@@ -276,6 +276,12 @@ impl PhantomTerminal {
         self.size
     }
 
+    /// The PTY file descriptor for ioctl queries (e.g. foreground process group).
+    #[inline]
+    pub fn pty_fd(&self) -> &File {
+        &self.pty_reader
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {

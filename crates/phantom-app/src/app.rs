@@ -63,6 +63,12 @@ pub enum AppState {
 struct Pane {
     terminal: PhantomTerminal,
     pane_id: PaneId,
+    /// Whether the terminal was in alt-screen mode on the previous frame.
+    was_alt_screen: bool,
+    /// True while the terminal is displaying a full-screen interactive program.
+    is_detached: bool,
+    /// Cached foreground process name (e.g. "vim", "htop") while detached.
+    detached_label: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +195,13 @@ impl App {
         layout.resize(width as f32, height as f32)?;
 
         // -- Panes --
-        let panes = vec![Pane { terminal, pane_id }];
+        let panes = vec![Pane {
+            terminal,
+            pane_id,
+            was_alt_screen: false,
+            is_detached: false,
+            detached_label: String::new(),
+        }];
 
         // -- Keybinds --
         let keybinds = KeybindRegistry::new();
@@ -490,7 +502,13 @@ impl App {
         match PhantomTerminal::new(cols, rows) {
             Ok(terminal) => {
                 let new_index = self.focused_pane + 1;
-                self.panes.insert(new_index, Pane { terminal, pane_id: new_child });
+                self.panes.insert(new_index, Pane {
+                    terminal,
+                    pane_id: new_child,
+                    was_alt_screen: false,
+                    is_detached: false,
+                    detached_label: String::new(),
+                });
                 self.focused_pane = new_index;
                 info!("Split: new pane {new_index} ({cols}x{rows})");
             }
@@ -571,6 +589,30 @@ impl App {
                     exited.push(i);
                 }
             }
+        }
+
+        // -- Alt-screen detection: detect interactive program attach/detach --
+        for pane in self.panes.iter_mut() {
+            let is_alt = phantom_terminal::alt_screen::is_alt_screen(pane.terminal.term());
+
+            if is_alt && !pane.was_alt_screen {
+                // Just entered alt screen -- interactive program started.
+                pane.is_detached = true;
+                pane.detached_label = phantom_terminal::process::foreground_process_name(
+                    pane.terminal.pty_fd(),
+                )
+                .unwrap_or_else(|| "interactive".to_string());
+                info!("Pane detached: process \"{}\"", pane.detached_label);
+            }
+
+            if !is_alt && pane.was_alt_screen && pane.is_detached {
+                // Left alt screen -- interactive program exited.
+                info!("Pane reattached (was \"{}\")", pane.detached_label);
+                pane.is_detached = false;
+                pane.detached_label.clear();
+            }
+
+            pane.was_alt_screen = is_alt;
         }
 
         // Remove exited panes in reverse order so indices stay valid.
@@ -1038,6 +1080,7 @@ impl App {
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         let has_multiple = self.panes.len() > 1;
+        let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
 
         for (pane_index, pane) in self.panes.iter().enumerate() {
             let is_focused = pane_index == self.focused_pane;
@@ -1118,8 +1161,73 @@ impl App {
                 quads.push(cursor_quad);
             }
 
-            // -- Pane border (only when multiple panes exist) --
-            if has_multiple {
+            // -- Pane border --
+            // Detached panes always get an animated cyan tether border + header.
+            // Non-detached panes get the standard border when multiple panes exist.
+            if pane.is_detached {
+                let elapsed = self.start_time.elapsed().as_secs_f32();
+                let pulse = (elapsed * 2.0).sin() * 0.15 + 0.85;
+                let border_color = [0.0, pulse, pulse * 0.8, 0.9];
+                let border_thickness = 2.0;
+
+                // Top edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [pane_rect.width, border_thickness],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
+                // Bottom edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y + pane_rect.height - border_thickness],
+                    size: [pane_rect.width, border_thickness],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
+                // Left edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [border_thickness, pane_rect.height],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
+                // Right edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x + pane_rect.width - border_thickness, pane_rect.y],
+                    size: [border_thickness, pane_rect.height],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
+
+                // -- Detach header bar --
+                let header_height = self.cell_size.1 + 4.0;
+                // Dark semi-transparent header background.
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x + border_thickness, pane_rect.y + border_thickness],
+                    size: [pane_rect.width - border_thickness * 2.0, header_height],
+                    color: [0.02, 0.06, 0.08, 0.85],
+                    border_radius: 0.0,
+                });
+
+                // Tether indicator dot (animated).
+                let dot_size = 6.0;
+                let dot_x = pane_rect.x + border_thickness + 6.0;
+                let dot_y = pane_rect.y + border_thickness + (header_height - dot_size) / 2.0;
+                quads.push(QuadInstance {
+                    pos: [dot_x, dot_y],
+                    size: [dot_size, dot_size],
+                    color: [0.0, pulse, pulse * 0.8, 1.0],
+                    border_radius: 3.0,
+                });
+
+                // Process name label.
+                let label = format!("  {} ", &pane.detached_label);
+                let label_x = dot_x + dot_size + 4.0;
+                let label_y = pane_rect.y + border_thickness + 2.0;
+                let label_color = [0.0, pulse, pulse * 0.8, 1.0];
+
+                detached_labels.push((label, label_x, label_y, label_color));
+            } else if has_multiple {
                 let border_color = if is_focused {
                     [0.2, 1.0, 0.5, 0.8] // bright green for focused
                 } else {
@@ -1155,6 +1263,11 @@ impl App {
                     border_radius: 0.0,
                 });
             }
+        }
+
+        // -- Detached pane labels (rendered after the pane loop to avoid borrow issues) --
+        for (label, x, y, color) in &detached_labels {
+            self.render_overlay_text(label, *x, *y, *color, glyphs);
         }
 
         // -- Tab bar --

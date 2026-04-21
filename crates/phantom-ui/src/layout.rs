@@ -299,6 +299,7 @@ mod tests {
     const WINDOW_W: f32 = 1920.0;
     const WINDOW_H: f32 = 1080.0;
     const EPSILON: f32 = 1.0; // rounding tolerance
+    const BOTTOM_PAD: f32 = 8.0; // matches root padding at scale=1.0
 
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() < EPSILON
@@ -317,8 +318,8 @@ mod tests {
         assert!(approx_eq(tab.width, WINDOW_W), "tab bar width: got {}", tab.width);
 
         assert!(
-            approx_eq(status.y + status.height, WINDOW_H),
-            "status bar should end at bottom: got y={} h={}",
+            approx_eq(status.y + status.height + BOTTOM_PAD, WINDOW_H),
+            "status bar should end at bottom minus padding: got y={} h={}",
             status.y,
             status.height,
         );
@@ -332,7 +333,7 @@ mod tests {
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
         let rect = engine.get_pane_rect(pane).unwrap();
-        let expected_height = WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL;
+        let expected_height = WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
 
         assert!(approx_eq(rect.y, TAB_BAR_HEIGHT_LOGICAL), "pane y: got {}", rect.y);
         assert!(approx_eq(rect.height, expected_height), "pane height: got {}", rect.height);

@@ -14,3 +14,4 @@ cosmic-text.workspace = true
 log.workspace = true
 anyhow.workspace = true
 etagere = "0.2"
+png = "0.17"
