@@ -72,6 +72,8 @@ pub struct TextRenderer {
     line_height: f32,
     /// Cached monospace cell dimensions: (width, height).
     cell_size: Option<(f32, f32)>,
+    /// Cache: char → (CacheKey, baseline_y offset). Avoids re-shaping every frame.
+    glyph_key_cache: std::collections::HashMap<char, Option<(CacheKey, f32, f32)>>,
 }
 
 impl TextRenderer {
@@ -90,6 +92,7 @@ impl TextRenderer {
             font_size,
             line_height,
             cell_size: None,
+            glyph_key_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -123,6 +126,7 @@ impl TextRenderer {
         self.font_size = font_size;
         self.line_height = (font_size * 1.2).ceil();
         self.cell_size = None;
+        self.glyph_key_cache.clear();
     }
 
     /// Measure the monospace cell size: (width, height).
@@ -212,8 +216,6 @@ impl TextRenderer {
         }
 
         let (cell_w, cell_h) = self.measure_cell();
-        let metrics = Metrics::new(self.font_size, self.line_height);
-        let attrs = Attrs::new().family(Family::Monospace);
         let rows = cells.len() / cols;
 
         let mut instances = Vec::with_capacity(cells.len());
@@ -222,56 +224,77 @@ impl TextRenderer {
             for col in 0..cols {
                 let cell = &cells[row * cols + col];
 
-                // Skip spaces and control characters -- nothing to rasterize.
+                // Skip spaces and control characters — nothing to rasterize.
                 if cell.ch <= ' ' {
                     continue;
                 }
 
-                // Shape this character through cosmic-text to get proper font
-                // selection, fallback, and glyph IDs.
-                let mut buffer = Buffer::new(&mut self.font_system, metrics);
-                let text: String = cell.ch.to_string();
-                buffer.set_text(&mut self.font_system, &text, attrs, Shaping::Advanced);
-                buffer.set_size(
+                // Look up the cached glyph key for this character. If not cached,
+                // shape it ONCE through cosmic-text and store the result.
+                let cached = if let Some(entry) = self.glyph_key_cache.get(&cell.ch) {
+                    *entry
+                } else {
+                    let result = self.shape_char(cell.ch, cell_w, cell_h);
+                    self.glyph_key_cache.insert(cell.ch, result);
+                    result
+                };
+
+                let Some((cache_key, line_y, phys_x)) = cached else {
+                    continue;
+                };
+
+                if let Some(entry) = atlas.get_or_insert(
+                    queue,
                     &mut self.font_system,
-                    Some(cell_w * 2.0),
-                    Some(cell_h * 2.0),
-                );
-                buffer.shape_until_scroll(&mut self.font_system, true);
+                    &mut self.swash_cache,
+                    cache_key,
+                ) {
+                    let cell_x = origin.0 + (col as f32) * cell_w;
+                    let baseline_y = origin.1 + (row as f32) * cell_h + line_y;
+                    let px = cell_x + phys_x + entry.left as f32;
+                    let py = baseline_y - entry.top as f32;
 
-                for run in buffer.layout_runs() {
-                    for glyph in run.glyphs.iter() {
-                        let physical = glyph.physical((0.0, 0.0), 1.0);
-
-                        if let Some(entry) = self.rasterize_glyph(atlas, queue, physical.cache_key)
-                        {
-                            // Cell origin on the pixel grid.
-                            let cell_x = origin.0 + (col as f32) * cell_w;
-                            let baseline_y = origin.1 + (row as f32) * cell_h + run.line_y;
-
-                            // Glyph position: integer position from physical +
-                            // bearing from the rasterized image placement.
-                            let px = cell_x + physical.x as f32 + entry.left as f32;
-                            let py = baseline_y + physical.y as f32 - entry.top as f32;
-
-                            instances.push(GlyphInstance {
-                                position: [px, py],
-                                uv_rect: [
-                                    entry.uv_min[0],
-                                    entry.uv_min[1],
-                                    entry.uv_max[0],
-                                    entry.uv_max[1],
-                                ],
-                                color: cell.fg,
-                                size: [entry.width as f32, entry.height as f32],
-                            });
-                        }
-                    }
+                    instances.push(GlyphInstance {
+                        position: [px, py],
+                        uv_rect: [
+                            entry.uv_min[0],
+                            entry.uv_min[1],
+                            entry.uv_max[0],
+                            entry.uv_max[1],
+                        ],
+                        color: cell.fg,
+                        size: [entry.width as f32, entry.height as f32],
+                    });
                 }
             }
         }
 
         instances
+    }
+
+    /// Shape a single character through cosmic-text ONCE and return the cache key
+    /// + positioning offsets. Returns None if the character produces no glyphs.
+    fn shape_char(&mut self, ch: char, cell_w: f32, cell_h: f32) -> Option<(CacheKey, f32, f32)> {
+        let metrics = Metrics::new(self.font_size, self.line_height);
+        let attrs = Attrs::new().family(Family::Monospace);
+
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        let text: String = ch.to_string();
+        buffer.set_text(&mut self.font_system, &text, attrs, Shaping::Advanced);
+        buffer.set_size(
+            &mut self.font_system,
+            Some(cell_w * 2.0),
+            Some(cell_h * 2.0),
+        );
+        buffer.shape_until_scroll(&mut self.font_system, true);
+
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let physical = glyph.physical((0.0, 0.0), 1.0);
+                return Some((physical.cache_key, run.line_y, physical.x as f32));
+            }
+        }
+        None
     }
 
     /// Prepare glyph instances from a pre-shaped cosmic-text `Buffer`.

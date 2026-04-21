@@ -104,6 +104,10 @@ pub struct App {
     // -- Command mode (backtick key) --
     command_mode: bool,
     command_input: Option<String>,
+
+    // -- Debug shader HUD --
+    debug_hud: bool,
+    debug_hud_selected: usize,
 }
 
 impl App {
@@ -224,6 +228,8 @@ impl App {
             supervisor,
             command_mode: false,
             command_input: None,
+            debug_hud: false,
+            debug_hud_selected: 0,
         })
     }
 
@@ -281,6 +287,12 @@ impl App {
     pub fn handle_key(&mut self, event: winit::event::KeyEvent) {
         // Only process key presses, not releases.
         if !event.state.is_pressed() {
+            return;
+        }
+
+        // -- Debug HUD input handling --
+        if self.debug_hud {
+            self.handle_debug_hud_key(&event);
             return;
         }
 
@@ -548,11 +560,218 @@ impl App {
                 .render(&mut encoder, &surface_view, &self.gpu.queue, &params);
         }
 
+        // -----------------------------------------------------------------
+        // Pass 3: System overlay — rendered AFTER CRT, directly on surface.
+        // No post-processing. Crisp, clean, always readable.
+        // -----------------------------------------------------------------
+        {
+            let mut overlay_quads: Vec<QuadInstance> = Vec::new();
+            let mut overlay_glyphs: Vec<phantom_renderer::text::GlyphInstance> = Vec::new();
+
+            let has_overlay = self.command_mode || self.debug_hud;
+
+            if has_overlay {
+                // -- Command input bar --
+                if self.command_mode {
+                    self.build_command_overlay(screen_size, &mut overlay_quads, &mut overlay_glyphs);
+                }
+
+                // -- Debug shader HUD --
+                if self.debug_hud {
+                    self.build_debug_hud(screen_size, &mut overlay_quads, &mut overlay_glyphs);
+                }
+
+                // Upload + render overlay in its own pass on the surface.
+                self.quad_renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &overlay_quads,
+                    screen_size,
+                );
+                self.grid_renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &overlay_glyphs,
+                    screen_size,
+                );
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("system-overlay-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load, // preserve the CRT output
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                self.quad_renderer.render(&mut pass);
+                self.grid_renderer.render(&mut pass, self.atlas.bind_group());
+            }
+        }
+
         // Submit and present.
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
+    }
+
+    /// Build the command input overlay (post-CRT, crisp).
+    fn build_command_overlay(
+        &mut self,
+        screen_size: [f32; 2],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        let bar_height = 28.0;
+        let y = screen_size[1] - bar_height;
+        let cmd_text = self.command_input.as_deref().unwrap_or("");
+        let display = format!("> {cmd_text}_");
+
+        // Dark background bar.
+        quads.push(QuadInstance {
+            pos: [0.0, y],
+            size: [screen_size[0], bar_height],
+            color: [0.02, 0.02, 0.04, 0.95],
+            border_radius: 0.0,
+        });
+
+        // Command text.
+        let color = [0.2, 1.0, 0.5, 1.0]; // bright green
+        let cells: Vec<phantom_renderer::text::TerminalCell> = display
+            .chars()
+            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: color })
+            .collect();
+
+        if !cells.is_empty() {
+            let cols = cells.len();
+            let origin = (8.0, y + 4.0);
+            let mut g = self.text_renderer.prepare_glyphs(
+                &mut self.atlas,
+                &self.gpu.queue,
+                &cells,
+                cols,
+                origin,
+            );
+            glyphs.append(&mut g);
+        }
+    }
+
+    /// Build the debug shader HUD overlay (post-CRT, crisp).
+    fn build_debug_hud(
+        &mut self,
+        screen_size: [f32; 2],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        let sp = &self.theme.shader_params;
+        let params: &[(&str, f32)] = &[
+            ("scanlines", sp.scanline_intensity),
+            ("bloom", sp.bloom_intensity),
+            ("aberration", sp.chromatic_aberration),
+            ("curvature", sp.curvature),
+            ("vignette", sp.vignette_intensity),
+            ("noise", sp.noise_intensity),
+        ];
+
+        let hud_width = 340.0;
+        let line_height = 20.0;
+        let hud_height = (params.len() as f32 + 3.0) * line_height;
+        let hud_x = screen_size[0] - hud_width - 16.0;
+        let hud_y = 16.0;
+
+        // Background panel.
+        quads.push(QuadInstance {
+            pos: [hud_x, hud_y],
+            size: [hud_width, hud_height],
+            color: [0.02, 0.02, 0.04, 0.90],
+            border_radius: 4.0,
+        });
+
+        // Border.
+        let border_color = [0.15, 0.4, 0.2, 0.8];
+        for &(pos, size) in &[
+            ([hud_x, hud_y], [hud_width, 1.0]),
+            ([hud_x, hud_y + hud_height - 1.0], [hud_width, 1.0]),
+            ([hud_x, hud_y], [1.0, hud_height]),
+            ([hud_x + hud_width - 1.0, hud_y], [1.0, hud_height]),
+        ] {
+            quads.push(QuadInstance {
+                pos,
+                size,
+                color: border_color,
+                border_radius: 0.0,
+            });
+        }
+
+        let mut text_y = hud_y + 6.0;
+        let text_x = hud_x + 12.0;
+
+        // Title
+        let title = "SHADER DEBUG";
+        self.render_overlay_text(title, text_x, text_y, [0.55, 1.0, 0.72, 1.0], glyphs);
+        text_y += line_height;
+
+        // Separator
+        let sep = "────────────────────────────────────";
+        self.render_overlay_text(sep, text_x, text_y, [0.15, 0.4, 0.2, 0.5], glyphs);
+        text_y += line_height;
+
+        // Param lines
+        for (i, &(name, value)) in params.iter().enumerate() {
+            let selected = i == self.debug_hud_selected;
+            let bar_len = 20;
+            let filled = ((value * bar_len as f32).round() as usize).min(bar_len);
+            let empty = bar_len - filled;
+            let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+            let marker = if selected { "▶" } else { " " };
+            let line = format!("{marker} {name:<14} {bar} {value:.2}");
+
+            let color = if selected {
+                [0.2, 1.0, 0.5, 1.0]
+            } else {
+                [0.5, 0.7, 0.5, 0.8]
+            };
+            self.render_overlay_text(&line, text_x, text_y, color, glyphs);
+            text_y += line_height;
+        }
+
+        // Help line
+        text_y += 4.0;
+        let help = "[Tab] next  [↑↓] adjust  [Esc] close";
+        self.render_overlay_text(help, text_x, text_y, [0.3, 0.5, 0.3, 0.6], glyphs);
+    }
+
+    /// Helper: render a text string directly into the overlay glyph buffer.
+    fn render_overlay_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: [f32; 4],
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        let cells: Vec<phantom_renderer::text::TerminalCell> = text
+            .chars()
+            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: color })
+            .collect();
+        if !cells.is_empty() {
+            let cols = cells.len();
+            let mut g = self.text_renderer.prepare_glyphs(
+                &mut self.atlas,
+                &self.gpu.queue,
+                &cells,
+                cols,
+                (x, y),
+            );
+            glyphs.append(&mut g);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -716,42 +935,7 @@ impl App {
             let status_texts = self.status_bar.render_text(&status_rect);
             self.render_text_segments(&status_texts, glyphs);
 
-            // -- Command input overlay (replaces status bar when active) --
-            if self.command_mode {
-                let cmd_text = self.command_input.as_deref().unwrap_or("");
-                let display = format!("` {cmd_text}_");
-
-                // Background overlay quad covering the status bar area.
-                quads.push(QuadInstance {
-                    pos: [status_rect.x, status_rect.y],
-                    size: [status_rect.width, status_rect.height],
-                    color: [0.05, 0.05, 0.05, 0.95],
-                    border_radius: 0.0,
-                });
-
-                // Render the command text.
-                let cmd_color = self.theme.colors.cursor;
-                let cells: Vec<phantom_renderer::text::TerminalCell> = display
-                    .chars()
-                    .map(|ch| phantom_renderer::text::TerminalCell {
-                        ch,
-                        fg: cmd_color,
-                    })
-                    .collect();
-
-                if !cells.is_empty() {
-                    let cols = cells.len();
-                    let origin = (status_rect.x + 4.0, status_rect.y + 2.0);
-                    let mut cmd_glyphs = self.text_renderer.prepare_glyphs(
-                        &mut self.atlas,
-                        &self.gpu.queue,
-                        &cells,
-                        cols,
-                        origin,
-                    );
-                    glyphs.append(&mut cmd_glyphs);
-                }
-            }
+            // Command overlay moved to system overlay pass (post-CRT).
         }
     }
 
@@ -829,6 +1013,49 @@ impl App {
     }
 
     /// Parse and execute a user command string entered via command mode.
+    /// Handle keys when the debug shader HUD is open.
+    fn handle_debug_hud_key(&mut self, event: &winit::event::KeyEvent) {
+        const PARAM_COUNT: usize = 6;
+        const STEP: f32 = 0.01;
+
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.debug_hud = false;
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.debug_hud_selected = (self.debug_hud_selected + 1) % PARAM_COUNT;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.adjust_debug_param(STEP);
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.adjust_debug_param(-STEP);
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                self.adjust_debug_param(STEP * 5.0);
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                self.adjust_debug_param(-STEP * 5.0);
+            }
+            _ => {}
+        }
+    }
+
+    /// Adjust the currently selected debug HUD shader parameter.
+    fn adjust_debug_param(&mut self, delta: f32) {
+        let sp = &mut self.theme.shader_params;
+        let val = match self.debug_hud_selected {
+            0 => &mut sp.scanline_intensity,
+            1 => &mut sp.bloom_intensity,
+            2 => &mut sp.chromatic_aberration,
+            3 => &mut sp.curvature,
+            4 => &mut sp.vignette_intensity,
+            5 => &mut sp.noise_intensity,
+            _ => return,
+        };
+        *val = (*val + delta).clamp(0.0, 1.0);
+    }
+
     fn execute_user_command(&mut self, input: &str) {
         let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
         if parts.is_empty() {
@@ -871,9 +1098,23 @@ impl App {
                 self.boot = BootSequence::new();
                 self.state = AppState::Boot;
             }
+            "debug" => {
+                self.debug_hud = !self.debug_hud;
+                info!("Debug HUD: {}", if self.debug_hud { "ON" } else { "OFF" });
+            }
+            "plain" => {
+                // Kill all CRT effects — pure terminal.
+                self.theme.shader_params.scanline_intensity = 0.0;
+                self.theme.shader_params.bloom_intensity = 0.0;
+                self.theme.shader_params.chromatic_aberration = 0.0;
+                self.theme.shader_params.curvature = 0.0;
+                self.theme.shader_params.vignette_intensity = 0.0;
+                self.theme.shader_params.noise_intensity = 0.0;
+                info!("Plain mode: all CRT effects disabled");
+            }
             "help" => {
                 info!(
-                    "Commands: set <key> <value> | theme <name> | reload | boot | quit | help"
+                    "Commands: set <k> <v> | theme <name> | plain | debug | reload | boot | quit"
                 );
             }
             other => {
@@ -1121,6 +1362,12 @@ impl App {
         modifiers: winit::event::Modifiers,
     ) {
         if !event.state.is_pressed() {
+            return;
+        }
+
+        // -- Debug HUD input handling --
+        if self.debug_hud {
+            self.handle_debug_hud_key(&event);
             return;
         }
 
