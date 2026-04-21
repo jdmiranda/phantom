@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 phantom-app = { path = "../phantom-app" }
+phantom-protocol = { path = "../phantom-protocol" }
 phantom-renderer = { path = "../phantom-renderer" }
 phantom-terminal = { path = "../phantom-terminal" }
 phantom-ui = { path = "../phantom-ui" }

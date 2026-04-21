@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::Result;
 use phantom_app::app::App;
+use phantom_app::config::PhantomConfig;
 use phantom_renderer::gpu::GpuContext;
-use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -12,13 +15,17 @@ use winit::{
 struct Phantom {
     window: Option<Arc<Window>>,
     app: Option<App>,
+    config: PhantomConfig,
+    supervisor_socket: Option<PathBuf>,
 }
 
 impl Phantom {
-    fn new() -> Self {
+    fn new(config: PhantomConfig, supervisor_socket: Option<PathBuf>) -> Self {
         Self {
             window: None,
             app: None,
+            config,
+            supervisor_socket,
         }
     }
 }
@@ -55,7 +62,7 @@ impl ApplicationHandler for Phantom {
             }
         };
 
-        match App::new(gpu) {
+        match App::with_config(gpu, self.config.clone(), self.supervisor_socket.as_deref()) {
             Ok(app) => {
                 self.app = Some(app);
             }
@@ -118,8 +125,132 @@ impl ApplicationHandler for Phantom {
     }
 }
 
+fn print_help() {
+    println!(
+        r#"PHANTOM v0.1.0 — AI-native terminal emulator
+
+USAGE:
+    phantom [OPTIONS]
+
+OPTIONS:
+    --theme <NAME>          Theme: phosphor, amber, ice, blood, vapor
+    --font-size <PT>        Font size in points (default: 14.0)
+    --scanlines <0.0-1.0>   Scanline intensity
+    --bloom <0.0-1.0>       Bloom/glow intensity
+    --aberration <0.0-1.0>  Chromatic aberration
+    --curvature <0.0-1.0>   CRT barrel distortion
+    --vignette <0.0-1.0>    Vignette intensity
+    --noise <0.0-1.0>       Film grain intensity
+    --no-boot               Skip the boot sequence
+    --init-config            Write default config to ~/.config/phantom/config.toml
+    --help                   Print this help message
+
+CONFIG:
+    ~/.config/phantom/config.toml
+
+EXAMPLES:
+    phantom --theme amber --curvature 0.1
+    phantom --bloom 0 --scanlines 0 --curvature 0
+    phantom --theme ice --font-size 16"#
+    );
+}
+
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Quick exits
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--init-config") {
+        let path = PhantomConfig::write_default()?;
+        println!("Wrote default config to {}", path.display());
+        return Ok(());
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Load config file, then apply CLI overrides
+    let mut config = PhantomConfig::load();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--theme" => {
+                i += 1;
+                if i < args.len() {
+                    config.theme_name = args[i].clone();
+                }
+            }
+            "--font-size" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(v) = args[i].parse::<f32>() {
+                        config.font_size = v;
+                    }
+                }
+            }
+            "--scanlines" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(v) = args[i].parse::<f32>() {
+                        config.shader_overrides.scanline_intensity = Some(v);
+                    }
+                }
+            }
+            "--bloom" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(v) = args[i].parse::<f32>() {
+                        config.shader_overrides.bloom_intensity = Some(v);
+                    }
+                }
+            }
+            "--aberration" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(v) = args[i].parse::<f32>() {
+                        config.shader_overrides.chromatic_aberration = Some(v);
+                    }
+                }
+            }
+            "--curvature" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(v) = args[i].parse::<f32>() {
+                        config.shader_overrides.curvature = Some(v);
+                    }
+                }
+            }
+            "--vignette" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(v) = args[i].parse::<f32>() {
+                        config.shader_overrides.vignette_intensity = Some(v);
+                    }
+                }
+            }
+            "--noise" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(v) = args[i].parse::<f32>() {
+                        config.shader_overrides.noise_intensity = Some(v);
+                    }
+                }
+            }
+            "--no-boot" => {
+                config.skip_boot = true;
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                print_help();
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
 
     log::info!(
         r#"
@@ -133,8 +264,17 @@ fn main() -> Result<()> {
 "#
     );
 
+    // -- Detect supervisor mode --
+    let supervisor_socket = std::env::var("PHANTOM_SUPERVISOR_SOCK")
+        .ok()
+        .map(PathBuf::from);
+
+    if let Some(ref sock) = supervisor_socket {
+        log::info!("Supervisor mode: socket at {}", sock.display());
+    }
+
     let event_loop = EventLoop::new()?;
-    let mut app = Phantom::new();
+    let mut app = Phantom::new(config, supervisor_socket);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

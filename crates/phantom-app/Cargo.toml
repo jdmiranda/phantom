@@ -8,6 +8,7 @@ license.workspace = true
 phantom-renderer = { path = "../phantom-renderer" }
 phantom-terminal = { path = "../phantom-terminal" }
 phantom-ui = { path = "../phantom-ui" }
+phantom-protocol = { path = "../phantom-protocol" }
 
 winit.workspace = true
 wgpu.workspace = true

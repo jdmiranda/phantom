@@ -1478,6 +1478,7 @@ dependencies = [
  "env_logger",
  "log",
  "phantom-app",
+ "phantom-protocol",
  "phantom-renderer",
  "phantom-terminal",
  "phantom-ui",
@@ -1490,12 +1491,21 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "phantom-protocol",
  "phantom-renderer",
  "phantom-terminal",
  "phantom-ui",
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "phantom-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
 ]
 
 [[package]]
@@ -1510,6 +1520,17 @@ dependencies = [
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "phantom-supervisor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "libc",
+ "log",
+ "phantom-protocol",
 ]
 
 [[package]]

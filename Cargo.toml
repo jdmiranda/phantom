@@ -5,6 +5,8 @@ members = [
     "crates/phantom-terminal",
     "crates/phantom-ui",
     "crates/phantom-app",
+    "crates/phantom-protocol",
+    "crates/phantom-supervisor",
 ]
 resolver = "2"
 

@@ -1,0 +1,17 @@
+[package]
+name = "phantom-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "phantom-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+phantom-protocol = { path = "../phantom-protocol" }
+
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+libc = "0.2"

@@ -150,6 +150,8 @@ pub struct BootSequence {
     phase: BootPhase,
     /// True when the blinking cursor is in its "on" half-cycle.
     cursor_on: bool,
+    /// When true, the boot sequence pauses at Welcome and waits for a keypress.
+    waiting_for_keypress: bool,
 }
 
 impl BootSequence {
@@ -159,6 +161,7 @@ impl BootSequence {
             elapsed: 0.0,
             phase: BootPhase::BlackScreen,
             cursor_on: true,
+            waiting_for_keypress: false,
         }
     }
 
@@ -174,6 +177,7 @@ impl BootSequence {
         self.cursor_on = (self.elapsed % CURSOR_BLINK_PERIOD) < (CURSOR_BLINK_PERIOD * 0.5);
 
         // Phase transitions based on absolute elapsed time.
+        // Pause at Welcome until dismiss() is called.
         self.phase = if self.elapsed < T_BLACK_END {
             BootPhase::BlackScreen
         } else if self.elapsed < T_WARMUP_END {
@@ -182,6 +186,10 @@ impl BootSequence {
             BootPhase::LogoReveal
         } else if self.elapsed < T_SYSCHECK_END {
             BootPhase::SystemCheck
+        } else if self.waiting_for_keypress {
+            // Clamp elapsed so we don't overshoot when dismissed.
+            self.elapsed = self.elapsed.min(T_WELCOME_END);
+            BootPhase::Welcome
         } else if self.elapsed < T_WELCOME_END {
             BootPhase::Welcome
         } else if self.elapsed < T_TRANSITION_END {
@@ -189,6 +197,20 @@ impl BootSequence {
         } else {
             BootPhase::Done
         };
+
+        // Start waiting once we reach Welcome.
+        if self.phase == BootPhase::Welcome && !self.waiting_for_keypress
+            && self.elapsed >= T_SYSCHECK_END
+        {
+            // Check if the welcome text is fully typed out before pausing.
+            let welcome_elapsed = self.elapsed - T_SYSCHECK_END;
+            let type_delay = 0.3;
+            let type_elapsed = (welcome_elapsed - type_delay).max(0.0);
+            let chars_visible = (type_elapsed * TYPE_SPEED * 0.4) as usize;
+            if chars_visible >= WELCOME_TEXT.chars().count() {
+                self.waiting_for_keypress = true;
+            }
+        }
     }
 
     /// The current boot phase.
@@ -334,6 +356,18 @@ impl BootSequence {
                 self.build_logo_lines_full(&mut lines);
                 self.build_syscheck_lines_full(&mut lines);
                 self.build_welcome_line(&mut lines);
+                if self.waiting_for_keypress {
+                    // Blinking "Press any key..." prompt
+                    if self.cursor_on {
+                        lines.push(BootTextLine {
+                            text: "Press any key to continue...".to_string(),
+                            color: GREEN_DIM,
+                            row: WELCOME_ROW + 2,
+                            chars_visible: 28,
+                            style: LineStyle::Normal,
+                        });
+                    }
+                }
             }
 
             BootPhase::TransitionToTerminal => {
@@ -504,6 +538,23 @@ impl Default for BootSequence {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+impl BootSequence {
+    /// Dismiss the boot screen (called on keypress while paused at Welcome).
+    /// Starts the transition to terminal.
+    pub fn dismiss(&mut self) {
+        if self.waiting_for_keypress {
+            self.waiting_for_keypress = false;
+            self.elapsed = T_WELCOME_END;
+            self.phase = BootPhase::TransitionToTerminal;
+        }
+    }
+
+    /// Returns true if the boot sequence is paused waiting for user input.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting_for_keypress
+    }
+}
 
 /// Attempt to skip remaining boot animation (e.g., on keypress).
 /// Jumps directly to the transition phase so it still looks clean.

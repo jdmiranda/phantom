@@ -5,6 +5,7 @@
 //! loop. It is created after the window and GPU context are established and
 //! handed control for the lifetime of the application.
 
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -12,6 +13,7 @@ use log::{debug, info, trace, warn};
 use wgpu::CommandEncoderDescriptor;
 use winit::keyboard::{Key, NamedKey};
 
+use phantom_protocol::{AppMessage, SupervisorCommand};
 use phantom_renderer::atlas::GlyphAtlas;
 use phantom_renderer::gpu::GpuContext;
 use phantom_renderer::grid::{GridCell, GridRenderData, GridRenderer};
@@ -30,6 +32,8 @@ use phantom_ui::themes::{self, Theme};
 use phantom_ui::widgets::{StatusBar, TabBar, Widget};
 
 use crate::boot::BootSequence;
+use crate::config::PhantomConfig;
+use crate::supervisor_client::SupervisorClient;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -93,6 +97,13 @@ pub struct App {
 
     // -- Whether a quit has been requested --
     quit_requested: bool,
+
+    // -- Supervisor connection (None when running standalone) --
+    supervisor: Option<SupervisorClient>,
+
+    // -- Command mode (backtick key) --
+    command_mode: bool,
+    command_input: Option<String>,
 }
 
 impl App {
@@ -102,12 +113,24 @@ impl App {
     /// surface. This constructor creates the terminal (spawning a PTY),
     /// renderers, layout engine, and boot sequence.
     pub fn new(gpu: GpuContext) -> Result<Self> {
+        Self::with_config(gpu, PhantomConfig::load(), None)
+    }
+
+    /// Create the application with an explicit config (for CLI overrides).
+    ///
+    /// If `supervisor_socket` is `Some`, connects to the supervisor and sends
+    /// `Ready`. Pass `None` for standalone mode.
+    pub fn with_config(
+        gpu: GpuContext,
+        config: PhantomConfig,
+        supervisor_socket: Option<&Path>,
+    ) -> Result<Self> {
         let width = gpu.surface_config.width;
         let height = gpu.surface_config.height;
         let format = gpu.format;
 
         // -- Font / text --
-        let mut text_renderer = TextRenderer::new(DEFAULT_FONT_SIZE);
+        let mut text_renderer = TextRenderer::new(config.font_size);
         let cell_size = text_renderer.measure_cell();
         info!(
             "Cell size: {:.1}x{:.1} at {:.0}pt",
@@ -142,8 +165,8 @@ impl App {
         // -- Keybinds --
         let keybinds = KeybindRegistry::new();
 
-        // -- Theme --
-        let theme = themes::phosphor();
+        // -- Theme (from config, with shader overrides) --
+        let theme = config.resolve_theme();
 
         // -- Widgets --
         let mut tab_bar = TabBar::new();
@@ -152,7 +175,29 @@ impl App {
         let status_bar = StatusBar::new();
 
         // -- Boot --
-        let boot = BootSequence::new();
+        let mut boot = BootSequence::new();
+        let initial_state = if config.skip_boot {
+            boot.skip_immediate();
+            AppState::Terminal
+        } else {
+            AppState::Boot
+        };
+
+        // -- Supervisor connection --
+        let supervisor = if let Some(sock) = supervisor_socket {
+            match SupervisorClient::connect(sock) {
+                Ok(mut client) => {
+                    client.send_ready();
+                    Some(client)
+                }
+                Err(e) => {
+                    warn!("Failed to connect to supervisor: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let now = Instant::now();
 
@@ -171,11 +216,14 @@ impl App {
             tab_bar,
             pane_id,
             boot,
-            state: AppState::Boot,
+            state: initial_state,
             start_time: now,
             last_frame: now,
             cell_size,
             quit_requested: false,
+            supervisor,
+            command_mode: false,
+            command_input: None,
         })
     }
 
@@ -236,6 +284,20 @@ impl App {
             return;
         }
 
+        // -- Command mode input handling --
+        if self.command_mode {
+            self.handle_command_mode_key(&event);
+            return;
+        }
+
+        // Backtick (`) toggles command mode on.
+        if matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
+            self.command_mode = true;
+            self.command_input = Some(String::new());
+            debug!("Command mode activated");
+            return;
+        }
+
         // Convert winit logical key to our combo for keybind lookup.
         if let Some(combo) = winit_key_to_combo(&event) {
             if let Some(action) = self.keybinds.lookup(&combo) {
@@ -244,9 +306,13 @@ impl App {
             }
         }
 
-        // During boot, any key press skips the boot sequence.
+        // During boot, keypress dismisses the boot screen (if paused) or skips ahead.
         if self.state == AppState::Boot {
-            self.boot.skip();
+            if self.boot.is_waiting() {
+                self.boot.dismiss();
+            } else {
+                self.boot.skip();
+            }
             return;
         }
 
@@ -337,6 +403,16 @@ impl App {
                 info!("Boot sequence complete, transitioning to terminal");
                 self.state = AppState::Terminal;
             }
+        }
+
+        // -- Supervisor heartbeat & command polling --
+        if let Some(ref mut sv) = self.supervisor {
+            sv.send_heartbeat();
+        }
+        // Drain supervisor commands (separate borrow to avoid alias issues).
+        let cmd = self.supervisor.as_mut().and_then(|sv| sv.try_recv());
+        if let Some(cmd) = cmd {
+            self.handle_supervisor_command(cmd);
         }
 
         // Update status bar clock.
@@ -631,6 +707,43 @@ impl App {
             // Render status bar text as glyphs.
             let status_texts = self.status_bar.render_text(&status_rect);
             self.render_text_segments(&status_texts, glyphs);
+
+            // -- Command input overlay (replaces status bar when active) --
+            if self.command_mode {
+                let cmd_text = self.command_input.as_deref().unwrap_or("");
+                let display = format!("` {cmd_text}_");
+
+                // Background overlay quad covering the status bar area.
+                quads.push(QuadInstance {
+                    pos: [status_rect.x, status_rect.y],
+                    size: [status_rect.width, status_rect.height],
+                    color: [0.05, 0.05, 0.05, 0.95],
+                    border_radius: 0.0,
+                });
+
+                // Render the command text.
+                let cmd_color = self.theme.colors.cursor;
+                let cells: Vec<phantom_renderer::text::TerminalCell> = display
+                    .chars()
+                    .map(|ch| phantom_renderer::text::TerminalCell {
+                        ch,
+                        fg: cmd_color,
+                    })
+                    .collect();
+
+                if !cells.is_empty() {
+                    let cols = cells.len();
+                    let origin = (status_rect.x + 4.0, status_rect.y + 2.0);
+                    let mut cmd_glyphs = self.text_renderer.prepare_glyphs(
+                        &mut self.atlas,
+                        &self.gpu.queue,
+                        &cells,
+                        cols,
+                        origin,
+                    );
+                    glyphs.append(&mut cmd_glyphs);
+                }
+            }
         }
     }
 
@@ -667,6 +780,172 @@ impl App {
 
             glyphs.append(&mut seg_glyphs);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Supervisor integration & command mode
+// ---------------------------------------------------------------------------
+
+impl App {
+    /// Handle a key press while in command mode.
+    ///
+    /// Printable chars are appended to the command buffer. Enter executes,
+    /// Escape cancels, Backspace deletes the last char.
+    fn handle_command_mode_key(&mut self, event: &winit::event::KeyEvent) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                debug!("Command mode cancelled");
+                self.command_mode = false;
+                self.command_input = None;
+            }
+            Key::Named(NamedKey::Enter) => {
+                let input = self.command_input.take().unwrap_or_default();
+                self.command_mode = false;
+                if !input.is_empty() {
+                    self.execute_user_command(&input);
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(ref mut buf) = self.command_input {
+                    buf.pop();
+                }
+            }
+            Key::Character(s) => {
+                if let Some(ref mut buf) = self.command_input {
+                    buf.push_str(s.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Parse and execute a user command string entered via command mode.
+    fn execute_user_command(&mut self, input: &str) {
+        let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
+        if parts.is_empty() {
+            return;
+        }
+
+        match parts[0] {
+            "set" => {
+                if parts.len() >= 3 {
+                    let key = parts[1].to_string();
+                    let value = parts[2].to_string();
+                    self.apply_set(&key, &value);
+                    // Forward to supervisor if connected.
+                    if let Some(ref mut sv) = self.supervisor {
+                        sv.send(&AppMessage::Log(format!("set {key}={value}")));
+                    }
+                } else {
+                    warn!("Usage: set <key> <value>");
+                }
+            }
+            "theme" => {
+                if parts.len() >= 2 {
+                    self.apply_theme(parts[1]);
+                    if let Some(ref mut sv) = self.supervisor {
+                        sv.send(&AppMessage::Log(format!("theme {}", parts[1])));
+                    }
+                } else {
+                    warn!("Usage: theme <name>");
+                }
+            }
+            "reload" => {
+                self.apply_reload();
+            }
+            "quit" | "exit" => {
+                info!("Quit requested via command mode");
+                self.quit_requested = true;
+            }
+            "boot" => {
+                info!("Replaying boot sequence via command mode");
+                self.boot = BootSequence::new();
+                self.state = AppState::Boot;
+            }
+            "help" => {
+                info!(
+                    "Commands: set <key> <value> | theme <name> | reload | boot | quit | help"
+                );
+            }
+            other => {
+                warn!("Unknown command: {other}");
+            }
+        }
+    }
+
+    /// Handle a command received from the supervisor process.
+    fn handle_supervisor_command(&mut self, cmd: SupervisorCommand) {
+        debug!("Supervisor command: {cmd:?}");
+        match cmd {
+            SupervisorCommand::Set { key, value } => {
+                self.apply_set(&key, &value);
+            }
+            SupervisorCommand::Theme(name) => {
+                self.apply_theme(&name);
+            }
+            SupervisorCommand::Reload => {
+                self.apply_reload();
+            }
+            SupervisorCommand::Shutdown => {
+                info!("Shutdown requested by supervisor");
+                self.quit_requested = true;
+            }
+            SupervisorCommand::Ping => {
+                if let Some(ref mut sv) = self.supervisor {
+                    sv.send(&AppMessage::Pong);
+                }
+            }
+        }
+    }
+
+    /// Live-update a shader parameter by key/value.
+    fn apply_set(&mut self, key: &str, value: &str) {
+        if let Ok(v) = value.parse::<f32>() {
+            match key {
+                "curvature" => self.theme.shader_params.curvature = v,
+                "scanlines" | "scanline_intensity" => {
+                    self.theme.shader_params.scanline_intensity = v;
+                }
+                "bloom" | "bloom_intensity" => {
+                    self.theme.shader_params.bloom_intensity = v;
+                }
+                "aberration" | "chromatic_aberration" => {
+                    self.theme.shader_params.chromatic_aberration = v;
+                }
+                "vignette" | "vignette_intensity" => {
+                    self.theme.shader_params.vignette_intensity = v;
+                }
+                "noise" | "noise_intensity" => {
+                    self.theme.shader_params.noise_intensity = v;
+                }
+                "font_size" => {
+                    debug!("font_size change requires renderer recreation (not yet implemented)");
+                }
+                _ => {
+                    warn!("Unknown config key: {key}");
+                }
+            }
+        } else {
+            warn!("Invalid value for {key}: {value} (expected f32)");
+        }
+    }
+
+    /// Hot-swap the active theme by name.
+    fn apply_theme(&mut self, name: &str) {
+        if let Some(new_theme) = themes::builtin_by_name(name) {
+            info!("Theme switched to: {name}");
+            self.theme = new_theme;
+        } else {
+            warn!("Unknown theme: {name}");
+        }
+    }
+
+    /// Re-read the config file from disk and apply it.
+    fn apply_reload(&mut self) {
+        info!("Reloading config from disk");
+        let config = PhantomConfig::load();
+        self.theme = config.resolve_theme();
     }
 }
 
@@ -835,6 +1114,25 @@ impl App {
     ) {
         if !event.state.is_pressed() {
             return;
+        }
+
+        // -- Command mode input handling --
+        if self.command_mode {
+            self.handle_command_mode_key(&event);
+            return;
+        }
+
+        // Backtick (`) toggles command mode on (only without modifiers).
+        if !modifiers.state().control_key()
+            && !modifiers.state().alt_key()
+            && !modifiers.state().super_key()
+        {
+            if matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
+                self.command_mode = true;
+                self.command_input = Some(String::new());
+                debug!("Command mode activated");
+                return;
+            }
         }
 
         // Check keybind registry with full modifier state.
