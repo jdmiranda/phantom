@@ -359,10 +359,18 @@ impl App {
                 debug!("Action: CloseTab (not yet implemented)");
             }
             Action::ZoomIn => {
-                debug!("Action: ZoomIn (not yet implemented)");
+                let new_size = self.text_renderer.font_size() + 2.0;
+                info!("Zoom in: {new_size}pt");
+                self.text_renderer.set_font_size(new_size);
+                self.cell_size = self.text_renderer.measure_cell();
+                self.atlas.clear();
             }
             Action::ZoomOut => {
-                debug!("Action: ZoomOut (not yet implemented)");
+                let new_size = (self.text_renderer.font_size() - 2.0).max(8.0);
+                info!("Zoom out: {new_size}pt");
+                self.text_renderer.set_font_size(new_size);
+                self.cell_size = self.text_renderer.measure_cell();
+                self.atlas.clear();
             }
             _ => {
                 debug!("Action: {action} (not yet implemented)");

@@ -17,6 +17,7 @@ struct Phantom {
     app: Option<App>,
     config: PhantomConfig,
     supervisor_socket: Option<PathBuf>,
+    modifiers: winit::event::Modifiers,
 }
 
 impl Phantom {
@@ -26,6 +27,7 @@ impl Phantom {
             app: None,
             config,
             supervisor_socket,
+            modifiers: winit::event::Modifiers::default(),
         }
     }
 }
@@ -98,16 +100,14 @@ impl ApplicationHandler for Phantom {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(app) = &mut self.app {
-                    app.handle_key(event);
+                    app.handle_key_with_mods(event, self.modifiers);
                     if app.should_quit() {
                         event_loop.exit();
                     }
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                if let Some(app) = &mut self.app {
-                    app.handle_modifiers(modifiers);
-                }
+                self.modifiers = modifiers;
             }
             WindowEvent::RedrawRequested => {
                 if let Some(app) = &mut self.app {

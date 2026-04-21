@@ -19,7 +19,8 @@ use anyhow::Result;
 pub const HEARTBEAT_INTERVAL_MS: u64 = 500;
 
 /// How long the supervisor waits before declaring the app dead.
-pub const HEARTBEAT_TIMEOUT_MS: u64 = 3000;
+/// 10 seconds to allow for GPU init, font loading, and boot sequence.
+pub const HEARTBEAT_TIMEOUT_MS: u64 = 10_000;
 
 /// Maximum restart attempts within the restart window.
 pub const MAX_RESTARTS: u32 = 5;

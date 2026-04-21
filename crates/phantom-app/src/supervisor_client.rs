@@ -60,7 +60,7 @@ impl SupervisorClient {
     pub fn send_heartbeat(&mut self) {
         let interval = Duration::from_millis(HEARTBEAT_INTERVAL_MS);
         if self.last_heartbeat.elapsed() >= interval {
-            trace!("Sending HEARTBEAT to supervisor");
+            debug!("Sending HEARTBEAT to supervisor");
             self.send(&AppMessage::Heartbeat);
             self.last_heartbeat = Instant::now();
         }

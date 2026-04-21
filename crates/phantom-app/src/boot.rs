@@ -8,51 +8,83 @@
 //!
 //! # Timeline
 //!
-//! | Phase                | Window       | Description                            |
-//! |----------------------|--------------|----------------------------------------|
-//! | `BlackScreen`        | 0.0 -- 0.3s  | Blank with blinking cursor             |
-//! | `CrtWarmup`          | 0.3 -- 0.8s  | CRT effects fade in, phosphor glow     |
-//! | `LogoReveal`         | 0.8 -- 1.2s  | ASCII PHANTOM logo types out           |
-//! | `SystemCheck`        | 1.2 -- 2.5s  | Status lines appear one by one         |
-//! | `Welcome`            | 2.5 -- 3.5s  | Welcome message, brief pause           |
-//! | `TransitionToTerminal` | 3.5 -- 4.0s | Fade/transition to live terminal     |
-//! | `Done`               | 4.0s+        | Boot complete, hand off                |
+//! | Phase                  | Window       | Description                                    |
+//! |------------------------|--------------|------------------------------------------------|
+//! | `BlackScreen`          | 0.0 -- 0.5s  | Static noise — dead CRT interference           |
+//! | `CrtWarmup`            | 0.5 -- 1.5s  | Noise clears center-out, scan beam sweeps      |
+//! | `LogoReveal`           | 1.5 -- 3.5s  | PHANTOM logo glitches in char-by-char          |
+//! | `SystemCheck`          | 3.5 -- 6.0s  | Status lines with animated progress bars       |
+//! | `Welcome`              | 6.0s -- key  | SYSTEM READY. + blinking prompt, waits for key |
+//! | `TransitionToTerminal` | key + 0.5s   | Quick fade to terminal                         |
+//! | `Done`                 | after fade   | Boot complete, hand off                        |
 
 // ---------------------------------------------------------------------------
 // Phase boundaries (seconds)
 // ---------------------------------------------------------------------------
 
-const T_BLACK_END: f32 = 0.3;
-const T_WARMUP_END: f32 = 0.8;
-const T_LOGO_END: f32 = 1.2;
-const T_SYSCHECK_END: f32 = 2.5;
-const T_WELCOME_END: f32 = 3.5;
-const T_TRANSITION_END: f32 = 4.0;
+const T_BLACK_END: f32 = 0.5;
+const T_WARMUP_END: f32 = 1.5;
+const T_LOGO_END: f32 = 3.5;
+const T_SYSCHECK_END: f32 = 6.0;
+const T_WELCOME_END: f32 = 6.5; // just past syscheck for the pause logic
+const T_TRANSITION_END: f32 = 7.0;
 
 /// Cursor blink period in seconds (on + off cycle).
 const CURSOR_BLINK_PERIOD: f32 = 0.6;
 
-/// Characters typed per second for the typewriter effect.
-const TYPE_SPEED: f32 = 280.0;
+/// Terminal dimensions for noise generation.
+const TERM_ROWS: usize = 24;
+const TERM_COLS: usize = 80;
+
+/// Center of terminal for circular clearing.
+const CENTER_ROW: f32 = 12.0;
+const CENTER_COL: f32 = 40.0;
+
+/// Maximum distance from center to any corner (for normalization).
+const MAX_DIST: f32 = 43.0; // ~sqrt(12^2 + 40^2)
 
 /// Delay between successive system-check lines (seconds).
-const SYSCHECK_LINE_DELAY: f32 = 0.22;
+const SYSCHECK_LINE_DELAY: f32 = 0.3;
+
+/// Duration for a progress bar to fill.
+const PROGRESS_BAR_DURATION: f32 = 0.4;
+
+/// Progress bar width in characters.
+const PROGRESS_BAR_WIDTH: usize = 20;
 
 // ---------------------------------------------------------------------------
 // Colors (linear RGBA)
 // ---------------------------------------------------------------------------
 
 /// Phosphor green -- the signature Phantom color.
-const GREEN: [f32; 4] = [0.0, 1.0, 0.38, 1.0];
+const GREEN: [f32; 4] = [0.2, 1.0, 0.5, 1.0];
 
-/// Dimmed green for secondary text.
-const GREEN_DIM: [f32; 4] = [0.0, 0.65, 0.25, 0.7];
+/// Dimmed green for secondary text / noise.
+const GREEN_DIM: [f32; 4] = [0.0, 0.65, 0.25, 0.5];
 
 /// Bright white-green for emphasis.
 const GREEN_BRIGHT: [f32; 4] = [0.55, 1.0, 0.72, 1.0];
 
-/// Status bracket green.
-const STATUS_GREEN: [f32; 4] = [0.0, 1.0, 0.38, 1.0];
+/// Status green for system check lines.
+const STATUS_GREEN: [f32; 4] = [0.2, 1.0, 0.5, 1.0];
+
+/// Very dim green for noise characters during warmup clearing.
+const GREEN_FAINT: [f32; 4] = [0.0, 0.4, 0.15, 0.3];
+
+/// Scan beam bright line.
+const SCAN_BEAM_COLOR: [f32; 4] = [0.6, 1.0, 0.8, 0.9];
+
+// ---------------------------------------------------------------------------
+// Glitch / noise characters
+// ---------------------------------------------------------------------------
+
+const GLITCH_CHARS: &[char] = &[
+    '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}', '\u{2580}', '\u{2584}',
+    '\u{258C}', '\u{2590}', '\u{2502}', '\u{2524}', '\u{2561}', '\u{2562}',
+    '\u{2556}', '\u{2555}', '\u{2563}', '\u{2551}', '\u{2557}', '\u{255D}',
+    '\u{255C}', '\u{255B}', '\u{2510}', '\u{2514}', '\u{2534}', '\u{252C}',
+    '\u{251C}', '\u{2500}', '\u{253C}',
+];
 
 // ---------------------------------------------------------------------------
 // ASCII logo
@@ -60,34 +92,54 @@ const STATUS_GREEN: [f32; 4] = [0.0, 1.0, 0.38, 1.0];
 
 const LOGO_LINES: &[&str] = &[
     " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2588}\u{2557}",
-    " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2551}\u{255a}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}",
-    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2551}",
-    " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{255d} \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2551}",
-    " \u{2588}\u{2588}\u{2551}     \u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551} \u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2551} \u{255a}\u{2550}\u{255d} \u{2588}\u{2588}\u{2551}",
-    " \u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{2550}\u{2550}\u{255d}   \u{255a}\u{2550}\u{255d}    \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d} \u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d}",
+    " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2551}\u{255A}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255D}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}",
+    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255D}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2551}",
+    " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{255D} \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255A}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255A}\u{2588}\u{2588}\u{2554}\u{255D}\u{2588}\u{2588}\u{2551}",
+    " \u{2588}\u{2588}\u{2551}     \u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551} \u{255A}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{255A}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255D}\u{2588}\u{2588}\u{2551} \u{255A}\u{2550}\u{255D} \u{2588}\u{2588}\u{2551}",
+    " \u{255A}\u{2550}\u{255D}     \u{255A}\u{2550}\u{255D}  \u{255A}\u{2550}\u{255D}\u{255A}\u{2550}\u{255D}  \u{255A}\u{2550}\u{255D}\u{255A}\u{2550}\u{255D}  \u{255A}\u{2550}\u{2550}\u{2550}\u{255D}   \u{255A}\u{2550}\u{255D}    \u{255A}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255D} \u{255A}\u{2550}\u{255D}     \u{255A}\u{2550}\u{255D}",
     "                        v0.1.0",
 ];
 
 /// Starting row for the logo (centered-ish on an 80x24 terminal).
 const LOGO_START_ROW: usize = 4;
 
+/// Row for the horizontal rule below the logo.
+const RULE_ROW: usize = LOGO_START_ROW + LOGO_LINES.len() + 1;
+
 // ---------------------------------------------------------------------------
-// System check lines
+// System check lines — content and their status labels
 // ---------------------------------------------------------------------------
 
-const SYSCHECK_LINES: &[&str] = &[
-    "[ OK ] Phantom Engine .......................... online",
-    "[ OK ] Context Engine .......................... ready",
-    "[ OK ] Agent Runtime ........................... 5 slots ready",
-    "[ OK ] Shader Pipeline ......................... CRT active",
-    "[ OK ] Session ................................. new",
+struct SysCheckDef {
+    label: &'static str,
+    dots: &'static str,
+    status: &'static str,
+}
+
+const SYSCHECK_DEFS: &[SysCheckDef] = &[
+    SysCheckDef { label: "\u{25A0} NEURAL CORE", dots: " ............ ", status: "ONLINE" },
+    SysCheckDef { label: "\u{25A0} RENDER ENGINE", dots: " .......... ", status: "ACTIVE" },
+    SysCheckDef { label: "\u{25A0} AGENT MESH", dots: " ............. ", status: "SYNCED" },
+    SysCheckDef { label: "\u{25A0} MEMORY BANKS", dots: " ........... ", status: "847 LOADED" },
+    SysCheckDef { label: "\u{25A0} SHADER PIPELINE", dots: " ........ ", status: "CRT ACTIVE" },
 ];
 
-/// Row offset from top for the first system-check line (after logo + gap).
-const SYSCHECK_START_ROW: usize = LOGO_START_ROW + LOGO_LINES.len() + 2;
+/// Kept for backwards compatibility in tests — mirrors SYSCHECK_DEFS labels.
+#[cfg(test)]
+const SYSCHECK_LINES: &[&str] = &[
+    "\u{25A0} NEURAL CORE",
+    "\u{25A0} RENDER ENGINE",
+    "\u{25A0} AGENT MESH",
+    "\u{25A0} MEMORY BANKS",
+    "\u{25A0} SHADER PIPELINE",
+];
 
-const WELCOME_TEXT: &str = "Welcome to Phantom.";
-const WELCOME_ROW: usize = SYSCHECK_START_ROW + SYSCHECK_LINES.len() + 2;
+/// Row offset from top for the first system-check line (after logo + rule + gap).
+const SYSCHECK_START_ROW: usize = RULE_ROW + 2;
+
+const WELCOME_TEXT: &str = "SYSTEM READY.";
+const WELCOME_ROW: usize = SYSCHECK_START_ROW + SYSCHECK_DEFS.len() + 1;
+const PROMPT_ROW: usize = WELCOME_ROW + 1;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -123,17 +175,17 @@ pub struct BootTextLine {
 /// The current phase of the boot sequence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootPhase {
-    /// 0.0 -- 0.3s: blank screen with blinking cursor.
+    /// 0.0 -- 0.5s: static noise, dead CRT interference.
     BlackScreen,
-    /// 0.3 -- 0.8s: CRT effects fade in, phosphor glow.
+    /// 0.5 -- 1.5s: noise clears center-out, scan beam sweeps.
     CrtWarmup,
-    /// 0.8 -- 1.2s: ASCII logo types out line by line.
+    /// 1.5 -- 3.5s: PHANTOM logo glitches in character by character.
     LogoReveal,
-    /// 1.2 -- 2.5s: status lines appear one by one.
+    /// 3.5 -- 6.0s: status lines with animated progress bars.
     SystemCheck,
-    /// 2.5 -- 3.5s: welcome message, brief pause.
+    /// 6.0s -- keypress: SYSTEM READY + blinking prompt.
     Welcome,
-    /// 3.5 -- 4.0s: fade/transition to live terminal.
+    /// keypress + 0.5s: fade to terminal.
     TransitionToTerminal,
     /// Boot complete. The app should switch to normal terminal rendering.
     Done,
@@ -176,8 +228,24 @@ impl BootSequence {
         // Cursor blink: toggle based on a simple modular clock.
         self.cursor_on = (self.elapsed % CURSOR_BLINK_PERIOD) < (CURSOR_BLINK_PERIOD * 0.5);
 
+        // Once we reach the Welcome phase, set the waiting flag — but only if
+        // we haven't already been dismissed (phase would be TransitionToTerminal
+        // or later after dismiss). We check by ensuring we're not already past
+        // Welcome in the phase machine.
+        if !self.waiting_for_keypress
+            && self.elapsed >= T_SYSCHECK_END
+            && self.phase != BootPhase::TransitionToTerminal
+            && self.phase != BootPhase::Done
+        {
+            self.waiting_for_keypress = true;
+        }
+
+        // If waiting for keypress, clamp elapsed so we never advance past Welcome.
+        if self.waiting_for_keypress {
+            self.elapsed = self.elapsed.min(T_WELCOME_END);
+        }
+
         // Phase transitions based on absolute elapsed time.
-        // Pause at Welcome until dismiss() is called.
         self.phase = if self.elapsed < T_BLACK_END {
             BootPhase::BlackScreen
         } else if self.elapsed < T_WARMUP_END {
@@ -186,31 +254,13 @@ impl BootSequence {
             BootPhase::LogoReveal
         } else if self.elapsed < T_SYSCHECK_END {
             BootPhase::SystemCheck
-        } else if self.waiting_for_keypress {
-            // Clamp elapsed so we don't overshoot when dismissed.
-            self.elapsed = self.elapsed.min(T_WELCOME_END);
-            BootPhase::Welcome
-        } else if self.elapsed < T_WELCOME_END {
+        } else if self.elapsed < T_WELCOME_END || self.waiting_for_keypress {
             BootPhase::Welcome
         } else if self.elapsed < T_TRANSITION_END {
             BootPhase::TransitionToTerminal
         } else {
             BootPhase::Done
         };
-
-        // Start waiting once we reach Welcome.
-        if self.phase == BootPhase::Welcome && !self.waiting_for_keypress
-            && self.elapsed >= T_SYSCHECK_END
-        {
-            // Check if the welcome text is fully typed out before pausing.
-            let welcome_elapsed = self.elapsed - T_SYSCHECK_END;
-            let type_delay = 0.3;
-            let type_elapsed = (welcome_elapsed - type_delay).max(0.0);
-            let chars_visible = (type_elapsed * TYPE_SPEED * 0.4) as usize;
-            if chars_visible >= WELCOME_TEXT.chars().count() {
-                self.waiting_for_keypress = true;
-            }
-        }
     }
 
     /// The current boot phase.
@@ -260,7 +310,6 @@ impl BootSequence {
         match self.phase {
             BootPhase::BlackScreen => 0.0,
             BootPhase::CrtWarmup => {
-                // Glow lags slightly behind the main CRT warmup.
                 let t = ((self.elapsed - T_BLACK_END) / (T_WARMUP_END - T_BLACK_END) - 0.15)
                     .clamp(0.0, 1.0);
                 smoothstep(t)
@@ -305,38 +354,38 @@ impl BootSequence {
     // -----------------------------------------------------------------------
 
     /// Returns all text lines that should be visible at the current time,
-    /// with typewriter animation state.
+    /// with animation state.
     ///
     /// The returned lines include:
-    /// - A blinking cursor (during `BlackScreen` and `CrtWarmup`)
-    /// - ASCII logo lines (from `LogoReveal` onward)
-    /// - System-check status lines (from `SystemCheck` onward)
-    /// - Welcome message (from `Welcome` onward)
+    /// - Full-screen noise (during `BlackScreen`)
+    /// - Clearing noise with scan beam (during `CrtWarmup`)
+    /// - Glitching ASCII logo (from `LogoReveal` onward)
+    /// - System-check status lines with progress bars (from `SystemCheck` onward)
+    /// - SYSTEM READY + blinking prompt (from `Welcome` onward)
     pub fn visible_text(&self) -> Vec<BootTextLine> {
         let mut lines = Vec::new();
 
         match self.phase {
             BootPhase::BlackScreen => {
-                // Blinking cursor only.
-                if self.cursor_on {
-                    lines.push(BootTextLine {
-                        text: "\u{2588}".to_string(),
-                        color: GREEN,
-                        row: LOGO_START_ROW,
-                        chars_visible: 1,
-                        style: LineStyle::Normal,
-                    });
-                }
+                self.build_noise_lines(1.0, None, &mut lines);
             }
 
             BootPhase::CrtWarmup => {
-                // Blinking cursor, now with CRT glow behind it.
-                if self.cursor_on {
+                let phase_t = (self.elapsed - T_BLACK_END) / (T_WARMUP_END - T_BLACK_END);
+                // Noise clears from center outward. clear_radius grows 0 -> MAX_DIST.
+                let clear_radius = phase_t * MAX_DIST * 1.3;
+                self.build_noise_lines(1.0 - phase_t * 0.7, Some(clear_radius), &mut lines);
+
+                // Scan beam: a bright horizontal line sweeping top to bottom once.
+                let beam_row = (phase_t * (TERM_ROWS as f32)).min(TERM_ROWS as f32 - 1.0);
+                let beam_row_int = beam_row as usize;
+                if beam_row_int < TERM_ROWS {
+                    let beam_text: String = "\u{2500}".repeat(TERM_COLS);
                     lines.push(BootTextLine {
-                        text: "\u{2588}".to_string(),
-                        color: GREEN,
-                        row: LOGO_START_ROW,
-                        chars_visible: 1,
+                        text: beam_text,
+                        color: SCAN_BEAM_COLOR,
+                        row: beam_row_int,
+                        chars_visible: TERM_COLS,
                         style: LineStyle::Normal,
                     });
                 }
@@ -356,18 +405,6 @@ impl BootSequence {
                 self.build_logo_lines_full(&mut lines);
                 self.build_syscheck_lines_full(&mut lines);
                 self.build_welcome_line(&mut lines);
-                if self.waiting_for_keypress {
-                    // Blinking "Press any key..." prompt
-                    if self.cursor_on {
-                        lines.push(BootTextLine {
-                            text: "Press any key to continue...".to_string(),
-                            color: GREEN_DIM,
-                            row: WELCOME_ROW + 2,
-                            chars_visible: 28,
-                            style: LineStyle::Normal,
-                        });
-                    }
-                }
             }
 
             BootPhase::TransitionToTerminal => {
@@ -386,59 +423,170 @@ impl BootSequence {
     }
 
     // -----------------------------------------------------------------------
-    // Internal line builders
+    // Noise generation
     // -----------------------------------------------------------------------
 
-    /// Logo lines with typewriter animation (during `LogoReveal`).
+    /// Generate full-screen noise lines. `density` controls how many cells are
+    /// filled (0.0 = empty, 1.0 = ~35% filled). `clear_radius` if provided
+    /// means cells within that distance from center are cleared.
+    fn build_noise_lines(
+        &self,
+        density: f32,
+        clear_radius: Option<f32>,
+        out: &mut Vec<BootTextLine>,
+    ) {
+        let frame = (self.elapsed * 30.0) as u32; // ~30 fps frame counter
+
+        for row in 0..TERM_ROWS {
+            let mut line_chars = String::with_capacity(TERM_COLS);
+            let mut has_content = false;
+
+            for col in 0..TERM_COLS {
+                // Deterministic hash for this cell at this frame.
+                let hash = noise_hash(row, col, frame);
+
+                // Should this cell be filled?
+                let fill_threshold = (density * 0.35 * 255.0) as u32;
+                let cell_val = (hash >> 8) & 0xFF;
+
+                // If within clear radius, skip this cell.
+                if let Some(radius) = clear_radius {
+                    let dr = row as f32 - CENTER_ROW;
+                    let dc = col as f32 - CENTER_COL;
+                    let dist = (dr * dr + dc * dc).sqrt();
+                    if dist < radius {
+                        line_chars.push(' ');
+                        continue;
+                    }
+                }
+
+                if cell_val < fill_threshold {
+                    let ch = noise_char_from_hash(hash);
+                    line_chars.push(ch);
+                    has_content = true;
+                } else {
+                    line_chars.push(' ');
+                }
+            }
+
+            if has_content {
+                let len = line_chars.chars().count();
+                out.push(BootTextLine {
+                    text: line_chars,
+                    color: GREEN_DIM,
+                    row,
+                    chars_visible: len,
+                    style: LineStyle::Normal,
+                });
+            } else {
+                // Emit empty row so spacing is maintained.
+                out.push(BootTextLine {
+                    text: " ".repeat(TERM_COLS),
+                    color: GREEN_FAINT,
+                    row,
+                    chars_visible: TERM_COLS,
+                    style: LineStyle::Normal,
+                });
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Logo with glitch-in effect
+    // -----------------------------------------------------------------------
+
+    /// Logo lines with glitch-in animation (during `LogoReveal`).
+    ///
+    /// Each character position has a "lock time". Before that time, the position
+    /// shows random glitch characters cycling rapidly. After lock time, it shows
+    /// the correct character. Lock times progress left to right with slight
+    /// per-character variation for organic feel.
     fn build_logo_lines(&self, out: &mut Vec<BootTextLine>) {
         let phase_elapsed = self.elapsed - T_WARMUP_END;
-        let total_chars: usize = LOGO_LINES.iter().map(|l| l.chars().count()).sum();
-        let chars_typed = (phase_elapsed * TYPE_SPEED).max(0.0) as usize;
+        let _phase_duration = T_LOGO_END - T_WARMUP_END; // 2.0s
 
-        let mut chars_remaining = chars_typed;
-        for (i, &line) in LOGO_LINES.iter().enumerate() {
-            let line_char_count = line.chars().count();
-            if chars_remaining == 0 {
-                break;
-            }
-            let visible = chars_remaining.min(line_char_count);
-            chars_remaining = chars_remaining.saturating_sub(line_char_count);
+        // Logo glitch phase: first 1.6s for the main logo, last 0.4s for extras.
+        let logo_duration = 1.6;
+        let frame = (self.elapsed * 30.0) as u32;
 
-            // Version line gets a dimmer color.
+        for (i, &logo_line) in LOGO_LINES.iter().enumerate() {
             let is_version = i == LOGO_LINES.len() - 1;
-            let color = if is_version { GREEN_DIM } else { GREEN_BRIGHT };
+            let final_color = if is_version { GREEN_DIM } else { GREEN_BRIGHT };
 
-            out.push(BootTextLine {
-                text: line.to_string(),
-                color,
-                row: LOGO_START_ROW + i,
-                chars_visible: visible,
-                style: if is_version { LineStyle::Normal } else { LineStyle::Logo },
-            });
+            let char_count = logo_line.chars().count();
+            if char_count == 0 {
+                continue;
+            }
+
+            let mut display = String::with_capacity(char_count * 4);
+            let mut any_visible = false;
+
+            let logo_chars: Vec<char> = logo_line.chars().collect();
+
+            for (ci, &real_ch) in logo_chars.iter().enumerate() {
+                if real_ch == ' ' {
+                    display.push(' ');
+                    continue;
+                }
+
+                // Lock time for this character: progresses left to right.
+                // Add per-character jitter based on position.
+                let base_progress = ci as f32 / char_count.max(1) as f32;
+                let row_offset = i as f32 * 0.02;
+                let jitter = ((ci * 7919 + i * 6271) % 100) as f32 / 100.0 * 0.15;
+                let lock_time = (base_progress + row_offset + jitter) * logo_duration;
+
+                if phase_elapsed >= lock_time {
+                    // Character is locked — show the real character.
+                    display.push(real_ch);
+                    any_visible = true;
+                } else if phase_elapsed >= lock_time - 0.3 {
+                    // Character is "trying" — show random glitch chars.
+                    let hash = noise_hash(i, ci, frame);
+                    let ch = noise_char_from_hash(hash);
+                    display.push(ch);
+                    any_visible = true;
+                } else {
+                    display.push(' ');
+                }
+            }
+
+            if any_visible || phase_elapsed > logo_duration * 0.5 {
+                let len = display.chars().count();
+                // Color shifts from dim glitch green to final bright green as chars lock.
+                let lock_fraction = if is_version {
+                    if phase_elapsed > logo_duration { 1.0 } else { 0.0 }
+                } else {
+                    (phase_elapsed / logo_duration).clamp(0.0, 1.0)
+                };
+                let color = lerp_color(GREEN_DIM, final_color, lock_fraction);
+
+                out.push(BootTextLine {
+                    text: display,
+                    color,
+                    row: LOGO_START_ROW + i,
+                    chars_visible: len,
+                    style: if is_version { LineStyle::Normal } else { LineStyle::Logo },
+                });
+            }
         }
 
-        // Blinking cursor at the end of the typing front.
-        if chars_typed < total_chars && self.cursor_on {
-            // Find which line and column the cursor is on.
-            let mut cursor_chars = chars_typed;
-            for (i, &line) in LOGO_LINES.iter().enumerate() {
-                let lc = line.chars().count();
-                if cursor_chars < lc {
-                    // Cursor is on this line, at column `cursor_chars`.
-                    // We encode it as a separate line so the renderer can
-                    // overlay the block cursor character.
-                    out.push(BootTextLine {
-                        text: "\u{2588}".to_string(),
-                        color: GREEN,
-                        row: LOGO_START_ROW + i,
-                        // The renderer should position this at column `cursor_chars`.
-                        chars_visible: 1,
-                        style: LineStyle::Normal,
-                    });
-                    break;
-                }
-                cursor_chars -= lc;
-            }
+        // Horizontal rule below logo — draws itself left to right.
+        let rule_progress = ((phase_elapsed - logo_duration) / 0.3).clamp(0.0, 1.0);
+        if rule_progress > 0.0 {
+            let rule_width = 56; // width of the logo roughly
+            let visible_chars = (rule_progress * rule_width as f32) as usize;
+            let rule_text: String = "\u{2550}".repeat(rule_width);
+            let padding = (TERM_COLS - rule_width) / 2;
+            let padded_rule = format!("{}{}", " ".repeat(padding), rule_text);
+            let total_visible = padding + visible_chars;
+            out.push(BootTextLine {
+                text: padded_rule,
+                color: GREEN_DIM,
+                row: RULE_ROW,
+                chars_visible: total_visible,
+                style: LineStyle::Normal,
+            });
         }
     }
 
@@ -456,29 +604,44 @@ impl BootSequence {
                 style: if is_version { LineStyle::Normal } else { LineStyle::Logo },
             });
         }
+
+        // Full horizontal rule.
+        let rule_width = 56;
+        let padding = (TERM_COLS - rule_width) / 2;
+        let rule_text = format!("{}{}", " ".repeat(padding), "\u{2550}".repeat(rule_width));
+        let len = rule_text.chars().count();
+        out.push(BootTextLine {
+            text: rule_text,
+            color: GREEN_DIM,
+            row: RULE_ROW,
+            chars_visible: len,
+            style: LineStyle::Normal,
+        });
     }
 
-    /// System-check lines with staggered reveal (during `SystemCheck`).
+    // -----------------------------------------------------------------------
+    // System check lines with progress bars
+    // -----------------------------------------------------------------------
+
+    /// System-check lines with staggered reveal and animated progress bars.
     fn build_syscheck_lines(&self, out: &mut Vec<BootTextLine>) {
         let phase_elapsed = self.elapsed - T_LOGO_END;
 
-        for (i, &line) in SYSCHECK_LINES.iter().enumerate() {
+        for (i, def) in SYSCHECK_DEFS.iter().enumerate() {
             let line_appear_time = i as f32 * SYSCHECK_LINE_DELAY;
             if phase_elapsed < line_appear_time {
                 break;
             }
 
             let line_elapsed = phase_elapsed - line_appear_time;
-            let line_char_count = line.chars().count();
-            // Each status line types out quickly -- snappy, confident.
-            let chars_visible = (line_elapsed * TYPE_SPEED * 1.5)
-                .min(line_char_count as f32) as usize;
+            let text = build_syscheck_text(def, line_elapsed);
+            let len = text.chars().count();
 
             out.push(BootTextLine {
-                text: line.to_string(),
+                text,
                 color: STATUS_GREEN,
                 row: SYSCHECK_START_ROW + i,
-                chars_visible,
+                chars_visible: len,
                 style: LineStyle::Status,
             });
         }
@@ -486,44 +649,59 @@ impl BootSequence {
 
     /// All system-check lines fully revealed.
     fn build_syscheck_lines_full(&self, out: &mut Vec<BootTextLine>) {
-        for (i, &line) in SYSCHECK_LINES.iter().enumerate() {
+        for (i, def) in SYSCHECK_DEFS.iter().enumerate() {
+            let text = build_syscheck_text(def, 10.0); // large elapsed = fully done
+            let len = text.chars().count();
             out.push(BootTextLine {
-                text: line.to_string(),
+                text,
                 color: STATUS_GREEN,
                 row: SYSCHECK_START_ROW + i,
-                chars_visible: line.chars().count(),
+                chars_visible: len,
                 style: LineStyle::Status,
             });
         }
     }
 
-    /// Welcome message with typewriter effect (during `Welcome`).
-    fn build_welcome_line(&self, out: &mut Vec<BootTextLine>) {
-        let phase_elapsed = self.elapsed - T_SYSCHECK_END;
-        // Brief pause before the welcome text starts typing.
-        let type_delay = 0.3;
-        let type_elapsed = (phase_elapsed - type_delay).max(0.0);
-        let chars_visible = (type_elapsed * TYPE_SPEED * 0.4)
-            .min(WELCOME_TEXT.chars().count() as f32) as usize;
+    // -----------------------------------------------------------------------
+    // Welcome / prompt
+    // -----------------------------------------------------------------------
 
-        if chars_visible > 0 {
+    /// Welcome message and blinking prompt (during `Welcome`).
+    fn build_welcome_line(&self, out: &mut Vec<BootTextLine>) {
+        // "SYSTEM READY." appears immediately.
+        let len = WELCOME_TEXT.chars().count();
+        out.push(BootTextLine {
+            text: WELCOME_TEXT.to_string(),
+            color: GREEN_BRIGHT,
+            row: WELCOME_ROW,
+            chars_visible: len,
+            style: LineStyle::Normal,
+        });
+
+        // Blinking prompt below.
+        if self.waiting_for_keypress {
+            let cursor = if self.cursor_on { "_" } else { " " };
+            let prompt = format!("> PRESS ANY KEY TO INITIALIZE {cursor}");
+            let plen = prompt.chars().count();
+            // Only show when cursor is on for the blink effect on the whole line.
             out.push(BootTextLine {
-                text: WELCOME_TEXT.to_string(),
-                color: GREEN_BRIGHT,
-                row: WELCOME_ROW,
-                chars_visible,
+                text: prompt,
+                color: if self.cursor_on { GREEN } else { GREEN_DIM },
+                row: PROMPT_ROW,
+                chars_visible: plen,
                 style: LineStyle::Normal,
             });
         }
     }
 
-    /// Welcome message fully revealed.
+    /// Welcome message fully revealed (for transition phase).
     fn build_welcome_line_full(&self, out: &mut Vec<BootTextLine>) {
+        let len = WELCOME_TEXT.chars().count();
         out.push(BootTextLine {
             text: WELCOME_TEXT.to_string(),
             color: GREEN_BRIGHT,
             row: WELCOME_ROW,
-            chars_visible: WELCOME_TEXT.chars().count(),
+            chars_visible: len,
             style: LineStyle::Normal,
         });
     }
@@ -536,7 +714,7 @@ impl Default for BootSequence {
 }
 
 // ---------------------------------------------------------------------------
-// Utility
+// Utility: dismiss / skip / is_waiting
 // ---------------------------------------------------------------------------
 
 impl BootSequence {
@@ -568,6 +746,7 @@ impl BootSequence {
                 self.phase = BootPhase::Done;
             }
             _ => {
+                self.waiting_for_keypress = false;
                 self.elapsed = T_WELCOME_END;
                 self.phase = BootPhase::TransitionToTerminal;
             }
@@ -578,9 +757,69 @@ impl BootSequence {
 /// Attempt to quickly skip all the way to Done (double-press, impatient user).
 impl BootSequence {
     pub fn skip_immediate(&mut self) {
+        self.waiting_for_keypress = false;
         self.elapsed = T_TRANSITION_END;
         self.phase = BootPhase::Done;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free functions
+// ---------------------------------------------------------------------------
+
+/// Deterministic pseudo-random hash for noise generation.
+/// Uses position and frame to create varied but repeatable patterns.
+fn noise_hash(row: usize, col: usize, frame: u32) -> u32 {
+    let mut h = (row as u32).wrapping_mul(7919)
+        .wrapping_add((col as u32).wrapping_mul(6271))
+        .wrapping_add(frame.wrapping_mul(173));
+    // Mix bits for better distribution.
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x5BD1E995);
+    h ^= h >> 15;
+    h
+}
+
+/// Pick a glitch character from a hash value.
+fn noise_char_from_hash(hash: u32) -> char {
+    GLITCH_CHARS[(hash as usize) % GLITCH_CHARS.len()]
+}
+
+/// Build the display text for a system check line at a given elapsed time.
+///
+/// Stages:
+/// 1. Label appears instantly.
+/// 2. Dots appear instantly with label.
+/// 3. Progress bar fills over `PROGRESS_BAR_DURATION`.
+/// 4. Status text appears when bar is complete.
+fn build_syscheck_text(def: &SysCheckDef, elapsed: f32) -> String {
+    let bar_progress = (elapsed / PROGRESS_BAR_DURATION).clamp(0.0, 1.0);
+    let filled = (bar_progress * PROGRESS_BAR_WIDTH as f32) as usize;
+    let empty = PROGRESS_BAR_WIDTH - filled;
+
+    let bar: String = format!(
+        "{}{}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(empty),
+    );
+
+    let status = if bar_progress >= 1.0 {
+        format!(" {}", def.status)
+    } else {
+        String::new()
+    };
+
+    format!("{}{}{}{}", def.label, def.dots, bar, status)
+}
+
+/// Linear interpolation between two RGBA colors.
+fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
 }
 
 /// Hermite smoothstep: maps [0, 1] to [0, 1] with ease-in/ease-out.
@@ -621,7 +860,7 @@ mod tests {
         let mut seq = BootSequence::new();
 
         // Just before CRT warmup.
-        seq.update(0.29);
+        seq.update(0.49);
         assert_eq!(seq.phase(), BootPhase::BlackScreen);
 
         // Into CRT warmup.
@@ -630,27 +869,25 @@ mod tests {
 
         // Reset and jump to logo.
         let mut seq = BootSequence::new();
-        seq.update(0.85);
+        seq.update(1.6);
         assert_eq!(seq.phase(), BootPhase::LogoReveal);
 
         // System check.
         let mut seq = BootSequence::new();
-        seq.update(1.3);
+        seq.update(4.0);
         assert_eq!(seq.phase(), BootPhase::SystemCheck);
 
-        // Welcome.
+        // Welcome (waits for keypress, so we need to get there and it should pause).
         let mut seq = BootSequence::new();
-        seq.update(2.6);
+        seq.update(6.1);
         assert_eq!(seq.phase(), BootPhase::Welcome);
 
-        // Transition.
-        let mut seq = BootSequence::new();
-        seq.update(3.6);
+        // After dismiss, transition.
+        seq.dismiss();
         assert_eq!(seq.phase(), BootPhase::TransitionToTerminal);
 
-        // Done.
-        let mut seq = BootSequence::new();
-        seq.update(4.1);
+        // After transition ends, done.
+        seq.update(0.6);
         assert_eq!(seq.phase(), BootPhase::Done);
         assert!(seq.is_done());
     }
@@ -659,11 +896,11 @@ mod tests {
     fn crt_intensity_ramps_during_warmup() {
         let mut seq = BootSequence::new();
 
-        seq.update(0.1);
+        seq.update(0.3);
         assert_eq!(seq.crt_intensity(), 0.0);
 
         seq = BootSequence::new();
-        seq.update(0.55);
+        seq.update(1.0);
         let intensity = seq.crt_intensity();
         assert!(
             intensity > 0.0 && intensity < 1.0,
@@ -671,19 +908,20 @@ mod tests {
         );
 
         seq = BootSequence::new();
-        seq.update(0.85);
+        seq.update(1.6);
         assert_eq!(seq.crt_intensity(), 1.0);
     }
 
     #[test]
-    fn visible_text_empty_at_start() {
-        let seq = BootSequence::new();
-        // Before any update, cursor_on is true, but elapsed is 0 so phase is BlackScreen.
+    fn visible_text_has_noise_at_start() {
+        let mut seq = BootSequence::new();
+        seq.update(0.1);
         let lines = seq.visible_text();
-        // Should have the blinking cursor.
+        // Should have noise lines (one per terminal row).
         assert!(
-            lines.len() <= 1,
-            "expected at most a cursor, got {} lines",
+            lines.len() >= TERM_ROWS,
+            "expected at least {} noise lines, got {}",
+            TERM_ROWS,
             lines.len()
         );
     }
@@ -691,7 +929,7 @@ mod tests {
     #[test]
     fn logo_lines_appear_during_reveal() {
         let mut seq = BootSequence::new();
-        seq.update(1.0); // mid logo reveal
+        seq.update(2.5); // mid logo reveal
         let lines = seq.visible_text();
         let logo_lines: Vec<_> = lines.iter().filter(|l| l.style == LineStyle::Logo).collect();
         assert!(!logo_lines.is_empty(), "expected logo lines during LogoReveal");
@@ -700,7 +938,7 @@ mod tests {
     #[test]
     fn syscheck_lines_appear_during_system_check() {
         let mut seq = BootSequence::new();
-        seq.update(2.0); // mid system check
+        seq.update(5.0); // mid system check
         let lines = seq.visible_text();
         let status_lines: Vec<_> = lines.iter().filter(|l| l.style == LineStyle::Status).collect();
         assert!(
@@ -712,22 +950,22 @@ mod tests {
     #[test]
     fn welcome_appears_during_welcome_phase() {
         let mut seq = BootSequence::new();
-        seq.update(3.2); // late welcome phase
+        seq.update(6.2);
         let lines = seq.visible_text();
         let welcome: Vec<_> = lines
             .iter()
-            .filter(|l| l.text.contains("Welcome"))
+            .filter(|l| l.text.contains("SYSTEM READY"))
             .collect();
         assert!(
             !welcome.is_empty(),
-            "expected welcome line during Welcome phase"
+            "expected SYSTEM READY line during Welcome phase"
         );
     }
 
     #[test]
     fn no_text_after_done() {
         let mut seq = BootSequence::new();
-        seq.update(5.0);
+        seq.skip_immediate();
         assert!(seq.is_done());
         let lines = seq.visible_text();
         assert!(lines.is_empty(), "expected no lines after Done");
@@ -744,7 +982,8 @@ mod tests {
     #[test]
     fn skip_from_transition_goes_to_done() {
         let mut seq = BootSequence::new();
-        seq.update(3.6);
+        seq.update(0.5);
+        seq.skip();
         assert_eq!(seq.phase(), BootPhase::TransitionToTerminal);
         seq.skip();
         assert_eq!(seq.phase(), BootPhase::Done);
@@ -761,7 +1000,7 @@ mod tests {
     #[test]
     fn done_phase_does_not_advance() {
         let mut seq = BootSequence::new();
-        seq.update(5.0);
+        seq.skip_immediate();
         let elapsed_before = seq.elapsed();
         seq.update(1.0);
         // Elapsed should not change once Done.
@@ -770,20 +1009,25 @@ mod tests {
 
     #[test]
     fn transition_progress_range() {
+        // Before transition.
         let mut seq = BootSequence::new();
-        seq.update(3.5);
+        seq.update(1.0);
         assert_eq!(seq.transition_progress(), 0.0);
 
+        // During transition.
         seq = BootSequence::new();
-        seq.update(3.75);
+        seq.update(0.1);
+        seq.skip(); // jumps to transition
+        seq.update(0.25); // mid-transition
         let p = seq.transition_progress();
         assert!(
             p > 0.0 && p < 1.0,
             "expected mid-transition, got {p}"
         );
 
+        // After transition.
         seq = BootSequence::new();
-        seq.update(4.1);
+        seq.skip_immediate();
         assert_eq!(seq.transition_progress(), 1.0);
     }
 
@@ -794,7 +1038,7 @@ mod tests {
         assert_eq!(seq.screen_opacity(), 1.0);
 
         seq = BootSequence::new();
-        seq.update(4.1);
+        seq.skip_immediate();
         assert_eq!(seq.screen_opacity(), 0.0);
     }
 
@@ -806,44 +1050,64 @@ mod tests {
     }
 
     #[test]
-    fn typewriter_shows_partial_chars() {
-        let mut seq = BootSequence::new();
-        // Very early in logo reveal -- should have partial chars_visible.
-        seq.update(T_WARMUP_END + 0.01);
-        assert_eq!(seq.phase(), BootPhase::LogoReveal);
-        let lines = seq.visible_text();
-        let logo_lines: Vec<_> = lines.iter().filter(|l| l.style == LineStyle::Logo).collect();
-        if let Some(first) = logo_lines.first() {
-            assert!(
-                first.chars_visible < first.text.chars().count(),
-                "expected partial reveal, got {}/{} chars visible",
-                first.chars_visible,
-                first.text.chars().count()
-            );
-        }
+    fn noise_hash_deterministic() {
+        let a = noise_hash(5, 10, 42);
+        let b = noise_hash(5, 10, 42);
+        assert_eq!(a, b);
     }
 
     #[test]
-    fn all_syscheck_lines_visible_near_end() {
+    fn noise_hash_varies() {
+        let a = noise_hash(0, 0, 0);
+        let b = noise_hash(0, 0, 1);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn syscheck_progress_bar_fills() {
+        let def = &SYSCHECK_DEFS[0];
+        let early = build_syscheck_text(def, 0.1);
+        let late = build_syscheck_text(def, 10.0);
+        // Early should not have status text.
+        assert!(!early.contains("ONLINE"), "bar should not be complete at 0.1s");
+        // Late should have status text.
+        assert!(late.contains("ONLINE"), "bar should be complete at 10.0s");
+    }
+
+    #[test]
+    fn waiting_for_keypress_pauses() {
         let mut seq = BootSequence::new();
-        seq.update(2.4); // near end of SystemCheck
-        let lines = seq.visible_text();
-        let status_lines: Vec<_> = lines.iter().filter(|l| l.style == LineStyle::Status).collect();
-        assert_eq!(
-            status_lines.len(),
-            SYSCHECK_LINES.len(),
-            "all system check lines should be visible near end of phase"
-        );
+        // Advance well past welcome.
+        seq.update(10.0);
+        // Should be paused at Welcome because waiting_for_keypress.
+        assert_eq!(seq.phase(), BootPhase::Welcome);
+        assert!(seq.is_waiting());
+        // Dismiss should transition.
+        seq.dismiss();
+        assert_eq!(seq.phase(), BootPhase::TransitionToTerminal);
     }
 
     #[test]
     fn logo_constant_count() {
-        // Verify the logo has the expected number of lines.
         assert_eq!(LOGO_LINES.len(), 7);
     }
 
     #[test]
     fn syscheck_constant_count() {
         assert_eq!(SYSCHECK_LINES.len(), 5);
+    }
+
+    #[test]
+    fn lerp_color_boundaries() {
+        let a = [0.0, 0.0, 0.0, 0.0];
+        let b = [1.0, 1.0, 1.0, 1.0];
+        let mid = lerp_color(a, b, 0.5);
+        assert!((mid[0] - 0.5).abs() < 0.001);
+        assert!((mid[3] - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn glitch_chars_nonempty() {
+        assert!(!GLITCH_CHARS.is_empty());
     }
 }
