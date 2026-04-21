@@ -179,7 +179,10 @@ impl App {
         let status_bar = StatusBar::new();
 
         // -- Boot --
-        let mut boot = BootSequence::new();
+        // Boot sequence sized to the full window (in character cells).
+        let boot_cols = (width as f32 / cell_size.0).floor().max(40.0) as usize;
+        let boot_rows = (height as f32 / cell_size.1).floor().max(10.0) as usize;
+        let mut boot = BootSequence::with_size(boot_cols, boot_rows);
         let initial_state = if config.skip_boot {
             boot.skip_immediate();
             AppState::Terminal
@@ -1095,7 +1098,11 @@ impl App {
             }
             "boot" => {
                 info!("Replaying boot sequence via command mode");
-                self.boot = BootSequence::new();
+                let w = self.gpu.surface_config.width;
+                let h = self.gpu.surface_config.height;
+                let bc = (w as f32 / self.cell_size.0).floor().max(40.0) as usize;
+                let br = (h as f32 / self.cell_size.1).floor().max(10.0) as usize;
+                self.boot = BootSequence::with_size(bc, br);
                 self.state = AppState::Boot;
             }
             "debug" => {

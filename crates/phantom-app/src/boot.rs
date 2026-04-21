@@ -32,16 +32,9 @@ const T_TRANSITION_END: f32 = 7.0;
 /// Cursor blink period in seconds (on + off cycle).
 const CURSOR_BLINK_PERIOD: f32 = 0.6;
 
-/// Terminal dimensions for noise generation.
-const TERM_ROWS: usize = 24;
-const TERM_COLS: usize = 80;
-
-/// Center of terminal for circular clearing.
-const CENTER_ROW: f32 = 12.0;
-const CENTER_COL: f32 = 40.0;
-
-/// Maximum distance from center to any corner (for normalization).
-const MAX_DIST: f32 = 43.0; // ~sqrt(12^2 + 40^2)
+/// Default terminal dimensions (used if not configured).
+const DEFAULT_ROWS: usize = 24;
+const DEFAULT_COLS: usize = 80;
 
 /// Delay between successive system-check lines (seconds).
 const SYSCHECK_LINE_DELAY: f32 = 0.3;
@@ -100,11 +93,8 @@ const LOGO_LINES: &[&str] = &[
     "                        v0.1.0",
 ];
 
-/// Starting row for the logo (centered-ish on an 80x24 terminal).
-const LOGO_START_ROW: usize = 4;
-
-/// Row for the horizontal rule below the logo.
-const RULE_ROW: usize = LOGO_START_ROW + LOGO_LINES.len() + 1;
+// Logo/content row positions are computed dynamically from screen size.
+// See BootSequence::logo_start_row() etc.
 
 // ---------------------------------------------------------------------------
 // System check lines — content and their status labels
@@ -134,12 +124,7 @@ const SYSCHECK_LINES: &[&str] = &[
     "\u{25A0} SHADER PIPELINE",
 ];
 
-/// Row offset from top for the first system-check line (after logo + rule + gap).
-const SYSCHECK_START_ROW: usize = RULE_ROW + 2;
-
 const WELCOME_TEXT: &str = "SYSTEM READY.";
-const WELCOME_ROW: usize = SYSCHECK_START_ROW + SYSCHECK_DEFS.len() + 1;
-const PROMPT_ROW: usize = WELCOME_ROW + 1;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -204,17 +189,61 @@ pub struct BootSequence {
     cursor_on: bool,
     /// When true, the boot sequence pauses at Welcome and waits for a keypress.
     waiting_for_keypress: bool,
+    /// Screen dimensions in character cells.
+    cols: usize,
+    rows: usize,
 }
 
 impl BootSequence {
     /// Create a new boot sequence, starting at `BlackScreen` / t=0.
     pub fn new() -> Self {
+        Self::with_size(DEFAULT_COLS, DEFAULT_ROWS)
+    }
+
+    /// Create a boot sequence sized to the given terminal dimensions.
+    pub fn with_size(cols: usize, rows: usize) -> Self {
         Self {
             elapsed: 0.0,
             phase: BootPhase::BlackScreen,
             cursor_on: true,
             waiting_for_keypress: false,
+            cols: cols.max(40),
+            rows: rows.max(10),
         }
+    }
+
+    /// Update screen dimensions (e.g. after resize).
+    pub fn set_size(&mut self, cols: usize, rows: usize) {
+        self.cols = cols.max(40);
+        self.rows = rows.max(10);
+    }
+
+    // -- Dynamic layout helpers --
+
+    /// Content block height: logo + rule + syschk + welcome + prompt.
+    fn content_height(&self) -> usize {
+        LOGO_LINES.len() + 1 + 2 + SYSCHECK_DEFS.len() + 3
+    }
+
+    /// Vertically centered start row for the logo.
+    fn logo_start_row(&self) -> usize {
+        self.rows.saturating_sub(self.content_height()) / 3
+    }
+
+    fn rule_row(&self) -> usize {
+        self.logo_start_row() + LOGO_LINES.len() + 1
+    }
+
+    fn syscheck_start_row(&self) -> usize {
+        self.rule_row() + 2
+    }
+
+    fn welcome_row(&self) -> usize {
+        self.syscheck_start_row() + SYSCHECK_DEFS.len() + 1
+    }
+
+    fn prompt_row(&self) -> usize {
+        self.welcome_row() + 1
     }
 
     /// Advance the sequence by `dt` seconds and update the current phase.
@@ -372,20 +401,20 @@ impl BootSequence {
 
             BootPhase::CrtWarmup => {
                 let phase_t = (self.elapsed - T_BLACK_END) / (T_WARMUP_END - T_BLACK_END);
-                // Noise clears from center outward. clear_radius grows 0 -> MAX_DIST.
-                let clear_radius = phase_t * MAX_DIST * 1.3;
+                // Noise clears from center outward. clear_radius grows 0 -> ((self.rows as f32 / 2.0).powi(2) + (self.cols as f32 / 2.0).powi(2)).sqrt().
+                let clear_radius = phase_t * ((self.rows as f32 / 2.0).powi(2) + (self.cols as f32 / 2.0).powi(2)).sqrt() * 1.3;
                 self.build_noise_lines(1.0 - phase_t * 0.7, Some(clear_radius), &mut lines);
 
                 // Scan beam: a bright horizontal line sweeping top to bottom once.
-                let beam_row = (phase_t * (TERM_ROWS as f32)).min(TERM_ROWS as f32 - 1.0);
+                let beam_row = (phase_t * (self.rows as f32)).min(self.rows as f32 - 1.0);
                 let beam_row_int = beam_row as usize;
-                if beam_row_int < TERM_ROWS {
-                    let beam_text: String = "\u{2500}".repeat(TERM_COLS);
+                if beam_row_int < self.rows {
+                    let beam_text: String = "\u{2500}".repeat(self.cols);
                     lines.push(BootTextLine {
                         text: beam_text,
                         color: SCAN_BEAM_COLOR,
                         row: beam_row_int,
-                        chars_visible: TERM_COLS,
+                        chars_visible: self.cols,
                         style: LineStyle::Normal,
                     });
                 }
@@ -437,11 +466,11 @@ impl BootSequence {
     ) {
         let frame = (self.elapsed * 30.0) as u32; // ~30 fps frame counter
 
-        for row in 0..TERM_ROWS {
-            let mut line_chars = String::with_capacity(TERM_COLS);
+        for row in 0..self.rows {
+            let mut line_chars = String::with_capacity(self.cols);
             let mut has_content = false;
 
-            for col in 0..TERM_COLS {
+            for col in 0..self.cols {
                 // Deterministic hash for this cell at this frame.
                 let hash = noise_hash(row, col, frame);
 
@@ -451,8 +480,8 @@ impl BootSequence {
 
                 // If within clear radius, skip this cell.
                 if let Some(radius) = clear_radius {
-                    let dr = row as f32 - CENTER_ROW;
-                    let dc = col as f32 - CENTER_COL;
+                    let dr = row as f32 - (self.rows as f32 / 2.0);
+                    let dc = col as f32 - (self.cols as f32 / 2.0);
                     let dist = (dr * dr + dc * dc).sqrt();
                     if dist < radius {
                         line_chars.push(' ');
@@ -481,10 +510,10 @@ impl BootSequence {
             } else {
                 // Emit empty row so spacing is maintained.
                 out.push(BootTextLine {
-                    text: " ".repeat(TERM_COLS),
+                    text: " ".repeat(self.cols),
                     color: GREEN_FAINT,
                     row,
-                    chars_visible: TERM_COLS,
+                    chars_visible: self.cols,
                     style: LineStyle::Normal,
                 });
             }
@@ -564,7 +593,7 @@ impl BootSequence {
                 out.push(BootTextLine {
                     text: display,
                     color,
-                    row: LOGO_START_ROW + i,
+                    row: self.logo_start_row() + i,
                     chars_visible: len,
                     style: if is_version { LineStyle::Normal } else { LineStyle::Logo },
                 });
@@ -577,13 +606,13 @@ impl BootSequence {
             let rule_width = 56; // width of the logo roughly
             let visible_chars = (rule_progress * rule_width as f32) as usize;
             let rule_text: String = "\u{2550}".repeat(rule_width);
-            let padding = (TERM_COLS - rule_width) / 2;
+            let padding = (self.cols - rule_width) / 2;
             let padded_rule = format!("{}{}", " ".repeat(padding), rule_text);
             let total_visible = padding + visible_chars;
             out.push(BootTextLine {
                 text: padded_rule,
                 color: GREEN_DIM,
-                row: RULE_ROW,
+                row: self.rule_row(),
                 chars_visible: total_visible,
                 style: LineStyle::Normal,
             });
@@ -599,7 +628,7 @@ impl BootSequence {
             out.push(BootTextLine {
                 text: line.to_string(),
                 color,
-                row: LOGO_START_ROW + i,
+                row: self.logo_start_row() + i,
                 chars_visible: line.chars().count(),
                 style: if is_version { LineStyle::Normal } else { LineStyle::Logo },
             });
@@ -607,13 +636,13 @@ impl BootSequence {
 
         // Full horizontal rule.
         let rule_width = 56;
-        let padding = (TERM_COLS - rule_width) / 2;
+        let padding = (self.cols - rule_width) / 2;
         let rule_text = format!("{}{}", " ".repeat(padding), "\u{2550}".repeat(rule_width));
         let len = rule_text.chars().count();
         out.push(BootTextLine {
             text: rule_text,
             color: GREEN_DIM,
-            row: RULE_ROW,
+            row: self.rule_row(),
             chars_visible: len,
             style: LineStyle::Normal,
         });
@@ -640,7 +669,7 @@ impl BootSequence {
             out.push(BootTextLine {
                 text,
                 color: STATUS_GREEN,
-                row: SYSCHECK_START_ROW + i,
+                row: self.syscheck_start_row() + i,
                 chars_visible: len,
                 style: LineStyle::Status,
             });
@@ -655,7 +684,7 @@ impl BootSequence {
             out.push(BootTextLine {
                 text,
                 color: STATUS_GREEN,
-                row: SYSCHECK_START_ROW + i,
+                row: self.syscheck_start_row() + i,
                 chars_visible: len,
                 style: LineStyle::Status,
             });
@@ -673,7 +702,7 @@ impl BootSequence {
         out.push(BootTextLine {
             text: WELCOME_TEXT.to_string(),
             color: GREEN_BRIGHT,
-            row: WELCOME_ROW,
+            row: self.welcome_row(),
             chars_visible: len,
             style: LineStyle::Normal,
         });
@@ -687,7 +716,7 @@ impl BootSequence {
             out.push(BootTextLine {
                 text: prompt,
                 color: if self.cursor_on { GREEN } else { GREEN_DIM },
-                row: PROMPT_ROW,
+                row: self.prompt_row(),
                 chars_visible: plen,
                 style: LineStyle::Normal,
             });
@@ -700,7 +729,7 @@ impl BootSequence {
         out.push(BootTextLine {
             text: WELCOME_TEXT.to_string(),
             color: GREEN_BRIGHT,
-            row: WELCOME_ROW,
+            row: self.welcome_row(),
             chars_visible: len,
             style: LineStyle::Normal,
         });
@@ -919,9 +948,9 @@ mod tests {
         let lines = seq.visible_text();
         // Should have noise lines (one per terminal row).
         assert!(
-            lines.len() >= TERM_ROWS,
+            lines.len() >= DEFAULT_ROWS,
             "expected at least {} noise lines, got {}",
-            TERM_ROWS,
+            DEFAULT_ROWS,
             lines.len()
         );
     }

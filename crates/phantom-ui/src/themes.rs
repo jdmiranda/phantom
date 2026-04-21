@@ -137,12 +137,12 @@ pub fn phosphor() -> Theme {
             ],
         },
         shader_params: ShaderParams {
-            scanline_intensity: 0.18,
-            bloom_intensity: 0.25,
-            chromatic_aberration: 0.04,
-            curvature: 0.06,
-            vignette_intensity: 0.20,
-            noise_intensity: 0.02,
+            scanline_intensity: 0.08,
+            bloom_intensity: 0.10,
+            chromatic_aberration: 0.01,
+            curvature: 0.0,
+            vignette_intensity: 0.08,
+            noise_intensity: 0.01,
             glow_color: rgb3(dim_green),
         },
         ui_colors: UiColors {

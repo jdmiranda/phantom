@@ -40,7 +40,7 @@ impl ApplicationHandler for Phantom {
 
         let attrs = WindowAttributes::default()
             .with_title("PHANTOM v0.1.0")
-            .with_inner_size(winit::dpi::LogicalSize::new(1200, 800));
+            .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
 
         let window = Arc::new(
             event_loop
