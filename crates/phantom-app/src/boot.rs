@@ -93,6 +93,30 @@ const LOGO_LINES: &[&str] = &[
     "                        v0.1.0",
 ];
 
+/// Laughing skull ASCII art — displayed above the logo during reveal.
+const SKULL_LINES: &[&str] = &[
+    "                    ██████████████                    ",
+    "                ████░░░░░░░░░░░░░░████                ",
+    "              ██░░░░░░░░░░░░░░░░░░░░░░██              ",
+    "            ██░░░░░░░░░░░░░░░░░░░░░░░░░░██            ",
+    "          ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██          ",
+    "         ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██         ",
+    "        ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██        ",
+    "        ██░░░░░░████░░░░░░░░░░░░████░░░░░░░░██        ",
+    "        ██░░░░████████░░░░░░░░████████░░░░░░██        ",
+    "        ██░░░░████████░░░░░░░░████████░░░░░░██        ",
+    "        ██░░░░░░████░░░░░░░░░░░░████░░░░░░░░██        ",
+    "         ██░░░░░░░░░░░░██████░░░░░░░░░░░░░░██         ",
+    "          ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██          ",
+    "           ██░░░░░░████░░░░░░████░░░░░░░░██           ",
+    "            ██░░░░░░░░████████░░░░░░░░░░██            ",
+    "              ██░░░░░░░░░░░░░░░░░░░░░░██              ",
+    "                ████░░░░░░░░░░░░░░████                ",
+    "                  ██████████████████                   ",
+    "                     ██  ██  ██                        ",
+    "                   ██████████████                      ",
+];
+
 // Logo/content row positions are computed dynamically from screen size.
 // See BootSequence::logo_start_row() etc.
 
@@ -220,14 +244,19 @@ impl BootSequence {
 
     // -- Dynamic layout helpers --
 
-    /// Content block height: logo + rule + syschk + welcome + prompt.
+    /// Content block height: skull + gap + logo + rule + syschk + welcome + prompt.
     fn content_height(&self) -> usize {
-        LOGO_LINES.len() + 1 + 2 + SYSCHECK_DEFS.len() + 3
+        SKULL_LINES.len() + 2 + LOGO_LINES.len() + 1 + 2 + SYSCHECK_DEFS.len() + 3
     }
 
-    /// Vertically centered start row for the logo.
-    fn logo_start_row(&self) -> usize {
+    /// Vertically centered start row for the skull (top of content block).
+    fn skull_start_row(&self) -> usize {
         self.rows.saturating_sub(self.content_height()) / 3
+    }
+
+    /// Start row for the PHANTOM logo (after skull + gap).
+    fn logo_start_row(&self) -> usize {
+        self.skull_start_row() + SKULL_LINES.len() + 2
     }
 
     fn rule_row(&self) -> usize {
@@ -421,16 +450,18 @@ impl BootSequence {
             }
 
             BootPhase::LogoReveal => {
+                self.build_skull_lines(&mut lines);
                 self.build_logo_lines(&mut lines);
             }
 
             BootPhase::SystemCheck => {
-                // Logo is fully revealed.
+                self.build_skull_lines(&mut lines);
                 self.build_logo_lines_full(&mut lines);
                 self.build_syscheck_lines(&mut lines);
             }
 
             BootPhase::Welcome => {
+                self.build_skull_lines(&mut lines);
                 self.build_logo_lines_full(&mut lines);
                 self.build_syscheck_lines_full(&mut lines);
                 self.build_welcome_line(&mut lines);
@@ -438,6 +469,7 @@ impl BootSequence {
 
             BootPhase::TransitionToTerminal => {
                 // Everything visible, fading out (opacity handled by screen_opacity).
+                self.build_skull_lines(&mut lines);
                 self.build_logo_lines_full(&mut lines);
                 self.build_syscheck_lines_full(&mut lines);
                 self.build_welcome_line_full(&mut lines);
@@ -525,6 +557,45 @@ impl BootSequence {
     // -----------------------------------------------------------------------
 
     /// Logo lines with glitch-in animation (during `LogoReveal`).
+    /// Build the skull ASCII art lines. Appears with a glitch-in effect during
+    /// LogoReveal, then stays solid in later phases.
+    fn build_skull_lines(&self, out: &mut Vec<BootTextLine>) {
+        let skull_start = self.skull_start_row();
+        let phase_elapsed = (self.elapsed - T_WARMUP_END).max(0.0);
+        let skull_color: [f32; 4] = [0.15, 0.9, 0.4, 0.9];
+
+        for (i, &line) in SKULL_LINES.iter().enumerate() {
+            let line_char_count = line.chars().count();
+            // Center the skull horizontally.
+            let padding = self.cols.saturating_sub(line_char_count) / 2;
+            let padded: String = " ".repeat(padding) + line;
+
+            // Glitch in: characters lock progressively over 0.8s.
+            let lock_progress = (phase_elapsed / 0.8).clamp(0.0, 1.0);
+            let chars_locked = (lock_progress * padded.chars().count() as f32) as usize;
+
+            let displayed: String = padded
+                .chars()
+                .enumerate()
+                .map(|(ci, ch)| {
+                    if ci < chars_locked || ch == ' ' {
+                        ch
+                    } else {
+                        noise_char_from_hash(noise_hash(skull_start + i, ci, (self.elapsed * 15.0) as u32))
+                    }
+                })
+                .collect();
+
+            out.push(BootTextLine {
+                text: displayed,
+                color: skull_color,
+                row: skull_start + i,
+                chars_visible: padded.chars().count(),
+                style: LineStyle::Logo,
+            });
+        }
+    }
+
     ///
     /// Each character position has a "lock time". Before that time, the position
     /// shows random glitch characters cycling rapidly. After lock time, it shows

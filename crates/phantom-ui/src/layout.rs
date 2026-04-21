@@ -161,16 +161,18 @@ impl LayoutEngine {
     /// Split an existing pane horizontally (left | right).
     ///
     /// The original pane becomes a row container holding two child panes that
-    /// share the space equally. Returns the `PaneId` of the newly created pane.
-    pub fn split_horizontal(&mut self, pane: PaneId) -> Result<PaneId> {
+    /// share the space equally. Returns `(existing_child, new_child)` -- the
+    /// existing pane's content should migrate to `existing_child`.
+    pub fn split_horizontal(&mut self, pane: PaneId) -> Result<(PaneId, PaneId)> {
         self.split(pane, FlexDirection::Row)
     }
 
     /// Split an existing pane vertically (top / bottom).
     ///
     /// The original pane becomes a column container holding two child panes that
-    /// share the space equally. Returns the `PaneId` of the newly created pane.
-    pub fn split_vertical(&mut self, pane: PaneId) -> Result<PaneId> {
+    /// share the space equally. Returns `(existing_child, new_child)` -- the
+    /// existing pane's content should migrate to `existing_child`.
+    pub fn split_vertical(&mut self, pane: PaneId) -> Result<(PaneId, PaneId)> {
         self.split(pane, FlexDirection::Column)
     }
 
@@ -205,7 +207,7 @@ impl LayoutEngine {
 
     /// Perform a split on an existing pane, converting it into a flex container
     /// in the given direction with two equally-sized children.
-    fn split(&mut self, pane: PaneId, direction: FlexDirection) -> Result<PaneId> {
+    fn split(&mut self, pane: PaneId, direction: FlexDirection) -> Result<(PaneId, PaneId)> {
         let pane_node = pane.0;
 
         // Create the two child panes that will live inside the split container.
@@ -238,7 +240,7 @@ impl LayoutEngine {
         self.tree.add_child(pane_node, left).context("failed to add left child")?;
         self.tree.add_child(pane_node, right).context("failed to add right child")?;
 
-        Ok(PaneId(right))
+        Ok((PaneId(left), PaneId(right)))
     }
 
     /// Recursively remove a node and all its descendants from the tree.
@@ -340,10 +342,12 @@ mod tests {
     fn split_horizontal_creates_two_children() {
         let mut engine = LayoutEngine::new().unwrap();
         let pane = engine.add_pane().unwrap();
-        let new_pane = engine.split_horizontal(pane).unwrap();
+        let (existing, new_pane) = engine.split_horizontal(pane).unwrap();
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
+        let r_existing = engine.get_pane_rect(existing).unwrap();
         let r_new = engine.get_pane_rect(new_pane).unwrap();
+        assert!(r_existing.width > 0.0, "existing pane should have positive width");
         assert!(r_new.width > 0.0, "new pane should have positive width");
         assert!(r_new.height > 0.0, "new pane should have positive height");
     }
@@ -352,10 +356,12 @@ mod tests {
     fn split_vertical_creates_two_children() {
         let mut engine = LayoutEngine::new().unwrap();
         let pane = engine.add_pane().unwrap();
-        let new_pane = engine.split_vertical(pane).unwrap();
+        let (existing, new_pane) = engine.split_vertical(pane).unwrap();
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
+        let r_existing = engine.get_pane_rect(existing).unwrap();
         let r_new = engine.get_pane_rect(new_pane).unwrap();
+        assert!(r_existing.width > 0.0, "existing pane should have positive width");
         assert!(r_new.width > 0.0, "new pane should have positive width");
         assert!(r_new.height > 0.0, "new pane should have positive height");
     }

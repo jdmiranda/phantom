@@ -56,6 +56,16 @@ pub enum AppState {
 }
 
 // ---------------------------------------------------------------------------
+// Pane
+// ---------------------------------------------------------------------------
+
+/// A terminal pane: owns a PTY-backed terminal emulator and its layout node.
+struct Pane {
+    terminal: PhantomTerminal,
+    pane_id: PaneId,
+}
+
+// ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
@@ -73,8 +83,9 @@ pub struct App {
     grid_renderer: GridRenderer,
     postfx: PostFxPipeline,
 
-    // -- Terminal --
-    terminal: PhantomTerminal,
+    // -- Terminal panes --
+    panes: Vec<Pane>,
+    focused_pane: usize,
 
     // -- UI --
     layout: LayoutEngine,
@@ -82,7 +93,6 @@ pub struct App {
     theme: Theme,
     status_bar: StatusBar,
     tab_bar: TabBar,
-    pane_id: PaneId,
 
     // -- Boot sequence --
     boot: BootSequence,
@@ -178,6 +188,9 @@ impl App {
         let pane_id = layout.add_pane()?;
         layout.resize(width as f32, height as f32)?;
 
+        // -- Panes --
+        let panes = vec![Pane { terminal, pane_id }];
+
         // -- Keybinds --
         let keybinds = KeybindRegistry::new();
 
@@ -227,13 +240,13 @@ impl App {
             quad_renderer,
             grid_renderer,
             postfx,
-            terminal,
+            panes,
+            focused_pane: 0,
             layout,
             keybinds,
             theme,
             status_bar,
             tab_bar,
-            pane_id,
             boot,
             state: initial_state,
             start_time: now,
@@ -279,15 +292,17 @@ impl App {
             warn!("Layout resize failed: {e}");
         }
 
-        // Recompute terminal dimensions
-        let pane_rect = self.layout.get_pane_rect(self.pane_id).unwrap_or(
-            phantom_ui::layout::Rect { x: 0.0, y: 30.0, width: width as f32, height: height as f32 - 54.0 },
-        );
-        let cols = (pane_rect.width / self.cell_size.0).floor().max(1.0) as u16;
-        let rows = (pane_rect.height / self.cell_size.1).floor().max(1.0) as u16;
+        // Recompute terminal dimensions for every pane.
+        for pane in &mut self.panes {
+            let pane_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or(
+                phantom_ui::layout::Rect { x: 0.0, y: 30.0, width: width as f32, height: height as f32 - 54.0 },
+            );
+            let cols = (pane_rect.width / self.cell_size.0).floor().max(1.0) as u16;
+            let rows = (pane_rect.height / self.cell_size.1).floor().max(1.0) as u16;
 
-        self.terminal.resize(cols, rows);
-        debug!("Terminal resized to {cols}x{rows}");
+            pane.terminal.resize(cols, rows);
+            trace!("Pane resized to {cols}x{rows}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -343,12 +358,14 @@ impl App {
             return;
         }
 
-        // Convert to terminal key event and write to PTY.
+        // Convert to terminal key event and write to focused pane's PTY.
         if let Some(terminal_event) = winit_key_to_terminal(&event) {
             let bytes = input::encode_key(&terminal_event);
             if !bytes.is_empty() {
-                if let Err(e) = self.terminal.pty_write(&bytes) {
-                    warn!("PTY write failed: {e}");
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    if let Err(e) = pane.terminal.pty_write(&bytes) {
+                        warn!("PTY write failed: {e}");
+                    }
                 }
             }
         }
@@ -385,6 +402,27 @@ impl App {
             Action::CloseTab => {
                 debug!("Action: CloseTab (not yet implemented)");
             }
+            Action::SplitHorizontal => {
+                self.split_focused_pane(true);
+            }
+            Action::SplitVertical => {
+                self.split_focused_pane(false);
+            }
+            Action::FocusNext => {
+                if !self.panes.is_empty() {
+                    self.focused_pane = (self.focused_pane + 1) % self.panes.len();
+                    debug!("Focus next: pane {}", self.focused_pane);
+                }
+            }
+            Action::FocusPrev => {
+                if !self.panes.is_empty() {
+                    self.focused_pane = (self.focused_pane + self.panes.len() - 1) % self.panes.len();
+                    debug!("Focus prev: pane {}", self.focused_pane);
+                }
+            }
+            Action::CloseFocused => {
+                self.close_focused_pane();
+            }
             Action::ZoomIn => {
                 let new_size = self.text_renderer.font_size() + 2.0;
                 info!("Zoom in: {new_size}pt");
@@ -405,6 +443,107 @@ impl App {
         }
     }
 
+    /// Split the focused pane. `horizontal` = left|right, otherwise top|bottom.
+    fn split_focused_pane(&mut self, horizontal: bool) {
+        let Some(current) = self.panes.get(self.focused_pane) else { return };
+        let current_pane_id = current.pane_id;
+
+        let split_result = if horizontal {
+            self.layout.split_horizontal(current_pane_id)
+        } else {
+            self.layout.split_vertical(current_pane_id)
+        };
+
+        let (existing_child, new_child) = match split_result {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!("Split failed: {e}");
+                return;
+            }
+        };
+
+        // Recompute layout so new rects are available.
+        let width = self.gpu.surface_config.width;
+        let height = self.gpu.surface_config.height;
+        if let Err(e) = self.layout.resize(width as f32, height as f32) {
+            warn!("Layout resize after split failed: {e}");
+        }
+
+        // The original pane_id node is now a container. The existing terminal
+        // migrates to existing_child.
+        self.panes[self.focused_pane].pane_id = existing_child;
+
+        // Resize existing pane's terminal to fit its new (smaller) rect.
+        if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
+            let cols = (rect.width / self.cell_size.0).floor().max(1.0) as u16;
+            let rows = (rect.height / self.cell_size.1).floor().max(1.0) as u16;
+            self.panes[self.focused_pane].terminal.resize(cols, rows);
+        }
+
+        // Spawn a new terminal sized to the new pane rect.
+        let new_rect = self.layout.get_pane_rect(new_child).unwrap_or(
+            phantom_ui::layout::Rect { x: 0.0, y: 30.0, width: width as f32 / 2.0, height: height as f32 - 54.0 },
+        );
+        let cols = (new_rect.width / self.cell_size.0).floor().max(1.0) as u16;
+        let rows = (new_rect.height / self.cell_size.1).floor().max(1.0) as u16;
+
+        match PhantomTerminal::new(cols, rows) {
+            Ok(terminal) => {
+                let new_index = self.focused_pane + 1;
+                self.panes.insert(new_index, Pane { terminal, pane_id: new_child });
+                self.focused_pane = new_index;
+                info!("Split: new pane {new_index} ({cols}x{rows})");
+            }
+            Err(e) => {
+                warn!("Failed to spawn terminal for new pane: {e}");
+                // The layout is already split but we have no terminal for it.
+                // Remove the new child from the layout to stay consistent.
+                let _ = self.layout.remove_pane(new_child);
+            }
+        }
+    }
+
+    /// Close the focused pane and its terminal.
+    fn close_focused_pane(&mut self) {
+        if self.panes.is_empty() {
+            return;
+        }
+
+        // Don't allow closing the last pane -- quit instead.
+        if self.panes.len() == 1 {
+            info!("Last pane closed, quitting");
+            self.quit_requested = true;
+            return;
+        }
+
+        let pane = self.panes.remove(self.focused_pane);
+        if let Err(e) = self.layout.remove_pane(pane.pane_id) {
+            warn!("Failed to remove pane from layout: {e}");
+        }
+        drop(pane);
+
+        // Recompute layout.
+        let width = self.gpu.surface_config.width;
+        let height = self.gpu.surface_config.height;
+        let _ = self.layout.resize(width as f32, height as f32);
+
+        // Adjust focus index.
+        if self.focused_pane >= self.panes.len() {
+            self.focused_pane = self.panes.len().saturating_sub(1);
+        }
+
+        // Resize remaining panes to fill the reclaimed space.
+        for pane in &mut self.panes {
+            if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
+                let cols = (rect.width / self.cell_size.0).floor().max(1.0) as u16;
+                let rows = (rect.height / self.cell_size.1).floor().max(1.0) as u16;
+                pane.terminal.resize(cols, rows);
+            }
+        }
+
+        info!("Pane closed, focused: {}", self.focused_pane);
+    }
+
     // -----------------------------------------------------------------------
     // Update
     // -----------------------------------------------------------------------
@@ -417,18 +556,55 @@ impl App {
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
 
-        // Read from PTY (non-blocking). Errors are expected when the child exits.
-        match self.terminal.pty_read() {
-            Ok(n) => {
-                if n > 0 {
-                    trace!("PTY read: {n} bytes");
+        // Read from all panes' PTYs (non-blocking). Collect indices of exited panes.
+        let mut exited: Vec<usize> = Vec::new();
+        for (i, pane) in self.panes.iter_mut().enumerate() {
+            match pane.terminal.pty_read() {
+                Ok(n) => {
+                    if n > 0 {
+                        trace!("Pane {i} PTY read: {n} bytes");
+                    }
+                }
+                Err(e) => {
+                    // PTY EOF means the shell exited in this pane.
+                    warn!("Pane {i} PTY read error (shell may have exited): {e}");
+                    exited.push(i);
                 }
             }
-            Err(e) => {
-                // PTY EOF means the shell exited -- request quit.
-                warn!("PTY read error (shell may have exited): {e}");
-                self.quit_requested = true;
+        }
+
+        // Remove exited panes in reverse order so indices stay valid.
+        for &i in exited.iter().rev() {
+            let pane = self.panes.remove(i);
+            if let Err(e) = self.layout.remove_pane(pane.pane_id) {
+                warn!("Failed to remove exited pane from layout: {e}");
             }
+            // Adjust focused_pane index.
+            if self.focused_pane >= self.panes.len() && !self.panes.is_empty() {
+                self.focused_pane = self.panes.len() - 1;
+            }
+        }
+
+        if !exited.is_empty() {
+            // Recompute layout after removals.
+            let width = self.gpu.surface_config.width;
+            let height = self.gpu.surface_config.height;
+            let _ = self.layout.resize(width as f32, height as f32);
+
+            // Resize remaining panes.
+            for pane in &mut self.panes {
+                if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
+                    let cols = (rect.width / self.cell_size.0).floor().max(1.0) as u16;
+                    let rows = (rect.height / self.cell_size.1).floor().max(1.0) as u16;
+                    pane.terminal.resize(cols, rows);
+                }
+            }
+        }
+
+        // If all panes are gone, quit.
+        if self.panes.is_empty() {
+            info!("All panes exited, quitting");
+            self.quit_requested = true;
         }
 
         // Boot sequence state machine.
@@ -854,81 +1030,131 @@ impl App {
     // Terminal rendering
     // -----------------------------------------------------------------------
 
-    /// Build quads and glyphs for normal terminal operation.
+    /// Build quads and glyphs for all terminal panes plus chrome.
     fn render_terminal(
         &mut self,
         screen_size: [f32; 2],
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
-        // -- Extract terminal grid --
-        let (render_cells, cols, rows, cursor) =
-            output::extract_grid(self.terminal.term());
+        let has_multiple = self.panes.len() > 1;
 
-        // -- Get pane rectangle from layout --
-        let pane_rect = self.layout.get_pane_rect(self.pane_id).unwrap_or(
-            phantom_ui::layout::Rect {
-                x: 0.0,
-                y: 30.0,
-                width: screen_size[0],
-                height: screen_size[1] - 54.0,
-            },
-        );
+        for (pane_index, pane) in self.panes.iter().enumerate() {
+            let is_focused = pane_index == self.focused_pane;
 
-        let origin = (pane_rect.x, pane_rect.y);
+            // -- Extract terminal grid --
+            let (render_cells, cols, rows, cursor) =
+                output::extract_grid(pane.terminal.term());
 
-        // -- Convert RenderCells to GridCells --
-        let grid_cells: Vec<GridCell> = render_cells
-            .iter()
-            .map(|rc| GridCell {
-                ch: rc.ch,
-                fg: rc.fg,
-                bg: rc.bg,
-            })
-            .collect();
-
-        // -- Prepare background quads + glyph instances via GridRenderData --
-        let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
-            &grid_cells,
-            cols,
-            rows,
-            &mut self.text_renderer,
-            &mut self.atlas,
-            &self.gpu.queue,
-            origin,
-            self.cell_size,
-        );
-
-        quads.append(&mut bg_quads);
-        glyphs.append(&mut glyph_instances);
-
-        // -- Cursor quad --
-        if cursor.visible {
-            let cursor_x = pane_rect.x + cursor.col as f32 * self.cell_size.0;
-            let cursor_y = pane_rect.y + cursor.row as f32 * self.cell_size.1;
-            let cursor_color = self.theme.colors.cursor;
-
-            let cursor_quad = match cursor.shape {
-                CursorShape::Block => QuadInstance {
-                    pos: [cursor_x, cursor_y],
-                    size: [self.cell_size.0, self.cell_size.1],
-                    color: [cursor_color[0], cursor_color[1], cursor_color[2], 0.7],
-                    border_radius: 0.0,
+            // -- Get pane rectangle from layout --
+            let pane_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or(
+                phantom_ui::layout::Rect {
+                    x: 0.0,
+                    y: 30.0,
+                    width: screen_size[0],
+                    height: screen_size[1] - 54.0,
                 },
-                CursorShape::Underline => QuadInstance {
-                    pos: [cursor_x, cursor_y + self.cell_size.1 - 2.0],
-                    size: [self.cell_size.0, 2.0],
-                    color: cursor_color,
+            );
+
+            let origin = (pane_rect.x, pane_rect.y);
+
+            // -- Convert RenderCells to GridCells --
+            let grid_cells: Vec<GridCell> = render_cells
+                .iter()
+                .map(|rc| GridCell {
+                    ch: rc.ch,
+                    fg: rc.fg,
+                    bg: rc.bg,
+                })
+                .collect();
+
+            // -- Prepare background quads + glyph instances via GridRenderData --
+            let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
+                &grid_cells,
+                cols,
+                rows,
+                &mut self.text_renderer,
+                &mut self.atlas,
+                &self.gpu.queue,
+                origin,
+                self.cell_size,
+            );
+
+            quads.append(&mut bg_quads);
+            glyphs.append(&mut glyph_instances);
+
+            // -- Cursor quad (only for focused pane, or dim for unfocused) --
+            if cursor.visible {
+                let cursor_x = pane_rect.x + cursor.col as f32 * self.cell_size.0;
+                let cursor_y = pane_rect.y + cursor.row as f32 * self.cell_size.1;
+                let cursor_color = if is_focused {
+                    self.theme.colors.cursor
+                } else {
+                    // Dim cursor for unfocused panes.
+                    let c = self.theme.colors.cursor;
+                    [c[0] * 0.3, c[1] * 0.3, c[2] * 0.3, c[3] * 0.4]
+                };
+
+                let cursor_quad = match cursor.shape {
+                    CursorShape::Block => QuadInstance {
+                        pos: [cursor_x, cursor_y],
+                        size: [self.cell_size.0, self.cell_size.1],
+                        color: [cursor_color[0], cursor_color[1], cursor_color[2], if is_focused { 0.7 } else { 0.3 }],
+                        border_radius: 0.0,
+                    },
+                    CursorShape::Underline => QuadInstance {
+                        pos: [cursor_x, cursor_y + self.cell_size.1 - 2.0],
+                        size: [self.cell_size.0, 2.0],
+                        color: cursor_color,
+                        border_radius: 0.0,
+                    },
+                    CursorShape::Bar => QuadInstance {
+                        pos: [cursor_x, cursor_y],
+                        size: [2.0, self.cell_size.1],
+                        color: cursor_color,
+                        border_radius: 0.0,
+                    },
+                };
+                quads.push(cursor_quad);
+            }
+
+            // -- Pane border (only when multiple panes exist) --
+            if has_multiple {
+                let border_color = if is_focused {
+                    [0.2, 1.0, 0.5, 0.8] // bright green for focused
+                } else {
+                    [0.25, 0.35, 0.25, 0.3] // dim for unfocused
+                };
+
+                // Top edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [pane_rect.width, 1.0],
+                    color: border_color,
                     border_radius: 0.0,
-                },
-                CursorShape::Bar => QuadInstance {
-                    pos: [cursor_x, cursor_y],
-                    size: [2.0, self.cell_size.1],
-                    color: cursor_color,
+                });
+                // Bottom edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y + pane_rect.height - 1.0],
+                    size: [pane_rect.width, 1.0],
+                    color: border_color,
                     border_radius: 0.0,
-                },
-            };
-            quads.push(cursor_quad);
+                });
+                // Left edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [1.0, pane_rect.height],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
+                // Right edge
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x + pane_rect.width - 1.0, pane_rect.y],
+                    size: [1.0, pane_rect.height],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
+            }
         }
 
         // -- Tab bar --
@@ -1423,7 +1649,7 @@ impl App {
             return;
         }
 
-        // Build terminal key event with proper modifiers.
+        // Build terminal key event with proper modifiers and write to focused pane.
         if let Some(mut terminal_event) = winit_key_to_terminal(&event) {
             let state = modifiers.state();
             terminal_event.mods = PhantomModifiers {
@@ -1435,8 +1661,10 @@ impl App {
 
             let bytes = input::encode_key(&terminal_event);
             if !bytes.is_empty() {
-                if let Err(e) = self.terminal.pty_write(&bytes) {
-                    warn!("PTY write failed: {e}");
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    if let Err(e) = pane.terminal.pty_write(&bytes) {
+                        warn!("PTY write failed: {e}");
+                    }
                 }
             }
         }
