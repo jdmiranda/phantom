@@ -1,0 +1,12 @@
+[package]
+name = "phantom-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+log.workspace = true
+anyhow.workspace = true
+libc = "0.2"
+bitflags = "2"

@@ -1,0 +1,11 @@
+[package]
+name = "phantom-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+phantom-renderer = { path = "../phantom-renderer" }
+taffy.workspace = true
+log.workspace = true
+anyhow.workspace = true

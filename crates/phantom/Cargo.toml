@@ -1,0 +1,20 @@
+[package]
+name = "phantom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "phantom"
+path = "src/main.rs"
+
+[dependencies]
+phantom-app = { path = "../phantom-app" }
+phantom-renderer = { path = "../phantom-renderer" }
+phantom-terminal = { path = "../phantom-terminal" }
+phantom-ui = { path = "../phantom-ui" }
+
+winit.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
