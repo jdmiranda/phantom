@@ -64,7 +64,10 @@ impl ApplicationHandler for Phantom {
             }
         };
 
-        match App::with_config(gpu, self.config.clone(), self.supervisor_socket.as_deref()) {
+        let scale_factor = window.scale_factor() as f32;
+        log::info!("Display scale factor: {scale_factor}");
+
+        match App::with_config_scaled(gpu, self.config.clone(), self.supervisor_socket.as_deref(), scale_factor) {
             Ok(app) => {
                 self.app = Some(app);
             }

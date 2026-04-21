@@ -40,7 +40,7 @@ use crate::supervisor_client::SupervisorClient;
 // ---------------------------------------------------------------------------
 
 /// Default font size in points for the terminal text renderer.
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+const DEFAULT_FONT_SIZE: f32 = 18.0;
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -121,20 +121,32 @@ impl App {
     }
 
     /// Create the application with an explicit config (for CLI overrides).
-    ///
-    /// If `supervisor_socket` is `Some`, connects to the supervisor and sends
-    /// `Ready`. Pass `None` for standalone mode.
     pub fn with_config(
         gpu: GpuContext,
         config: PhantomConfig,
         supervisor_socket: Option<&Path>,
     ) -> Result<Self> {
+        Self::with_config_scaled(gpu, config, supervisor_socket, 1.0)
+    }
+
+    /// Create the application with config and display scale factor.
+    ///
+    /// `scale_factor` is the display's DPI scale (e.g. 2.0 on Retina Macs).
+    /// Font size is multiplied by this to render at the correct visual size.
+    pub fn with_config_scaled(
+        gpu: GpuContext,
+        config: PhantomConfig,
+        supervisor_socket: Option<&Path>,
+        scale_factor: f32,
+    ) -> Result<Self> {
         let width = gpu.surface_config.width;
         let height = gpu.surface_config.height;
         let format = gpu.format;
 
-        // -- Font / text --
-        let mut text_renderer = TextRenderer::new(config.font_size);
+        // -- Font / text (scaled for HiDPI) --
+        let scaled_font_size = config.font_size * scale_factor;
+        info!("Font: {:.0}pt logical × {:.1}x scale = {:.0}pt physical", config.font_size, scale_factor, scaled_font_size);
+        let mut text_renderer = TextRenderer::new(scaled_font_size);
         let cell_size = text_renderer.measure_cell();
         info!(
             "Cell size: {:.1}x{:.1} at {:.0}pt",
