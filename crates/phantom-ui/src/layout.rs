@@ -106,10 +106,18 @@ impl LayoutEngine {
             })
             .context("failed to create status_bar node")?;
 
+        let bottom_pad = 8.0 * scale;
+
         let root = tree
             .new_with_children(
                 Style {
                     display: Display::Flex,
+                    padding: taffy::geometry::Rect {
+                        left: LengthPercentage::Length(0.0),
+                        right: LengthPercentage::Length(0.0),
+                        top: LengthPercentage::Length(0.0),
+                        bottom: LengthPercentage::Length(bottom_pad),
+                    },
                     flex_direction: FlexDirection::Column,
                     size: Size { width: Dimension::Percent(1.0), height: Dimension::Percent(1.0) },
                     ..Style::default()
