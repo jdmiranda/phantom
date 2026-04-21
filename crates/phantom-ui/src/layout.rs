@@ -4,11 +4,11 @@
 use anyhow::{Context, Result};
 use taffy::prelude::*;
 
-/// Fixed height of the tab bar in pixels.
-const TAB_BAR_HEIGHT: f32 = 30.0;
+/// Logical height of the tab bar in points (before DPI scaling).
+const TAB_BAR_HEIGHT_LOGICAL: f32 = 30.0;
 
-/// Fixed height of the status bar in pixels.
-const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Logical height of the status bar in points (before DPI scaling).
+const STATUS_BAR_HEIGHT_LOGICAL: f32 = 28.0;
 
 /// A rectangle in pixel coordinates, representing the computed position
 /// and size of a layout region.
@@ -71,11 +71,19 @@ impl LayoutEngine {
     /// the tab bar, content area, and status bar. No panes are created
     /// -- call `add_pane` to populate the content area.
     pub fn new() -> Result<Self> {
+        Self::with_scale(1.0)
+    }
+
+    /// Create a new layout engine with DPI scale factor applied to chrome heights.
+    pub fn with_scale(scale: f32) -> Result<Self> {
+        let tab_h = TAB_BAR_HEIGHT_LOGICAL * scale;
+        let status_h = STATUS_BAR_HEIGHT_LOGICAL * scale;
+
         let mut tree = TaffyTree::new();
 
         let tab_bar = tree
             .new_leaf(Style {
-                size: Size { width: Dimension::Auto, height: Dimension::Length(TAB_BAR_HEIGHT) },
+                size: Size { width: Dimension::Auto, height: Dimension::Length(tab_h) },
                 flex_shrink: 0.0,
                 ..Style::default()
             })
@@ -92,7 +100,7 @@ impl LayoutEngine {
 
         let status_bar = tree
             .new_leaf(Style {
-                size: Size { width: Dimension::Auto, height: Dimension::Length(STATUS_BAR_HEIGHT) },
+                size: Size { width: Dimension::Auto, height: Dimension::Length(status_h) },
                 flex_shrink: 0.0,
                 ..Style::default()
             })
@@ -297,7 +305,7 @@ mod tests {
         let status = engine.get_status_bar_rect().unwrap();
 
         assert!(approx_eq(tab.y, 0.0), "tab bar should start at top: got {}", tab.y);
-        assert!(approx_eq(tab.height, TAB_BAR_HEIGHT), "tab bar height: got {}", tab.height);
+        assert!(approx_eq(tab.height, TAB_BAR_HEIGHT_LOGICAL), "tab bar height: got {}", tab.height);
         assert!(approx_eq(tab.width, WINDOW_W), "tab bar width: got {}", tab.width);
 
         assert!(
@@ -306,7 +314,7 @@ mod tests {
             status.y,
             status.height,
         );
-        assert!(approx_eq(status.height, STATUS_BAR_HEIGHT), "status bar height: got {}", status.height);
+        assert!(approx_eq(status.height, STATUS_BAR_HEIGHT_LOGICAL), "status bar height: got {}", status.height);
     }
 
     #[test]
@@ -316,9 +324,9 @@ mod tests {
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
         let rect = engine.get_pane_rect(pane).unwrap();
-        let expected_height = WINDOW_H - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+        let expected_height = WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL;
 
-        assert!(approx_eq(rect.y, TAB_BAR_HEIGHT), "pane y: got {}", rect.y);
+        assert!(approx_eq(rect.y, TAB_BAR_HEIGHT_LOGICAL), "pane y: got {}", rect.y);
         assert!(approx_eq(rect.height, expected_height), "pane height: got {}", rect.height);
         assert!(approx_eq(rect.width, WINDOW_W), "pane width: got {}", rect.width);
     }

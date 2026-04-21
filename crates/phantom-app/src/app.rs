@@ -174,7 +174,7 @@ impl App {
 
         // -- Terminal dimensions from window size --
         // Reserve space for the tab bar (30px) and status bar (24px).
-        let chrome_height = 30.0 + 24.0;
+        let chrome_height = (30.0 + 28.0) * scale_factor;
         let content_height = (height as f32 - chrome_height).max(cell_size.1);
         let cols = ((width as f32) / cell_size.0).floor().max(1.0) as u16;
         let rows = (content_height / cell_size.1).floor().max(1.0) as u16;
@@ -184,7 +184,7 @@ impl App {
         let terminal = PhantomTerminal::new(cols, rows)?;
 
         // -- Layout --
-        let mut layout = LayoutEngine::new()?;
+        let mut layout = LayoutEngine::with_scale(scale_factor)?;
         let pane_id = layout.add_pane()?;
         layout.resize(width as f32, height as f32)?;
 
