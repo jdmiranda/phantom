@@ -232,7 +232,9 @@ impl App {
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) -> f32 {
-        let show_sys = self.sysmon_visible && self.sysmon.latest.is_some();
+        // Reserve space for sysmon as soon as it's toggled on — even before
+        // the first poll arrives — so the layout doesn't jump when data shows up.
+        let show_sys = self.sysmon_visible;
         let show_app = self.appmon_visible;
 
         if !show_sys && !show_app {
@@ -257,17 +259,19 @@ impl App {
         let mut max_h: f32 = 0.0;
 
         if show_sys {
-            if let Some(ref stats) = self.sysmon.latest {
-                let lines = crate::sysmon::build_monitor_lines(stats);
-                let h = self.render_monitor_panel(
-                    "SYSTEM RESOURCES",
-                    &lines,
-                    margin, panel_y, sys_width,
-                    [0.15, 0.5, 0.3, 0.7],
-                    quads, glyphs,
-                );
-                max_h = max_h.max(h);
-            }
+            let lines = if let Some(ref stats) = self.sysmon.latest {
+                crate::sysmon::build_monitor_lines(stats)
+            } else {
+                vec![("▮ Polling...".into(), [0.4, 0.7, 0.5, 0.5])]
+            };
+            let h = self.render_monitor_panel(
+                "SYSTEM RESOURCES",
+                &lines,
+                margin, panel_y, sys_width,
+                [0.15, 0.5, 0.3, 0.7],
+                quads, glyphs,
+            );
+            max_h = max_h.max(h);
         }
 
         if show_app {
