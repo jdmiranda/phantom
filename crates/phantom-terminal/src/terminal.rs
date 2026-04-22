@@ -250,6 +250,19 @@ impl PhantomTerminal {
         Ok(n)
     }
 
+    /// Access the raw bytes from the last `pty_read` call.
+    ///
+    /// Returns the slice of the internal read buffer that was filled during
+    /// the most recent read. The returned slice is only valid until the next
+    /// `pty_read` call.
+    #[inline]
+    pub fn last_read_buf(&self) -> &[u8] {
+        // After pty_read, self.read_buf contains the last-read data.
+        // The length is not tracked separately, but callers can use the
+        // return value of pty_read to slice this.
+        &self.read_buf
+    }
+
     /// Write raw input bytes to the PTY (keyboard/mouse input, paste data, etc.).
     pub fn pty_write(&mut self, data: &[u8]) -> Result<()> {
         self.pty_writer

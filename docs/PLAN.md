@@ -1,7 +1,7 @@
 # Phantom Development Plan
 
-**Last updated**: 2026-04-21
-**Crates**: 18 | **Lines**: 27,939 | **Tests**: 663
+**Last updated**: 2026-04-22
+**Crates**: 19 | **Lines**: 30,422 | **Tests**: 703
 
 ---
 
@@ -73,14 +73,16 @@
 - [ ] wasmtime integration (actually run .wasm binaries)
 
 ### Integration Wiring (CRITICAL)
-- [ ] Wire semantic parser into PTY output (intercept real output)
-- [ ] Wire AI brain to app event loop (send/receive events)
-- [ ] Wire agent system to pane creation (spawn agent → create pane)
-- [ ] Wire error detection → suggestion overlay in render loop
-- [ ] Wire project context into status bar
-- [ ] Wire session save on exit, restore on launch
-- [ ] Wire NLP interpreter into command mode
-- [ ] Wire scene graph into render pipeline (replace flat re-upload)
+- [x] Wire semantic parser into PTY output (error pattern scanner + brain events)
+- [x] Wire AI brain to app event loop (spawn thread, idle events, action drain)
+- [x] Wire error detection → suggestion overlay in render loop
+- [x] Wire project context into status bar (auto-detect, git branch, refresh)
+- [x] Wire session save on exit, restore on launch
+- [x] Wire NLP interpreter into command mode (fallback handler)
+- [x] Wire scene graph into app (structural nodes, resize sync, dirty tracking)
+- [ ] Wire agent system to pane creation (spawn agent → create pane) — stub wired
+- [ ] Scene graph: replace flat quad/glyph collection with scene-driven traversal
+- [ ] Scene graph: dirty-flag GPU upload optimization
 
 ### Infrastructure
 - [ ] TCP/WebSocket remote control listener

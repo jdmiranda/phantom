@@ -5,7 +5,8 @@
 //! loop. It is created after the window and GPU context are established and
 //! handed control for the lifetime of the application.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -22,7 +23,7 @@ use phantom_renderer::quads::{QuadInstance, QuadRenderer};
 use phantom_renderer::text::TextRenderer;
 
 use phantom_terminal::input::{self, KeyEvent, PhantomKey, PhantomModifiers};
-use phantom_terminal::output::{self, CursorShape};
+use phantom_terminal::output::{self, CursorShape, TerminalThemeColors};
 use phantom_terminal::terminal::PhantomTerminal;
 
 use phantom_ui::keybinds::{Action, KeyCombo, KeybindRegistry};
@@ -30,6 +31,17 @@ use phantom_ui::keybinds::Key as UiKey;
 use phantom_ui::layout::{LayoutEngine, PaneId};
 use phantom_ui::themes::{self, Theme};
 use phantom_ui::widgets::{StatusBar, TabBar, Widget};
+
+use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
+use phantom_brain::events::{AiAction, AiEvent};
+use phantom_context::ProjectContext;
+use phantom_memory::MemoryStore;
+use phantom_nlp::NlpInterpreter;
+use phantom_nlp::interpreter::ResolvedAction;
+use phantom_scene::node::{NodeKind, RenderLayer};
+use phantom_scene::tree::SceneTree;
+use phantom_session::session::{SessionManager, SessionState, PaneState};
+use phantom_mcp::{spawn_listener, AppCommand, McpListener, ScreenshotReply};
 
 use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
@@ -41,6 +53,41 @@ use crate::supervisor_client::SupervisorClient;
 
 /// Default font size in points for the terminal text renderer.
 const DEFAULT_FONT_SIZE: f32 = 18.0;
+
+// --- App-container chrome ------------------------------------------------
+// Each pane renders inside a container with a title strip, tinted background,
+// and border. Padding is expressed in cell units so it stays proportional
+// across DPI/font-size changes.
+
+/// Horizontal padding inside the app container, in multiples of cell width.
+const CONTAINER_PAD_X_CELLS: f32 = 0.6;
+
+/// Title-strip height, in multiples of cell height. Contains the app label
+/// (e.g. "● shell · zsh 205×60") and sits between the container's top edge
+/// and the terminal grid.
+const CONTAINER_TITLE_H_CELLS: f32 = 1.2;
+
+/// Bottom padding inside the app container, in multiples of cell height.
+const CONTAINER_PAD_B_CELLS: f32 = 0.3;
+
+/// Compute the terminal-grid area inside a pane's outer layout rect.
+///
+/// The container claims padding on all four sides plus a title strip at the
+/// top. The returned rect is where terminal glyphs should actually draw and
+/// is also what `cols`/`rows` must be derived from for PTY sizing.
+fn pane_inner_rect(cell_size: (f32, f32), outer: phantom_ui::layout::Rect) -> phantom_ui::layout::Rect {
+    let pad_x = cell_size.0 * CONTAINER_PAD_X_CELLS;
+    let title_h = cell_size.1 * CONTAINER_TITLE_H_CELLS;
+    let pad_b = cell_size.1 * CONTAINER_PAD_B_CELLS;
+    let w = (outer.width - pad_x * 2.0).max(cell_size.0);
+    let h = (outer.height - title_h - pad_b).max(cell_size.1);
+    phantom_ui::layout::Rect {
+        x: outer.x + pad_x,
+        y: outer.y + title_h,
+        width: w,
+        height: h,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -69,6 +116,10 @@ struct Pane {
     is_detached: bool,
     /// Cached foreground process name (e.g. "vim", "htop") while detached.
     detached_label: String,
+    /// Rolling output buffer for semantic scanning (last ~8KB of PTY output).
+    output_buf: String,
+    /// Whether we've already notified the brain about errors in the current buffer.
+    error_notified: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +175,38 @@ pub struct App {
     // -- Debug shader HUD --
     debug_hud: bool,
     debug_hud_selected: usize,
+
+    // -- AI Brain (OODA loop on dedicated thread) --
+    brain: Option<BrainHandle>,
+
+    // -- Project context (auto-detected) --
+    context: Option<ProjectContext>,
+
+    // -- Memory store (persistent per-project) --
+    memory: Option<MemoryStore>,
+
+    // -- Session manager --
+    session_manager: Option<SessionManager>,
+
+    // -- Idle tracking (seconds since last user keypress) --
+    last_input_time: Instant,
+
+    // -- Suggestion overlay (from brain) --
+    suggestion: Option<SuggestionOverlay>,
+
+    // -- Scene graph (retained, dirty-tracked) --
+    scene: SceneTree,
+
+    // -- MCP listener (Unix socket) and inbound command channel --
+    mcp_cmd_rx: mpsc::Receiver<AppCommand>,
+    _mcp_listener: Option<McpListener>,
+}
+
+/// An active suggestion from the AI brain.
+struct SuggestionOverlay {
+    text: String,
+    options: Vec<(char, String)>,
+    shown_at: Instant,
 }
 
 impl App {
@@ -179,11 +262,19 @@ impl App {
         let postfx = PostFxPipeline::new(&gpu.device, format, width, height);
 
         // -- Terminal dimensions from window size --
-        // Reserve space for the tab bar (30px) and status bar (24px).
+        // Reserve space for the tab bar (30px), status bar (28px), and the
+        // app-container chrome (padding + title strip) inside the pane.
         let chrome_height = (30.0 + 28.0) * scale_factor;
         let content_height = (height as f32 - chrome_height).max(cell_size.1);
-        let cols = ((width as f32) / cell_size.0).floor().max(1.0) as u16;
-        let rows = (content_height / cell_size.1).floor().max(1.0) as u16;
+        let initial_outer = phantom_ui::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: content_height,
+        };
+        let initial_inner = pane_inner_rect(cell_size, initial_outer);
+        let cols = (initial_inner.width / cell_size.0).floor().max(1.0) as u16;
+        let rows = (initial_inner.height / cell_size.1).floor().max(1.0) as u16;
 
         info!("Terminal: {cols}x{rows} (window {width}x{height})");
 
@@ -201,6 +292,8 @@ impl App {
             was_alt_screen: false,
             is_detached: false,
             detached_label: String::new(),
+            output_buf: String::new(),
+            error_notified: false,
         }];
 
         // -- Keybinds --
@@ -213,7 +306,72 @@ impl App {
         let mut tab_bar = TabBar::new();
         tab_bar.add_tab("shell");
 
-        let status_bar = StatusBar::new();
+        let mut status_bar = StatusBar::new();
+
+        // -- Project context (auto-detect language, git, etc.) --
+        let project_dir = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".into());
+        let context = ProjectContext::detect(Path::new(&project_dir));
+        info!(
+            "Project detected: {} [{:?}]",
+            context.name, context.project_type
+        );
+
+        // Wire context into status bar.
+        status_bar.set_cwd(&context.name);
+        if let Some(ref git) = context.git {
+            status_bar.set_branch(&git.branch);
+        }
+
+        // -- Memory store (persistent per-project) --
+        let memory = match MemoryStore::open(&project_dir) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                warn!("Failed to open memory store: {e}");
+                None
+            }
+        };
+
+        // -- AI Brain thread --
+        let brain = spawn_brain(BrainConfig {
+            project_dir: project_dir.clone(),
+            enable_suggestions: true,
+            enable_memory: true,
+            quiet_threshold: 0.5,
+        });
+        info!("AI brain spawned");
+
+        // -- Scene graph --
+        let mut scene = SceneTree::new();
+        let root = scene.root();
+        // Structural nodes for the UI hierarchy.
+        let _tab_bar_node = scene.add_node(root, NodeKind::TabBar);
+        let content_node = scene.add_node(root, NodeKind::ContentArea);
+        let _status_bar_node = scene.add_node(root, NodeKind::StatusBar);
+        // First pane under content area.
+        let _pane_node = scene.add_node(content_node, NodeKind::Pane);
+        // Overlay nodes (rendered after CRT post-fx).
+        let cmd_bar_node = scene.add_node(root, NodeKind::CommandBar);
+        if let Some(n) = scene.get_mut(cmd_bar_node) { n.render_layer = RenderLayer::Overlay; }
+        let debug_hud_node = scene.add_node(root, NodeKind::DebugHud);
+        if let Some(n) = scene.get_mut(debug_hud_node) { n.render_layer = RenderLayer::Overlay; }
+        let suggestion_node = scene.add_node(root, NodeKind::AgentSuggestion);
+        if let Some(n) = scene.get_mut(suggestion_node) { n.render_layer = RenderLayer::Overlay; }
+        let _ = (cmd_bar_node, debug_hud_node, suggestion_node); // suppress unused
+        // Set initial transforms.
+        scene.set_transform(root, 0.0, 0.0, width as f32, height as f32);
+        scene.update_world_transforms();
+        info!("Scene graph initialized: {} nodes", scene.node_count());
+
+        // -- Session manager --
+        let session_manager = match SessionManager::new() {
+            Ok(sm) => Some(sm),
+            Err(e) => {
+                warn!("Failed to create session manager: {e}");
+                None
+            }
+        };
 
         // -- Boot --
         // Boot sequence sized to the full window (in character cells).
@@ -243,6 +401,26 @@ impl App {
             None
         };
 
+        // -- MCP listener --
+        // Bind a Unix socket so external MCP clients (Claude Code, `nc -U`, etc.)
+        // can drive Phantom live. Path honors $PHANTOM_MCP_SOCK; otherwise
+        // falls back to /tmp/phantom-mcp-<pid>.sock.
+        let mcp_socket_path = std::env::var("PHANTOM_MCP_SOCK")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("/tmp/phantom-mcp-{}.sock", std::process::id())));
+        let (mcp_cmd_tx, mcp_cmd_rx) = mpsc::channel::<AppCommand>();
+        let mcp_listener = match spawn_listener(mcp_socket_path.clone(), mcp_cmd_tx) {
+            Ok(l) => {
+                info!("MCP listener ready: {}", mcp_socket_path.display());
+                Some(l)
+            }
+            Err(e) => {
+                warn!("Failed to start MCP listener at {}: {e}", mcp_socket_path.display());
+                None
+            }
+        };
+
         let now = Instant::now();
 
         Ok(Self {
@@ -270,12 +448,83 @@ impl App {
             command_input: None,
             debug_hud: false,
             debug_hud_selected: 0,
+            brain: Some(brain),
+            context: Some(context),
+            memory,
+            session_manager,
+            last_input_time: now,
+            suggestion: None,
+            scene,
+            mcp_cmd_rx,
+            _mcp_listener: mcp_listener,
         })
     }
 
     /// Returns `true` if the app has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Graceful shutdown: save session, shut down brain thread.
+    pub fn shutdown(&mut self) {
+        // Save session state.
+        if let Some(ref sm) = self.session_manager {
+            let state = self.build_session_state();
+            match sm.save(&state) {
+                Ok(path) => info!("Session saved to {}", path.display()),
+                Err(e) => warn!("Failed to save session: {e}"),
+            }
+        }
+
+        // Shut down the brain thread.
+        if let Some(ref brain) = self.brain {
+            let _ = brain.send_event(AiEvent::Shutdown);
+        }
+    }
+
+    /// Build a SessionState snapshot from current app state.
+    fn build_session_state(&self) -> SessionState {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let project_dir = self.context.as_ref()
+            .map(|c| c.root.clone())
+            .unwrap_or_else(|| ".".into());
+        let project_name = self.context.as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "unknown".into());
+        let git_branch = self.context.as_ref()
+            .and_then(|c| c.git.as_ref().map(|g| g.branch.clone()));
+
+        let panes: Vec<PaneState> = self.panes.iter().enumerate().map(|(i, pane)| {
+            let term_size = pane.terminal.size();
+            PaneState {
+                working_dir: project_dir.clone(),
+                is_focused: i == self.focused_pane,
+                cols: term_size.cols,
+                rows: term_size.rows,
+                title: if pane.is_detached {
+                    pane.detached_label.clone()
+                } else {
+                    "shell".into()
+                },
+                split: None,
+            }
+        }).collect();
+
+        SessionState {
+            version: 1,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            project_dir,
+            project_name,
+            git_branch,
+            panes,
+            theme_name: self.theme.name.clone(),
+            font_size: self.text_renderer.font_size(),
+            activity: None,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -304,17 +553,25 @@ impl App {
             warn!("Layout resize failed: {e}");
         }
 
-        // Recompute terminal dimensions for every pane.
+        // Recompute terminal dimensions for every pane. Cols/rows come from
+        // the pane's *inner* rect (inside container chrome) so the shell sees
+        // the same area we draw into.
         for pane in &mut self.panes {
             let pane_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or(
                 phantom_ui::layout::Rect { x: 0.0, y: 30.0, width: width as f32, height: height as f32 - 54.0 },
             );
-            let cols = (pane_rect.width / self.cell_size.0).floor().max(1.0) as u16;
-            let rows = (pane_rect.height / self.cell_size.1).floor().max(1.0) as u16;
+            let inner = pane_inner_rect(self.cell_size, pane_rect);
+            let cols = (inner.width / self.cell_size.0).floor().max(1.0) as u16;
+            let rows = (inner.height / self.cell_size.1).floor().max(1.0) as u16;
 
             pane.terminal.resize(cols, rows);
             trace!("Pane resized to {cols}x{rows}");
         }
+
+        // Update scene graph root transform.
+        let root = self.scene.root();
+        self.scene.set_transform(root, 0.0, 0.0, width as f32, height as f32);
+        self.scene.update_world_transforms();
     }
 
     // -----------------------------------------------------------------------
@@ -330,6 +587,28 @@ impl App {
         // Only process key presses, not releases.
         if !event.state.is_pressed() {
             return;
+        }
+
+        // Track last input for idle detection.
+        self.last_input_time = Instant::now();
+
+        // Dismiss active suggestion on any keypress.
+        if self.suggestion.is_some() {
+            // Check if the user pressed a shortcut key for a suggestion option.
+            if let Key::Character(ref s) = event.logical_key {
+                if let Some(ch) = s.chars().next() {
+                    let ch_lower = ch.to_ascii_lowercase();
+                    let matched = self.suggestion.as_ref()
+                        .and_then(|s| s.options.iter().find(|(k, _)| *k == ch_lower).map(|(_, v)| v.clone()));
+                    if let Some(action_text) = matched {
+                        info!("[PHANTOM]: User chose: {action_text}");
+                        self.suggestion = None;
+                        return;
+                    }
+                }
+            }
+            // Any other key dismisses the suggestion.
+            self.suggestion = None;
         }
 
         // -- Debug HUD input handling --
@@ -485,19 +764,21 @@ impl App {
         // migrates to existing_child.
         self.panes[self.focused_pane].pane_id = existing_child;
 
-        // Resize existing pane's terminal to fit its new (smaller) rect.
+        // Resize existing pane's terminal to fit its new (smaller) inner rect.
         if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
-            let cols = (rect.width / self.cell_size.0).floor().max(1.0) as u16;
-            let rows = (rect.height / self.cell_size.1).floor().max(1.0) as u16;
+            let inner = pane_inner_rect(self.cell_size, rect);
+            let cols = (inner.width / self.cell_size.0).floor().max(1.0) as u16;
+            let rows = (inner.height / self.cell_size.1).floor().max(1.0) as u16;
             self.panes[self.focused_pane].terminal.resize(cols, rows);
         }
 
-        // Spawn a new terminal sized to the new pane rect.
+        // Spawn a new terminal sized to the new pane's inner rect.
         let new_rect = self.layout.get_pane_rect(new_child).unwrap_or(
             phantom_ui::layout::Rect { x: 0.0, y: 30.0, width: width as f32 / 2.0, height: height as f32 - 54.0 },
         );
-        let cols = (new_rect.width / self.cell_size.0).floor().max(1.0) as u16;
-        let rows = (new_rect.height / self.cell_size.1).floor().max(1.0) as u16;
+        let new_inner = pane_inner_rect(self.cell_size, new_rect);
+        let cols = (new_inner.width / self.cell_size.0).floor().max(1.0) as u16;
+        let rows = (new_inner.height / self.cell_size.1).floor().max(1.0) as u16;
 
         match PhantomTerminal::new(cols, rows) {
             Ok(terminal) => {
@@ -508,6 +789,8 @@ impl App {
                     was_alt_screen: false,
                     is_detached: false,
                     detached_label: String::new(),
+                    output_buf: String::new(),
+                    error_notified: false,
                 });
                 self.focused_pane = new_index;
                 info!("Split: new pane {new_index} ({cols}x{rows})");
@@ -553,8 +836,9 @@ impl App {
         // Resize remaining panes to fill the reclaimed space.
         for pane in &mut self.panes {
             if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
-                let cols = (rect.width / self.cell_size.0).floor().max(1.0) as u16;
-                let rows = (rect.height / self.cell_size.1).floor().max(1.0) as u16;
+                let inner = pane_inner_rect(self.cell_size, rect);
+                let cols = (inner.width / self.cell_size.0).floor().max(1.0) as u16;
+                let rows = (inner.height / self.cell_size.1).floor().max(1.0) as u16;
                 pane.terminal.resize(cols, rows);
             }
         }
@@ -581,12 +865,66 @@ impl App {
                 Ok(n) => {
                     if n > 0 {
                         trace!("Pane {i} PTY read: {n} bytes");
+
+                        // Capture raw output for semantic scanning.
+                        let raw = &pane.terminal.last_read_buf()[..n];
+                        if let Ok(text) = std::str::from_utf8(raw) {
+                            pane.output_buf.push_str(text);
+                            // Rolling window: keep last 8KB.
+                            if pane.output_buf.len() > 8192 {
+                                let trim = pane.output_buf.len() - 8192;
+                                pane.output_buf.drain(..trim);
+                            }
+                            // Reset error notification when new output arrives.
+                            pane.error_notified = false;
+                        }
                     }
                 }
                 Err(e) => {
                     // PTY EOF means the shell exited in this pane.
                     warn!("Pane {i} PTY read error (shell may have exited): {e}");
                     exited.push(i);
+                }
+            }
+        }
+
+        // Semantic scan: detect errors in PTY output and notify brain.
+        if let Some(ref brain) = self.brain {
+            for pane in self.panes.iter_mut() {
+                if pane.error_notified || pane.is_detached || pane.output_buf.is_empty() {
+                    continue;
+                }
+                // Quick heuristic scan for error patterns.
+                let buf = &pane.output_buf;
+                let has_error = buf.contains("error[E")        // Rust
+                    || buf.contains("Error:")                   // generic
+                    || buf.contains("FAILED")                   // test failures
+                    || buf.contains("error: ")                  // cargo/generic
+                    || buf.contains("npm ERR!")                 // npm
+                    || buf.contains("Traceback (most recent")   // Python
+                    || buf.contains("SyntaxError")              // JS/Python
+                    || buf.contains("TypeError")                // JS/Python
+                    || buf.contains("panic at");                // Rust panic
+
+                if has_error {
+                    // Parse the buffer through the semantic parser.
+                    let parsed = phantom_semantic::SemanticParser::parse(
+                        "",
+                        &pane.output_buf,
+                        &pane.output_buf,
+                        Some(1), // nonzero = error
+                    );
+                    if !parsed.errors.is_empty() {
+                        let _ = brain.send_event(AiEvent::CommandComplete(parsed));
+                        pane.error_notified = true;
+                    }
+                }
+
+                // Detect prompt return (shell ready) — clear the buffer.
+                // Simple heuristic: buffer ends with common prompt suffixes.
+                let trimmed = buf.trim_end();
+                if trimmed.ends_with("$ ") || trimmed.ends_with("% ") || trimmed.ends_with("> ") || trimmed.ends_with("# ") {
+                    pane.output_buf.clear();
                 }
             }
         }
@@ -636,8 +974,9 @@ impl App {
             // Resize remaining panes.
             for pane in &mut self.panes {
                 if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
-                    let cols = (rect.width / self.cell_size.0).floor().max(1.0) as u16;
-                    let rows = (rect.height / self.cell_size.1).floor().max(1.0) as u16;
+                    let inner = pane_inner_rect(self.cell_size, rect);
+                    let cols = (inner.width / self.cell_size.0).floor().max(1.0) as u16;
+                    let rows = (inner.height / self.cell_size.1).floor().max(1.0) as u16;
                     pane.terminal.resize(cols, rows);
                 }
             }
@@ -668,9 +1007,229 @@ impl App {
             self.handle_supervisor_command(cmd);
         }
 
+        // -- AI Brain: send idle events + drain actions --
+        if let Some(ref brain) = self.brain {
+            let idle_secs = now.duration_since(self.last_input_time).as_secs_f32();
+            // Send idle pulse every ~5 seconds (approximated by frame tick).
+            if idle_secs > 5.0 && (idle_secs % 5.0) < dt {
+                let _ = brain.send_event(AiEvent::UserIdle { seconds: idle_secs });
+            }
+
+            // Drain brain actions.
+            while let Some(action) = brain.try_recv_action() {
+                match action {
+                    AiAction::ShowSuggestion { text, options } => {
+                        info!("[PHANTOM]: {text}");
+                        self.suggestion = Some(SuggestionOverlay {
+                            text,
+                            options,
+                            shown_at: now,
+                        });
+                    }
+                    AiAction::ShowNotification(msg) => {
+                        info!("[PHANTOM]: {msg}");
+                    }
+                    AiAction::UpdateMemory { key, value } => {
+                        if let Some(ref mut mem) = self.memory {
+                            let _ = mem.set(
+                                &key,
+                                &value,
+                                phantom_memory::MemoryCategory::Context,
+                                phantom_memory::MemorySource::Auto,
+                            );
+                        }
+                    }
+                    AiAction::SpawnAgent(_task) => {
+                        // Agent pane creation will be wired in a follow-up.
+                        debug!("Brain requested agent spawn (not yet wired to GUI panes)");
+                    }
+                    AiAction::RunCommand(cmd) => {
+                        debug!("Brain suggested command: {cmd}");
+                    }
+                    AiAction::DoNothing => {}
+                }
+            }
+        }
+
+        // Expire stale suggestions after 10 seconds.
+        if let Some(ref s) = self.suggestion {
+            if now.duration_since(s.shown_at).as_secs() > 10 {
+                self.suggestion = None;
+            }
+        }
+
+        // -- Refresh git context periodically (every ~30s) --
+        if let Some(ref mut ctx) = self.context {
+            let elapsed = now.duration_since(self.start_time).as_secs();
+            if elapsed > 0 && elapsed % 30 == 0 && dt > 0.0 {
+                ctx.refresh_git();
+                if let Some(ref git) = ctx.git {
+                    self.status_bar.set_branch(&git.branch);
+                }
+            }
+        }
+
+        // -- Drain MCP commands from external clients --
+        // Each command carries a reply channel; handler runs to completion
+        // (including GPU readback for screenshots) before we reply.
+        loop {
+            match self.mcp_cmd_rx.try_recv() {
+                Ok(cmd) => self.handle_mcp_command(cmd),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    warn!("MCP command channel disconnected");
+                    break;
+                }
+            }
+        }
+
         // Update status bar clock.
         let now_wall = chrono_time_string();
         self.status_bar.set_time(&now_wall);
+    }
+
+    // -----------------------------------------------------------------------
+    // MCP command handlers
+    // -----------------------------------------------------------------------
+
+    /// Handle one inbound MCP command by running the relevant app-side work
+    /// and sending the result back on the command's reply channel.
+    fn handle_mcp_command(&mut self, cmd: AppCommand) {
+        match cmd {
+            AppCommand::Screenshot { path, reply } => {
+                let result = self.mcp_capture_screenshot(&path);
+                let _ = reply.send(result);
+            }
+            AppCommand::RunCommand { command, reply } => {
+                let result = self.mcp_send_to_pty(&command);
+                let _ = reply.send(result);
+            }
+            AppCommand::ReadTerminalState { reply } => {
+                let text = self.mcp_read_terminal_state();
+                let _ = reply.send(Ok(text));
+            }
+            AppCommand::GetContext { reply } => {
+                let json = self.mcp_get_context_json();
+                let _ = reply.send(Ok(json));
+            }
+        }
+    }
+
+    /// Capture the current pre-CRT scene texture and save it as a PNG at `path`.
+    ///
+    /// Uses `phantom_renderer::screenshot::capture_frame` against the PostFx
+    /// offscreen texture (same pixels that get the CRT shader applied). The
+    /// texture holds the last rendered frame, so this is "current state" from
+    /// the user's POV with one frame of latency.
+    fn mcp_capture_screenshot(&mut self, path: &Path) -> Result<ScreenshotReply, String> {
+        use phantom_renderer::screenshot::{capture_frame, ScreenshotMetadata, save_screenshot};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let texture = self.postfx.scene_texture();
+        let width = texture.width();
+        let height = texture.height();
+
+        let pixels = capture_frame(&self.gpu.device, &self.gpu.queue, texture, width, height);
+
+        // Swizzle BGRA -> RGBA if the surface format is BGRA (macOS default).
+        let pixels_rgba = match self.gpu.format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+                let mut out = pixels.clone();
+                for px in out.chunks_exact_mut(4) {
+                    px.swap(0, 2); // B <-> R
+                }
+                out
+            }
+            _ => pixels,
+        };
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let metadata = ScreenshotMetadata {
+            timestamp,
+            width,
+            height,
+            theme: self.theme.name.clone(),
+            pane_count: self.panes.len(),
+            project: self.context.as_ref().map(|c| c.name.clone()),
+            branch: self.context.as_ref().and_then(|c| c.git.as_ref().map(|g| g.branch.clone())),
+        };
+
+        save_screenshot(&pixels_rgba, width, height, &metadata, path)
+            .map_err(|e| format!("save failed: {e}"))?;
+
+        info!("Screenshot saved via MCP: {} ({}x{})", path.display(), width, height);
+
+        Ok(ScreenshotReply {
+            path: path.to_path_buf(),
+            width,
+            height,
+        })
+    }
+
+    /// Write a string to the focused pane's PTY. Appends a newline so the
+    /// shell executes it.
+    fn mcp_send_to_pty(&mut self, command: &str) -> Result<(), String> {
+        let pane = self.panes.get_mut(self.focused_pane)
+            .ok_or_else(|| "no focused pane".to_string())?;
+
+        let mut bytes = command.as_bytes().to_vec();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        pane.terminal.pty_write(&bytes)
+            .map_err(|e| format!("pty_write failed: {e}"))?;
+
+        Ok(())
+    }
+
+    /// Extract visible terminal grid from the focused pane as plain text.
+    fn mcp_read_terminal_state(&self) -> String {
+        let Some(pane) = self.panes.get(self.focused_pane) else {
+            return String::new();
+        };
+        let (cells, cols, rows, _cursor) = output::extract_grid(pane.terminal.term());
+
+        let mut out = String::with_capacity(cells.len() + rows);
+        for row in 0..rows {
+            for col in 0..cols {
+                let idx = row * cols + col;
+                if let Some(cell) = cells.get(idx) {
+                    out.push(cell.ch);
+                }
+            }
+            out.push('\n');
+        }
+        // Trim trailing whitespace rows for readability.
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        out
+    }
+
+    /// Serialize project context as JSON.
+    fn mcp_get_context_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let Some(ctx) = &self.context else {
+            return json!({});
+        };
+        json!({
+            "name": ctx.name,
+            "root": ctx.root,
+            "project_type": format!("{:?}", ctx.project_type),
+            "git": ctx.git.as_ref().map(|g| json!({
+                "branch": g.branch,
+                "dirty": g.is_dirty,
+                "ahead": g.ahead,
+                "behind": g.behind,
+            })),
+            "pane_count": self.panes.len(),
+            "focused_pane": self.focused_pane,
+            "theme": self.theme.name,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -801,7 +1360,7 @@ impl App {
             let mut overlay_quads: Vec<QuadInstance> = Vec::new();
             let mut overlay_glyphs: Vec<phantom_renderer::text::GlyphInstance> = Vec::new();
 
-            let has_overlay = self.command_mode || self.debug_hud;
+            let has_overlay = self.command_mode || self.debug_hud || self.suggestion.is_some();
 
             if has_overlay {
                 // -- Command input bar --
@@ -812,6 +1371,11 @@ impl App {
                 // -- Debug shader HUD --
                 if self.debug_hud {
                     self.build_debug_hud(screen_size, &mut overlay_quads, &mut overlay_glyphs);
+                }
+
+                // -- AI Suggestion overlay --
+                if self.suggestion.is_some() {
+                    self.build_suggestion_overlay(screen_size, &mut overlay_quads, &mut overlay_glyphs);
                 }
 
                 // Upload + render overlay in its own pass on the surface.
@@ -893,6 +1457,96 @@ impl App {
                 origin,
             );
             glyphs.append(&mut g);
+        }
+    }
+
+    /// Build the AI suggestion overlay (post-CRT, crisp).
+    fn build_suggestion_overlay(
+        &mut self,
+        screen_size: [f32; 2],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        let suggestion = match self.suggestion {
+            Some(ref s) => s,
+            None => return,
+        };
+
+        let line_height = 22.0;
+        let padding = 12.0;
+        let option_lines = suggestion.options.len();
+        let total_lines = 1 + option_lines; // text line + option lines
+        let box_height = (total_lines as f32) * line_height + padding * 2.0;
+        let box_width = 500.0_f32.min(screen_size[0] - 32.0);
+        let box_x = (screen_size[0] - box_width) / 2.0;
+        let box_y = screen_size[1] - box_height - 60.0; // above status bar
+
+        // Background panel.
+        quads.push(QuadInstance {
+            pos: [box_x, box_y],
+            size: [box_width, box_height],
+            color: [0.02, 0.04, 0.08, 0.92],
+            border_radius: 4.0,
+        });
+
+        // Cyan border.
+        for &(pos, size) in &[
+            ([box_x, box_y], [box_width, 1.0]),
+            ([box_x, box_y + box_height - 1.0], [box_width, 1.0]),
+            ([box_x, box_y], [1.0, box_height]),
+            ([box_x + box_width - 1.0, box_y], [1.0, box_height]),
+        ] {
+            quads.push(QuadInstance {
+                pos,
+                size,
+                color: [0.0, 0.8, 0.9, 0.7],
+                border_radius: 0.0,
+            });
+        }
+
+        // Suggestion text.
+        let prefix = "[PHANTOM]: ";
+        let display = format!("{prefix}{}", suggestion.text);
+        let text_color = [0.1, 0.9, 0.6, 1.0];
+        let cells: Vec<phantom_renderer::text::TerminalCell> = display
+            .chars()
+            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: text_color })
+            .collect();
+
+        if !cells.is_empty() {
+            let cols = cells.len();
+            let origin = (box_x + padding, box_y + padding);
+            let mut g = self.text_renderer.prepare_glyphs(
+                &mut self.atlas,
+                &self.gpu.queue,
+                &cells,
+                cols,
+                origin,
+            );
+            glyphs.append(&mut g);
+        }
+
+        // Option labels.
+        let opt_color = [0.6, 0.8, 0.4, 1.0];
+        for (i, (key, label)) in suggestion.options.iter().enumerate() {
+            let opt_text = format!("  [{key}] {label}");
+            let opt_cells: Vec<phantom_renderer::text::TerminalCell> = opt_text
+                .chars()
+                .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: opt_color })
+                .collect();
+
+            if !opt_cells.is_empty() {
+                let cols = opt_cells.len();
+                let origin = (box_x + padding, box_y + padding + (i as f32 + 1.0) * line_height);
+                let mut g = self.text_renderer.prepare_glyphs(
+                    &mut self.atlas,
+                    &self.gpu.queue,
+                    &opt_cells,
+                    cols,
+                    origin,
+                );
+                glyphs.append(&mut g);
+            }
         }
     }
 
@@ -1079,15 +1733,24 @@ impl App {
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
-        let has_multiple = self.panes.len() > 1;
+        let _has_multiple = self.panes.len() > 1;
         let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
+        let mut container_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
+
+        // Build theme-aware color mapping for terminal grid extraction.
+        let theme_colors = TerminalThemeColors {
+            foreground: self.theme.colors.foreground,
+            background: self.theme.colors.background,
+            cursor: self.theme.colors.cursor,
+            ansi: Some(self.theme.colors.ansi),
+        };
 
         for (pane_index, pane) in self.panes.iter().enumerate() {
             let is_focused = pane_index == self.focused_pane;
 
-            // -- Extract terminal grid --
+            // -- Extract terminal grid with theme colors --
             let (render_cells, cols, rows, cursor) =
-                output::extract_grid(pane.terminal.term());
+                output::extract_grid_themed(pane.terminal.term(), &theme_colors);
 
             // -- Get pane rectangle from layout --
             let pane_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or(
@@ -1099,7 +1762,71 @@ impl App {
                 },
             );
 
-            let origin = (pane_rect.x, pane_rect.y);
+            // -- Inner rect: area inside container chrome where the grid draws --
+            let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
+            let origin = (inner_rect.x, inner_rect.y);
+
+            // -- App-container chrome ---------------------------------------
+            // Drawn before the terminal grid so cell backgrounds layer on top.
+            // Non-detached panes only; detached panes have their own (cyan) chrome.
+            if !pane.is_detached {
+                let bg = self.theme.colors.background;
+                // Slightly lighter than theme bg — gives containers visible
+                // separation from the window backdrop.
+                let cont_bg = [
+                    (bg[0] + 0.015).min(1.0),
+                    (bg[1] + 0.030).min(1.0),
+                    (bg[2] + 0.015).min(1.0),
+                    1.0,
+                ];
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [pane_rect.width, pane_rect.height],
+                    color: cont_bg,
+                    border_radius: 6.0,
+                });
+
+                // Title strip across the top of the container.
+                let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
+                let title_bg = if is_focused {
+                    [bg[0] * 1.6 + 0.04, bg[1] * 2.0 + 0.06, bg[2] * 1.6 + 0.04, 1.0]
+                } else {
+                    [bg[0] * 1.3 + 0.02, bg[1] * 1.5 + 0.03, bg[2] * 1.3 + 0.02, 1.0]
+                };
+                quads.push(QuadInstance {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [pane_rect.width, title_h],
+                    color: title_bg,
+                    border_radius: 6.0,
+                });
+
+                // Focus-aware border around the entire container.
+                let border_color = if is_focused {
+                    [0.2, 1.0, 0.5, 0.65]
+                } else {
+                    [0.15, 0.25, 0.18, 0.45]
+                };
+                let t = 1.0;
+                // top
+                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                // bottom
+                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                // left
+                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                // right
+                quads.push(QuadInstance { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+
+                // Title text: "● shell · {cols}×{rows}"
+                let dot_color = if is_focused {
+                    [0.2, 1.0, 0.5, 1.0]
+                } else {
+                    [0.4, 0.5, 0.4, 0.7]
+                };
+                let title_text = format!("● shell  {}×{}", cols, rows);
+                let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
+                let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
+                container_titles.push((title_text, title_x, title_y, dot_color));
+            }
 
             // -- Convert RenderCells to GridCells --
             let grid_cells: Vec<GridCell> = render_cells
@@ -1128,8 +1855,8 @@ impl App {
 
             // -- Cursor quad (only for focused pane, or dim for unfocused) --
             if cursor.visible {
-                let cursor_x = pane_rect.x + cursor.col as f32 * self.cell_size.0;
-                let cursor_y = pane_rect.y + cursor.row as f32 * self.cell_size.1;
+                let cursor_x = inner_rect.x + cursor.col as f32 * self.cell_size.0;
+                let cursor_y = inner_rect.y + cursor.row as f32 * self.cell_size.1;
                 let cursor_color = if is_focused {
                     self.theme.colors.cursor
                 } else {
@@ -1227,46 +1954,18 @@ impl App {
                 let label_color = [0.0, pulse, pulse * 0.8, 1.0];
 
                 detached_labels.push((label, label_x, label_y, label_color));
-            } else if has_multiple {
-                let border_color = if is_focused {
-                    [0.2, 1.0, 0.5, 0.8] // bright green for focused
-                } else {
-                    [0.25, 0.35, 0.25, 0.3] // dim for unfocused
-                };
-
-                // Top edge
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, 1.0],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
-                // Bottom edge
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y + pane_rect.height - 1.0],
-                    size: [pane_rect.width, 1.0],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
-                // Left edge
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [1.0, pane_rect.height],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
-                // Right edge
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x + pane_rect.width - 1.0, pane_rect.y],
-                    size: [1.0, pane_rect.height],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
             }
+            // Note: non-detached pane borders are now drawn as part of the
+            // app-container chrome at the top of the pane loop.
         }
 
         // -- Detached pane labels (rendered after the pane loop to avoid borrow issues) --
         for (label, x, y, color) in &detached_labels {
+            self.render_overlay_text(label, *x, *y, *color, glyphs);
+        }
+
+        // -- App-container title text (deferred to avoid borrow conflicts in loop) --
+        for (label, x, y, color) in &container_titles {
             self.render_overlay_text(label, *x, *y, *color, glyphs);
         }
 
@@ -1476,7 +2175,33 @@ impl App {
                 );
             }
             other => {
-                warn!("Unknown command: {other}");
+                // NLP fallback: try interpreting as natural language.
+                if let Some(ref ctx) = self.context {
+                    match NlpInterpreter::interpret(input, ctx) {
+                        ResolvedAction::RunCommand(cmd) => {
+                            info!("[PHANTOM NLP]: running `{cmd}`");
+                            // Write the resolved command to the focused pane's PTY.
+                            if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                                let cmd_bytes = format!("{cmd}\n");
+                                let _ = pane.terminal.pty_write(cmd_bytes.as_bytes());
+                            }
+                        }
+                        ResolvedAction::SpawnAgent(desc) => {
+                            info!("[PHANTOM NLP]: agent requested: {desc}");
+                        }
+                        ResolvedAction::ShowInfo(info_text) => {
+                            info!("[PHANTOM]: {info_text}");
+                        }
+                        ResolvedAction::Ambiguous { input: _, options } => {
+                            info!("[PHANTOM]: Did you mean: {}", options.join(", "));
+                        }
+                        ResolvedAction::PassThrough => {
+                            warn!("Unknown command: {other}");
+                        }
+                    }
+                } else {
+                    warn!("Unknown command: {other}");
+                }
             }
         }
     }
@@ -1721,6 +2446,14 @@ impl App {
     ) {
         if !event.state.is_pressed() {
             return;
+        }
+
+        // Track last input for idle detection.
+        self.last_input_time = Instant::now();
+
+        // Dismiss active suggestion on any keypress.
+        if self.suggestion.is_some() {
+            self.suggestion = None;
         }
 
         // -- Debug HUD input handling --

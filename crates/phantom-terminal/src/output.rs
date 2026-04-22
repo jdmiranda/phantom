@@ -101,20 +101,42 @@ pub struct CursorState {
 }
 
 // ---------------------------------------------------------------------------
-// Color conversion
+// Theme-aware color mapping
 // ---------------------------------------------------------------------------
 
-/// Default foreground: opaque white.
-const DEFAULT_FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// Default background: fully transparent black.
-const DEFAULT_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+/// Theme color overrides passed into grid extraction.
+///
+/// This decouples `phantom-terminal` from the theme system — the caller
+/// (phantom-app) populates this from `Theme::colors` and passes it in.
+#[derive(Debug, Clone)]
+pub struct TerminalThemeColors {
+    /// Default foreground (used for `NamedColor::Foreground`).
+    pub foreground: [f32; 4],
+    /// Default background (used for `NamedColor::Background`).
+    pub background: [f32; 4],
+    /// Cursor color.
+    pub cursor: [f32; 4],
+    /// Override for the first 16 ANSI palette entries.
+    /// If `Some`, these replace the xterm defaults for indices 0..16.
+    pub ansi: Option<[[f32; 4]; 16]>,
+}
+
+impl Default for TerminalThemeColors {
+    fn default() -> Self {
+        Self {
+            foreground: [1.0, 1.0, 1.0, 1.0],
+            background: [0.0, 0.0, 0.0, 0.0],
+            cursor: [1.0, 1.0, 1.0, 1.0],
+            ansi: None,
+        }
+    }
+}
 
 /// Convert an alacritty `Color` to an RGBA float quad.
 ///
-/// Named special colors (`Foreground`, `Background`, `Cursor`, and the `Dim*`
-/// / `Bright*` variants that don't map to a standard index) fall back to the
-/// default fg/bg since we don't have access to the user's color scheme here.
-fn color_to_rgba(color: Color, table: &[[f32; 4]; 256], is_fg: bool) -> [f32; 4] {
+/// Theme colors are used for `Foreground`, `Background`, and `Cursor`
+/// semantics. ANSI colors use the theme override palette when available.
+fn color_to_rgba(color: Color, table: &[[f32; 4]; 256], theme: &TerminalThemeColors, is_fg: bool) -> [f32; 4] {
     match color {
         Color::Spec(rgb) => [
             rgb.r as f32 / 255.0,
@@ -123,12 +145,12 @@ fn color_to_rgba(color: Color, table: &[[f32; 4]; 256], is_fg: bool) -> [f32; 4]
             1.0,
         ],
         Color::Indexed(idx) => table[idx as usize],
-        Color::Named(named) => named_color_to_rgba(named, table, is_fg),
+        Color::Named(named) => named_color_to_rgba(named, table, theme, is_fg),
     }
 }
 
-/// Resolve a `NamedColor` to RGBA.
-fn named_color_to_rgba(named: NamedColor, table: &[[f32; 4]; 256], is_fg: bool) -> [f32; 4] {
+/// Resolve a `NamedColor` to RGBA using theme colors.
+fn named_color_to_rgba(named: NamedColor, table: &[[f32; 4]; 256], theme: &TerminalThemeColors, is_fg: bool) -> [f32; 4] {
     match named {
         // Standard 16 ANSI colors map directly to indices 0..16.
         NamedColor::Black => table[0],
@@ -158,12 +180,12 @@ fn named_color_to_rgba(named: NamedColor, table: &[[f32; 4]; 256], is_fg: bool) 
         NamedColor::DimCyan => dim(table[6]),
         NamedColor::DimWhite => dim(table[7]),
 
-        // Semantic names — fall back to defaults.
-        NamedColor::Foreground | NamedColor::BrightForeground => DEFAULT_FG,
-        NamedColor::DimForeground => dim(DEFAULT_FG),
-        NamedColor::Background => DEFAULT_BG,
+        // Semantic names — resolved from the THEME, not hardcoded.
+        NamedColor::Foreground | NamedColor::BrightForeground => theme.foreground,
+        NamedColor::DimForeground => dim(theme.foreground),
+        NamedColor::Background => theme.background,
         NamedColor::Cursor => {
-            if is_fg { DEFAULT_BG } else { DEFAULT_FG }
+            if is_fg { theme.background } else { theme.cursor }
         }
     }
 }
@@ -182,13 +204,33 @@ const fn dim(c: [f32; 4]) -> [f32; 4] {
 ///
 /// Returns `(cells, cols, rows, cursor_state)` where `cells` is row-major with
 /// `cols * rows` entries.
+///
+/// When `theme` is `None`, falls back to xterm defaults (white on black).
 pub fn extract_grid<T: EventListener>(
     term: &Term<T>,
+) -> (Vec<RenderCell>, usize, usize, CursorState) {
+    extract_grid_themed(term, &TerminalThemeColors::default())
+}
+
+/// Extract the visible terminal grid with theme-aware colors.
+///
+/// The `theme` parameter provides foreground, background, cursor, and
+/// ANSI palette overrides. This is the primary path used by the GUI app.
+pub fn extract_grid_themed<T: EventListener>(
+    term: &Term<T>,
+    theme: &TerminalThemeColors,
 ) -> (Vec<RenderCell>, usize, usize, CursorState) {
     let grid = term.grid();
     let cols = grid.columns();
     let rows = grid.screen_lines();
-    let table = ansi_color_table();
+    let mut table = ansi_color_table();
+
+    // Override ANSI 0..16 with theme palette if provided.
+    if let Some(ref ansi) = theme.ansi {
+        for (i, color) in ansi.iter().enumerate() {
+            table[i] = *color;
+        }
+    }
 
     let mut cells = Vec::with_capacity(cols * rows);
 
@@ -203,15 +245,15 @@ pub fn extract_grid<T: EventListener>(
             {
                 cells.push(RenderCell {
                     ch: ' ',
-                    fg: DEFAULT_FG,
-                    bg: color_to_rgba(cell.bg, &table, false),
+                    fg: theme.foreground,
+                    bg: color_to_rgba(cell.bg, &table, theme, false),
                     flags: CellFlags::empty(),
                 });
                 continue;
             }
 
-            let mut fg = color_to_rgba(cell.fg, &table, true);
-            let mut bg = color_to_rgba(cell.bg, &table, false);
+            let mut fg = color_to_rgba(cell.fg, &table, theme, true);
+            let mut bg = color_to_rgba(cell.bg, &table, theme, false);
 
             let alac_flags = cell.flags;
             let render_flags = CellFlags::from_alac(alac_flags);
@@ -431,15 +473,37 @@ mod tests {
         }
     }
 
+    fn default_theme() -> TerminalThemeColors {
+        TerminalThemeColors::default()
+    }
+
+    /// Phosphor theme colors (green on dark) for regression testing.
+    fn phosphor_theme() -> TerminalThemeColors {
+        let green: [f32; 4] = [0.2, 1.0, 0.0, 1.0];
+        let bg: [f32; 4] = [0.04, 0.055, 0.078, 1.0];
+        let cursor: [f32; 4] = [0.2, 1.0, 0.0, 1.0];
+        let mut ansi = [[0.0f32; 4]; 16];
+        ansi[0] = bg;
+        ansi[2] = green;
+        ansi[7] = [0.69, 0.8, 0.63, 1.0];
+        TerminalThemeColors {
+            foreground: green,
+            background: bg,
+            cursor,
+            ansi: Some(ansi),
+        }
+    }
+
     #[test]
     fn color_spec_conversion() {
         let table = ansi_color_table();
+        let theme = default_theme();
         let rgb = alacritty_terminal::vte::ansi::Rgb {
             r: 128,
             g: 64,
             b: 255,
         };
-        let rgba = color_to_rgba(Color::Spec(rgb), &table, true);
+        let rgba = color_to_rgba(Color::Spec(rgb), &table, &theme, true);
         assert!((rgba[0] - 128.0 / 255.0).abs() < 1e-6);
         assert!((rgba[1] - 64.0 / 255.0).abs() < 1e-6);
         assert!((rgba[2] - 255.0 / 255.0).abs() < 1e-6);
@@ -449,18 +513,18 @@ mod tests {
     #[test]
     fn color_indexed_conversion() {
         let table = ansi_color_table();
+        let theme = default_theme();
         // Index 1 should be red.
-        let rgba = color_to_rgba(Color::Indexed(1), &table, true);
+        let rgba = color_to_rgba(Color::Indexed(1), &table, &theme, true);
         assert_eq!(rgba, table[1]);
     }
 
     #[test]
-    fn color_named_foreground_background() {
+    fn color_named_foreground_uses_default_when_no_theme() {
         let table = ansi_color_table();
-        let fg = color_to_rgba(Color::Named(NamedColor::Foreground), &table, true);
-        assert_eq!(fg, DEFAULT_FG);
-        let bg = color_to_rgba(Color::Named(NamedColor::Background), &table, false);
-        assert_eq!(bg, DEFAULT_BG);
+        let theme = default_theme();
+        let fg = color_to_rgba(Color::Named(NamedColor::Foreground), &table, &theme, true);
+        assert_eq!(fg, [1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -468,5 +532,110 @@ mod tests {
         // Index 21 = 16 + 0*36 + 0*6 + 5 = pure blue in cube.
         let t = ansi_color_table();
         assert_eq!(t[21], [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    // ===================================================================
+    // REGRESSION: theme color mapping (the bug that made Phantom gray)
+    // ===================================================================
+
+    #[test]
+    fn foreground_uses_theme_color_not_white() {
+        let table = ansi_color_table();
+        let theme = phosphor_theme();
+        let fg = color_to_rgba(Color::Named(NamedColor::Foreground), &table, &theme, true);
+        // Must be phosphor green, NOT hardcoded white.
+        assert_eq!(fg, theme.foreground, "NamedColor::Foreground must use theme foreground");
+        assert_ne!(fg, [1.0, 1.0, 1.0, 1.0], "must NOT be hardcoded white");
+    }
+
+    #[test]
+    fn background_uses_theme_color_not_transparent() {
+        let table = ansi_color_table();
+        let theme = phosphor_theme();
+        let bg = color_to_rgba(Color::Named(NamedColor::Background), &table, &theme, false);
+        // Must be theme background, NOT transparent black.
+        assert_eq!(bg, theme.background, "NamedColor::Background must use theme background");
+        assert_ne!(bg, [0.0, 0.0, 0.0, 0.0], "must NOT be transparent black");
+    }
+
+    #[test]
+    fn cursor_uses_theme_color() {
+        let table = ansi_color_table();
+        let theme = phosphor_theme();
+        let cursor_bg = color_to_rgba(Color::Named(NamedColor::Cursor), &table, &theme, false);
+        assert_eq!(cursor_bg, theme.cursor, "NamedColor::Cursor (bg) must use theme cursor");
+    }
+
+    #[test]
+    fn bright_foreground_uses_theme_color() {
+        let table = ansi_color_table();
+        let theme = phosphor_theme();
+        let fg = color_to_rgba(Color::Named(NamedColor::BrightForeground), &table, &theme, true);
+        assert_eq!(fg, theme.foreground, "BrightForeground must use theme foreground");
+    }
+
+    #[test]
+    fn dim_foreground_uses_dimmed_theme_color() {
+        let table = ansi_color_table();
+        let theme = phosphor_theme();
+        let fg = color_to_rgba(Color::Named(NamedColor::DimForeground), &table, &theme, true);
+        let expected = dim(theme.foreground);
+        assert_eq!(fg, expected, "DimForeground must be 67% of theme foreground");
+    }
+
+    #[test]
+    fn ansi_palette_override_applied() {
+        let mut table = ansi_color_table();
+        let theme = phosphor_theme();
+        // Apply override to table like extract_grid_themed does.
+        if let Some(ref ansi) = theme.ansi {
+            for (i, color) in ansi.iter().enumerate() {
+                table[i] = *color;
+            }
+        }
+        // NamedColor::Green (index 2) must use theme's green, not xterm green.
+        let green = named_color_to_rgba(NamedColor::Green, &table, &theme, true);
+        assert_eq!(green, theme.ansi.unwrap()[2], "ANSI green must use theme palette");
+        assert_ne!(green, [0.0, 0xCD as f32 / 255.0, 0.0, 1.0], "must NOT be xterm default green");
+    }
+
+    #[test]
+    fn ansi_palette_override_only_affects_0_to_15() {
+        let mut table = ansi_color_table();
+        let original_16 = table[16]; // first cube color
+        let theme = phosphor_theme();
+        if let Some(ref ansi) = theme.ansi {
+            for (i, color) in ansi.iter().enumerate() {
+                table[i] = *color;
+            }
+        }
+        // Index 16+ must be unchanged.
+        assert_eq!(table[16], original_16, "color cube (16+) must not be affected by ANSI override");
+    }
+
+    #[test]
+    fn no_ansi_override_uses_xterm_defaults() {
+        let table = ansi_color_table();
+        let theme = TerminalThemeColors {
+            foreground: [0.5, 0.5, 0.5, 1.0],
+            background: [0.1, 0.1, 0.1, 1.0],
+            cursor: [0.5, 0.5, 0.5, 1.0],
+            ansi: None, // no override
+        };
+        // NamedColor::Red (index 1) should use xterm default.
+        let red = named_color_to_rgba(NamedColor::Red, &table, &theme, true);
+        assert_eq!(red, table[1], "without ANSI override, should use xterm defaults");
+    }
+
+    #[test]
+    fn spec_color_unaffected_by_theme() {
+        let table = ansi_color_table();
+        let theme = phosphor_theme();
+        let rgb = alacritty_terminal::vte::ansi::Rgb { r: 0xAA, g: 0xBB, b: 0xCC };
+        let rgba = color_to_rgba(Color::Spec(rgb), &table, &theme, true);
+        // Exact RGB values must be preserved regardless of theme.
+        assert!((rgba[0] - 0xAA as f32 / 255.0).abs() < 1e-6);
+        assert!((rgba[1] - 0xBB as f32 / 255.0).abs() < 1e-6);
+        assert!((rgba[2] - 0xCC as f32 / 255.0).abs() < 1e-6);
     }
 }

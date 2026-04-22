@@ -93,6 +93,9 @@ impl ApplicationHandler for Phantom {
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("Window closed. Shutting down.");
+                if let Some(app) = &mut self.app {
+                    app.shutdown();
+                }
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
@@ -107,6 +110,7 @@ impl ApplicationHandler for Phantom {
                 if let Some(app) = &mut self.app {
                     app.handle_key_with_mods(event, self.modifiers);
                     if app.should_quit() {
+                        app.shutdown();
                         event_loop.exit();
                     }
                 }

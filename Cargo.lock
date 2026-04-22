@@ -2009,12 +2009,23 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "phantom-agents",
+ "phantom-brain",
+ "phantom-context",
+ "phantom-history",
+ "phantom-mcp",
+ "phantom-memory",
+ "phantom-nlp",
  "phantom-protocol",
  "phantom-renderer",
+ "phantom-scene",
+ "phantom-semantic",
+ "phantom-session",
  "phantom-terminal",
  "phantom-ui",
  "png",
  "pollster",
+ "serde_json",
  "wgpu",
  "winit",
 ]
@@ -2066,6 +2077,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
