@@ -15,6 +15,15 @@ phantom-renderer = { path = "../phantom-renderer" }
 phantom-terminal = { path = "../phantom-terminal" }
 phantom-ui = { path = "../phantom-ui" }
 
+# Headless mode dependencies
+phantom-brain = { path = "../phantom-brain" }
+phantom-context = { path = "../phantom-context" }
+phantom-memory = { path = "../phantom-memory" }
+phantom-history = { path = "../phantom-history" }
+phantom-agents = { path = "../phantom-agents" }
+phantom-semantic = { path = "../phantom-semantic" }
+phantom-nlp = { path = "../phantom-nlp" }
+
 winit.workspace = true
 anyhow.workspace = true
 log.workspace = true

@@ -12,6 +12,8 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
+mod headless;
+
 struct Phantom {
     window: Option<Arc<Window>>,
     app: Option<App>,
@@ -136,6 +138,7 @@ USAGE:
     phantom [OPTIONS]
 
 OPTIONS:
+    --headless               Run in headless REPL mode (no window, no GPU)
     --theme <NAME>          Theme: phosphor, amber, ice, blood, vapor
     --font-size <PT>        Font size in points (default: 14.0)
     --scanlines <0.0-1.0>   Scanline intensity
@@ -177,10 +180,14 @@ fn main() -> Result<()> {
 
     // Load config file, then apply CLI overrides
     let mut config = PhantomConfig::load();
+    let mut headless = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--headless" => {
+                headless = true;
+            }
             "--theme" => {
                 i += 1;
                 if i < args.len() {
@@ -266,6 +273,12 @@ fn main() -> Result<()> {
                         v0.1.0
 "#
     );
+
+    // -- Headless mode --
+    if headless {
+        log::info!("Starting headless REPL mode");
+        return headless::run_headless(config);
+    }
 
     // -- Detect supervisor mode --
     let supervisor_socket = std::env::var("PHANTOM_SUPERVISOR_SOCK")
