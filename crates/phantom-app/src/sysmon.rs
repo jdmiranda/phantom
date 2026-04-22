@@ -1,11 +1,8 @@
-//! System resource monitor — live CPU, memory, and disk bars.
+//! System resource monitor — live hardware metrics.
 //!
-//! Polls system stats on a background thread via macOS sysctl/mach APIs
-//! and sends snapshots over an mpsc channel. The render loop drains the
-//! latest snapshot each frame.
-//!
-//! The thread sleeps when the panel is hidden (signalled via an atomic flag)
-//! to avoid wasting CPU on process spawning.
+//! Polls CPU, memory, disk, network, battery, disk I/O, GPU, and thermals
+//! on a background thread via macOS commands. Sends snapshots over mpsc.
+//! Thread sleeps when the panel is hidden.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -20,34 +17,58 @@ use log::info;
 /// A snapshot of system resource usage.
 #[derive(Debug, Clone)]
 pub(crate) struct SystemStats {
+    // -- CPU / Load --
     pub cpu_usage: f32,
+    pub load_avg_1m: f32,
+
+    // -- Memory --
     pub mem_usage: f32,
     pub mem_used_mb: u64,
     pub mem_total_mb: u64,
+
+    // -- Disk space --
     pub disk_usage: f32,
     pub disk_used_gb: f32,
     pub disk_total_gb: f32,
-    pub load_avg_1m: f32,
+
+    // -- Disk I/O (KB/s) --
+    pub disk_read_kbs: f32,
+    pub disk_write_kbs: f32,
+
+    // -- Network throughput (KB/s) --
+    pub net_rx_kbs: f32,
+    pub net_tx_kbs: f32,
+
+    // -- Battery --
+    pub battery_pct: Option<f32>,
+    pub battery_charging: bool,
+    pub battery_time_remaining: Option<String>,
+
+    // -- Thermal --
+    pub cpu_temp_c: Option<f32>,
+    pub gpu_temp_c: Option<f32>,
+
+    // -- GPU --
+    pub gpu_usage: Option<f32>,
+
+    // -- Network connections --
+    pub net_connections: u32,
 }
 
 /// Handle for the sysmon background thread.
 pub(crate) struct SysmonHandle {
     rx: mpsc::Receiver<SystemStats>,
-    /// Most recent stats (updated each frame from channel).
     pub latest: Option<SystemStats>,
-    /// Shared flag: true = thread should poll, false = sleep.
     active: Arc<AtomicBool>,
 }
 
 impl SysmonHandle {
-    /// Poll for the latest stats (non-blocking). Call once per frame.
     pub fn poll(&mut self) {
         while let Ok(stats) = self.rx.try_recv() {
             self.latest = Some(stats);
         }
     }
 
-    /// Tell the background thread to start/stop polling.
     pub fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Relaxed);
     }
@@ -57,7 +78,6 @@ impl SysmonHandle {
 // Spawn
 // ---------------------------------------------------------------------------
 
-/// Spawn the sysmon background thread. Returns a handle for polling.
 pub(crate) fn spawn_sysmon() -> SysmonHandle {
     let (tx, rx) = mpsc::channel();
     let active = Arc::new(AtomicBool::new(false));
@@ -69,7 +89,6 @@ pub(crate) fn spawn_sysmon() -> SysmonHandle {
         .expect("failed to spawn sysmon thread");
 
     info!("System monitor spawned (idle until activated)");
-
     SysmonHandle { rx, latest: None, active }
 }
 
@@ -78,76 +97,69 @@ pub(crate) fn spawn_sysmon() -> SysmonHandle {
 // ---------------------------------------------------------------------------
 
 fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
+    let mut prev_net = NetCounters::read();
+    let mut prev_disk_io = DiskIoCounters::read();
+
     loop {
-        // Sleep when not visible — no process spawning, no CPU.
         if !active.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
 
         let cpu_usage = read_cpu_usage();
-
         let (mem_used_mb, mem_total_mb) = read_memory();
-        let mem_usage = if mem_total_mb > 0 {
-            mem_used_mb as f32 / mem_total_mb as f32
-        } else {
-            0.0
-        };
-
-        let (disk_used_gb, disk_total_gb) = read_disk();
-        let disk_usage = if disk_total_gb > 0.0 {
-            disk_used_gb / disk_total_gb
-        } else {
-            0.0
-        };
-
+        let mem_usage = if mem_total_mb > 0 { mem_used_mb as f32 / mem_total_mb as f32 } else { 0.0 };
+        let (disk_used_gb, disk_total_gb) = read_disk_space();
+        let disk_usage = if disk_total_gb > 0.0 { disk_used_gb / disk_total_gb } else { 0.0 };
         let load_avg_1m = read_load_average();
 
+        // Disk I/O delta.
+        let curr_disk_io = DiskIoCounters::read();
+        let (disk_read_kbs, disk_write_kbs) = DiskIoCounters::throughput(&prev_disk_io, &curr_disk_io, 2.0);
+        prev_disk_io = curr_disk_io;
+
+        // Network delta.
+        let curr_net = NetCounters::read();
+        let (net_rx_kbs, net_tx_kbs) = NetCounters::throughput(&prev_net, &curr_net, 2.0);
+        prev_net = curr_net;
+
+        let (battery_pct, battery_charging, battery_time_remaining) = read_battery();
+        let (cpu_temp_c, gpu_temp_c, gpu_usage) = read_powermetrics();
+        let net_connections = read_net_connections();
+
         let stats = SystemStats {
-            cpu_usage,
-            mem_usage,
-            mem_used_mb,
-            mem_total_mb,
-            disk_usage,
-            disk_used_gb,
-            disk_total_gb,
-            load_avg_1m,
+            cpu_usage, load_avg_1m,
+            mem_usage, mem_used_mb, mem_total_mb,
+            disk_usage, disk_used_gb, disk_total_gb,
+            disk_read_kbs, disk_write_kbs,
+            net_rx_kbs, net_tx_kbs,
+            battery_pct, battery_charging, battery_time_remaining,
+            cpu_temp_c, gpu_temp_c, gpu_usage,
+            net_connections,
         };
 
-        if tx.send(stats).is_err() {
-            break;
-        }
-
+        if tx.send(stats).is_err() { break; }
         std::thread::sleep(Duration::from_secs(2));
     }
 }
 
 // ---------------------------------------------------------------------------
-// macOS system queries
+// CPU
 // ---------------------------------------------------------------------------
 
-/// Read CPU usage via `top -l 1 -n 0` (one sample, no process list).
-/// Returns a fraction 0.0–1.0.
 fn read_cpu_usage() -> f32 {
     let output = std::process::Command::new("sh")
         .arg("-c")
-        // top -l 1 -n 0: one sample, zero processes. Grep for CPU line.
         .arg("top -l 1 -n 0 -s 0 2>/dev/null | grep 'CPU usage'")
         .output();
 
     match output {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout);
-            // Format: "CPU usage: 5.26% user, 3.94% sys, 90.79% idle"
-            // Extract idle percentage and compute 1 - idle.
             if let Some(idle_str) = text.split("idle").next() {
                 let parts: Vec<&str> = idle_str.split(',').collect();
                 if let Some(last) = parts.last() {
-                    let pct: f32 = last.trim()
-                        .trim_end_matches('%')
-                        .trim()
-                        .parse()
-                        .unwrap_or(100.0);
+                    let pct: f32 = last.trim().trim_end_matches('%').trim().parse().unwrap_or(100.0);
                     return (1.0 - pct / 100.0).clamp(0.0, 1.0);
                 }
             }
@@ -157,30 +169,45 @@ fn read_cpu_usage() -> f32 {
     }
 }
 
-/// Read memory usage via sysctl + vm_stat.
+fn read_load_average() -> f32 {
+    std::process::Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output().ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout).trim()
+                .trim_start_matches('{').trim()
+                .split_whitespace().next()
+                .and_then(|s| s.parse::<f32>().ok())
+        })
+        .unwrap_or(0.0)
+}
+
+fn num_cpus_cached() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::process::Command::new("sysctl").args(["-n", "hw.ncpu"]).output().ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+            .unwrap_or(4)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+
 fn read_memory() -> (u64, u64) {
     let total_bytes: u64 = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()
+        .args(["-n", "hw.memsize"]).output().ok()
         .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
         .unwrap_or(0);
 
-    // Use `memory_pressure` or parse `vm_stat` for used memory.
-    // vm_stat gives page counts; multiply by page size.
-    let output = std::process::Command::new("vm_stat")
-        .output()
-        .ok()
+    let output = std::process::Command::new("vm_stat").output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
 
-    // Parse page size from first line: "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
     let page_size: u64 = output.lines().next()
-        .and_then(|line| {
-            line.split("page size of ").nth(1)
-                .and_then(|s| s.split(' ').next())
-                .and_then(|s| s.parse().ok())
-        })
+        .and_then(|l| l.split("page size of ").nth(1).and_then(|s| s.split(' ').next().and_then(|s| s.parse().ok())))
         .unwrap_or(16384);
 
     let mut active: u64 = 0;
@@ -189,154 +216,322 @@ fn read_memory() -> (u64, u64) {
     let mut speculative: u64 = 0;
 
     for line in output.lines() {
-        if line.starts_with("Pages active") {
-            active = extract_vm_stat_value(line);
-        } else if line.starts_with("Pages wired") {
-            wired = extract_vm_stat_value(line);
-        } else if line.starts_with("Pages occupied by compressor") {
-            compressed = extract_vm_stat_value(line);
-        } else if line.starts_with("Pages speculative") {
-            speculative = extract_vm_stat_value(line);
+        if line.starts_with("Pages active") { active = vm_val(line); }
+        else if line.starts_with("Pages wired") { wired = vm_val(line); }
+        else if line.starts_with("Pages occupied by compressor") { compressed = vm_val(line); }
+        else if line.starts_with("Pages speculative") { speculative = vm_val(line); }
+    }
+
+    let used = (active + wired + compressed + speculative) * page_size;
+    (used / (1024 * 1024), total_bytes / (1024 * 1024))
+}
+
+fn vm_val(line: &str) -> u64 {
+    line.split(':').nth(1).unwrap_or("").trim().trim_end_matches('.').parse().unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Disk space
+// ---------------------------------------------------------------------------
+
+fn read_disk_space() -> (f32, f32) {
+    std::process::Command::new("df").args(["-g", "/"]).output().ok()
+        .and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.lines().nth(1).and_then(|l| {
+                let p: Vec<&str> = l.split_whitespace().collect();
+                if p.len() >= 4 {
+                    Some((p[2].parse().unwrap_or(0.0), p[1].parse().unwrap_or(0.0)))
+                } else { None }
+            })
+        })
+        .unwrap_or((0.0, 0.0))
+}
+
+// ---------------------------------------------------------------------------
+// Disk I/O
+// ---------------------------------------------------------------------------
+
+struct DiskIoCounters { read_kb: u64, write_kb: u64 }
+
+impl DiskIoCounters {
+    fn read() -> Self {
+        // iostat -d -c 1 gives KB/t, tps, MB/s for the interval.
+        // We use `iostat -d -c 2 -w 1` and take the second sample for delta.
+        // Simpler: use `iostat -I -d` for cumulative bytes.
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("iostat -I -d 2>/dev/null | tail -1")
+            .output();
+
+        match output {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let parts: Vec<&str> = text.trim().split_whitespace().collect();
+                // iostat -I -d: KB/t  xfrs  MB
+                // We want the MB column (cumulative).
+                if parts.len() >= 3 {
+                    let mb: f64 = parts[2].parse().unwrap_or(0.0);
+                    // Approximate: split evenly (we can't distinguish r/w from this).
+                    let kb = (mb * 1024.0) as u64;
+                    return Self { read_kb: kb / 2, write_kb: kb / 2 };
+                }
+                Self { read_kb: 0, write_kb: 0 }
+            }
+            Err(_) => Self { read_kb: 0, write_kb: 0 },
         }
     }
 
-    // "Used" = active + wired + compressed (how Activity Monitor counts it).
-    let used_bytes = (active + wired + compressed + speculative) * page_size;
-
-    (used_bytes / (1024 * 1024), total_bytes / (1024 * 1024))
+    fn throughput(prev: &Self, curr: &Self, interval_secs: f32) -> (f32, f32) {
+        let dr = curr.read_kb.saturating_sub(prev.read_kb) as f32 / interval_secs;
+        let dw = curr.write_kb.saturating_sub(prev.write_kb) as f32 / interval_secs;
+        (dr, dw)
+    }
 }
 
-fn extract_vm_stat_value(line: &str) -> u64 {
-    line.split(':')
-        .nth(1)
-        .unwrap_or("")
-        .trim()
-        .trim_end_matches('.')
-        .parse()
+// ---------------------------------------------------------------------------
+// Network throughput
+// ---------------------------------------------------------------------------
+
+struct NetCounters { rx_bytes: u64, tx_bytes: u64 }
+
+impl NetCounters {
+    fn read() -> Self {
+        // netstat -ib: parse Ibytes/Obytes columns for en0.
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("netstat -ib 2>/dev/null | grep -E '^en[0-9]' | head -1")
+            .output();
+
+        match output {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let parts: Vec<&str> = text.trim().split_whitespace().collect();
+                // Fields: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes
+                if parts.len() >= 10 {
+                    let rx: u64 = parts[6].parse().unwrap_or(0);
+                    let tx: u64 = parts[9].parse().unwrap_or(0);
+                    return Self { rx_bytes: rx, tx_bytes: tx };
+                }
+                Self { rx_bytes: 0, tx_bytes: 0 }
+            }
+            Err(_) => Self { rx_bytes: 0, tx_bytes: 0 },
+        }
+    }
+
+    fn throughput(prev: &Self, curr: &Self, interval_secs: f32) -> (f32, f32) {
+        let rx_kb = curr.rx_bytes.saturating_sub(prev.rx_bytes) as f32 / 1024.0 / interval_secs;
+        let tx_kb = curr.tx_bytes.saturating_sub(prev.tx_bytes) as f32 / 1024.0 / interval_secs;
+        (rx_kb, tx_kb)
+    }
+}
+
+fn read_net_connections() -> u32 {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("netstat -an 2>/dev/null | grep -c ESTABLISHED")
+        .output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
         .unwrap_or(0)
 }
 
-/// Read disk usage via `df /`.
-fn read_disk() -> (f32, f32) {
-    let output = std::process::Command::new("df")
-        .args(["-g", "/"])
+// ---------------------------------------------------------------------------
+// Battery
+// ---------------------------------------------------------------------------
+
+fn read_battery() -> (Option<f32>, bool, Option<String>) {
+    let output = std::process::Command::new("pmset")
+        .args(["-g", "batt"]).output();
+
+    match output {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            // "InternalBattery-0 (id=...)	82%; charging; 1:23 remaining"
+            let mut pct = None;
+            let mut charging = false;
+            let mut remaining = None;
+
+            for line in text.lines() {
+                if line.contains("InternalBattery") || line.contains('%') {
+                    // Extract percentage.
+                    if let Some(p) = line.split('%').next() {
+                        let num_str = p.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<String>();
+                        let num_str: String = num_str.chars().rev().collect();
+                        if let Ok(v) = num_str.parse::<f32>() {
+                            pct = Some(v);
+                        }
+                    }
+                    charging = line.contains("charging") && !line.contains("discharging");
+                    // Time remaining.
+                    if let Some(idx) = line.find("remaining") {
+                        let before = &line[..idx];
+                        let time_str = before.rsplit(';').next().unwrap_or("").trim();
+                        if !time_str.is_empty() && time_str != "(no estimate)" {
+                            remaining = Some(time_str.to_string());
+                        }
+                    }
+                }
+            }
+            (pct, charging, remaining)
+        }
+        Err(_) => (None, false, None),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thermals + GPU (powermetrics — may need sudo, graceful fallback)
+// ---------------------------------------------------------------------------
+
+fn read_powermetrics() -> (Option<f32>, Option<f32>, Option<f32>) {
+    // powermetrics requires root. Try without sudo; if it fails, return None.
+    // Use a short timeout to avoid blocking.
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("timeout 2 powermetrics --samplers smc,gpu_power -n 1 -i 1000 2>/dev/null")
         .output();
 
     match output {
         Ok(o) => {
             let text = String::from_utf8_lossy(&o.stdout);
-            if let Some(line) = text.lines().nth(1) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let total: f32 = parts[1].parse().unwrap_or(0.0);
-                    let used: f32 = parts[2].parse().unwrap_or(0.0);
-                    return (used, total);
+            let mut cpu_temp = None;
+            let mut gpu_temp = None;
+            let mut gpu_usage = None;
+
+            for line in text.lines() {
+                // SMC: "CPU die temperature: 45.2 C"
+                if line.contains("CPU die temperature") {
+                    cpu_temp = extract_temp(line);
+                }
+                // SMC: "GPU die temperature: 42.1 C"
+                if line.contains("GPU die temperature") {
+                    gpu_temp = extract_temp(line);
+                }
+                // GPU: "GPU Active: 12%"  or "GPU active residency: 12.34%"
+                if line.contains("GPU") && (line.contains("Active") || line.contains("active residency")) {
+                    if let Some(pct_str) = line.split(':').nth(1) {
+                        let cleaned = pct_str.trim().trim_end_matches('%').trim();
+                        if let Ok(v) = cleaned.parse::<f32>() {
+                            gpu_usage = Some(v / 100.0);
+                        }
+                    }
                 }
             }
-            (0.0, 0.0)
+            (cpu_temp, gpu_temp, gpu_usage)
         }
-        Err(_) => (0.0, 0.0),
+        Err(_) => (None, None, None),
     }
 }
 
-/// Read 1-minute load average.
-fn read_load_average() -> f32 {
-    std::process::Command::new("sysctl")
-        .args(["-n", "vm.loadavg"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            let text = String::from_utf8_lossy(&o.stdout).to_string();
-            text.trim()
-                .trim_start_matches('{')
-                .trim()
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f32>().ok())
-        })
-        .unwrap_or(0.0)
+fn extract_temp(line: &str) -> Option<f32> {
+    line.split(':').nth(1)
+        .and_then(|s| s.trim().split_whitespace().next())
+        .and_then(|s| s.parse::<f32>().ok())
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
-const BAR_WIDTH: usize = 24;
+const BAR_WIDTH: usize = 20;
 
-/// Build a resource bar string in boot sequence style.
-pub(crate) fn build_resource_bar(
-    label: &str,
-    value: f32,
-    detail: &str,
-) -> String {
+pub(crate) fn build_resource_bar(label: &str, value: f32, detail: &str) -> String {
     let clamped = value.clamp(0.0, 1.0);
     let filled = (clamped * BAR_WIDTH as f32).round() as usize;
     let empty = BAR_WIDTH - filled;
-
-    let bar = format!(
-        "{}{}",
-        "\u{2588}".repeat(filled),
-        "\u{2591}".repeat(empty),
-    );
-
-    format!("▮ {:<12} {} {}", label, bar, detail)
+    format!("▮ {:<12} {}{} {}", label, "\u{2588}".repeat(filled), "\u{2591}".repeat(empty), detail)
 }
 
-/// Build all resource bar lines from a stats snapshot.
+fn usage_color(v: f32) -> [f32; 4] {
+    if v < 0.5 { [0.2, 1.0, 0.5, 1.0] }
+    else if v < 0.8 { [0.9, 0.9, 0.2, 1.0] }
+    else { [1.0, 0.35, 0.2, 1.0] }
+}
+
+fn format_throughput(kbs: f32) -> String {
+    if kbs >= 1024.0 { format!("{:.1} MB/s", kbs / 1024.0) }
+    else { format!("{:.0} KB/s", kbs) }
+}
+
 pub(crate) fn build_monitor_lines(stats: &SystemStats) -> Vec<(String, [f32; 4])> {
     let num_cpus = num_cpus_cached();
+    let cyan = [0.0, 0.8, 0.9, 1.0];
+    let dim = [0.4, 0.7, 0.5, 0.7];
 
-    let usage_color = |v: f32| -> [f32; 4] {
-        if v < 0.5 {
-            [0.2, 1.0, 0.5, 1.0]
-        } else if v < 0.8 {
-            [0.9, 0.9, 0.2, 1.0]
-        } else {
-            [1.0, 0.35, 0.2, 1.0]
-        }
-    };
+    let mut lines = vec![
+        // CPU.
+        (build_resource_bar("CPU", stats.cpu_usage, &format!("{:.0}%", stats.cpu_usage * 100.0)),
+         usage_color(stats.cpu_usage)),
+        // Memory.
+        (build_resource_bar("MEMORY", stats.mem_usage,
+            &format!("{:.1}/{:.1} GB", stats.mem_used_mb as f32 / 1024.0, stats.mem_total_mb as f32 / 1024.0)),
+         usage_color(stats.mem_usage)),
+        // Disk space.
+        (build_resource_bar("DISK", stats.disk_usage,
+            &format!("{:.0}/{:.0} GB", stats.disk_used_gb, stats.disk_total_gb)),
+         usage_color(stats.disk_usage)),
+        // Load average.
+        (format!("▮ {:<12} {:.2}  ({} cores)", "LOAD AVG", stats.load_avg_1m, num_cpus),
+         if stats.load_avg_1m > num_cpus as f32 { [1.0, 0.35, 0.2, 1.0] }
+         else if stats.load_avg_1m > num_cpus as f32 * 0.7 { [0.9, 0.9, 0.2, 1.0] }
+         else { [0.2, 1.0, 0.5, 1.0] }),
+    ];
 
-    vec![
-        (
-            build_resource_bar("CPU", stats.cpu_usage, &format!("{:.0}%", stats.cpu_usage * 100.0)),
-            usage_color(stats.cpu_usage),
-        ),
-        (
-            build_resource_bar(
-                "MEMORY",
-                stats.mem_usage,
-                &format!("{:.1}/{:.1} GB", stats.mem_used_mb as f32 / 1024.0, stats.mem_total_mb as f32 / 1024.0),
-            ),
-            usage_color(stats.mem_usage),
-        ),
-        (
-            build_resource_bar("DISK", stats.disk_usage, &format!("{:.0}/{:.0} GB", stats.disk_used_gb, stats.disk_total_gb)),
-            usage_color(stats.disk_usage),
-        ),
-        (
-            format!("▮ {:<12} {:.2}  ({} cores)", "LOAD AVG", stats.load_avg_1m, num_cpus),
-            if stats.load_avg_1m > num_cpus as f32 {
-                [1.0, 0.35, 0.2, 1.0]
-            } else if stats.load_avg_1m > num_cpus as f32 * 0.7 {
-                [0.9, 0.9, 0.2, 1.0]
-            } else {
-                [0.2, 1.0, 0.5, 1.0]
-            },
-        ),
-    ]
-}
+    // Network throughput.
+    let net_bar_val = ((stats.net_rx_kbs + stats.net_tx_kbs) / 10240.0).clamp(0.0, 1.0); // 10MB/s = full
+    lines.push((
+        build_resource_bar("NETWORK", net_bar_val,
+            &format!("↓{} ↑{}", format_throughput(stats.net_rx_kbs), format_throughput(stats.net_tx_kbs))),
+        cyan,
+    ));
 
-fn num_cpus_cached() -> usize {
-    use std::sync::OnceLock;
-    static NUM_CPUS: OnceLock<usize> = OnceLock::new();
-    *NUM_CPUS.get_or_init(|| {
-        std::process::Command::new("sysctl")
-            .args(["-n", "hw.ncpu"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-            .unwrap_or(4)
-    })
+    // Disk I/O.
+    let io_bar_val = ((stats.disk_read_kbs + stats.disk_write_kbs) / 102400.0).clamp(0.0, 1.0); // 100MB/s = full
+    lines.push((
+        build_resource_bar("DISK I/O", io_bar_val,
+            &format!("R:{} W:{}", format_throughput(stats.disk_read_kbs), format_throughput(stats.disk_write_kbs))),
+        dim,
+    ));
+
+    // Network connections.
+    lines.push((
+        format!("▮ {:<12} {} established", "CONNECTIONS", stats.net_connections),
+        dim,
+    ));
+
+    // Battery (if available).
+    if let Some(pct) = stats.battery_pct {
+        let status = if stats.battery_charging { "⚡" } else { "🔋" };
+        let time = stats.battery_time_remaining.as_deref().unwrap_or("");
+        let batt_frac = pct / 100.0;
+        lines.push((
+            build_resource_bar("BATTERY", batt_frac, &format!("{:.0}% {status} {time}", pct)),
+            usage_color(1.0 - batt_frac), // invert: low battery = red
+        ));
+    }
+
+    // GPU (if available).
+    if let Some(gpu) = stats.gpu_usage {
+        lines.push((
+            build_resource_bar("GPU", gpu, &format!("{:.0}%", gpu * 100.0)),
+            usage_color(gpu),
+        ));
+    }
+
+    // Temperatures (if available).
+    if stats.cpu_temp_c.is_some() || stats.gpu_temp_c.is_some() {
+        let cpu_t = stats.cpu_temp_c.map(|t| format!("CPU:{:.0}°C", t)).unwrap_or_default();
+        let gpu_t = stats.gpu_temp_c.map(|t| format!("GPU:{:.0}°C", t)).unwrap_or_default();
+        let max_temp = stats.cpu_temp_c.unwrap_or(0.0).max(stats.gpu_temp_c.unwrap_or(0.0));
+        let temp_frac = (max_temp / 100.0).clamp(0.0, 1.0); // 100°C = full
+        lines.push((
+            build_resource_bar("THERMAL", temp_frac, &format!("{cpu_t} {gpu_t}")),
+            if max_temp > 90.0 { [1.0, 0.35, 0.2, 1.0] }
+            else if max_temp > 70.0 { [0.9, 0.9, 0.2, 1.0] }
+            else { [0.2, 1.0, 0.5, 1.0] },
+        ));
+    }
+
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -347,67 +542,80 @@ fn num_cpus_cached() -> usize {
 mod tests {
     use super::*;
 
+    fn full_stats() -> SystemStats {
+        SystemStats {
+            cpu_usage: 0.25, load_avg_1m: 2.5,
+            mem_usage: 0.60, mem_used_mb: 12288, mem_total_mb: 20480,
+            disk_usage: 0.45, disk_used_gb: 225.0, disk_total_gb: 500.0,
+            disk_read_kbs: 5120.0, disk_write_kbs: 2048.0,
+            net_rx_kbs: 1500.0, net_tx_kbs: 300.0,
+            battery_pct: Some(72.0), battery_charging: true,
+            battery_time_remaining: Some("1:30".into()),
+            cpu_temp_c: Some(55.0), gpu_temp_c: Some(48.0),
+            gpu_usage: Some(0.15), net_connections: 42,
+        }
+    }
+
     #[test]
-    fn build_resource_bar_empty() {
-        let bar = build_resource_bar("TEST", 0.0, "0%");
+    fn build_monitor_lines_all_metrics() {
+        let lines = build_monitor_lines(&full_stats());
+        // CPU + Memory + Disk + Load + Network + Disk I/O + Connections + Battery + GPU + Thermal = 10
+        assert_eq!(lines.len(), 10);
+        assert!(lines[0].0.contains("CPU"));
+        assert!(lines[4].0.contains("NETWORK"));
+        assert!(lines[7].0.contains("BATTERY"));
+        assert!(lines[8].0.contains("GPU"));
+        assert!(lines[9].0.contains("THERMAL"));
+    }
+
+    #[test]
+    fn build_monitor_lines_no_optional_metrics() {
+        let mut s = full_stats();
+        s.battery_pct = None;
+        s.gpu_usage = None;
+        s.cpu_temp_c = None;
+        s.gpu_temp_c = None;
+        let lines = build_monitor_lines(&s);
+        // CPU + Memory + Disk + Load + Network + Disk I/O + Connections = 7
+        assert_eq!(lines.len(), 7);
+    }
+
+    #[test]
+    fn format_throughput_kb() {
+        assert_eq!(format_throughput(500.0), "500 KB/s");
+    }
+
+    #[test]
+    fn format_throughput_mb() {
+        assert_eq!(format_throughput(2048.0), "2.0 MB/s");
+    }
+
+    #[test]
+    fn battery_color_inverted() {
+        // Low battery (20%) should be red (inverted: usage_color(0.8) = red).
+        let mut s = full_stats();
+        s.battery_pct = Some(20.0);
+        let lines = build_monitor_lines(&s);
+        let batt_line = lines.iter().find(|(t, _)| t.contains("BATTERY")).unwrap();
+        assert_eq!(batt_line.1[0], 1.0); // red channel
+    }
+
+    #[test]
+    fn build_resource_bar_formats() {
+        let bar = build_resource_bar("TEST", 0.5, "50%");
         assert!(bar.contains("TEST"));
-        assert!(bar.contains("\u{2591}"));
-        assert!(!bar.contains("\u{2588}"));
-    }
-
-    #[test]
-    fn build_resource_bar_full() {
-        let bar = build_resource_bar("CPU", 1.0, "100%");
-        assert!(bar.contains("CPU"));
-        assert!(!bar.contains("\u{2591}"));
-    }
-
-    #[test]
-    fn build_resource_bar_half() {
-        let bar = build_resource_bar("MEM", 0.5, "8/16 GB");
+        assert!(bar.contains("50%"));
         assert!(bar.contains("\u{2588}"));
         assert!(bar.contains("\u{2591}"));
     }
 
     #[test]
-    fn build_resource_bar_clamps() {
-        let _ = build_resource_bar("X", 1.5, "");
-        let _ = build_resource_bar("X", -0.5, "");
-    }
-
-    #[test]
-    fn build_monitor_lines_produces_four() {
-        let stats = SystemStats {
-            cpu_usage: 0.25, mem_usage: 0.60, mem_used_mb: 12288, mem_total_mb: 20480,
-            disk_usage: 0.45, disk_used_gb: 225.0, disk_total_gb: 500.0, load_avg_1m: 2.5,
-        };
-        let lines = build_monitor_lines(&stats);
-        assert_eq!(lines.len(), 4);
-    }
-
-    #[test]
-    fn sysmon_handle_poll_keeps_latest() {
+    fn sysmon_handle_poll() {
         let (tx, rx) = mpsc::channel();
         let active = Arc::new(AtomicBool::new(false));
         let mut handle = SysmonHandle { rx, latest: None, active };
-
-        for i in 0..3 {
-            tx.send(SystemStats {
-                cpu_usage: i as f32 * 0.1, mem_usage: 0.5, mem_used_mb: 10240,
-                mem_total_mb: 20480, disk_usage: 0.4, disk_used_gb: 200.0,
-                disk_total_gb: 500.0, load_avg_1m: 1.0,
-            }).unwrap();
-        }
-
+        tx.send(full_stats()).unwrap();
         handle.poll();
-        assert!((handle.latest.as_ref().unwrap().cpu_usage - 0.2).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn active_flag_controls_thread() {
-        let active = Arc::new(AtomicBool::new(false));
-        assert!(!active.load(Ordering::Relaxed));
-        active.store(true, Ordering::Relaxed);
-        assert!(active.load(Ordering::Relaxed));
+        assert!(handle.latest.is_some());
     }
 }

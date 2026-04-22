@@ -137,7 +137,6 @@ mod tests {
             agent_working: 1,
             scene_nodes: 8,
             bus_queue_depth: 12,
-            bus_topics: 3,
             memory_entries: 5,
             pty_buf_bytes: 4096,
             uptime_secs: 3661,
