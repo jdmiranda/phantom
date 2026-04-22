@@ -10,6 +10,7 @@ use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 
 use crate::events::{AiAction, AiEvent};
+use crate::router::{BrainRouter, RouterConfig, TaskClassifier};
 use crate::scoring::UtilityScorer;
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,8 @@ pub struct BrainConfig {
     pub enable_memory: bool,
     /// Minimum score an action must exceed to be emitted (default: 0.5).
     pub quiet_threshold: f32,
+    /// Router configuration. If `None`, uses default (heuristic + ollama + claude).
+    pub router: Option<RouterConfig>,
 }
 
 impl Default for BrainConfig {
@@ -69,6 +72,7 @@ impl Default for BrainConfig {
             enable_suggestions: true,
             enable_memory: true,
             quiet_threshold: 0.5,
+            router: None,
         }
     }
 }
@@ -121,6 +125,7 @@ fn brain_loop(
                 .expect("failed to create fallback memory store")
         });
     let mut scorer = UtilityScorer::new();
+    let mut router = BrainRouter::new(config.router.unwrap_or_default());
 
     log::info!(
         "AI brain online — project: {} [{:?}]",
@@ -143,6 +148,25 @@ fn brain_loop(
 
         // ORIENT: update world model.
         orient(&event, &mut scorer);
+
+        // CLASSIFY: determine task complexity and select backend cascade.
+        let complexity = TaskClassifier::classify(&event);
+        let backends = router.route(complexity);
+
+        log::debug!(
+            "AI brain: complexity={:?}, routed to [{}]",
+            complexity,
+            backends
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+
+        // For now, all backends cascade to heuristic scoring.
+        // Future: Ollama/Claude backends will handle Simple/Complex tasks
+        // directly, with the router recording latency and success metrics.
+        let _ = &mut router; // suppress unused_mut until backends do real work
 
         // DECIDE: score all actions, pick the best.
         let best = scorer.evaluate(&event, &context, &memory);
