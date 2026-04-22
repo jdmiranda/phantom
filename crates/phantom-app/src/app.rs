@@ -162,6 +162,10 @@ pub struct App {
 
     // -- Plugin registry --
     pub(crate) plugin_registry: PluginRegistry,
+
+    // -- System resource monitor --
+    pub(crate) sysmon: crate::sysmon::SysmonHandle,
+    pub(crate) sysmon_visible: bool,
 }
 
 /// An active suggestion from the AI brain.
@@ -402,6 +406,9 @@ impl App {
             }
         };
 
+        // -- System monitor --
+        let sysmon = crate::sysmon::spawn_sysmon();
+
         // -- Boot --
         // Boot sequence sized to the full window (in character cells).
         let boot_cols = (width as f32 / cell_size.0).floor().max(40.0) as usize;
@@ -497,6 +504,8 @@ impl App {
             topic_terminal_error,
             topic_agent_event,
             plugin_registry,
+            sysmon,
+            sysmon_visible: false,
         })
     }
 

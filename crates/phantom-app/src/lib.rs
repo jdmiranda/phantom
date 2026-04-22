@@ -9,5 +9,6 @@ mod pane;
 mod render;
 mod render_overlay;
 pub mod session;
+mod sysmon;
 pub mod supervisor_client;
 mod update;

@@ -304,6 +304,9 @@ impl App {
         }
         self.scene.update_world_transforms();
 
+        // Poll system monitor.
+        self.sysmon.poll();
+
         // Update status bar clock.
         let now_wall = chrono_time_string();
         self.status_bar.set_time(&now_wall);

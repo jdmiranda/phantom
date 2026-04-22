@@ -84,6 +84,10 @@ impl App {
                     warn!("Usage: agent <prompt>");
                 }
             }
+            "sysmon" | "monitor" | "stats" => {
+                self.sysmon_visible = !self.sysmon_visible;
+                info!("System monitor: {}", if self.sysmon_visible { "ON" } else { "OFF" });
+            }
             "plugins" | "plugin" => {
                 let list = self.plugin_registry.list();
                 if list.is_empty() {
@@ -97,7 +101,7 @@ impl App {
             }
             "help" => {
                 info!(
-                    "Commands: set <k> <v> | theme <name> | agent <prompt> | plugins | plain | debug | reload | boot | quit"
+                    "Commands: set <k> <v> | theme <name> | agent <prompt> | sysmon | plugins | plain | debug | reload | boot | quit"
                 );
             }
             other => {

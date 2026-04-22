@@ -298,8 +298,12 @@ impl App {
         let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
         let mut container_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
 
-        // -- Agent panes: render as stacked panels above the terminal --
-        let agent_height = self.render_agent_panels(screen_size, quads, glyphs);
+        // -- Stacked panels above the terminal (sysmon + agent panes) --
+        let sysmon_height = self.render_sysmon_panel(screen_size, quads, glyphs);
+        let agent_height = self.render_agent_panels_offset(
+            screen_size, quads, glyphs, sysmon_height,
+        );
+        let panels_height = sysmon_height + agent_height;
 
         // Build theme-aware color mapping for terminal grid extraction.
         let theme_colors = TerminalThemeColors {
@@ -335,11 +339,11 @@ impl App {
                     height: screen_size[1] - 54.0,
                 }
             });
-            if agent_height > 0.0 {
-                layout_rect.y += agent_height;
-                layout_rect.height -= agent_height;
+            if panels_height > 0.0 {
+                layout_rect.y += panels_height;
+                layout_rect.height -= panels_height;
                 if layout_rect.height < self.cell_size.1 * 4.0 {
-                    layout_rect.height = self.cell_size.1 * 4.0; // minimum 4 rows
+                    layout_rect.height = self.cell_size.1 * 4.0;
                 }
             }
 
