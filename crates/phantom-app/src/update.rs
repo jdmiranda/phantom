@@ -42,15 +42,11 @@ impl App {
                         if let Ok(text) = std::str::from_utf8(raw) {
                             pane.output_buf.push_str(text);
                             if pane.output_buf.len() > 8192 {
-                                let mut trim = pane.output_buf.len() - 8192;
-                                // Advance to the next char boundary to avoid
-                                // panicking on multi-byte UTF-8 sequences.
-                                while trim < pane.output_buf.len()
-                                    && !pane.output_buf.is_char_boundary(trim)
-                                {
-                                    trim += 1;
+                                let excess = pane.output_buf.len() - 8192;
+                                let drain_to = pane.output_buf.floor_char_boundary(excess);
+                                if drain_to > 0 && pane.output_buf.is_char_boundary(drain_to) {
+                                    pane.output_buf.drain(..drain_to);
                                 }
-                                pane.output_buf.drain(..trim);
                             }
                             pane.error_notified = false;
                         }
@@ -317,6 +313,9 @@ impl App {
         // Poll system monitor.
         self.sysmon.poll();
 
+        // Advance keystroke glitch animations.
+        self.keystroke_fx.tick();
+
         // Update status bar clock.
         let now_wall = chrono_time_string();
         self.status_bar.set_time(&now_wall);
@@ -381,11 +380,12 @@ impl App {
         let width = texture.width();
         let height = texture.height();
 
-        let pixels = capture_frame(&self.gpu.device, &self.gpu.queue, texture, width, height);
+        let pixels = capture_frame(&self.gpu.device, &self.gpu.queue, texture, width, height)
+            .map_err(|e| format!("capture failed: {e}"))?;
 
         let pixels_rgba = match self.gpu.format {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
-                let mut out = pixels.clone();
+                let mut out = pixels;
                 for px in out.chunks_exact_mut(4) {
                     px.swap(0, 2);
                 }

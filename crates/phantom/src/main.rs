@@ -1,3 +1,4 @@
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ struct Phantom {
     config: PhantomConfig,
     supervisor_socket: Option<PathBuf>,
     modifiers: winit::event::Modifiers,
+    consecutive_panics: u32,
 }
 
 impl Phantom {
@@ -30,7 +32,18 @@ impl Phantom {
             config,
             supervisor_socket,
             modifiers: winit::event::Modifiers::default(),
+            consecutive_panics: 0,
         }
+    }
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -44,11 +57,14 @@ impl ApplicationHandler for Phantom {
             .with_title("PHANTOM v0.1.0")
             .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
 
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("Failed to create window"),
-        );
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                log::error!("Failed to create window: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
 
         let gpu = match GpuContext::new(window.clone()) {
             Ok(gpu) => {
@@ -107,22 +123,16 @@ impl ApplicationHandler for Phantom {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                let modifiers = self.modifiers;
                 if let Some(app) = &mut self.app {
-                    let app_ptr = app as *mut App;
-                    let mods = self.modifiers;
-                    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let app = unsafe { &mut *app_ptr };
-                        app.handle_key_with_mods(event, mods);
-                    })) {
-                        let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = e.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "unknown panic".to_string()
-                        };
-                        log::error!("Input panic (recovered): {msg}");
+                    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        app.handle_key_with_mods(event, modifiers);
+                    }));
+                    if let Err(ref panic) = result {
+                        log::error!("Input panic: {}", panic_message(panic));
                     }
+                }
+                if let Some(app) = &mut self.app {
                     if app.should_quit() {
                         app.shutdown();
                         event_loop.exit();
@@ -133,26 +143,36 @@ impl ApplicationHandler for Phantom {
                 self.modifiers = modifiers;
             }
             WindowEvent::RedrawRequested => {
-                if let Some(app) = &mut self.app {
-                    // Catch panics in update/render so a single bad frame
-                    // doesn't kill the event loop. Log and continue.
-                    let app_ptr = app as *mut App;
-                    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // SAFETY: we hold &mut self.app, nobody else touches it.
-                        let app = unsafe { &mut *app_ptr };
+                let frame_result = if let Some(app) = &mut self.app {
+                    std::panic::catch_unwind(AssertUnwindSafe(|| {
                         app.update();
                         if let Err(e) = app.render() {
                             log::error!("Render error: {e}");
                         }
-                    })) {
-                        let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = e.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "unknown panic".to_string()
-                        };
-                        log::error!("Frame panic (recovered): {msg}");
+                    }))
+                } else {
+                    Ok(())
+                };
+                match frame_result {
+                    Ok(()) => self.consecutive_panics = 0,
+                    Err(panic) => {
+                        self.consecutive_panics += 1;
+                        log::error!(
+                            "Frame panic #{}: {}",
+                            self.consecutive_panics,
+                            panic_message(&panic),
+                        );
+                        if self.consecutive_panics > 10 {
+                            log::error!(
+                                "Too many consecutive panics ({}) — forcing exit",
+                                self.consecutive_panics,
+                            );
+                            if let Some(app) = &mut self.app {
+                                app.shutdown();
+                            }
+                            event_loop.exit();
+                            return;
+                        }
                     }
                 }
                 if let Some(window) = &self.window {
@@ -233,7 +253,9 @@ fn main() -> Result<()> {
     // -- Logging: file + stderr --
     // Write logs to ~/.config/phantom/phantom.log so crashes are debuggable.
     let log_path = dirs_or_home().join(".config/phantom/phantom.log");
-    let _ = std::fs::create_dir_all(log_path.parent().unwrap());
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -291,13 +313,15 @@ fn main() -> Result<()> {
             chrono_timestamp(),
         );
 
-        // Write to file.
+        // Write to file, fall back to stderr if write fails.
         let crash_path = crash_dir.join("crash.log");
-        let _ = std::fs::write(&crash_path, &report);
+        if let Err(e) = std::fs::write(&crash_path, &report) {
+            eprintln!("Failed to write crash report to {}: {e}", crash_path.display());
+        } else {
+            eprintln!("Crash report saved to {}", crash_path.display());
+        }
 
-        // Also print to stderr.
         eprintln!("\n{report}");
-        eprintln!("Crash report saved to {}", crash_path.display());
     }));
 
     // Load config file, then apply CLI overrides
