@@ -165,6 +165,26 @@ EXAMPLES:
     );
 }
 
+/// Home-based config dir.
+fn dirs_or_home() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+}
+
+/// ISO-ish timestamp without external crate.
+fn chrono_timestamp() -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&ts, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+        tm.tm_hour, tm.tm_min, tm.tm_sec,
+    )
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -180,7 +200,75 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // -- Logging: file + stderr --
+    // Write logs to ~/.config/phantom/phantom.log so crashes are debuggable.
+    let log_path = dirs_or_home().join(".config/phantom/phantom.log");
+    let _ = std::fs::create_dir_all(log_path.parent().unwrap());
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    );
+    if let Ok(file) = log_file {
+        use std::io::Write;
+        let file = std::sync::Mutex::new(file);
+        builder.format(move |buf, record| {
+            let line = format!(
+                "[{} {} {}] {}\n",
+                chrono_timestamp(),
+                record.level(),
+                record.target(),
+                record.args()
+            );
+            // Write to both stderr and file.
+            let _ = buf.write_all(line.as_bytes());
+            if let Ok(mut f) = file.lock() {
+                let _ = f.write_all(line.as_bytes());
+            }
+            Ok(())
+        });
+    }
+    builder.init();
+
+    // -- Panic hook: save crash report to disk --
+    let crash_dir = dirs_or_home().join(".config/phantom");
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".into());
+
+        let backtrace = std::backtrace::Backtrace::force_capture();
+
+        let report = format!(
+            "PHANTOM CRASH REPORT\n\
+             ====================\n\
+             Time: {}\n\
+             Panic: {payload}\n\
+             Location: {location}\n\n\
+             Backtrace:\n{backtrace}\n",
+            chrono_timestamp(),
+        );
+
+        // Write to file.
+        let crash_path = crash_dir.join("crash.log");
+        let _ = std::fs::write(&crash_path, &report);
+
+        // Also print to stderr.
+        eprintln!("\n{report}");
+        eprintln!("Crash report saved to {}", crash_path.display());
+    }));
 
     // Load config file, then apply CLI overrides
     let mut config = PhantomConfig::load();
