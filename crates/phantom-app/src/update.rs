@@ -280,6 +280,11 @@ impl App {
                 let json = self.mcp_get_context_json();
                 let _ = reply.send(Ok(json));
             }
+            AppCommand::PhantomCommand { command, reply } => {
+                info!("[MCP]: phantom.command: {command}");
+                self.execute_user_command(&command);
+                let _ = reply.send(Ok(format!("executed: {command}")));
+            }
         }
     }
 

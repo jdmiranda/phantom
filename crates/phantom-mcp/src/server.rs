@@ -339,6 +339,17 @@ fn builtin_tools() -> Vec<McpTool> {
                 "required": ["key", "value"],
             }),
         },
+        McpTool {
+            name: "phantom.command".to_owned(),
+            description: "Execute a Phantom command (same as backtick mode). Commands: theme <name>, debug, plain, boot, agent <prompt>, reload, quit.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The Phantom command to execute (e.g. 'theme pipboy', 'debug', 'agent fix the bug')"},
+                },
+                "required": ["command"],
+            }),
+        },
     ]
 }
 
@@ -395,7 +406,7 @@ mod tests {
         let req = create_request(2, "tools/list", json!({}));
         let resp = s.handle_request(&req);
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         let names: Vec<String> = tools.iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
         assert!(names.contains(&"phantom.run_command".to_owned()));
         assert!(names.contains(&"phantom.screenshot".to_owned()));
@@ -479,7 +490,7 @@ mod tests {
     #[test]
     fn server_has_eight_tools_and_three_resources() {
         let s = server();
-        assert_eq!(s.tools().len(), 8);
+        assert_eq!(s.tools().len(), 9);
         assert_eq!(s.resources().len(), 3);
     }
 }

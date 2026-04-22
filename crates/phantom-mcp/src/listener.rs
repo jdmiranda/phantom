@@ -61,6 +61,11 @@ pub enum AppCommand {
     GetContext {
         reply: SyncSender<Result<serde_json::Value, String>>,
     },
+    /// Execute a Phantom command (backtick mode: theme, debug, plain, agent, etc).
+    PhantomCommand {
+        command: String,
+        reply: SyncSender<Result<String, String>>,
+    },
 }
 
 /// Payload returned for a successful screenshot.
@@ -269,6 +274,7 @@ fn dispatch(
         "phantom.run_command" => dispatch_run_command(id, &args, cmd_tx),
         "phantom.send_key" => dispatch_send_key(id, &args, cmd_tx),
         "phantom.get_context" => dispatch_get_context(id, cmd_tx),
+        "phantom.command" => dispatch_phantom_command(id, &args, cmd_tx),
         // For every other tool, defer to the stub implementation in `server`.
         _ => server.handle_request(request),
     }
@@ -437,6 +443,50 @@ fn dispatch_get_context(
             id,
             json!({
                 "content": [{"type": "text", "text": format!("get_context failed: {e}")}],
+                "isError": true,
+            }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
+fn dispatch_phantom_command(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let command = args
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if command.is_empty() {
+        return protocol::create_error(id, INVALID_PARAMS, "missing 'command' argument");
+    }
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::PhantomCommand {
+            command: command.clone(),
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv() {
+        Ok(Ok(msg)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{"type": "text", "text": msg}],
+            }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("command failed: {e}")}],
                 "isError": true,
             }),
         ),
