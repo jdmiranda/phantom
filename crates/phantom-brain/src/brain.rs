@@ -8,7 +8,6 @@ use std::sync::mpsc;
 
 use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
-use phantom_semantic::ParsedOutput;
 
 use crate::events::{AiAction, AiEvent};
 use crate::scoring::UtilityScorer;
@@ -22,8 +21,8 @@ use crate::scoring::UtilityScorer;
 /// Cheaply cloneable on the sender side (use `clone_sender` to fan-in events
 /// from multiple producers). The action receiver is single-consumer.
 pub struct BrainHandle {
-    event_tx: mpsc::Sender<AiEvent>,
-    action_rx: mpsc::Receiver<AiAction>,
+    pub(crate) event_tx: mpsc::Sender<AiEvent>,
+    pub(crate) action_rx: mpsc::Receiver<AiAction>,
 }
 
 impl BrainHandle {
