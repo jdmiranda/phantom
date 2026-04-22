@@ -169,10 +169,12 @@ impl Widget for StatusBar {
 
     fn render_text(&self, rect: &Rect) -> Vec<TextSegment> {
         let mut segments = Vec::with_capacity(3);
-        let padding = 8.0_f32;
+        // Padding scales with screen width so content survives CRT barrel
+        // distortion at edges. ~1.5% of width handles curvature up to ~0.06.
+        let padding = (rect.width * 0.015).max(8.0);
         let text_y = rect.y + (rect.height * 0.5) - 1.0;
 
-        // -- Right: time (anchored to right edge) --
+        // -- Right: time (anchored to right edge with CRT margin) --
         let time_width = self.time.len() as f32 * CHAR_WIDTH;
         let time_x = rect.x + rect.width - time_width - padding;
 

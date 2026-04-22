@@ -28,6 +28,7 @@ pollster.workspace = true
 log.workspace = true
 anyhow.workspace = true
 serde_json = "1"
+libc = "0.2"
 
 [dev-dependencies]
 png = "0.17"

@@ -130,18 +130,16 @@ fn winit_key_to_terminal(event: &winit::event::KeyEvent) -> Option<KeyEvent> {
 
 /// Get the current wall clock time as a `HH:MM` string.
 pub(crate) fn chrono_time_string() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    // Use libc localtime to get the correct local timezone.
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs() as libc::time_t;
 
-    let day_secs = secs % 86400;
-    let hours = day_secs / 3600;
-    let minutes = (day_secs % 3600) / 60;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&timestamp, &mut tm) };
 
-    format!("{hours:02}:{minutes:02}")
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 // ---------------------------------------------------------------------------
