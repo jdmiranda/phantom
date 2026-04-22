@@ -2001,6 +2001,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-brain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "phantom-agents",
+ "phantom-context",
+ "phantom-history",
+ "phantom-memory",
+ "phantom-semantic",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "phantom-context"
 version = "0.1.0"
 dependencies = [
@@ -2092,6 +2107,15 @@ dependencies = [
  "tempfile",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "phantom-scene"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.0",
+ "log",
 ]
 
 [[package]]
