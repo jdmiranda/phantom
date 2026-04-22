@@ -1,62 +1,67 @@
 # Phantom Handoff Document
 
-**Date**: 2026-04-21
-**Session**: Initial build session
+**Date**: 2026-04-21 (end of session)
+**Session**: Initial build session — spec to working product
 **Author**: Jeremy Miranda + Claude
 
 ---
 
-## What Was Built
+## What Was Built This Session
 
-In one session, Phantom went from a spec document (PHANTOM.md) to a 19-crate, 29,206-line Rust application with 703 tests. Every phase of the original spec is implemented, plus extensions.
+From a spec document (PHANTOM.md) to a 19-crate, 29,953-line Rust application with 703 tests in one session. Every phase of the original spec is implemented plus significant extensions.
 
-### Stats
+### Final Stats
 - **19 crates** in a Cargo workspace
-- **29,206 lines** of Rust
-- **703 tests**, 0 failures
-- **25 commits** on main
+- **29,953 lines** of Rust
+- **703 tests**, 0 failures, 0 warnings (deny(warnings) enforced)
+- **31 commits** on main
 - **Repo**: https://github.com/jdmiranda/phantom
-
-### What's Working (runs and renders)
-- GPU-accelerated terminal emulator (fullscreen, Retina-scaled)
-- CRT post-processing shaders (5 themes, live-tweakable)
-- Cinematic boot sequence (noise, skull, glitch logo, progress bars, keypress to proceed)
-- Tmux-style pane splitting (Cmd+D/Shift+D, focus cycling, close)
-- Command mode (backtick): `set`, `theme`, `debug`, `plain`, `agent`, `boot`, `quit`
-- Debug shader HUD with live parameter adjustment
-- Config file (`~/.config/phantom/config.toml`) + CLI args
-
-### What's Built But Not Wired Into App
-These crates exist with full APIs and tests, but are NOT yet connected to the running application's event loop. This is the #1 priority for the next session.
-
-| Crate | What It Does | Wiring Needed |
-|-------|-------------|---------------|
-| `phantom-semantic` | Parses git/cargo/docker output into structured data | Hook into PTY output stream |
-| `phantom-agents` | Agent runtime, tools, Claude API, CLI, suggestions | Create agent panes from app, connect to Claude API |
-| `phantom-brain` | OODA loop, utility scoring, ambient intelligence | Spawn brain thread from app, wire event channels |
-| `phantom-context` | Project detection (language, framework, git) | Call on startup, feed to status bar + brain |
-| `phantom-memory` | Per-project key-value persistence | Connect to brain orient phase |
-| `phantom-history` | Structured command history (JSONL) | Append after each command completes |
-| `phantom-session` | Session save/restore | Save on exit, restore on launch |
-| `phantom-nlp` | Natural language command interpreter | Wire into command mode as fallback |
-| `phantom-plugins` | WASM plugin host, registry, marketplace | Add wasmtime, load plugins on startup |
-| `phantom-mcp` | MCP server + client (JSON-RPC) | Start server on startup, expose tools |
-| `phantom-scene` | Retained scene graph, dirty tracking | Replace flat quad/glyph re-upload in render |
-| `phantom-adapter` | AppAdapter trait, registry, pub/sub, spatial | Refactor panes to Box<dyn AppAdapter> |
-
-### Known Bugs
-- **Supervisor restart loop**: supervisor spawns phantom but heartbeat connection is flaky. Timeout was increased to 10s as a workaround. Root cause: need to verify PTY + GPU init complete before heartbeat starts.
-- **Boot pause timing**: boot sequence pause at "SYSTEM READY" works but had a race condition (fixed, but should be verified on different frame rates).
-- **Zoom doesn't resize terminal grid**: Cmd+= changes font size but doesn't recompute terminal cols/rows.
 
 ---
 
-## Architecture Overview
+## What's Working Right Now
+
+### Headless REPL Mode (fully functional)
+```bash
+cargo run --bin phantom -- --headless
+```
+- Project context auto-detected (Rust, Cargo, git state)
+- AI brain thread running (OODA loop, utility scoring)
+- `chat <message>` — talk to Claude with session context. Chat spawns least-privilege agents to read files/run commands. Conversation persists across messages.
+- `agent "prompt"` — spawn AI agent with full tool use (ReadFile, WriteFile, RunCommand, SearchFiles, GitStatus, GitDiff, ListFiles)
+- Natural language commands: `build` → `cargo build`, `what changed` → `git log`, `fix it` → spawn agent
+- Semantic parsing of all command output
+- Error detection → agent suggestions
+- Persistent memory + command history
+- `.env` file loading for API key
+
+### GUI Mode (renders but not fully wired)
+```bash
+cargo run --bin phantom
+```
+- GPU-accelerated terminal (wgpu, Metal/Vulkan)
+- CRT post-processing shaders (5 themes, live-tweakable)
+- Cinematic boot sequence (noise, skull, glitch logo, progress bars, keypress to proceed)
+- Tmux-style pane splitting (Cmd+D/Shift+D)
+- Command mode (backtick): `set`, `theme`, `debug`, `plain`, `agent`, `boot`, `quit`
+- Debug shader HUD with live parameter sliders
+- Fullscreen, Retina/HiDPI scaling
+- Process detach (alt-screen detection, animated borders)
+
+### API Key Setup
+```bash
+# .env file in project root (already created, gitignored)
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+---
+
+## Architecture — 19 Crates
 
 ```
-phantom                  # winit event loop, window management
+phantom                  # main binary (winit + headless REPL)
 phantom-supervisor       # Erlang/OTP two-process monitor
-phantom-app              # App orchestrator (owns all subsystems)
+phantom-app              # GUI app orchestrator
 phantom-renderer         # GPU: wgpu, atlas, quads, grid, post-fx, images, screenshots
 phantom-terminal         # PTY: alacritty_terminal, input, output, kitty, alt-screen, process
 phantom-ui               # themes, layout (taffy), keybinds, widgets
@@ -64,7 +69,7 @@ phantom-semantic         # command parser, error detection, highlighting
 phantom-agents           # agent runtime, tools, permissions, Claude API, CLI, suggestions, render
 phantom-brain            # ambient OODA loop, utility scoring, events
 phantom-context          # project detection, framework, git, commands
-phantom-memory           # per-project key-value store
+phantom-memory           # per-project key-value memory
 phantom-history          # structured command history (JSONL)
 phantom-session          # session save/restore
 phantom-nlp              # natural language command interpreter
@@ -79,114 +84,139 @@ phantom-adapter          # AppAdapter trait, registry, pub/sub, spatial negotiat
 
 ## Key Files to Read First
 
-1. **`PHANTOM.md`** — the original spec/manifesto
-2. **`docs/VISION.md`** — updated vision (app platform, not just terminal)
-3. **`docs/PLAN.md`** — master task tracker (what's done, what's queued)
-4. **`docs/ARD-001-architecture-decisions.md`** — why wgpu, alacritty_terminal, cosmic-text, etc
-5. **`docs/ARD-002-wasm-app-adapter.md`** — everything is an app, WASM sandbox
-6. **`docs/ARD-003-app-lifecycle-pubsub.md`** — lifecycle states, pub/sub event bus, spatial negotiation
-7. **`crates/phantom-app/src/app.rs`** — the main App struct, render loop, key handling
+1. **`PHANTOM.md`** — original spec/manifesto
+2. **`README.md`** — comprehensive feature list + commands
+3. **`docs/VISION.md`** — updated vision (app platform, ambient AI)
+4. **`docs/PLAN.md`** — master task tracker
+5. **`docs/HANDOFF.md`** — this file
+6. **`docs/ARD-001-architecture-decisions.md`** — core tech choices
+7. **`docs/ARD-002-wasm-app-adapter.md`** — everything is an app
+8. **`docs/ARD-003-app-lifecycle-pubsub.md`** — lifecycle, pub/sub, spatial negotiation
+9. **`docs/research/ai-control-loop.md`** — OODA, utility AI, ambient agents, Claude Code internals
+10. **`docs/research/scene-graph.md`** — FrankenTUI, Bevy, dirty tracking
+11. **`docs/research/spatial-negotiation.md`** — Wayland, Cassowary, constraint tiling
+12. **`crates/phantom/src/headless.rs`** — the headless REPL (most integrated code)
+13. **`crates/phantom-app/src/app.rs`** — the GUI app struct + render loop
 
 ---
 
 ## Priority Queue for Next Session
 
-### P0: Integration Wiring (CRITICAL)
-The code exists but isn't connected. This is the difference between "bunch of crates" and "working product."
+### P0: Telemetry (quick, high value)
+- Wrap `tracing` + `tracing-subscriber` with Phantom-specific event types
+- Non-blocking structured events (AgentSpawned, CommandExecuted, BrainDecision, etc.)
+- JSONL subscriber for history, brain subscriber for observation
+- ~100 lines wrapping existing ecosystem
 
-1. **Wire brain thread**: spawn `phantom-brain` from `App::new()`, send `AiEvent::CommandComplete` after each PTY read, receive `AiAction` in update loop
-2. **Wire semantic parser**: intercept PTY output, run through `SemanticParser::parse()`, emit to brain
-3. **Wire error → suggestion**: when brain emits `AiAction::ShowSuggestion`, render the suggestion overlay
-4. **Wire project context**: call `ProjectContext::detect()` on startup, display in status bar
-5. **Wire session restore**: load last session on startup, save on exit
-6. **Wire NLP into command mode**: if command doesn't match built-in, try `NlpInterpreter::interpret()`
+### P1: Integration Wiring (CRITICAL — biggest gap)
+The code exists in 19 crates but many aren't wired into the running app:
 
-### P1: AppAdapter Refactor
-7. Implement `TerminalApp` wrapping `PhantomTerminal`
-8. Implement `AgentApp` wrapping `Agent`
-9. Refactor `App.panes` from `Vec<Pane>` to `Vec<Box<dyn AppAdapter>>`
-10. Wire event bus between apps
+| What | Wire From | Wire To |
+|------|-----------|---------|
+| Semantic parser | PTY output stream | Brain + history |
+| AI brain | App event loop | Suggestion overlay |
+| Agent panes | Agent spawn | GUI pane creation |
+| Error suggestions | Error detection | Render overlay |
+| Project context | Startup detection | Status bar |
+| Session restore | App startup | Pane recreation |
+| NLP interpreter | Command mode | Fallback handler |
+| Scene graph | Layout changes | Render pipeline |
 
-### P2: Scene Graph Integration
-11. Replace flat quad/glyph re-upload with scene graph dirty tracking
-12. Only re-render panes that received PTY output
+### P2: AppAdapter Refactor
+- Implement `TerminalApp` wrapping PhantomTerminal
+- Implement `AgentApp` wrapping Agent
+- Refactor `App.panes` from `Vec<Pane>` to `Vec<Box<dyn AppAdapter>>`
+- Wire event bus between apps
+- Spatial negotiation in the arbiter
 
-### P3: WASM Runtime
-13. Add wasmtime dependency
-14. Implement WASM host functions bridging AppAdapter methods
-15. Load `.wasm` plugins at runtime
-
-### P4: Remaining Features
-16. TCP/WebSocket remote control listener
-17. Test hardening (integration tests, GPU visual regression)
-18. Demo script
-
----
-
-## Design Decisions Still Open
-
-- **App Adapter**: should the adapter trait live in its own crate (current) or be merged into phantom-app?
-- **WASM vs native plugins**: should built-in apps (terminal, agent) run through WASM or stay native? Performance vs dogfooding purity.
-- **Scene graph granularity**: per-pane dirty tracking vs per-row vs per-cell? Tradeoff: more granularity = less GPU work but more CPU bookkeeping.
-- **AI brain trigger policy**: how aggressive should the ambient AI be? Current quiet_score baseline is 0.5. May need user-configurable threshold.
-- **MCP transport**: stdio (like Claude Code) vs Unix socket vs TCP? May need all three for different use cases.
+### P3: Remaining Features
+- TCP/WebSocket remote control listener (#45)
+- wasmtime integration (actually run .wasm plugins)
+- GPU visual regression tests (screenshot comparison)
+- Test hardening (integration tests across crates)
+- Demo script
 
 ---
 
-## Research Docs (read for context)
+## Design Decisions — Open Questions
+
+| Question | Context |
+|----------|---------|
+| Telemetry: wrap tracing or build custom? | **Decided: wrap tracing.** Don't rebuild what exists. |
+| Chat tools: direct file access or spawn agents? | **Decided: spawn agents.** Chat is commander, agents are workers. Least privilege. |
+| AppAdapter: own crate or merge into phantom-app? | Currently own crate. May merge later for simplicity. |
+| WASM vs native for built-in apps? | Performance says native, dogfooding says WASM. Start native, migrate to WASM when runtime is stable. |
+| AI brain aggressiveness? | quiet_score = 0.5 baseline. May need to be user-configurable. |
+| MCP transport? | Need stdio (Claude Code), Unix socket (local), TCP (remote). Start with all three. |
+
+---
+
+## Known Bugs
+
+| Bug | Severity | Notes |
+|-----|----------|-------|
+| Supervisor heartbeat flaky | Medium | Timeout increased to 10s workaround. Root cause: GPU init timing. |
+| Zoom doesn't resize terminal grid | Low | Font changes but cols/rows not recomputed. |
+| Boot sequence log noise | Low | `[INFO phantom_brain]` prints during boot before prompt. |
+| Chat tool_use_id tracking | Medium | Multi-turn tool calls may not have correct IDs for the API. |
+
+---
+
+## Research Docs
 
 | Doc | Key Insight |
 |-----|-------------|
-| `docs/research/ai-control-loop.md` | OODA + Utility AI. Quiet score baseline prevents annoying suggestions. Event-driven, not polling. |
-| `docs/research/scene-graph.md` | FrankenTUI's diff-based rendering. 95% GPU upload reduction for typical terminal use. |
-| `docs/research/spatial-negotiation.md` | Wayland's two-phase negotiation + Cassowary constraint solving. Apps declare preferences, arbiter resolves. |
-| `docs/research/supervisor-architecture.md` | Erlang/OTP one_for_one restart. Separate process = survives crashes. |
-
----
-
-## How to Run
-
-```bash
-# Build
-cargo build --release
-
-# Run standalone
-cargo run --bin phantom
-
-# Run with supervisor
-cargo run --bin phantom-supervisor
-
-# Run tests
-cargo test --workspace
-
-# CLI options
-cargo run --bin phantom -- --help
-cargo run --bin phantom -- --theme amber --no-boot
-```
-
-## How to Test
-
-```bash
-# All tests
-cargo test --workspace
-
-# Specific crate
-cargo test -p phantom-agents
-cargo test -p phantom-semantic
-
-# With output
-cargo test --workspace -- --nocapture
-```
+| `research/ai-control-loop.md` | OODA + Utility AI. Event-driven (70-90% less latency than polling). Quiet score prevents annoying suggestions. Claude Code is reactive; Phantom is ambient. |
+| `research/scene-graph.md` | FrankenTUI diff-based rendering. 95% GPU upload reduction. Dirty flags + retained subtrees. |
+| `research/spatial-negotiation.md` | Wayland two-phase negotiation + Cassowary constraint solving. Apps declare preferences, arbiter resolves. |
+| `research/supervisor-architecture.md` | Erlang/OTP one_for_one. Separate process survives crashes. |
 
 ---
 
 ## User Preferences (Jeremy)
 
-- Wants ambitious, "impress me not please me" approach
-- Loves the cyberpunk aesthetic but wants effects subtle (curvature 0.0, scanlines 0.08)
-- Wants the boot sequence to be cinematic and pausable
-- Cares about the AI being ambient/proactive, not reactive like Claude Code
+- Ambitious, "impress me not please me"
+- Loves cyberpunk aesthetic but subtle effects (curvature 0.0, scanlines 0.08)
+- Boot sequence should be cinematic and pausable
+- AI must be ambient/proactive, not reactive like Claude Code
 - Inspired by Yahoo Pipes for data flow between apps
-- Wants apps to negotiate spatial layout, not just get shoved into splits
+- Apps negotiate spatial layout, not just shoved into splits
 - Values research-backed decisions with ADRs
+- Warnings as errors — zero tolerance for compiler warnings
+- Wants the app to build itself (headless mode + agents working on the codebase)
+- Chat = commander (spawns agents), Agent = worker (has tools)
+- Prompt should say [USER] not >
 - Runs on Apple M3 Max (Retina 2x display)
+- API key stored in .env (gitignored), not environment
+
+---
+
+## How to Start
+
+```bash
+# Headless mode (brain + agents + chat)
+cargo run --bin phantom -- --headless
+
+# GUI mode (terminal + shaders + panes)
+cargo run --bin phantom
+
+# With supervisor
+cargo run --bin phantom-supervisor
+
+# Run tests
+cargo test --workspace
+
+# CLI help
+cargo run --bin phantom -- --help
+```
+
+### In Headless Mode
+```
+[USER]: help                          # see all commands
+[USER]: chat who are you              # talk to AI
+[USER]: chat read docs/PLAN.md        # AI spawns agent to read, then discusses
+[USER]: agent "fix the failing tests" # spawn agent with full tools
+[USER]: status                        # project/agent/memory status
+[USER]: build                         # runs cargo build (NLP)
+[USER]: what changed                  # runs git log (NLP)
+```
