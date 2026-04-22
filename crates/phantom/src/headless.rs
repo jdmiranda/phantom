@@ -32,6 +32,9 @@ use phantom_semantic::SemanticParser;
 
 /// Run Phantom in headless mode: no window, no GPU, just the brain + REPL.
 pub fn run_headless(_config: PhantomConfig) -> Result<()> {
+    // Load .env file if present.
+    load_dotenv();
+
     let project_dir = std::env::current_dir()?.to_string_lossy().to_string();
     let context = ProjectContext::detect(Path::new(&project_dir));
 
@@ -589,4 +592,28 @@ fn print_help() {
     println!("Chat vs Agent:");
     println!("  chat     = conversation (no tools, remembers context)");
     println!("  agent    = worker (has tools, reads/writes files, runs commands)");
+}
+
+/// Load a `.env` file from the current directory if it exists.
+fn load_dotenv() {
+    let path = std::path::Path::new(".env");
+    if !path.exists() {
+        return;
+    }
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+                if std::env::var(key).is_err() {
+                    // SAFETY: single-threaded at this point (before brain spawn).
+                    unsafe { std::env::set_var(key, value); }
+                }
+            }
+        }
+    }
 }
