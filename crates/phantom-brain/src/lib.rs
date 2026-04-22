@@ -41,6 +41,7 @@
 
 pub mod brain;
 pub mod events;
+pub mod ollama;
 pub mod router;
 pub mod scoring;
 

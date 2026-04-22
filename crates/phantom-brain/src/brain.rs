@@ -10,7 +10,7 @@ use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 
 use crate::events::{AiAction, AiEvent};
-use crate::router::{BrainRouter, RouterConfig, TaskClassifier};
+use crate::router::{BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier};
 use crate::scoring::UtilityScorer;
 
 // ---------------------------------------------------------------------------
@@ -127,6 +127,14 @@ fn brain_loop(
     let mut scorer = UtilityScorer::new();
     let mut router = BrainRouter::new(config.router.unwrap_or_default());
 
+    // Health-check Ollama at startup.
+    if crate::ollama::is_available() {
+        router.set_backend_available("ollama-phi3.5", true);
+        log::info!("Ollama detected — local model dispatch enabled");
+    } else {
+        log::info!("Ollama not detected — using heuristic-only mode");
+    }
+
     log::info!(
         "AI brain online — project: {} [{:?}]",
         context.name,
@@ -151,31 +159,21 @@ fn brain_loop(
 
         // CLASSIFY: determine task complexity and select backend cascade.
         let complexity = TaskClassifier::classify(&event);
-        let backends = router.route(complexity);
+        // Clone the first Ollama backend info so we can release the router borrow.
+        let ollama_backend: Option<ModelBackend> = router.route(complexity)
+            .iter()
+            .find(|b| matches!(b.kind, BackendKind::Ollama { .. }))
+            .cloned()
+            .cloned();
 
-        log::debug!(
-            "AI brain: complexity={:?}, routed to [{}]",
-            complexity,
-            backends
-                .iter()
-                .map(|b| b.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" → ")
-        );
-
-        // For now, all backends cascade to heuristic scoring.
-        // Future: Ollama/Claude backends will handle Simple/Complex tasks
-        // directly, with the router recording latency and success metrics.
-        let _ = &mut router; // suppress unused_mut until backends do real work
-
-        // DECIDE: score all actions, pick the best.
+        // DECIDE: score all actions via heuristics, pick the best.
         let best = scorer.evaluate(&event, &context, &memory);
 
         log::debug!(
-            "AI brain: {} (score: {:.2}, reason: {})",
+            "AI brain: complexity={:?}, {} (score: {:.2})",
+            complexity,
             action_name(&best.action),
             best.score,
-            best.reason
         );
 
         // ACT: only emit if score exceeds threshold and suggestions are enabled.
@@ -183,10 +181,18 @@ fn brain_loop(
         let suppressed = !config.enable_suggestions && matches!(best.action, AiAction::ShowSuggestion { .. });
         let memory_suppressed = !config.enable_memory && matches!(best.action, AiAction::UpdateMemory { .. });
 
-        if !dominated_by_quiet && !suppressed && !memory_suppressed {
-            if action_tx.send(best.action).is_err() {
-                break; // render thread dropped its receiver
-            }
+        if dominated_by_quiet || suppressed || memory_suppressed {
+            continue;
+        }
+
+        // ENHANCE: if the winning action is a suggestion and we have an
+        // error event, try to upgrade it with Ollama's local model.
+        let action = enhance_with_ollama(
+            best.action, &event, &context, &ollama_backend, &mut router,
+        );
+
+        if action_tx.send(action).is_err() {
+            break; // render thread dropped its receiver
         }
     }
 
@@ -214,6 +220,68 @@ fn orient(event: &AiEvent, scorer: &mut UtilityScorer) {
             scorer.user_acted();
         }
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// enhance_with_ollama — upgrade heuristic suggestions with local model
+// ---------------------------------------------------------------------------
+
+/// If the winning action is a suggestion and an Ollama backend is available
+/// and the event is an error, call the local model to generate a real
+/// response. Falls back to the heuristic suggestion on any failure.
+fn enhance_with_ollama(
+    heuristic_action: AiAction,
+    event: &AiEvent,
+    context: &ProjectContext,
+    ollama_backend: &Option<ModelBackend>,
+    router: &mut BrainRouter,
+) -> AiAction {
+    // Only enhance suggestions.
+    if !matches!(heuristic_action, AiAction::ShowSuggestion { .. }) {
+        return heuristic_action;
+    }
+
+    let Some(backend) = ollama_backend else {
+        return heuristic_action;
+    };
+    let model_name = match &backend.kind {
+        BackendKind::Ollama { model } => model.as_str(),
+        _ => return heuristic_action,
+    };
+
+    // Only generate for error events (the highest-value use case).
+    let AiEvent::CommandComplete(parsed) = event else {
+        return heuristic_action;
+    };
+    if parsed.errors.is_empty() {
+        return heuristic_action;
+    }
+
+    let proj_type = format!("{:?}", context.project_type);
+    let prompt = crate::ollama::build_error_triage_prompt(
+        &parsed.command,
+        &parsed.errors,
+        &proj_type,
+    );
+
+    match crate::ollama::generate(model_name, &prompt, 150) {
+        Ok((text, latency_ms)) => {
+            log::info!("Ollama enhanced suggestion ({latency_ms:.0}ms): {text}");
+            router.record_result(&backend.name, latency_ms, true);
+            AiAction::ShowSuggestion {
+                text,
+                options: vec![
+                    ('y', "Fix it".into()),
+                    ('n', "Dismiss".into()),
+                ],
+            }
+        }
+        Err(e) => {
+            log::warn!("Ollama dispatch failed, using heuristic: {e}");
+            router.record_result(&backend.name, 0.0, false);
+            heuristic_action
+        }
     }
 }
 

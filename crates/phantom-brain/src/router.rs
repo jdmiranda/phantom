@@ -263,6 +263,13 @@ impl BrainRouter {
         }
     }
 
+    /// Set a backend's availability by name.
+    pub fn set_backend_available(&mut self, name: &str, available: bool) {
+        if let Some(backend) = self.config.backends.iter_mut().find(|b| b.name == name) {
+            backend.available = available;
+        }
+    }
+
     /// Get the confidence threshold for cascade escalation.
     pub fn confidence_threshold(&self) -> f32 {
         self.config.confidence_threshold
