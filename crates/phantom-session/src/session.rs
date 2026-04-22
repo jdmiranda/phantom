@@ -30,6 +30,17 @@ pub enum SplitDirection {
     Vertical,
 }
 
+/// Saved CRT shader parameters — persisted so debug HUD tuning survives restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedShaderParams {
+    pub scanline_intensity: f32,
+    pub bloom_intensity: f32,
+    pub chromatic_aberration: f32,
+    pub curvature: f32,
+    pub vignette_intensity: f32,
+    pub noise_intensity: f32,
+}
+
 /// Full saved session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
@@ -45,6 +56,9 @@ pub struct SessionState {
     pub font_size: f32,
     /// Short note about what the user was doing.
     pub activity: Option<String>,
+    /// CRT shader params at the time of save (debug HUD tuning etc.).
+    #[serde(default)]
+    pub shader_params: Option<SavedShaderParams>,
 }
 
 /// Summary for listing sessions without loading full state.
@@ -317,6 +331,7 @@ mod tests {
             theme_name: "dracula".into(),
             font_size: 14.0,
             activity: Some("Implementing session save".into()),
+            shader_params: None,
         }
     }
 
@@ -562,5 +577,132 @@ mod tests {
 
         let result = mgr.load(&bad_file);
         assert!(result.is_err());
+    }
+
+    // =======================================================================
+    // Session restore round-trip tests
+    // =======================================================================
+
+    #[test]
+    fn save_and_restore_preserves_theme_name() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/project";
+        let state = SessionState {
+            version: 1,
+            timestamp: 1_700_000_500,
+            project_dir: project_dir.into(),
+            project_name: "project".into(),
+            git_branch: Some("main".into()),
+            panes: vec![PaneState {
+                working_dir: project_dir.into(),
+                is_focused: true,
+                cols: 120,
+                rows: 40,
+                title: "zsh".into(),
+                split: None,
+            }],
+            theme_name: "pipboy".into(),
+            font_size: 16.0,
+            activity: Some("testing session restore".into()),
+            shader_params: None,
+        };
+
+        mgr.save(&state).unwrap();
+        let restored = mgr.load_latest(project_dir).unwrap().unwrap();
+
+        assert_eq!(restored.theme_name, "pipboy");
+        assert_eq!(restored.font_size, 16.0);
+        assert_eq!(restored.activity, Some("testing session restore".into()));
+    }
+
+    #[test]
+    fn restore_multi_pane_session() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/multi";
+        let state = SessionState {
+            version: 1,
+            timestamp: 1_700_000_600,
+            project_dir: project_dir.into(),
+            project_name: "multi".into(),
+            git_branch: Some("feature".into()),
+            panes: vec![
+                PaneState {
+                    working_dir: project_dir.into(),
+                    is_focused: true,
+                    cols: 120,
+                    rows: 40,
+                    title: "editor".into(),
+                    split: None,
+                },
+                PaneState {
+                    working_dir: project_dir.into(),
+                    is_focused: false,
+                    cols: 80,
+                    rows: 24,
+                    title: "tests".into(),
+                    split: Some(SplitDirection::Vertical),
+                },
+                PaneState {
+                    working_dir: project_dir.into(),
+                    is_focused: false,
+                    cols: 60,
+                    rows: 20,
+                    title: "logs".into(),
+                    split: Some(SplitDirection::Horizontal),
+                },
+            ],
+            theme_name: "dracula".into(),
+            font_size: 14.0,
+            activity: None,
+            shader_params: None,
+        };
+
+        mgr.save(&state).unwrap();
+        let restored = mgr.load_latest(project_dir).unwrap().unwrap();
+
+        assert_eq!(restored.panes.len(), 3);
+        assert_eq!(restored.panes[0].title, "editor");
+        assert!(restored.panes[0].is_focused);
+        assert_eq!(restored.panes[1].split, Some(SplitDirection::Vertical));
+        assert_eq!(restored.panes[2].split, Some(SplitDirection::Horizontal));
+    }
+
+    #[test]
+    fn welcome_message_from_restored_session() {
+        let state = SessionState {
+            version: 1,
+            timestamp: 1_700_000_700,
+            project_dir: "/proj".into(),
+            project_name: "phantom".into(),
+            git_branch: Some("feature/agents".into()),
+            panes: vec![
+                PaneState {
+                    working_dir: "/proj".into(),
+                    is_focused: true,
+                    cols: 120,
+                    rows: 40,
+                    title: "zsh".into(),
+                    split: None,
+                },
+                PaneState {
+                    working_dir: "/proj".into(),
+                    is_focused: false,
+                    cols: 80,
+                    rows: 24,
+                    title: "htop".into(),
+                    split: Some(SplitDirection::Horizontal),
+                },
+            ],
+            theme_name: "pipboy".into(),
+            font_size: 18.0,
+            activity: Some("Wiring the scene graph".into()),
+            shader_params: None,
+        };
+
+        let msg = SessionManager::welcome_message(&state);
+        assert!(msg.contains("phantom"));
+        assert!(msg.contains("feature/agents"));
+        assert!(msg.contains("2 panes"));
+        assert!(msg.contains("Wiring the scene graph"));
     }
 }

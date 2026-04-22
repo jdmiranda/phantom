@@ -706,4 +706,180 @@ mod tests {
         assert!(tree.get(a).unwrap().dirty.contains(DirtyFlags::CHILDREN));
         assert!(tree.get(0).unwrap().dirty.contains(DirtyFlags::CHILDREN));
     }
+
+    // ── App pane lifecycle simulation ──────────────────────────────
+
+    /// Simulate the scene graph structure that phantom-app creates:
+    /// Root → TabBar, ContentArea, StatusBar, overlays.
+    /// Panes are children of ContentArea.
+    fn build_app_scene() -> (SceneTree, NodeId /* content_area */) {
+        let mut tree = SceneTree::new();
+        let root = tree.root();
+        tree.set_transform(root, 0.0, 0.0, 1280.0, 720.0);
+
+        let _tab_bar = tree.add_node(root, NodeKind::TabBar);
+        let content = tree.add_node(root, NodeKind::ContentArea);
+        let _status_bar = tree.add_node(root, NodeKind::StatusBar);
+
+        let cmd_bar = tree.add_node(root, NodeKind::CommandBar);
+        tree.get_mut(cmd_bar).unwrap().render_layer = RenderLayer::Overlay;
+        let debug_hud = tree.add_node(root, NodeKind::DebugHud);
+        tree.get_mut(debug_hud).unwrap().render_layer = RenderLayer::Overlay;
+
+        tree.update_world_transforms();
+        (tree, content)
+    }
+
+    #[test]
+    fn pane_add_creates_scene_node() {
+        let (mut tree, content) = build_app_scene();
+        let initial_count = tree.node_count();
+
+        let pane1 = tree.add_node(content, NodeKind::Pane);
+        assert_eq!(tree.node_count(), initial_count + 1);
+        assert_eq!(tree.get(pane1).unwrap().kind, NodeKind::Pane);
+        assert_eq!(tree.get(pane1).unwrap().parent, Some(content));
+    }
+
+    #[test]
+    fn pane_split_adds_second_node() {
+        let (mut tree, content) = build_app_scene();
+
+        let pane1 = tree.add_node(content, NodeKind::Pane);
+        tree.set_transform(pane1, 0.0, 30.0, 640.0, 660.0);
+
+        let pane2 = tree.add_node(content, NodeKind::Pane);
+        tree.set_transform(pane2, 640.0, 30.0, 640.0, 660.0);
+
+        tree.update_world_transforms();
+
+        let content_children = &tree.get(content).unwrap().children;
+        assert_eq!(content_children.len(), 2);
+        assert!(content_children.contains(&pane1));
+        assert!(content_children.contains(&pane2));
+
+        // World transforms should differ.
+        let wt1 = tree.get(pane1).unwrap().world_transform;
+        let wt2 = tree.get(pane2).unwrap().world_transform;
+        assert_eq!(wt1.x, 0.0);
+        assert_eq!(wt2.x, 640.0);
+    }
+
+    #[test]
+    fn pane_close_removes_scene_node() {
+        let (mut tree, content) = build_app_scene();
+
+        let pane1 = tree.add_node(content, NodeKind::Pane);
+        let pane2 = tree.add_node(content, NodeKind::Pane);
+        let count_before = tree.node_count();
+
+        tree.remove_node(pane1);
+
+        assert_eq!(tree.node_count(), count_before - 1);
+        assert!(tree.get(pane1).is_none());
+        assert!(tree.get(pane2).is_some());
+
+        // Content should only have pane2 as child.
+        let children = &tree.get(content).unwrap().children;
+        assert_eq!(children, &[pane2]);
+    }
+
+    #[test]
+    fn pane_visibility_excludes_hidden_panes() {
+        let (mut tree, content) = build_app_scene();
+
+        let pane1 = tree.add_node(content, NodeKind::Pane);
+        let pane2 = tree.add_node(content, NodeKind::Pane);
+
+        // Hide pane1.
+        tree.set_visible(pane1, false);
+
+        let visible = tree.visible_nodes(RenderLayer::Scene);
+        assert!(!visible.contains(&pane1), "hidden pane should be excluded");
+        assert!(visible.contains(&pane2), "visible pane should be included");
+    }
+
+    #[test]
+    fn pane_transform_sync_from_layout() {
+        let (mut tree, content) = build_app_scene();
+
+        let pane = tree.add_node(content, NodeKind::Pane);
+
+        // Simulate layout engine providing a rect.
+        tree.set_transform(pane, 12.0, 42.0, 600.0, 400.0);
+        tree.update_world_transforms();
+
+        let wt = tree.get(pane).unwrap().world_transform;
+        assert_eq!(wt.x, 12.0);
+        assert_eq!(wt.y, 42.0);
+        assert_eq!(wt.width, 600.0);
+        assert_eq!(wt.height, 400.0);
+    }
+
+    #[test]
+    fn pane_resize_updates_transforms() {
+        let (mut tree, content) = build_app_scene();
+
+        let pane = tree.add_node(content, NodeKind::Pane);
+        tree.set_transform(pane, 0.0, 30.0, 1280.0, 660.0);
+        tree.update_world_transforms();
+
+        // Simulate window resize.
+        let root = tree.root();
+        tree.set_transform(root, 0.0, 0.0, 1920.0, 1080.0);
+        tree.set_transform(pane, 0.0, 30.0, 1920.0, 1020.0);
+        tree.update_world_transforms();
+
+        let wt = tree.get(pane).unwrap().world_transform;
+        assert_eq!(wt.width, 1920.0);
+        assert_eq!(wt.height, 1020.0);
+    }
+
+    #[test]
+    fn overlay_nodes_separate_from_scene_panes() {
+        let (tree, _content) = build_app_scene();
+
+        // Content area panes are Scene layer.
+        // CommandBar and DebugHud are Overlay layer.
+        let scene_nodes = tree.visible_nodes(RenderLayer::Scene);
+        let overlay_nodes = tree.visible_nodes(RenderLayer::Overlay);
+
+        // Scene layer: root + tab_bar + content + status_bar.
+        assert!(
+            scene_nodes.iter().all(|&id| {
+                let node = tree.get(id).unwrap();
+                node.render_layer == RenderLayer::Scene
+            }),
+            "all scene nodes should be Scene layer"
+        );
+
+        // Overlay layer: command_bar + debug_hud.
+        assert_eq!(overlay_nodes.len(), 2);
+        assert!(overlay_nodes.iter().all(|&id| {
+            tree.get(id).unwrap().render_layer == RenderLayer::Overlay
+        }));
+    }
+
+    #[test]
+    fn three_pane_split_then_close_middle() {
+        let (mut tree, content) = build_app_scene();
+
+        let p1 = tree.add_node(content, NodeKind::Pane);
+        let p2 = tree.add_node(content, NodeKind::Pane);
+        let p3 = tree.add_node(content, NodeKind::Pane);
+
+        tree.set_transform(p1, 0.0, 30.0, 426.0, 660.0);
+        tree.set_transform(p2, 426.0, 30.0, 426.0, 660.0);
+        tree.set_transform(p3, 852.0, 30.0, 428.0, 660.0);
+        tree.update_world_transforms();
+
+        // Close middle pane.
+        tree.remove_node(p2);
+
+        let children = &tree.get(content).unwrap().children;
+        assert_eq!(children.len(), 2);
+        assert!(children.contains(&p1));
+        assert!(children.contains(&p3));
+        assert!(tree.get(p2).is_none());
+    }
 }

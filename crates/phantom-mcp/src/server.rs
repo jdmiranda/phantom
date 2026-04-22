@@ -139,7 +139,7 @@ impl PhantomMcpServer {
         json!({ "tools": self.tools })
     }
 
-    fn handle_tool_call(&self, name: &str, args: &serde_json::Value) -> serde_json::Value {
+    fn handle_tool_call(&self, name: &str, _args: &serde_json::Value) -> serde_json::Value {
         // Verify the tool exists.
         let known = self.tools.iter().any(|t| t.name == name);
         if !known {
@@ -152,50 +152,13 @@ impl PhantomMcpServer {
             });
         }
 
-        // Dispatch to stub implementations. Real implementations will be
-        // wired in when the terminal runtime is connected.
-        match name {
-            "phantom.run_command" => {
-                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("[stub] would execute: {cmd}"),
-                    }],
-                })
-            }
-            "phantom.read_output" => json!({
-                "content": [{"type": "text", "text": "[stub] no output captured yet"}],
-            }),
-            "phantom.screenshot" => json!({
-                "content": [{"type": "text", "text": "[stub] screenshot not available"}],
-            }),
-            "phantom.split_pane" => {
-                let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("horizontal");
-                json!({
-                    "content": [{"type": "text", "text": format!("[stub] would split pane {direction}")}],
-                })
-            }
-            "phantom.get_context" => json!({
-                "content": [{"type": "text", "text": "[stub] project context unavailable"}],
-            }),
-            "phantom.get_memory" => {
-                let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                json!({
-                    "content": [{"type": "text", "text": format!("[stub] memory read: {key}")}],
-                })
-            }
-            "phantom.set_memory" => {
-                let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                json!({
-                    "content": [{"type": "text", "text": format!("[stub] memory written: {key}")}],
-                })
-            }
-            _ => json!({
-                "content": [{"type": "text", "text": format!("unimplemented tool: {name}")}],
-                "isError": true,
-            }),
-        }
+        // All tool calls are forwarded to the app thread via the listener's
+        // command channel. This fallback only fires when the server instance
+        // is used without a live app (e.g. in unit tests).
+        json!({
+            "content": [{"type": "text", "text": format!("tool '{name}' requires a live app connection")}],
+            "isError": true,
+        })
     }
 
     fn handle_resources_list(&self) -> serde_json::Value {
@@ -203,26 +166,14 @@ impl PhantomMcpServer {
     }
 
     fn handle_resource_read(&self, uri: &str) -> serde_json::Value {
+        // Resource reads require the app thread for live state. Without a
+        // command channel, return a helpful message.
         match uri {
-            "phantom://terminal/state" => json!({
+            "phantom://terminal/state" | "phantom://project/context" | "phantom://history/recent" => json!({
                 "contents": [{
                     "uri": uri,
                     "mimeType": "text/plain",
-                    "text": "[stub] terminal state",
-                }],
-            }),
-            "phantom://project/context" => json!({
-                "contents": [{
-                    "uri": uri,
-                    "mimeType": "application/json",
-                    "text": "[stub] project context",
-                }],
-            }),
-            "phantom://history/recent" => json!({
-                "contents": [{
-                    "uri": uri,
-                    "mimeType": "application/json",
-                    "text": "[stub] recent history",
+                    "text": format!("resource '{uri}' requires a live app connection — use tools/call instead"),
                 }],
             }),
             _ => json!({
@@ -414,15 +365,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_run_command() {
+    fn tool_call_run_command_without_app_returns_error() {
         let s = server();
         let req = create_request(3, "tools/call", json!({
             "name": "phantom.run_command",
             "arguments": {"command": "ls -la"}
         }));
         let resp = s.handle_request(&req);
-        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_owned();
-        assert!(text.contains("ls -la"));
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
     }
 
     #[test]
@@ -451,7 +402,8 @@ mod tests {
         let s = server();
         let req = create_request(6, "resources/read", json!({"uri": "phantom://terminal/state"}));
         let resp = s.handle_request(&req);
-        let contents = &resp.result.unwrap()["contents"];
+        let result = resp.result.unwrap();
+        let contents = &result["contents"];
         assert_eq!(contents[0]["uri"], "phantom://terminal/state");
     }
 
@@ -488,9 +440,50 @@ mod tests {
     }
 
     #[test]
-    fn server_has_eight_tools_and_three_resources() {
+    fn server_has_nine_tools_and_three_resources() {
         let s = server();
         assert_eq!(s.tools().len(), 9);
         assert_eq!(s.resources().len(), 3);
+    }
+
+    #[test]
+    fn all_tool_calls_require_live_app() {
+        let s = server();
+        let tool_names = [
+            "phantom.run_command", "phantom.read_output", "phantom.screenshot",
+            "phantom.split_pane", "phantom.get_context", "phantom.get_memory",
+            "phantom.set_memory", "phantom.send_key", "phantom.command",
+        ];
+        for name in tool_names {
+            let req = create_request(100, "tools/call", json!({
+                "name": name,
+                "arguments": {"command": "test", "key": "k", "value": "v", "direction": "h"}
+            }));
+            let resp = s.handle_request(&req);
+            let result = resp.result.unwrap();
+            assert_eq!(
+                result["isError"], true,
+                "tool '{name}' should return isError without live app"
+            );
+        }
+    }
+
+    #[test]
+    fn resource_read_known_uris_return_helpful_message() {
+        let s = server();
+        for uri in [
+            "phantom://terminal/state",
+            "phantom://project/context",
+            "phantom://history/recent",
+        ] {
+            let req = create_request(200, "resources/read", json!({"uri": uri}));
+            let resp = s.handle_request(&req);
+            let result = resp.result.unwrap();
+            let text = result["contents"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains("live app"),
+                "resource '{uri}' should mention live app: {text}"
+            );
+        }
     }
 }

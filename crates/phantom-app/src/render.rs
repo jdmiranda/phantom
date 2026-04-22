@@ -169,6 +169,11 @@ impl App {
                 self.build_suggestion_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
+            // -- Agent pane overlays --
+            if !self.agent_panes.is_empty() {
+                self.build_agent_pane_overlays(screen_size, &mut chrome_quads, &mut chrome_glyphs);
+            }
+
             if !chrome_quads.is_empty() || !chrome_glyphs.is_empty() {
                 // Upload + render overlay in its own pass on the surface.
                 self.quad_renderer.prepare(
@@ -308,11 +313,21 @@ impl App {
         for (pane_index, pane) in self.panes.iter().enumerate() {
             let is_focused = pane_index == self.focused_pane;
 
+            // Skip panes whose scene node is marked invisible.
+            if let Some(node) = self.scene.get(pane.scene_node) {
+                if !node.visible {
+                    continue;
+                }
+            }
+
             // -- Extract terminal grid with theme colors --
             let (render_cells, cols, rows, cursor) =
                 output::extract_grid_themed(pane.terminal.term(), &theme_colors);
 
-            // -- Get pane rectangle from layout --
+            // -- Get pane rectangle from layout engine --
+            // The scene graph is synced from layout each frame (in update()),
+            // but layout remains the source of truth for rendering to avoid
+            // off-by-one-frame issues during initialization.
             let layout_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or_else(|e| {
                 warn!("Layout missing for pane {:?} in render: {e}", pane.pane_id);
                 phantom_ui::layout::Rect {
@@ -330,12 +345,13 @@ impl App {
             let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
             let origin = (inner_rect.x, inner_rect.y);
 
-            // -- App-container chrome (routed to overlay pass — post-CRT) ----
+            // -- App-container chrome ----
             // Non-detached panes only; detached panes have their own (cyan) chrome.
+            //
+            // Background + drop shadow → scene pass (gets CRT, draws UNDER text).
+            // Border + title → overlay pass (stays crisp, draws OVER CRT).
             if !pane.is_detached {
                 let bg = self.theme.colors.background;
-                // Noticeably lighter than theme bg — container must read as
-                // a distinct surface sitting on the window backdrop.
                 let cont_bg = [
                     (bg[0] + 0.06).min(1.0),
                     (bg[1] + 0.10).min(1.0),
@@ -343,30 +359,30 @@ impl App {
                     1.0,
                 ];
 
-                // Drop shadow: slightly darker quad offset behind the container.
-                chrome_quads.push(QuadInstance {
+                // Drop shadow (scene pass — gets CRT).
+                quads.push(QuadInstance {
                     pos: [pane_rect.x + 3.0, pane_rect.y + 3.0],
                     size: [pane_rect.width, pane_rect.height],
                     color: [0.0, 0.0, 0.0, 0.35],
                     border_radius: 6.0,
                 });
 
-                // Container background.
-                chrome_quads.push(QuadInstance {
+                // Container background (scene pass — gets CRT).
+                quads.push(QuadInstance {
                     pos: [pane_rect.x, pane_rect.y],
                     size: [pane_rect.width, pane_rect.height],
                     color: cont_bg,
                     border_radius: 6.0,
                 });
 
-                // Title strip across the top of the container.
+                // Title strip (scene pass — gets CRT).
                 let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
                 let title_bg = if is_focused {
                     [bg[0] * 1.6 + 0.04, bg[1] * 2.0 + 0.06, bg[2] * 1.6 + 0.04, 1.0]
                 } else {
                     [bg[0] * 1.3 + 0.02, bg[1] * 1.5 + 0.03, bg[2] * 1.3 + 0.02, 1.0]
                 };
-                chrome_quads.push(QuadInstance {
+                quads.push(QuadInstance {
                     pos: [pane_rect.x, pane_rect.y],
                     size: [pane_rect.width, title_h],
                     color: title_bg,

@@ -8,6 +8,7 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{debug, info, trace, warn};
 
+use phantom_adapter::BusMessage;
 use phantom_brain::events::{AiAction, AiEvent};
 use phantom_context::ProjectContext;
 use phantom_mcp::{AppCommand, ScreenshotReply};
@@ -28,11 +29,13 @@ impl App {
 
         // Read from all panes' PTYs (non-blocking). Collect indices of exited panes.
         let mut exited: Vec<usize> = Vec::new();
+        let mut had_output = false;
         for (i, pane) in self.panes.iter_mut().enumerate() {
             match pane.terminal.pty_read() {
                 Ok(n) => {
                     if n > 0 {
                         trace!("Pane {i} PTY read: {n} bytes");
+                        had_output = true;
 
                         // Capture raw output for semantic scanning.
                         let raw = &pane.terminal.last_read_buf()[..n];
@@ -51,6 +54,16 @@ impl App {
                     exited.push(i);
                 }
             }
+        }
+
+        // Publish terminal output event to bus (batched per frame).
+        if had_output {
+            self.event_bus.emit(BusMessage {
+                topic_id: self.topic_terminal_output,
+                sender: 0,
+                payload: serde_json::json!({ "pane_count": self.panes.len() }),
+                timestamp: now.duration_since(self.start_time).as_secs(),
+            });
         }
 
         // Semantic scan: detect errors in PTY output and notify brain.
@@ -80,6 +93,14 @@ impl App {
                     if !parsed.errors.is_empty() {
                         let _ = brain.send_event(AiEvent::CommandComplete(parsed));
                         pane.error_notified = true;
+
+                        // Publish error event to bus.
+                        self.event_bus.emit(BusMessage {
+                            topic_id: self.topic_terminal_error,
+                            sender: 0,
+                            payload: serde_json::json!({ "has_errors": true }),
+                            timestamp: now.duration_since(self.start_time).as_secs(),
+                        });
                     }
                 }
 
@@ -118,6 +139,7 @@ impl App {
             if let Err(e) = self.layout.remove_pane(pane.pane_id) {
                 warn!("Failed to remove exited pane from layout: {e}");
             }
+            self.scene.remove_node(pane.scene_node);
             if self.focused_pane >= self.panes.len() && !self.panes.is_empty() {
                 self.focused_pane = self.panes.len() - 1;
             }
@@ -246,8 +268,41 @@ impl App {
             }
         }
 
-        // Poll agent panes for streaming output.
+        // Poll agent panes for streaming output and emit bus events on completion.
+        let agent_count_before = self.agent_panes.iter()
+            .filter(|p| p.status == crate::agent_pane::AgentPaneStatus::Working)
+            .count();
         self.poll_agent_panes();
+        let agent_count_after = self.agent_panes.iter()
+            .filter(|p| p.status == crate::agent_pane::AgentPaneStatus::Working)
+            .count();
+        // If any agent just finished this frame, emit bus events.
+        if agent_count_after < agent_count_before {
+            for pane in &self.agent_panes {
+                if matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed) {
+                    self.event_bus.emit(BusMessage {
+                        topic_id: self.topic_agent_event,
+                        sender: 0,
+                        payload: serde_json::json!({
+                            "task": pane.task,
+                            "success": pane.status == crate::agent_pane::AgentPaneStatus::Done,
+                        }),
+                        timestamp: now.duration_since(self.start_time).as_secs(),
+                    });
+                }
+            }
+        }
+
+        // Sync scene graph transforms from layout engine.
+        for pane in &self.panes {
+            if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
+                self.scene.set_transform(
+                    pane.scene_node,
+                    rect.x, rect.y, rect.width, rect.height,
+                );
+            }
+        }
+        self.scene.update_world_transforms();
 
         // Update status bar clock.
         let now_wall = chrono_time_string();
@@ -284,6 +339,23 @@ impl App {
                 info!("[MCP]: phantom.command: {command}");
                 self.execute_user_command(&command);
                 let _ = reply.send(Ok(format!("executed: {command}")));
+            }
+            AppCommand::ReadOutput { lines, reply } => {
+                let text = self.mcp_read_output(lines);
+                let _ = reply.send(Ok(text));
+            }
+            AppCommand::SplitPane { direction, reply } => {
+                let horizontal = direction == "horizontal";
+                self.split_focused_pane(horizontal);
+                let _ = reply.send(Ok(format!("split pane {direction}")));
+            }
+            AppCommand::GetMemory { key, reply } => {
+                let result = self.mcp_get_memory(&key);
+                let _ = reply.send(result);
+            }
+            AppCommand::SetMemory { key, value, reply } => {
+                let result = self.mcp_set_memory(&key, &value);
+                let _ = reply.send(result);
             }
         }
     }
@@ -391,6 +463,40 @@ impl App {
             out.pop();
         }
         out
+    }
+
+    fn mcp_read_output(&self, lines: usize) -> String {
+        if self.panes.get(self.focused_pane).is_none() {
+            return String::new();
+        }
+        let full = self.mcp_read_terminal_state();
+        let all_lines: Vec<&str> = full.lines().collect();
+        let start = all_lines.len().saturating_sub(lines);
+        all_lines[start..].join("\n")
+    }
+
+    fn mcp_get_memory(&self, key: &str) -> Result<String, String> {
+        let Some(ref mem) = self.memory else {
+            return Err("memory store not available".into());
+        };
+        match mem.get(key) {
+            Some(entry) => Ok(entry.value.clone()),
+            None => Ok(String::new()),
+        }
+    }
+
+    fn mcp_set_memory(&mut self, key: &str, value: &str) -> Result<String, String> {
+        let Some(ref mut mem) = self.memory else {
+            return Err("memory store not available".into());
+        };
+        mem.set(
+            key,
+            value,
+            phantom_memory::MemoryCategory::Context,
+            phantom_memory::MemorySource::Agent,
+        )
+        .map_err(|e| format!("memory write failed: {e}"))?;
+        Ok(format!("stored: {key}"))
     }
 
     fn mcp_get_context_json(&self) -> serde_json::Value {

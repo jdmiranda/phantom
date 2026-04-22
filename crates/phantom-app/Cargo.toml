@@ -19,6 +19,8 @@ phantom-agents = { path = "../phantom-agents" }
 phantom-history = { path = "../phantom-history" }
 phantom-scene = { path = "../phantom-scene" }
 phantom-mcp = { path = "../phantom-mcp" }
+phantom-adapter = { path = "../phantom-adapter" }
+phantom-plugins = { path = "../phantom-plugins" }
 
 winit.workspace = true
 wgpu.workspace = true

@@ -27,10 +27,12 @@ use phantom_ui::layout::LayoutEngine;
 use phantom_ui::themes::Theme;
 use phantom_ui::widgets::{StatusBar, TabBar};
 
+use phantom_adapter::{EventBus, TopicId, DataType};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
 use phantom_brain::events::AiEvent;
 use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
+use phantom_plugins::PluginRegistry;
 use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
 use phantom_session::session::{SessionManager, SessionState, PaneState};
@@ -137,6 +139,7 @@ pub struct App {
 
     // -- Scene graph (retained, dirty-tracked) --
     pub(crate) scene: SceneTree,
+    pub(crate) scene_content_node: phantom_scene::node::NodeId,
 
     // -- MCP listener (Unix socket) and inbound command channel --
     pub(crate) mcp_cmd_rx: mpsc::Receiver<AppCommand>,
@@ -150,6 +153,15 @@ pub struct App {
 
     // -- Agent panes (AI workers running in visible panes) --
     pub(crate) agent_panes: Vec<crate::agent_pane::AgentPane>,
+
+    // -- Event bus (pub/sub between subsystems) --
+    pub(crate) event_bus: EventBus,
+    pub(crate) topic_terminal_output: TopicId,
+    pub(crate) topic_terminal_error: TopicId,
+    pub(crate) topic_agent_event: TopicId,
+
+    // -- Plugin registry --
+    pub(crate) plugin_registry: PluginRegistry,
 }
 
 /// An active suggestion from the AI brain.
@@ -234,9 +246,11 @@ impl App {
         layout.resize(width as f32, height as f32)?;
 
         // -- Panes --
+        // scene_node will be set after the scene graph is created below.
         let panes = vec![Pane {
             terminal,
             pane_id,
+            scene_node: 0, // placeholder; set after scene graph init
             was_alt_screen: false,
             is_detached: false,
             detached_label: String::new(),
@@ -248,7 +262,7 @@ impl App {
         let keybinds = KeybindRegistry::new();
 
         // -- Theme (from config, with shader overrides) --
-        let theme = config.resolve_theme();
+        let mut theme = config.resolve_theme();
 
         // -- Widgets --
         let mut tab_bar = TabBar::new();
@@ -298,8 +312,8 @@ impl App {
         let _tab_bar_node = scene.add_node(root, NodeKind::TabBar);
         let content_node = scene.add_node(root, NodeKind::ContentArea);
         let _status_bar_node = scene.add_node(root, NodeKind::StatusBar);
-        // First pane under content area.
-        let _pane_node = scene.add_node(content_node, NodeKind::Pane);
+        // First pane under content area — linked to panes[0].
+        let first_pane_node = scene.add_node(content_node, NodeKind::Pane);
         // Overlay nodes (rendered after CRT post-fx).
         let cmd_bar_node = scene.add_node(root, NodeKind::CommandBar);
         if let Some(n) = scene.get_mut(cmd_bar_node) { n.render_layer = RenderLayer::Overlay; }
@@ -308,17 +322,83 @@ impl App {
         let suggestion_node = scene.add_node(root, NodeKind::AgentSuggestion);
         if let Some(n) = scene.get_mut(suggestion_node) { n.render_layer = RenderLayer::Overlay; }
         let _ = (cmd_bar_node, debug_hud_node, suggestion_node); // suppress unused
-        // Set initial transforms.
+        // Set initial transforms from layout.
         scene.set_transform(root, 0.0, 0.0, width as f32, height as f32);
+        // Sync first pane's scene transform from the layout engine.
+        if let Ok(rect) = layout.get_pane_rect(pane_id) {
+            scene.set_transform(first_pane_node, rect.x, rect.y, rect.width, rect.height);
+        }
         scene.update_world_transforms();
         info!("Scene graph initialized: {} nodes", scene.node_count());
 
-        // -- Session manager --
+        // Link scene graph pane node back to the first pane.
+        let panes = {
+            let mut p = panes;
+            p[0].scene_node = first_pane_node;
+            p
+        };
+
+        // -- Session manager + restore --
         let session_manager = match SessionManager::new() {
             Ok(sm) => Some(sm),
             Err(e) => {
                 warn!("Failed to create session manager: {e}");
                 None
+            }
+        };
+
+        // Try to restore the most recent session for this project.
+        if let Some(ref sm) = session_manager {
+            match sm.load_latest(&project_dir) {
+                Ok(Some(prev)) => {
+                    // Restore theme from previous session, preserving config
+                    // shader overrides by re-resolving through the config path.
+                    if prev.theme_name != config.theme_name {
+                        let mut restore_config = config.clone();
+                        restore_config.theme_name = prev.theme_name.to_ascii_lowercase();
+                        theme = restore_config.resolve_theme();
+                        info!("Session restored theme: {}", prev.theme_name);
+                    }
+                    // Restore CRT shader params from session (debug HUD tuning etc.)
+                    if let Some(ref sp) = prev.shader_params {
+                        theme.shader_params.scanline_intensity = sp.scanline_intensity;
+                        theme.shader_params.bloom_intensity = sp.bloom_intensity;
+                        theme.shader_params.chromatic_aberration = sp.chromatic_aberration;
+                        theme.shader_params.curvature = sp.curvature;
+                        theme.shader_params.vignette_intensity = sp.vignette_intensity;
+                        theme.shader_params.noise_intensity = sp.noise_intensity;
+                        info!(
+                            "Session restored CRT: scanlines={:.2} bloom={:.2} curve={:.2}",
+                            sp.scanline_intensity, sp.bloom_intensity, sp.curvature
+                        );
+                    }
+                    let welcome = SessionManager::welcome_message(&prev);
+                    info!("{welcome}");
+                    status_bar.set_activity(&welcome);
+                }
+                Ok(None) => {
+                    info!("No previous session for this project");
+                }
+                Err(e) => {
+                    warn!("Failed to load session: {e}");
+                }
+            }
+        }
+
+        // -- Event bus --
+        let mut event_bus = EventBus::new();
+        let topic_terminal_output = event_bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
+        let topic_terminal_error = event_bus.create_topic(0, "terminal.error", DataType::Text);
+        let topic_agent_event = event_bus.create_topic(0, "agent.event", DataType::Json);
+        info!("Event bus initialized: {} topics", event_bus.topic_count());
+
+        // -- Plugin registry --
+        let plugin_registry = match PluginRegistry::new() {
+            Ok(reg) => reg,
+            Err(e) => {
+                warn!("Failed to create plugin registry: {e}");
+                PluginRegistry::with_dir(std::env::temp_dir().join("phantom-plugins-fallback"))
+                    .expect("failed to create fallback plugin registry")
             }
         };
 
@@ -404,6 +484,7 @@ impl App {
             last_input_time: now,
             suggestion: None,
             scene,
+            scene_content_node: content_node,
             mcp_cmd_rx,
             _mcp_listener: mcp_listener,
             pool_quads: Vec::with_capacity(256),
@@ -411,6 +492,11 @@ impl App {
             pool_chrome_quads: Vec::with_capacity(32),
             pool_chrome_glyphs: Vec::with_capacity(256),
             agent_panes: Vec::new(),
+            event_bus,
+            topic_terminal_output,
+            topic_terminal_error,
+            topic_agent_event,
+            plugin_registry,
         })
     }
 
@@ -419,7 +505,7 @@ impl App {
         self.quit_requested
     }
 
-    /// Graceful shutdown: save session, shut down brain thread.
+    /// Graceful shutdown: save session, dispatch plugin hooks, shut down brain.
     pub fn shutdown(&mut self) {
         // Tell the supervisor we're exiting on purpose — don't restart.
         if let Some(ref mut sv) = self.supervisor {
@@ -434,6 +520,20 @@ impl App {
                 Err(e) => warn!("Failed to save session: {e}"),
             }
         }
+
+        // Dispatch shutdown hooks to plugins.
+        let wd = self.context.as_ref()
+            .map(|c| c.root.clone())
+            .unwrap_or_else(|| ".".into());
+        let ctx = phantom_plugins::HookContext::shutdown(&wd);
+        let responses = self.plugin_registry.dispatch_hook(
+            &phantom_plugins::HookType::OnShutdown,
+            &ctx,
+        );
+        for resp in &responses {
+            info!("[plugin shutdown]: {resp:?}");
+        }
+        self.plugin_registry.shutdown_all();
 
         // Shut down the brain thread.
         if let Some(ref brain) = self.brain {
@@ -470,6 +570,7 @@ impl App {
             }
         }).collect();
 
+        let sp = &self.theme.shader_params;
         SessionState {
             version: 1,
             timestamp: SystemTime::now()
@@ -483,6 +584,14 @@ impl App {
             theme_name: self.theme.name.clone(),
             font_size: self.text_renderer.font_size(),
             activity: None,
+            shader_params: Some(phantom_session::session::SavedShaderParams {
+                scanline_intensity: sp.scanline_intensity,
+                bloom_intensity: sp.bloom_intensity,
+                chromatic_aberration: sp.chromatic_aberration,
+                curvature: sp.curvature,
+                vignette_intensity: sp.vignette_intensity,
+                noise_intensity: sp.noise_intensity,
+            }),
         }
     }
 

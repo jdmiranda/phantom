@@ -66,6 +66,27 @@ pub enum AppCommand {
         command: String,
         reply: SyncSender<Result<String, String>>,
     },
+    /// Read recent output from the focused (or specified) pane.
+    ReadOutput {
+        lines: usize,
+        reply: SyncSender<Result<String, String>>,
+    },
+    /// Split the focused pane.
+    SplitPane {
+        direction: String,
+        reply: SyncSender<Result<String, String>>,
+    },
+    /// Read a value from project memory.
+    GetMemory {
+        key: String,
+        reply: SyncSender<Result<String, String>>,
+    },
+    /// Write a value to project memory.
+    SetMemory {
+        key: String,
+        value: String,
+        reply: SyncSender<Result<String, String>>,
+    },
 }
 
 /// Payload returned for a successful screenshot.
@@ -275,6 +296,10 @@ fn dispatch(
         "phantom.send_key" => dispatch_send_key(id, &args, cmd_tx),
         "phantom.get_context" => dispatch_get_context(id, cmd_tx),
         "phantom.command" => dispatch_phantom_command(id, &args, cmd_tx),
+        "phantom.read_output" => dispatch_read_output(id, &args, cmd_tx),
+        "phantom.split_pane" => dispatch_split_pane(id, &args, cmd_tx),
+        "phantom.get_memory" => dispatch_get_memory(id, &args, cmd_tx),
+        "phantom.set_memory" => dispatch_set_memory(id, &args, cmd_tx),
         // For every other tool, defer to the stub implementation in `server`.
         _ => server.handle_request(request),
     }
@@ -494,6 +519,145 @@ fn dispatch_phantom_command(
     }
 }
 
+fn dispatch_read_output(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let lines = args
+        .get("lines")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::ReadOutput { lines, reply: reply_tx })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv() {
+        Ok(Ok(text)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": text}] }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": format!("read_output failed: {e}")}], "isError": true }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
+fn dispatch_split_pane(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let direction = args
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("horizontal")
+        .to_string();
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::SplitPane { direction, reply: reply_tx })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv() {
+        Ok(Ok(msg)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": msg}] }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": format!("split_pane failed: {e}")}], "isError": true }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
+fn dispatch_get_memory(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let key = args
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if key.is_empty() {
+        return protocol::create_error(id, INVALID_PARAMS, "missing 'key' argument");
+    }
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::GetMemory { key: key.clone(), reply: reply_tx })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv() {
+        Ok(Ok(value)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": value}], "key": key }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": format!("get_memory failed: {e}")}], "isError": true }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
+fn dispatch_set_memory(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let key = args
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let value = args
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if key.is_empty() {
+        return protocol::create_error(id, INVALID_PARAMS, "missing 'key' argument");
+    }
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::SetMemory { key: key.clone(), value, reply: reply_tx })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv() {
+        Ok(Ok(msg)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": msg}], "key": key }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({ "content": [{"type": "text", "text": format!("set_memory failed: {e}")}], "isError": true }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -543,6 +707,123 @@ mod tests {
         let resp = send_and_recv(&mut stream, req);
         assert!(resp.contains("phantom.screenshot"));
         assert!(resp.contains("phantom.run_command"));
+    }
+
+    #[test]
+    fn read_output_forwards_to_app_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-read-output.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::ReadOutput { lines, reply } = cmd {
+                    let _ = reply.send(Ok(format!("line1\nline2\n(requested {lines})")));
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"phantom.read_output","arguments":{"lines":50}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("line1"), "resp was: {resp}");
+        assert!(resp.contains("line2"), "resp was: {resp}");
+    }
+
+    #[test]
+    fn split_pane_forwards_to_app_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-split-pane.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::SplitPane { direction, reply } = cmd {
+                    let _ = reply.send(Ok(format!("split pane {direction}")));
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"phantom.split_pane","arguments":{"direction":"vertical"}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("split pane vertical"), "resp was: {resp}");
+    }
+
+    #[test]
+    fn get_memory_forwards_to_app_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-get-mem.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::GetMemory { key, reply } = cmd {
+                    let _ = reply.send(Ok(format!("value_for_{key}")));
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"phantom.get_memory","arguments":{"key":"test_key"}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("value_for_test_key"), "resp was: {resp}");
+    }
+
+    #[test]
+    fn set_memory_forwards_to_app_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-set-mem.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::SetMemory { key, value, reply } = cmd {
+                    let _ = reply.send(Ok(format!("stored {key}={value}")));
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"phantom.set_memory","arguments":{"key":"k","value":"v"}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("stored k=v"), "resp was: {resp}");
+    }
+
+    #[test]
+    fn get_memory_rejects_empty_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-get-mem-empty.sock");
+        let (cmd_tx, _cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"phantom.get_memory","arguments":{"key":""}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("missing"), "should reject empty key: {resp}");
+    }
+
+    #[test]
+    fn set_memory_rejects_empty_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-set-mem-empty.sock");
+        let (cmd_tx, _cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"phantom.set_memory","arguments":{"key":"","value":"v"}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("missing"), "should reject empty key: {resp}");
     }
 
     #[test]

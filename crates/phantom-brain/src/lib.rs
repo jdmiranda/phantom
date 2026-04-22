@@ -40,6 +40,7 @@
 //! ```
 
 pub mod brain;
+pub mod claude;
 pub mod events;
 pub mod ollama;
 pub mod router;

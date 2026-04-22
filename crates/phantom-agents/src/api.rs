@@ -132,6 +132,12 @@ impl ApiHandle {
     pub fn is_done(&self) -> bool {
         self.done
     }
+
+    /// Create a handle from a raw receiver. Used by test harnesses to inject
+    /// synthetic API events without hitting the network.
+    pub fn from_receiver(rx: mpsc::Receiver<ApiEvent>) -> Self {
+        Self { rx, done: false }
+    }
 }
 
 // ---------------------------------------------------------------------------

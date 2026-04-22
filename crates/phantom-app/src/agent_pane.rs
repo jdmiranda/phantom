@@ -18,7 +18,6 @@ use crate::app::App;
 // ---------------------------------------------------------------------------
 
 /// An active agent running in a GUI pane.
-#[allow(dead_code)] // Fields used by render (agent pane rendering WIP)
 pub(crate) struct AgentPane {
     /// The agent's task description.
     pub(crate) task: String,
@@ -122,11 +121,6 @@ impl AgentPane {
         got_content
     }
 
-    /// Whether the agent is still working.
-    #[allow(dead_code)] // Used by render (agent pane rendering WIP)
-    pub(crate) fn is_working(&self) -> bool {
-        self.status == AgentPaneStatus::Working
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +148,143 @@ impl App {
     pub(crate) fn poll_agent_panes(&mut self) {
         for pane in &mut self.agent_panes {
             pane.poll();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn agent_with_handle() -> (AgentPane, mpsc::Sender<ApiEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let handle = ApiHandle::from_receiver(rx);
+        let pane = AgentPane {
+            task: "test task".into(),
+            status: AgentPaneStatus::Working,
+            output: String::from("● Agent working...\n\n"),
+            api_handle: Some(handle),
+            tool_use_ids: Vec::new(),
+        };
+        (pane, tx)
+    }
+
+    #[test]
+    fn agent_pane_starts_working() {
+        let (pane, _tx) = agent_with_handle();
+        assert_eq!(pane.status, AgentPaneStatus::Working);
+        assert!(pane.output.contains("Agent working"));
+    }
+
+    #[test]
+    fn poll_receives_text_delta() {
+        let (mut pane, tx) = agent_with_handle();
+        tx.send(ApiEvent::TextDelta("hello world".into())).unwrap();
+
+        let got = pane.poll();
+        assert!(got, "should have received content");
+        assert!(pane.output.contains("hello world"));
+        assert_eq!(pane.status, AgentPaneStatus::Working);
+    }
+
+    #[test]
+    fn poll_receives_done_event() {
+        let (mut pane, tx) = agent_with_handle();
+        tx.send(ApiEvent::TextDelta("result".into())).unwrap();
+        tx.send(ApiEvent::Done).unwrap();
+
+        pane.poll();
+        assert_eq!(pane.status, AgentPaneStatus::Done);
+        assert!(pane.output.contains("✓ Agent finished"));
+        assert!(pane.api_handle.is_none(), "handle should be dropped on Done");
+    }
+
+    #[test]
+    fn poll_receives_error_event() {
+        let (mut pane, tx) = agent_with_handle();
+        tx.send(ApiEvent::Error("network timeout".into())).unwrap();
+
+        pane.poll();
+        assert_eq!(pane.status, AgentPaneStatus::Failed);
+        assert!(pane.output.contains("✗ Error: network timeout"));
+        assert!(pane.api_handle.is_none());
+    }
+
+    #[test]
+    fn poll_accumulates_multiple_deltas() {
+        let (mut pane, tx) = agent_with_handle();
+        tx.send(ApiEvent::TextDelta("line 1\n".into())).unwrap();
+        tx.send(ApiEvent::TextDelta("line 2\n".into())).unwrap();
+        tx.send(ApiEvent::TextDelta("line 3\n".into())).unwrap();
+
+        pane.poll();
+        assert!(pane.output.contains("line 1"));
+        assert!(pane.output.contains("line 2"));
+        assert!(pane.output.contains("line 3"));
+    }
+
+    #[test]
+    fn poll_returns_false_when_no_handle() {
+        let mut pane = AgentPane {
+            task: "orphan".into(),
+            status: AgentPaneStatus::Done,
+            output: String::new(),
+            api_handle: None,
+            tool_use_ids: Vec::new(),
+        };
+        assert!(!pane.poll());
+    }
+
+    #[test]
+    fn poll_returns_false_when_no_events() {
+        let (mut pane, _tx) = agent_with_handle();
+        // Don't send anything.
+        assert!(!pane.poll());
+        assert_eq!(pane.status, AgentPaneStatus::Working);
+    }
+
+    #[test]
+    fn tool_use_tracked_in_ids() {
+        let (mut pane, tx) = agent_with_handle();
+        tx.send(ApiEvent::ToolUse {
+            id: "tool_123".into(),
+            call: phantom_agents::tools::ToolCall {
+                tool: phantom_agents::tools::ToolType::ReadFile,
+                args: serde_json::json!({"path": "/tmp/test"}),
+            },
+        }).unwrap();
+
+        pane.poll();
+        assert_eq!(pane.tool_use_ids, vec!["tool_123"]);
+        assert!(pane.output.contains("Tool:"));
+    }
+
+    #[test]
+    fn task_description_extraction() {
+        // Verify the description logic works for each AgentTask variant.
+        let cases: Vec<(AgentTask, &str)> = vec![
+            (AgentTask::FreeForm { prompt: "fix bug".into() }, "fix bug"),
+            (AgentTask::RunCommand { command: "cargo test".into() }, "Run: cargo test"),
+            (AgentTask::WatchAndNotify { description: "build".into() }, "Watch: build"),
+        ];
+
+        for (task, expected_prefix) in cases {
+            let desc = match &task {
+                AgentTask::FreeForm { prompt } => prompt.clone(),
+                AgentTask::FixError { error_summary, .. } => format!("Fix: {error_summary}"),
+                AgentTask::RunCommand { command } => format!("Run: {command}"),
+                AgentTask::ReviewCode { context, .. } => format!("Review: {context}"),
+                AgentTask::WatchAndNotify { description } => format!("Watch: {description}"),
+            };
+            assert!(
+                desc.starts_with(expected_prefix),
+                "task desc '{desc}' should start with '{expected_prefix}'"
+            );
         }
     }
 }

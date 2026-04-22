@@ -13,6 +13,7 @@ pub mod host;
 pub mod registry;
 pub mod builtins;
 pub mod marketplace;
+pub mod script;
 
 pub use builtins::{get_official, official_plugins};
 pub use host::{HookContext, HookEvent, HookResponse, MockRuntime, PluginRuntime};
@@ -21,3 +22,4 @@ pub use manifest::{
 };
 pub use marketplace::{Marketplace, MarketplaceListing};
 pub use registry::{LoadedPlugin, PluginInfo, PluginRegistry};
+pub use script::ScriptRuntime;

@@ -2053,6 +2053,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "phantom-adapter",
  "phantom-agents",
  "phantom-brain",
  "phantom-context",
@@ -2060,6 +2061,7 @@ dependencies = [
  "phantom-mcp",
  "phantom-memory",
  "phantom-nlp",
+ "phantom-plugins",
  "phantom-protocol",
  "phantom-renderer",
  "phantom-scene",

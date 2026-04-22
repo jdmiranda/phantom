@@ -6,6 +6,7 @@
 
 use log::{info, warn};
 
+use phantom_scene::node::NodeId;
 use phantom_terminal::terminal::PhantomTerminal;
 use phantom_ui::layout::PaneId;
 
@@ -35,6 +36,7 @@ pub(crate) const CONTAINER_MARGIN: f32 = 12.0;
 pub(crate) struct Pane {
     pub(crate) terminal: PhantomTerminal,
     pub(crate) pane_id: PaneId,
+    pub(crate) scene_node: NodeId,
     pub(crate) was_alt_screen: bool,
     pub(crate) is_detached: bool,
     pub(crate) detached_label: String,
@@ -142,10 +144,16 @@ impl App {
 
         match PhantomTerminal::new(cols, rows) {
             Ok(terminal) => {
+                // Create scene graph node for the new pane.
+                let scene_node = self.scene.add_node(
+                    self.scene_content_node,
+                    phantom_scene::node::NodeKind::Pane,
+                );
                 let new_index = self.focused_pane + 1;
                 self.panes.insert(new_index, Pane {
                     terminal,
                     pane_id: new_child,
+                    scene_node,
                     was_alt_screen: false,
                     is_detached: false,
                     detached_label: String::new(),
@@ -178,6 +186,8 @@ impl App {
         if let Err(e) = self.layout.remove_pane(pane.pane_id) {
             warn!("Failed to remove pane from layout: {e}");
         }
+        // Remove the corresponding scene graph node.
+        self.scene.remove_node(pane.scene_node);
         drop(pane);
 
         let width = self.gpu.surface_config.width;

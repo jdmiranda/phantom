@@ -10,7 +10,7 @@ use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 
 use crate::events::{AiAction, AiEvent};
-use crate::router::{BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier};
+use crate::router::{BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier, TaskComplexity};
 use crate::scoring::UtilityScorer;
 
 // ---------------------------------------------------------------------------
@@ -191,6 +191,17 @@ fn brain_loop(
             best.action, &event, &context, &ollama_backend, &mut router,
         );
 
+        // ESCALATE: for Complex tasks, if Ollama didn't enhance (still heuristic)
+        // and Claude is available, escalate to the frontier model.
+        let claude_backend: Option<ModelBackend> = router.route(complexity)
+            .iter()
+            .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
+            .cloned()
+            .cloned();
+        let action = enhance_with_claude(
+            action, &event, &context, complexity, &claude_backend, &mut router,
+        );
+
         if action_tx.send(action).is_err() {
             break; // render thread dropped its receiver
         }
@@ -281,6 +292,73 @@ fn enhance_with_ollama(
             log::warn!("Ollama dispatch failed, using heuristic: {e}");
             router.record_result(&backend.name, 0.0, false);
             heuristic_action
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// enhance_with_claude — escalate to frontier model for complex tasks
+// ---------------------------------------------------------------------------
+
+/// If the task is Complex, Claude is available, and the current suggestion
+/// could benefit from deeper analysis, call Claude for a better response.
+fn enhance_with_claude(
+    current_action: AiAction,
+    event: &AiEvent,
+    context: &ProjectContext,
+    complexity: TaskComplexity,
+    claude_backend: &Option<ModelBackend>,
+    router: &mut BrainRouter,
+) -> AiAction {
+    // Only escalate Complex tasks.
+    if complexity != TaskComplexity::Complex {
+        return current_action;
+    }
+
+    // Only enhance suggestions.
+    if !matches!(current_action, AiAction::ShowSuggestion { .. }) {
+        return current_action;
+    }
+
+    let Some(backend) = claude_backend else {
+        return current_action;
+    };
+    let model_name = match &backend.kind {
+        BackendKind::Claude { model } => model.as_str(),
+        _ => return current_action,
+    };
+
+    // Only generate for error events with 3+ errors (Complex classification).
+    let AiEvent::CommandComplete(parsed) = event else {
+        return current_action;
+    };
+    if parsed.errors.len() < 3 {
+        return current_action;
+    }
+
+    let proj_type = format!("{:?}", context.project_type);
+    let prompt = crate::claude::build_error_analysis_prompt(
+        &parsed.command,
+        &parsed.errors,
+        &proj_type,
+    );
+
+    match crate::claude::generate(model_name, &prompt, 300) {
+        Ok((text, latency_ms)) => {
+            log::info!("Claude escalation ({latency_ms:.0}ms): {text}");
+            router.record_result(&backend.name, latency_ms, true);
+            AiAction::ShowSuggestion {
+                text,
+                options: vec![
+                    ('y', "Fix it".into()),
+                    ('n', "Dismiss".into()),
+                ],
+            }
+        }
+        Err(e) => {
+            log::warn!("Claude escalation failed, using previous: {e}");
+            router.record_result(&backend.name, 0.0, false);
+            current_action
         }
     }
 }
@@ -379,5 +457,170 @@ mod tests {
 
         assert_eq!(scorer.chattiness, 0.0);
         assert_eq!(scorer.suggestions_since_input, 0);
+    }
+
+    // =======================================================================
+    // enhance_with_claude gating tests
+    // =======================================================================
+
+    fn test_context() -> phantom_context::ProjectContext {
+        phantom_context::ProjectContext {
+            root: "/tmp/test".into(),
+            name: "test".into(),
+            project_type: phantom_context::ProjectType::Rust,
+            package_manager: phantom_context::PackageManager::Cargo,
+            framework: phantom_context::Framework::None,
+            commands: phantom_context::ProjectCommands {
+                build: Some("cargo build".into()),
+                test: Some("cargo test".into()),
+                run: None,
+                lint: None,
+                format: None,
+            },
+            git: None,
+            rust_version: None,
+            node_version: None,
+            python_version: None,
+        }
+    }
+
+    fn make_error(msg: &str) -> phantom_semantic::DetectedError {
+        phantom_semantic::DetectedError {
+            message: msg.into(),
+            error_type: phantom_semantic::ErrorType::Compiler,
+            file: None,
+            line: None,
+            column: None,
+            code: None,
+            severity: phantom_semantic::Severity::Error,
+            raw_line: String::new(),
+            suggestion: None,
+        }
+    }
+
+    fn parsed_many_errors() -> phantom_semantic::ParsedOutput {
+        phantom_semantic::ParsedOutput {
+            command: "cargo build".into(),
+            command_type: phantom_semantic::CommandType::Cargo(phantom_semantic::CargoCommand::Build),
+            exit_code: Some(1),
+            content_type: phantom_semantic::ContentType::CompilerOutput,
+            errors: vec![make_error("e1"), make_error("e2"), make_error("e3")],
+            warnings: vec![],
+            duration_ms: Some(2000),
+            raw_output: "errors".into(),
+        }
+    }
+
+    fn parsed_few_errors() -> phantom_semantic::ParsedOutput {
+        phantom_semantic::ParsedOutput {
+            command: "cargo build".into(),
+            command_type: phantom_semantic::CommandType::Cargo(phantom_semantic::CargoCommand::Build),
+            exit_code: Some(1),
+            content_type: phantom_semantic::ContentType::CompilerOutput,
+            errors: vec![make_error("e1")],
+            warnings: vec![],
+            duration_ms: Some(500),
+            raw_output: "error".into(),
+        }
+    }
+
+    fn suggestion_action() -> AiAction {
+        AiAction::ShowSuggestion {
+            text: "heuristic suggestion".into(),
+            options: vec![],
+        }
+    }
+
+    #[test]
+    fn claude_skips_non_complex_tasks() {
+        let ctx = test_context();
+        let mut router = BrainRouter::new(RouterConfig::default());
+        let backend = Some(ModelBackend::claude_default());
+        let event = AiEvent::CommandComplete(parsed_many_errors());
+
+        let action = enhance_with_claude(
+            suggestion_action(), &event, &ctx,
+            TaskComplexity::Simple, // not Complex
+            &backend, &mut router,
+        );
+        // Should return original action unchanged.
+        if let AiAction::ShowSuggestion { text, .. } = &action {
+            assert_eq!(text, "heuristic suggestion");
+        } else {
+            panic!("expected ShowSuggestion, got {action:?}");
+        }
+    }
+
+    #[test]
+    fn claude_skips_non_suggestion_actions() {
+        let ctx = test_context();
+        let mut router = BrainRouter::new(RouterConfig::default());
+        let backend = Some(ModelBackend::claude_default());
+        let event = AiEvent::CommandComplete(parsed_many_errors());
+
+        let action = enhance_with_claude(
+            AiAction::DoNothing, &event, &ctx,
+            TaskComplexity::Complex,
+            &backend, &mut router,
+        );
+        assert!(matches!(action, AiAction::DoNothing));
+    }
+
+    #[test]
+    fn claude_skips_when_no_backend() {
+        let ctx = test_context();
+        let mut router = BrainRouter::new(RouterConfig::default());
+        let event = AiEvent::CommandComplete(parsed_many_errors());
+
+        let action = enhance_with_claude(
+            suggestion_action(), &event, &ctx,
+            TaskComplexity::Complex,
+            &None, // no Claude backend
+            &mut router,
+        );
+        if let AiAction::ShowSuggestion { text, .. } = &action {
+            assert_eq!(text, "heuristic suggestion");
+        } else {
+            panic!("expected original suggestion");
+        }
+    }
+
+    #[test]
+    fn claude_skips_few_errors() {
+        let ctx = test_context();
+        let mut router = BrainRouter::new(RouterConfig::default());
+        let backend = Some(ModelBackend::claude_default());
+        let event = AiEvent::CommandComplete(parsed_few_errors()); // only 1 error
+
+        let action = enhance_with_claude(
+            suggestion_action(), &event, &ctx,
+            TaskComplexity::Complex,
+            &backend, &mut router,
+        );
+        // Should NOT escalate — fewer than 3 errors.
+        if let AiAction::ShowSuggestion { text, .. } = &action {
+            assert_eq!(text, "heuristic suggestion");
+        } else {
+            panic!("expected original suggestion");
+        }
+    }
+
+    #[test]
+    fn claude_skips_non_command_events() {
+        let ctx = test_context();
+        let mut router = BrainRouter::new(RouterConfig::default());
+        let backend = Some(ModelBackend::claude_default());
+        let event = AiEvent::UserIdle { seconds: 30.0 };
+
+        let action = enhance_with_claude(
+            suggestion_action(), &event, &ctx,
+            TaskComplexity::Complex,
+            &backend, &mut router,
+        );
+        if let AiAction::ShowSuggestion { text, .. } = &action {
+            assert_eq!(text, "heuristic suggestion");
+        } else {
+            panic!("expected original suggestion");
+        }
     }
 }

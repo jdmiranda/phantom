@@ -95,6 +95,7 @@ pub struct StatusBar {
     cwd: String,
     branch: String,
     time: String,
+    activity: Option<String>,
 }
 
 impl StatusBar {
@@ -104,6 +105,7 @@ impl StatusBar {
             cwd: String::from("~"),
             branch: String::from("main"),
             time: String::from("00:00"),
+            activity: None,
         }
     }
 
@@ -120,6 +122,17 @@ impl StatusBar {
     /// Update the displayed clock string.
     pub fn set_time(&mut self, time: &str) {
         self.time = time.to_owned();
+    }
+
+    /// Set an activity message (e.g. session welcome-back).
+    /// Cleared automatically after the first render.
+    pub fn set_activity(&mut self, msg: &str) {
+        self.activity = Some(msg.to_owned());
+    }
+
+    /// Take and clear the current activity message.
+    pub fn take_activity(&mut self) -> Option<String> {
+        self.activity.take()
     }
 
     /// Truncate `text` so it fits within `max_chars`, prepending `...` if needed.

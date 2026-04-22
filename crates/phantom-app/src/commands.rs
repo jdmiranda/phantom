@@ -84,9 +84,20 @@ impl App {
                     warn!("Usage: agent <prompt>");
                 }
             }
+            "plugins" | "plugin" => {
+                let list = self.plugin_registry.list();
+                if list.is_empty() {
+                    info!("[PHANTOM]: No plugins loaded");
+                } else {
+                    for p in &list {
+                        let status = if p.enabled { "on" } else { "off" };
+                        info!("[PHANTOM]: {} v{} [{status}] — {}", p.name, p.version, p.description);
+                    }
+                }
+            }
             "help" => {
                 info!(
-                    "Commands: set <k> <v> | theme <name> | agent <prompt> | plain | debug | reload | boot | quit"
+                    "Commands: set <k> <v> | theme <name> | agent <prompt> | plugins | plain | debug | reload | boot | quit"
                 );
             }
             other => {

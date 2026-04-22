@@ -198,3 +198,149 @@ impl Default for EventBus {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── App-topology integration tests ──────────────────────────────
+
+    /// Simulate the 3-topic setup that phantom-app creates on startup
+    /// and verify the event routing used by the update loop.
+    #[test]
+    fn app_topology_three_topics() {
+        let mut bus = EventBus::new();
+        let app_id = 0;
+        let t_output = bus.create_topic(app_id, "terminal.output", DataType::TerminalOutput);
+        let t_error = bus.create_topic(app_id, "terminal.error", DataType::Text);
+        let t_agent = bus.create_topic(app_id, "agent.event", DataType::Json);
+
+        assert_eq!(bus.topic_count(), 3);
+        assert_eq!(bus.topics()[0].name, "terminal.output");
+        assert_eq!(bus.topics()[1].name, "terminal.error");
+        assert_eq!(bus.topics()[2].name, "agent.event");
+
+        // IDs should be sequential.
+        assert_eq!(t_output, 1);
+        assert_eq!(t_error, 2);
+        assert_eq!(t_agent, 3);
+    }
+
+    #[test]
+    fn terminal_output_event_routes_to_subscriber() {
+        let mut bus = EventBus::new();
+        let t_output = bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
+        let brain_id = 100;
+        bus.subscribe(brain_id, t_output);
+
+        bus.emit(BusMessage {
+            topic_id: t_output,
+            sender: 0,
+            payload: json!({"pane_count": 2}),
+            timestamp: 42,
+        });
+
+        let msgs = bus.drain_for(brain_id);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload["pane_count"], 2);
+        assert_eq!(msgs[0].timestamp, 42);
+    }
+
+    #[test]
+    fn error_event_isolated_from_output_subscriber() {
+        let mut bus = EventBus::new();
+        let t_output = bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
+        let t_error = bus.create_topic(0, "terminal.error", DataType::Text);
+
+        let output_sub = 10;
+        let error_sub = 20;
+        bus.subscribe(output_sub, t_output);
+        bus.subscribe(error_sub, t_error);
+
+        bus.emit(BusMessage {
+            topic_id: t_error,
+            sender: 0,
+            payload: json!({"has_errors": true}),
+            timestamp: 1,
+        });
+
+        // Output subscriber should NOT see the error event.
+        let msgs = bus.drain_for(output_sub);
+        assert!(msgs.is_empty());
+
+        // Error subscriber should see it.
+        let msgs = bus.drain_for(error_sub);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload["has_errors"], true);
+    }
+
+    #[test]
+    fn agent_event_carries_task_and_success() {
+        let mut bus = EventBus::new();
+        let t_agent = bus.create_topic(0, "agent.event", DataType::Json);
+        let sub = 50;
+        bus.subscribe(sub, t_agent);
+
+        bus.emit(BusMessage {
+            topic_id: t_agent,
+            sender: 0,
+            payload: json!({"task": "fix the bug", "success": true}),
+            timestamp: 100,
+        });
+
+        let msgs = bus.drain_for(sub);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload["task"], "fix the bug");
+        assert_eq!(msgs[0].payload["success"], true);
+    }
+
+    #[test]
+    fn multiple_events_batch_per_frame() {
+        let mut bus = EventBus::new();
+        let t_output = bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
+        let sub = 10;
+        bus.subscribe(sub, t_output);
+
+        // Simulate 3 frames of terminal output.
+        for ts in 1..=3 {
+            bus.emit(BusMessage {
+                topic_id: t_output,
+                sender: 0,
+                payload: json!({"frame": ts}),
+                timestamp: ts,
+            });
+        }
+
+        let msgs = bus.drain_for(sub);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].payload["frame"], 1);
+        assert_eq!(msgs[2].payload["frame"], 3);
+    }
+
+    #[test]
+    fn drain_clears_queue_for_subscriber() {
+        let mut bus = EventBus::new();
+        let tid = bus.create_topic(0, "x", DataType::Text);
+        let sub = 1;
+        bus.subscribe(sub, tid);
+
+        bus.emit(BusMessage {
+            topic_id: tid,
+            sender: 0,
+            payload: json!("first"),
+            timestamp: 1,
+        });
+
+        let first = bus.drain_for(sub);
+        assert_eq!(first.len(), 1);
+
+        // Second drain should be empty.
+        let second = bus.drain_for(sub);
+        assert!(second.is_empty());
+    }
+}
