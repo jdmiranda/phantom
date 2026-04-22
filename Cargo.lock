@@ -1973,6 +1973,7 @@ dependencies = [
  "phantom-semantic",
  "phantom-terminal",
  "phantom-ui",
+ "serde_json",
  "winit",
 ]
 

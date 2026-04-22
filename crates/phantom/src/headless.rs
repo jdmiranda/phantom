@@ -70,14 +70,14 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
     // Chat conversation buffer — persists across messages within the session.
     let mut chat_history: Vec<AgentMessage> = Vec::new();
 
-    print!("> ");
+    print!("[USER]: ");
     io::stdout().flush()?;
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let input = line?.trim().to_string();
         if input.is_empty() {
-            print!("> ");
+            print!("[USER]: ");
             io::stdout().flush()?;
             continue;
         }
@@ -120,7 +120,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
 
         if handled {
             drain_brain(&brain);
-            print!("> ");
+            print!("[USER]: ");
             io::stdout().flush()?;
             continue;
         }
@@ -136,13 +136,13 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
             };
 
             if let Some(ref cfg) = claude_config {
-                run_chat(cfg, msg, &context, &memory, &mut chat_history);
+                run_chat(cfg, msg, &context, &memory, &mut chat_history, &mut agents, &project_dir, &mut tool_use_ids);
             } else {
                 println!("[PHANTOM]: ANTHROPIC_API_KEY not set. Cannot chat.");
             }
 
             drain_brain(&brain);
-            print!("> ");
+            print!("[USER]: ");
             io::stdout().flush()?;
             continue;
         }
@@ -175,7 +175,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
                 }
 
                 drain_brain(&brain);
-                print!("> ");
+                print!("[USER]: ");
                 io::stdout().flush()?;
                 continue;
             }
@@ -232,7 +232,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         }
 
         drain_brain(&brain);
-        print!("> ");
+        print!("[USER]: ");
         io::stdout().flush()?;
     }
 
@@ -492,19 +492,36 @@ fn print_status(context: &ProjectContext, agents: &AgentManager, memory: &Memory
 // Chat with AI
 // ---------------------------------------------------------------------------
 
-/// Run a chat turn with Claude, maintaining conversation history across the session.
+/// Run a chat turn with Claude. Chat is the COMMANDER — it can spawn
+/// constrained agents to do work but never touches files directly.
+///
+/// Chat gets one meta-tool: `spawn_agent`. When it needs to read files,
+/// run commands, or modify code, it spawns an agent with the minimum
+/// permission set for the task.
 fn run_chat(
     config: &ClaudeConfig,
     user_msg: &str,
     context: &ProjectContext,
     memory: &MemoryStore,
     chat_history: &mut Vec<AgentMessage>,
+    agents: &mut AgentManager,
+    project_dir: &str,
+    tool_use_ids: &mut Vec<String>,
 ) {
+    use phantom_agents::agent::{Agent, AgentTask};
     // Build system prompt with project context + memory on first message.
     if chat_history.is_empty() {
         let system = format!(
-            "You are Phantom, an AI-native terminal assistant. You're running in headless mode \
-            inside the user's terminal. Be concise, technical, and helpful.\n\n\
+            "You are Phantom, an AI-native terminal assistant running in headless mode.\n\
+            You are the COMMANDER. You do NOT have direct file or command access.\n\
+            Instead, you have a `spawn_agent` tool to delegate work to sandboxed agents.\n\n\
+            When the user asks you to read files, run commands, or modify code, spawn an agent \
+            with the MINIMUM permissions needed:\n\
+            - Reading files: permissions = [\"ReadFiles\"]\n\
+            - Running commands: permissions = [\"RunCommands\"]\n\
+            - Writing/editing files: permissions = [\"ReadFiles\", \"WriteFiles\"]\n\
+            - Full dev work: permissions = [\"ReadFiles\", \"WriteFiles\", \"RunCommands\", \"GitAccess\"]\n\n\
+            Be concise, technical, and helpful. Show the agent's output to the user.\n\n\
             PROJECT CONTEXT:\n{}\n\n\
             PROJECT MEMORY:\n{}",
             context.agent_context(),
@@ -516,21 +533,39 @@ fn run_chat(
     // Add user message.
     chat_history.push(AgentMessage::User(user_msg.to_string()));
 
-    // Build a temporary agent to send the conversation.
-    use phantom_agents::agent::{Agent, AgentTask};
+    // Build the spawn_agent tool definition.
+    let spawn_tool = phantom_agents::tools::ToolDefinition {
+        name: "spawn_agent".to_string(),
+        description: "Spawn a sandboxed agent to perform work. The agent has tools (ReadFile, WriteFile, RunCommand, etc) constrained by the permissions you specify. Use minimum permissions needed.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "What the agent should do"
+                },
+                "permissions": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["ReadFiles", "WriteFiles", "RunCommands", "GitAccess", "Network"] },
+                    "description": "Minimum permissions the agent needs"
+                }
+            },
+            "required": ["task", "permissions"]
+        }),
+    };
+
+    // Build temp agent with chat history.
     let mut temp_agent = Agent::new(9999, AgentTask::FreeForm {
         prompt: user_msg.to_string(),
     });
-
-    // Copy chat history into the agent's messages.
     for msg in chat_history.iter() {
         temp_agent.push_message(msg.clone());
     }
 
-    // Send to Claude (no tools — this is just chat, not agent work).
-    let mut handle = send_message(config, &temp_agent, &[], &[]);
+    // Send to Claude with the spawn_agent tool.
+    let mut handle = send_message(config, &temp_agent, &[spawn_tool], tool_use_ids);
 
-    // Stream the response.
+    // Stream the response, handle tool calls.
     let mut full_response = String::new();
     print!("[PHANTOM]: ");
     io::stdout().flush().ok();
@@ -542,6 +577,87 @@ fn run_chat(
                 io::stdout().flush().ok();
                 full_response.push_str(&text);
             }
+            Some(ApiEvent::ToolUse { id, call }) => {
+                // Chat wants to spawn an agent.
+                let task_str = call.args.get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown task")
+                    .to_string();
+
+                let perms: Vec<String> = call.args.get("permissions")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                println!("\n[PHANTOM]: Spawning agent: \"{task_str}\" [perms: {}]", perms.join(", "));
+
+                // Spawn the agent.
+                let agent_task = AgentTask::FreeForm { prompt: task_str.clone() };
+                let agent_id = agents.spawn(agent_task);
+
+                // Drive the agent with full tools (filtered by permissions).
+                let mut agent_output = String::new();
+                tool_use_ids.clear();
+                if let Some(agent) = agents.get_mut(agent_id) {
+                    let sys = agent.system_prompt();
+                    agent.push_message(AgentMessage::System(sys));
+                    agent.push_message(AgentMessage::User(task_str));
+                }
+
+                // Run the agent loop.
+                run_agent_loop(agents, config, project_dir, tool_use_ids);
+
+                // Collect agent output.
+                if let Some(agent) = agents.get(agent_id) {
+                    for line in &agent.output_log {
+                        agent_output.push_str(line);
+                        agent_output.push('\n');
+                    }
+                    // Also get the last assistant message.
+                    for msg in agent.messages.iter().rev() {
+                        if let AgentMessage::Assistant(text) = msg {
+                            if agent_output.is_empty() {
+                                agent_output = text.clone();
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                if agent_output.is_empty() {
+                    agent_output = "Agent completed with no output.".to_string();
+                }
+
+                // Feed agent result back to chat as a tool result.
+                let _ = id; // tool_use_id tracked for multi-turn
+                chat_history.push(AgentMessage::ToolCall(call));
+                chat_history.push(AgentMessage::ToolResult(phantom_agents::ToolResult {
+                    tool: phantom_agents::ToolType::ReadFile, // placeholder type
+                    success: true,
+                    output: agent_output.clone(),
+                }));
+
+                println!("[AGENT RESULT]: {}", &agent_output[..agent_output.len().min(500)]);
+
+                // Continue the chat conversation with the tool result.
+                // Rebuild and resend.
+                let mut followup_agent = Agent::new(9999, AgentTask::FreeForm {
+                    prompt: user_msg.to_string(),
+                });
+                for msg in chat_history.iter() {
+                    followup_agent.push_message(msg.clone());
+                }
+
+                let spawn_tool_again = phantom_agents::tools::ToolDefinition {
+                    name: "spawn_agent".to_string(),
+                    description: "Spawn a sandboxed agent to perform work.".to_string(),
+                    parameters: serde_json::json!({"type": "object", "properties": {"task": {"type": "string"}, "permissions": {"type": "array", "items": {"type": "string"}}}, "required": ["task", "permissions"]}),
+                };
+
+                handle = send_message(config, &followup_agent, &[spawn_tool_again], tool_use_ids);
+                print!("[PHANTOM]: ");
+                io::stdout().flush().ok();
+            }
             Some(ApiEvent::Done) => {
                 println!();
                 break;
@@ -550,14 +666,13 @@ fn run_chat(
                 println!("\n[ERROR]: {e}");
                 break;
             }
-            Some(_) => {}
             None => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }
 
-    // Save assistant response to chat history for context in next turn.
+    // Save final response to chat history.
     if !full_response.is_empty() {
         chat_history.push(AgentMessage::Assistant(full_response));
     }
