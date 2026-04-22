@@ -296,7 +296,7 @@ impl App {
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
         _chrome_quads: &mut Vec<QuadInstance>,
-        chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+        _chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         let _has_multiple = self.panes.len() > 1;
         let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
@@ -553,9 +553,9 @@ impl App {
             self.render_overlay_text(label, *x, *y, *color, glyphs);
         }
 
-        // -- App-container title text (routed to chrome overlay — post-CRT) --
+        // -- App-container title text (scene pass — curves with CRT) --
         for (label, x, y, color) in &container_titles {
-            self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
+            self.render_overlay_text(label, *x, *y, *color, glyphs);
         }
 
         // -- Tab bar --
