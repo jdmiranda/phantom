@@ -283,6 +283,17 @@ fn builtin_tools() -> Vec<McpTool> {
             }),
         },
         McpTool {
+            name: "phantom.send_key".to_owned(),
+            description: "Send a keypress to the app. State-aware: dismisses the boot screen if active; otherwise goes to the focused pane's PTY. Named keys supported: Enter, Tab, Escape, Space, Backspace, Up, Down, Left, Right. Anything else is sent verbatim.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Named key or literal character(s) to send"},
+                },
+                "required": ["key"],
+            }),
+        },
+        McpTool {
             name: "phantom.split_pane".to_owned(),
             description: "Create a new pane by splitting an existing one".to_owned(),
             input_schema: json!({
@@ -384,7 +395,7 @@ mod tests {
         let req = create_request(2, "tools/list", json!({}));
         let resp = s.handle_request(&req);
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let names: Vec<String> = tools.iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
         assert!(names.contains(&"phantom.run_command".to_owned()));
         assert!(names.contains(&"phantom.screenshot".to_owned()));
@@ -466,9 +477,9 @@ mod tests {
     }
 
     #[test]
-    fn server_has_seven_tools_and_three_resources() {
+    fn server_has_eight_tools_and_three_resources() {
         let s = server();
-        assert_eq!(s.tools().len(), 7);
+        assert_eq!(s.tools().len(), 8);
         assert_eq!(s.resources().len(), 3);
     }
 }

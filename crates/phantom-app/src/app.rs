@@ -70,6 +70,25 @@ const CONTAINER_TITLE_H_CELLS: f32 = 1.2;
 /// Bottom padding inside the app container, in multiples of cell height.
 const CONTAINER_PAD_B_CELLS: f32 = 0.3;
 
+/// Translate an MCP `phantom.send_key` argument into terminal input bytes.
+///
+/// Named keys map to their ANSI/VT sequences; anything else is passed
+/// through as UTF-8 bytes.
+fn key_name_to_bytes(key: &str) -> Vec<u8> {
+    match key {
+        "Enter" | "Return" => b"\r".to_vec(),
+        "Tab" => b"\t".to_vec(),
+        "Escape" | "Esc" => b"\x1b".to_vec(),
+        "Space" => b" ".to_vec(),
+        "Backspace" => b"\x7f".to_vec(),
+        "Up" => b"\x1b[A".to_vec(),
+        "Down" => b"\x1b[B".to_vec(),
+        "Right" => b"\x1b[C".to_vec(),
+        "Left" => b"\x1b[D".to_vec(),
+        other => other.as_bytes().to_vec(),
+    }
+}
+
 /// Compute the terminal-grid area inside a pane's outer layout rect.
 ///
 /// The container claims padding on all four sides plus a title strip at the
@@ -1104,6 +1123,10 @@ impl App {
                 let result = self.mcp_send_to_pty(&command);
                 let _ = reply.send(result);
             }
+            AppCommand::SendKey { key, reply } => {
+                let result = self.mcp_send_key(&key);
+                let _ = reply.send(result);
+            }
             AppCommand::ReadTerminalState { reply } => {
                 let text = self.mcp_read_terminal_state();
                 let _ = reply.send(Ok(text));
@@ -1168,6 +1191,35 @@ impl App {
             width,
             height,
         })
+    }
+
+    /// Handle an external key event over MCP.
+    ///
+    /// State-aware: during boot, any key dismisses the current pause or
+    /// skips the sequence. During normal operation, the key name is
+    /// translated to terminal input bytes and written to the focused
+    /// pane's PTY.
+    ///
+    /// Returns a short note describing what happened (dismissed boot,
+    /// skipped boot, or wrote N bytes to PTY) for debugging over the wire.
+    fn mcp_send_key(&mut self, key: &str) -> Result<String, String> {
+        if self.state == AppState::Boot {
+            if self.boot.is_waiting() {
+                self.boot.dismiss();
+                return Ok("dismissed boot pause".into());
+            }
+            self.boot.skip();
+            return Ok("skipped boot sequence".into());
+        }
+
+        let bytes = key_name_to_bytes(key);
+        let pane = self.panes.get_mut(self.focused_pane)
+            .ok_or_else(|| "no focused pane".to_string())?;
+        pane.terminal.pty_write(&bytes)
+            .map_err(|e| format!("pty_write failed: {e}"))?;
+        // Reset idle timer — an MCP key counts as user input for brain purposes.
+        self.last_input_time = Instant::now();
+        Ok(format!("wrote {} bytes to pty", bytes.len()))
     }
 
     /// Write a string to the focused pane's PTY. Appends a newline so the

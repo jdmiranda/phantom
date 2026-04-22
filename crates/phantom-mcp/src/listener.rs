@@ -45,6 +45,14 @@ pub enum AppCommand {
         command: String,
         reply: SyncSender<Result<(), String>>,
     },
+    /// Send a keypress to the app. State-aware: dismisses the boot screen
+    /// if active; otherwise translates to terminal input bytes. Supports
+    /// named keys ("Enter", "Tab", "Escape", "Space", "Up", "Down", "Left",
+    /// "Right", "Backspace") and plain character strings.
+    SendKey {
+        key: String,
+        reply: SyncSender<Result<String, String>>,
+    },
     /// Extract visible terminal grid from the focused pane as plain text.
     ReadTerminalState {
         reply: SyncSender<Result<String, String>>,
@@ -259,9 +267,55 @@ fn dispatch(
     match tool_name {
         "phantom.screenshot" => dispatch_screenshot(id, &args, cmd_tx),
         "phantom.run_command" => dispatch_run_command(id, &args, cmd_tx),
+        "phantom.send_key" => dispatch_send_key(id, &args, cmd_tx),
         "phantom.get_context" => dispatch_get_context(id, cmd_tx),
         // For every other tool, defer to the stub implementation in `server`.
         _ => server.handle_request(request),
+    }
+}
+
+fn dispatch_send_key(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let key = args
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if key.is_empty() {
+        return protocol::create_error(id, INVALID_PARAMS, "missing 'key' argument");
+    }
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::SendKey {
+            key: key.clone(),
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv() {
+        Ok(Ok(note)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("key '{key}' sent: {note}")}],
+                "key": key,
+                "note": note,
+            }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("send_key failed: {e}")}],
+                "isError": true,
+            }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
     }
 }
 
