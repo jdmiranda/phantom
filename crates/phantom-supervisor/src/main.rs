@@ -355,6 +355,10 @@ impl Supervisor {
             AppMessage::Log(text) => {
                 info!("[phantom] {text}");
             }
+            AppMessage::ExitClean => {
+                info!("phantom requested clean exit — supervisor standing down");
+                self.shutdown.store(true, Ordering::Relaxed);
+            }
         }
     }
 

@@ -120,6 +120,8 @@ pub enum AppMessage {
     Log(String),
     /// Response to a `Ping`.
     Pong,
+    /// App is exiting intentionally — supervisor should NOT restart.
+    ExitClean,
 }
 
 impl AppMessage {
@@ -129,6 +131,7 @@ impl AppMessage {
             Self::Ready => "READY".into(),
             Self::Log(msg) => format!("LOG:{msg}"),
             Self::Pong => "PONG".into(),
+            Self::ExitClean => "EXIT_CLEAN".into(),
         }
     }
 
@@ -140,6 +143,7 @@ impl AppMessage {
                 "HEARTBEAT" => Some(Self::Heartbeat),
                 "READY" => Some(Self::Ready),
                 "PONG" => Some(Self::Pong),
+                "EXIT_CLEAN" => Some(Self::ExitClean),
                 _ => None,
             }
         }

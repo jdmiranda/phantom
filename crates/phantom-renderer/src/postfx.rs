@@ -12,7 +12,7 @@ use wgpu::{
     ColorTargetState, ColorWrites, Device, FilterMode, FragmentState, MultisampleState,
     PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, Queue, RenderPipeline,
     RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
-    ShaderStages, Texture, TextureDescriptor, TextureDimension, TextureFormat,
+    Sampler, ShaderStages, Texture, TextureDescriptor, TextureDimension, TextureFormat,
     TextureSampleType, TextureUsages, TextureView, TextureViewDimension, VertexState,
 };
 
@@ -291,6 +291,8 @@ pub struct PostFxPipeline {
     bind_group: BindGroup,
     /// Uniform buffer holding `PostFxParams`.
     uniform_buf: Buffer,
+    /// Linear sampler for the offscreen texture — created once, reused on resize.
+    sampler: Sampler,
     /// Surface format, stored for texture recreation on resize.
     format: TextureFormat,
 }
@@ -430,6 +432,7 @@ impl PostFxPipeline {
             bind_group_layout,
             bind_group,
             uniform_buf,
+            sampler,
             format: surface_format,
         }
     }
@@ -446,20 +449,12 @@ impl PostFxPipeline {
         self.offscreen_texture = texture;
         self.offscreen_view = view;
 
-        // Recreate sampler (same config) — needed for the new bind group.
-        let sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("postfx-sampler"),
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Nearest,
-            ..Default::default()
-        });
-
+        // Reuse the existing sampler — it's immutable and config-independent.
         self.bind_group = create_bind_group(
             device,
             &self.bind_group_layout,
             &self.offscreen_view,
-            &sampler,
+            &self.sampler,
             &self.uniform_buf,
         );
     }
