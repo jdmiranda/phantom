@@ -295,7 +295,7 @@ impl App {
         screen_size: [f32; 2],
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
-        chrome_quads: &mut Vec<QuadInstance>,
+        _chrome_quads: &mut Vec<QuadInstance>,
         chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         let _has_multiple = self.panes.len() > 1;
@@ -389,7 +389,7 @@ impl App {
                     border_radius: 6.0,
                 });
 
-                // Focus-aware border around the entire container.
+                // Focus-aware border (scene pass — curves with CRT alongside bg).
                 let border_color = if is_focused {
                     [0.2, 1.0, 0.5, 0.85]
                 } else {
@@ -397,13 +397,13 @@ impl App {
                 };
                 let t = 1.0;
                 // top
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
                 // bottom
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
                 // left
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
                 // right
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                quads.push(QuadInstance { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
 
                 // Title text: "● shell · {cols}×{rows}"
                 let dot_color = if is_focused {
