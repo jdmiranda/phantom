@@ -41,10 +41,12 @@
 
 pub mod brain;
 pub mod events;
+pub mod router;
 pub mod scoring;
 
 pub use brain::*;
 pub use events::*;
+pub use router::*;
 pub use scoring::*;
 
 // ===========================================================================
