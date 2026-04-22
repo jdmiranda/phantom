@@ -1970,6 +1970,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "phantom-agents"
 version = "0.1.0"
 dependencies = [
