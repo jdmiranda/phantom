@@ -108,7 +108,21 @@ impl ApplicationHandler for Phantom {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(app) = &mut self.app {
-                    app.handle_key_with_mods(event, self.modifiers);
+                    let app_ptr = app as *mut App;
+                    let mods = self.modifiers;
+                    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let app = unsafe { &mut *app_ptr };
+                        app.handle_key_with_mods(event, mods);
+                    })) {
+                        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        log::error!("Input panic (recovered): {msg}");
+                    }
                     if app.should_quit() {
                         app.shutdown();
                         event_loop.exit();
@@ -120,9 +134,25 @@ impl ApplicationHandler for Phantom {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(app) = &mut self.app {
-                    app.update();
-                    if let Err(e) = app.render() {
-                        log::error!("Render error: {e}");
+                    // Catch panics in update/render so a single bad frame
+                    // doesn't kill the event loop. Log and continue.
+                    let app_ptr = app as *mut App;
+                    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // SAFETY: we hold &mut self.app, nobody else touches it.
+                        let app = unsafe { &mut *app_ptr };
+                        app.update();
+                        if let Err(e) = app.render() {
+                            log::error!("Render error: {e}");
+                        }
+                    })) {
+                        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        log::error!("Frame panic (recovered): {msg}");
                     }
                 }
                 if let Some(window) = &self.window {
