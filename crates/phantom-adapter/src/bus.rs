@@ -54,6 +54,9 @@ pub struct Topic {
     pub publisher: AppId,
 }
 
+/// Maximum queued messages before oldest are dropped.
+const MAX_QUEUE_SIZE: usize = 256;
+
 /// The central event bus for inter-app communication.
 pub struct EventBus {
     topics: Vec<Topic>,
@@ -121,9 +124,17 @@ impl EventBus {
         }
     }
 
-    /// Enqueue a message.
+    /// Enqueue a message. Drops oldest messages if the queue is full.
     pub fn emit(&mut self, message: BusMessage) {
+        if self.queue.len() >= MAX_QUEUE_SIZE {
+            self.queue.pop_front();
+        }
         self.queue.push_back(message);
+    }
+
+    /// Number of messages currently queued.
+    pub fn queue_len(&self) -> usize {
+        self.queue.len()
     }
 
     /// Drain and return all queued messages whose topic `subscriber` is
@@ -320,6 +331,31 @@ mod tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].payload["frame"], 1);
         assert_eq!(msgs[2].payload["frame"], 3);
+    }
+
+    #[test]
+    fn emit_caps_queue_at_max_size() {
+        let mut bus = EventBus::new();
+        let tid = bus.create_topic(0, "spam", DataType::Text);
+
+        // Fill past the cap.
+        for i in 0..300 {
+            bus.emit(BusMessage {
+                topic_id: tid,
+                sender: 0,
+                payload: json!(i),
+                timestamp: i as u64,
+            });
+        }
+
+        // Queue should never exceed MAX_QUEUE_SIZE.
+        assert!(bus.queue_len() <= 256, "queue len was {}", bus.queue_len());
+        // Oldest messages should have been dropped.
+        // The newest message (299) should be in the queue.
+        let sub = 1;
+        bus.subscribe(sub, tid);
+        let msgs = bus.drain_for(sub);
+        assert_eq!(msgs.last().unwrap().payload, json!(299));
     }
 
     #[test]

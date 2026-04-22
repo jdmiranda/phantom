@@ -86,6 +86,7 @@ impl App {
             }
             "sysmon" | "monitor" | "stats" => {
                 self.sysmon_visible = !self.sysmon_visible;
+                self.sysmon.set_active(self.sysmon_visible);
                 info!("System monitor: {}", if self.sysmon_visible { "ON" } else { "OFF" });
             }
             "plugins" | "plugin" => {
