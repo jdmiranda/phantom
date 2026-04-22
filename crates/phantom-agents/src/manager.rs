@@ -96,6 +96,38 @@ impl AgentManager {
         self.active_count() < self.max_concurrent
     }
 
+    /// Kill (force-complete) an agent by ID. Returns `true` if the agent existed and was killed.
+    pub fn kill(&mut self, id: AgentId) -> bool {
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
+            if matches!(
+                agent.status,
+                AgentStatus::Queued | AgentStatus::Working | AgentStatus::WaitingForTool
+            ) {
+                agent.complete(false);
+                agent.log("[killed by user]");
+                self.promote_queued();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Kill all active agents. Returns the number of agents killed.
+    pub fn kill_all(&mut self) -> usize {
+        let mut count = 0;
+        for agent in &mut self.agents {
+            if matches!(
+                agent.status,
+                AgentStatus::Queued | AgentStatus::Working | AgentStatus::WaitingForTool
+            ) {
+                agent.complete(false);
+                agent.log("[killed by user]");
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Promote queued agents to working if capacity is available.
     fn promote_queued(&mut self) {
         let mut active = self.active_count();

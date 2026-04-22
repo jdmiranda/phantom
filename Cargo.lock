@@ -2034,6 +2034,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-nlp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "phantom-context",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "phantom-protocol"
 version = "0.1.0"
 dependencies = [

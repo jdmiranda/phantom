@@ -10,7 +10,10 @@
 
 pub mod agent;
 pub mod api;
+pub mod cli;
 pub mod manager;
+pub mod render;
+pub mod suggest;
 pub mod tools;
 
 pub use agent::*;

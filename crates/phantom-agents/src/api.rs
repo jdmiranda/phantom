@@ -138,18 +138,8 @@ impl ApiHandle {
 // Message format conversion
 // ---------------------------------------------------------------------------
 
-/// Convert an `AgentMessage` slice into the `messages` array for the API.
-///
-/// System messages are excluded here -- they are handled via the top-level
-/// `system` field. Adjacent tool calls from the assistant are grouped into a
-/// single assistant message, and adjacent tool results are grouped into a
-/// single user message, matching the API's expected interleaving.
-///
-/// **ID tracking**: The `tools::ToolCall` type does not carry an API-assigned
-/// ID. When converting outbound messages, we generate deterministic placeholder
-/// IDs (`"toolu_N"`) so the API gets valid JSON. The *real* IDs come back from
-/// the API response and must be tracked by the caller (typically via the
-/// `tool_use_ids` map passed to [`build_messages_with_ids`]).
+/// Convenience wrapper: convert messages with auto-generated placeholder IDs.
+#[cfg(test)]
 fn build_messages(messages: &[AgentMessage]) -> Vec<Value> {
     build_messages_with_ids(messages, &[])
 }
@@ -212,7 +202,7 @@ fn build_messages_with_ids(messages: &[AgentMessage], tool_use_ids: &[String]) -
                     "content": content_blocks,
                 }));
             }
-            AgentMessage::ToolResult(tr) => {
+            AgentMessage::ToolResult(_) => {
                 // Collect consecutive tool results into a single user message.
                 let mut content_blocks = Vec::new();
                 while i < messages.len() {
