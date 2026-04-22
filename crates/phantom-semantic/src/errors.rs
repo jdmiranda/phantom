@@ -150,8 +150,9 @@ impl ErrorHighlighter {
 
         // file.ext:line:col  or  file.ext:line
         // Requires the file portion to contain a dot (so we match actual file paths).
+        // Allows leading whitespace, `-->`, `at `, or `(` (for stack traces).
         let general_re = Regex::new(
-            r"(?m)(?:^|\s|-->\s*|at\s+)([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d+)(?::(\d+))?"
+            r"(?m)(?:^|\s|-->\s*|at\s+|\()([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d+)(?::(\d+))?"
         )
         .unwrap();
 

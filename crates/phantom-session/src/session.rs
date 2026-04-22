@@ -1,0 +1,566 @@
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Saved state of a single terminal pane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneState {
+    pub working_dir: String,
+    pub is_focused: bool,
+    pub cols: u16,
+    pub rows: u16,
+    pub title: String,
+    /// How the pane was split relative to its parent.
+    pub split: Option<SplitDirection>,
+}
+
+/// Direction a pane was split from its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
+
+/// Full saved session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionState {
+    /// Schema version for forward compatibility.
+    pub version: u32,
+    /// When saved (unix epoch seconds).
+    pub timestamp: u64,
+    pub project_dir: String,
+    pub project_name: String,
+    pub git_branch: Option<String>,
+    pub panes: Vec<PaneState>,
+    pub theme_name: String,
+    pub font_size: f32,
+    /// Short note about what the user was doing.
+    pub activity: Option<String>,
+}
+
+/// Summary for listing sessions without loading full state.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub path: PathBuf,
+    pub project_name: String,
+    pub timestamp: u64,
+    pub pane_count: usize,
+    pub activity: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// SessionManager
+// ---------------------------------------------------------------------------
+
+/// Session persistence manager.
+///
+/// Sessions are stored as JSON files under `~/.config/phantom/sessions/`
+/// with the naming scheme `{project_hash}_{timestamp}.json`.
+pub struct SessionManager {
+    session_dir: PathBuf,
+}
+
+impl SessionManager {
+    /// Create a session manager using the default session directory
+    /// (`~/.config/phantom/sessions/`).
+    pub fn new() -> Result<Self> {
+        let home = std::env::var("HOME").context("HOME not set")?;
+        let session_dir = PathBuf::from(home)
+            .join(".config")
+            .join("phantom")
+            .join("sessions");
+        fs::create_dir_all(&session_dir)
+            .with_context(|| format!("failed to create session dir: {}", session_dir.display()))?;
+        Ok(Self { session_dir })
+    }
+
+    /// Create a session manager rooted at a custom directory (useful for tests).
+    pub fn with_dir(session_dir: PathBuf) -> Result<Self> {
+        fs::create_dir_all(&session_dir)
+            .with_context(|| format!("failed to create session dir: {}", session_dir.display()))?;
+        Ok(Self { session_dir })
+    }
+
+    /// Save a session state to disk.
+    ///
+    /// Returns the path to the written file.
+    pub fn save(&self, state: &SessionState) -> Result<PathBuf> {
+        let hash = project_hash(&state.project_dir);
+        let filename = format!("{hash}_{}.json", state.timestamp);
+        let path = self.session_dir.join(&filename);
+        let json =
+            serde_json::to_string_pretty(state).context("failed to serialize session state")?;
+        fs::write(&path, json)
+            .with_context(|| format!("failed to write session file: {}", path.display()))?;
+        log::info!("session saved: {}", path.display());
+        Ok(path)
+    }
+
+    /// Load the most recent session for a project directory.
+    ///
+    /// Returns `None` if no session exists for the given project.
+    pub fn load_latest(&self, project_dir: &str) -> Result<Option<SessionState>> {
+        let hash = project_hash(project_dir);
+        let prefix = format!("{hash}_");
+
+        let mut matching: Vec<PathBuf> = self.session_files()?.into_iter().filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        }).collect();
+
+        // Sort by timestamp descending (encoded in filename).
+        matching.sort_by(|a, b| {
+            let ts_a = timestamp_from_filename(a);
+            let ts_b = timestamp_from_filename(b);
+            ts_b.cmp(&ts_a)
+        });
+
+        match matching.first() {
+            Some(path) => {
+                let state = self.load(path)?;
+                Ok(Some(state))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Load a specific session by file path.
+    pub fn load(&self, path: &Path) -> Result<SessionState> {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read session file: {}", path.display()))?;
+        let state: SessionState = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse session file: {}", path.display()))?;
+        Ok(state)
+    }
+
+    /// List all saved sessions, most recent first.
+    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        let files = self.session_files()?;
+        let mut summaries = Vec::new();
+
+        for path in &files {
+            match self.load(path) {
+                Ok(state) => {
+                    summaries.push(SessionSummary {
+                        path: path.clone(),
+                        project_name: state.project_name,
+                        timestamp: state.timestamp,
+                        pane_count: state.panes.len(),
+                        activity: state.activity,
+                    });
+                }
+                Err(e) => {
+                    log::warn!("skipping corrupt session file {}: {e}", path.display());
+                }
+            }
+        }
+
+        // Most recent first.
+        summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(summaries)
+    }
+
+    /// Delete sessions older than `max_age_days`.
+    ///
+    /// Returns the number of files deleted.
+    pub fn cleanup(&self, max_age_days: u32) -> Result<u32> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff = now.saturating_sub(u64::from(max_age_days) * 86_400);
+        let mut deleted = 0u32;
+
+        for path in self.session_files()? {
+            let ts = timestamp_from_filename(&path);
+            if ts < cutoff {
+                if let Err(e) = fs::remove_file(&path) {
+                    log::warn!("failed to delete {}: {e}", path.display());
+                } else {
+                    deleted += 1;
+                }
+            }
+        }
+
+        log::info!("session cleanup: deleted {deleted} file(s) older than {max_age_days} days");
+        Ok(deleted)
+    }
+
+    /// Build a welcome-back message from a saved session.
+    pub fn welcome_message(state: &SessionState) -> String {
+        let mut parts = vec![format!(
+            "Welcome back. You were working on {}",
+            state.project_name
+        )];
+
+        if let Some(ref branch) = state.git_branch {
+            parts.push(format!("on branch {branch}"));
+        }
+
+        let mut msg = parts.join(" ");
+        msg.push('.');
+
+        let pane_count = state.panes.len();
+        if pane_count > 0 {
+            msg.push_str(&format!(
+                " {} pane{} open.",
+                pane_count,
+                if pane_count == 1 { "" } else { "s" }
+            ));
+        }
+
+        if let Some(ref activity) = state.activity {
+            msg.push(' ');
+            msg.push_str(activity);
+        }
+
+        msg
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    /// Collect all `.json` session files in the session directory.
+    fn session_files(&self) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        let entries = fs::read_dir(&self.session_dir).with_context(|| {
+            format!(
+                "failed to read session dir: {}",
+                self.session_dir.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                files.push(path);
+            }
+        }
+        Ok(files)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+/// Deterministic hash of a project directory path, used as a filename prefix.
+fn project_hash(project_dir: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    project_dir.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Extract the unix timestamp from a session filename like `{hash}_{timestamp}.json`.
+fn timestamp_from_filename(path: &Path) -> u64 {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit('_').next())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Return the current unix epoch in seconds.
+#[cfg(test)]
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_secs()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Helper: create a `SessionManager` backed by a temp directory.
+    fn test_manager() -> (SessionManager, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(dir.path().to_path_buf()).unwrap();
+        (mgr, dir)
+    }
+
+    /// Helper: build a minimal valid session state.
+    fn sample_state(project_dir: &str, project_name: &str, timestamp: u64) -> SessionState {
+        SessionState {
+            version: 1,
+            timestamp,
+            project_dir: project_dir.into(),
+            project_name: project_name.into(),
+            git_branch: Some("main".into()),
+            panes: vec![
+                PaneState {
+                    working_dir: project_dir.into(),
+                    is_focused: true,
+                    cols: 120,
+                    rows: 40,
+                    title: "zsh".into(),
+                    split: None,
+                },
+            ],
+            theme_name: "dracula".into(),
+            font_size: 14.0,
+            activity: Some("Implementing session save".into()),
+        }
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let (mgr, _dir) = test_manager();
+        let state = sample_state("/home/dev/phantom", "phantom", 1_700_000_000);
+
+        let path = mgr.save(&state).unwrap();
+        let loaded = mgr.load(&path).unwrap();
+
+        assert_eq!(loaded.version, state.version);
+        assert_eq!(loaded.timestamp, state.timestamp);
+        assert_eq!(loaded.project_dir, state.project_dir);
+        assert_eq!(loaded.project_name, state.project_name);
+        assert_eq!(loaded.git_branch, state.git_branch);
+        assert_eq!(loaded.panes.len(), 1);
+        assert_eq!(loaded.panes[0].cols, 120);
+        assert_eq!(loaded.theme_name, "dracula");
+        assert_eq!(loaded.font_size, 14.0);
+        assert_eq!(loaded.activity, state.activity);
+    }
+
+    #[test]
+    fn save_creates_json_file() {
+        let (mgr, dir) = test_manager();
+        let state = sample_state("/tmp/proj", "proj", 1_700_000_001);
+
+        let path = mgr.save(&state).unwrap();
+
+        assert!(path.exists());
+        assert_eq!(path.extension().unwrap(), "json");
+        assert!(path.starts_with(dir.path()));
+    }
+
+    #[test]
+    fn load_latest_picks_newest() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+
+        let old = sample_state(project_dir, "phantom", 1_700_000_000);
+        let mid = sample_state(project_dir, "phantom", 1_700_000_100);
+        let new = sample_state(project_dir, "phantom", 1_700_000_200);
+
+        // Save out of order to verify sorting.
+        mgr.save(&mid).unwrap();
+        mgr.save(&old).unwrap();
+        mgr.save(&new).unwrap();
+
+        let latest = mgr.load_latest(project_dir).unwrap().unwrap();
+        assert_eq!(latest.timestamp, 1_700_000_200);
+    }
+
+    #[test]
+    fn load_latest_returns_none_for_unknown_project() {
+        let (mgr, _dir) = test_manager();
+        let state = sample_state("/home/dev/phantom", "phantom", 1_700_000_000);
+        mgr.save(&state).unwrap();
+
+        let result = mgr.load_latest("/home/dev/other").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn list_sessions_returns_all_sorted() {
+        let (mgr, _dir) = test_manager();
+
+        mgr.save(&sample_state("/proj/a", "alpha", 1_700_000_100))
+            .unwrap();
+        mgr.save(&sample_state("/proj/b", "bravo", 1_700_000_300))
+            .unwrap();
+        mgr.save(&sample_state("/proj/a", "alpha", 1_700_000_200))
+            .unwrap();
+
+        let sessions = mgr.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 3);
+        // Most recent first.
+        assert_eq!(sessions[0].timestamp, 1_700_000_300);
+        assert_eq!(sessions[0].project_name, "bravo");
+        assert_eq!(sessions[1].timestamp, 1_700_000_200);
+        assert_eq!(sessions[2].timestamp, 1_700_000_100);
+    }
+
+    #[test]
+    fn list_sessions_includes_pane_count_and_activity() {
+        let (mgr, _dir) = test_manager();
+        let mut state = sample_state("/proj/x", "xray", 1_700_000_000);
+        state.panes.push(PaneState {
+            working_dir: "/proj/x/tests".into(),
+            is_focused: false,
+            cols: 80,
+            rows: 24,
+            title: "tests".into(),
+            split: Some(SplitDirection::Vertical),
+        });
+        state.activity = Some("Running tests".into());
+        mgr.save(&state).unwrap();
+
+        let sessions = mgr.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].pane_count, 2);
+        assert_eq!(sessions[0].activity.as_deref(), Some("Running tests"));
+    }
+
+    #[test]
+    fn cleanup_deletes_old_sessions() {
+        let (mgr, _dir) = test_manager();
+
+        let now = now_epoch();
+        let old_ts = now - 100 * 86_400; // 100 days ago
+        let recent_ts = now - 2 * 86_400; // 2 days ago
+
+        mgr.save(&sample_state("/proj/a", "alpha", old_ts))
+            .unwrap();
+        mgr.save(&sample_state("/proj/b", "bravo", recent_ts))
+            .unwrap();
+
+        let deleted = mgr.cleanup(30).unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining = mgr.list_sessions().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].project_name, "bravo");
+    }
+
+    #[test]
+    fn cleanup_returns_zero_when_nothing_to_delete() {
+        let (mgr, _dir) = test_manager();
+
+        let now = now_epoch();
+        mgr.save(&sample_state("/proj/a", "alpha", now)).unwrap();
+
+        let deleted = mgr.cleanup(30).unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn welcome_message_with_branch_and_activity() {
+        let state = sample_state("/home/dev/phantom", "phantom", 1_700_000_000);
+        let msg = SessionManager::welcome_message(&state);
+
+        assert!(msg.contains("Welcome back"));
+        assert!(msg.contains("phantom"));
+        assert!(msg.contains("branch main"));
+        assert!(msg.contains("1 pane open."));
+        assert!(msg.contains("Implementing session save"));
+    }
+
+    #[test]
+    fn welcome_message_without_branch() {
+        let mut state = sample_state("/proj", "myproject", 1_700_000_000);
+        state.git_branch = None;
+        state.activity = None;
+
+        let msg = SessionManager::welcome_message(&state);
+
+        assert_eq!(
+            msg,
+            "Welcome back. You were working on myproject. 1 pane open."
+        );
+    }
+
+    #[test]
+    fn welcome_message_multiple_panes() {
+        let mut state = sample_state("/proj", "multi", 1_700_000_000);
+        state.panes.push(PaneState {
+            working_dir: "/proj".into(),
+            is_focused: false,
+            cols: 80,
+            rows: 24,
+            title: "htop".into(),
+            split: Some(SplitDirection::Horizontal),
+        });
+        state.git_branch = Some("feature/auth".into());
+        state.activity = None;
+
+        let msg = SessionManager::welcome_message(&state);
+
+        assert!(msg.contains("branch feature/auth"));
+        assert!(msg.contains("2 panes open."));
+    }
+
+    #[test]
+    fn welcome_message_no_panes() {
+        let mut state = sample_state("/proj", "empty", 1_700_000_000);
+        state.panes.clear();
+        state.git_branch = None;
+        state.activity = None;
+
+        let msg = SessionManager::welcome_message(&state);
+        assert_eq!(msg, "Welcome back. You were working on empty.");
+    }
+
+    #[test]
+    fn project_hash_is_deterministic() {
+        let h1 = project_hash("/home/dev/phantom");
+        let h2 = project_hash("/home/dev/phantom");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn different_projects_get_different_hashes() {
+        let h1 = project_hash("/home/dev/phantom");
+        let h2 = project_hash("/home/dev/other");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn pane_state_serialization_round_trip() {
+        let pane = PaneState {
+            working_dir: "/home/dev".into(),
+            is_focused: true,
+            cols: 200,
+            rows: 50,
+            title: "nvim".into(),
+            split: Some(SplitDirection::Vertical),
+        };
+
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: PaneState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.working_dir, pane.working_dir);
+        assert_eq!(restored.is_focused, pane.is_focused);
+        assert_eq!(restored.cols, pane.cols);
+        assert_eq!(restored.rows, pane.rows);
+        assert_eq!(restored.title, pane.title);
+        assert_eq!(restored.split, Some(SplitDirection::Vertical));
+    }
+
+    #[test]
+    fn load_returns_error_for_missing_file() {
+        let (mgr, dir) = test_manager();
+        let bogus = dir.path().join("nonexistent.json");
+        let result = mgr.load(&bogus);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_returns_error_for_corrupt_json() {
+        let (mgr, dir) = test_manager();
+        let bad_file = dir.path().join("bad_123.json");
+        fs::write(&bad_file, "not valid json {{{").unwrap();
+
+        let result = mgr.load(&bad_file);
+        assert!(result.is_err());
+    }
+}

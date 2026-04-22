@@ -9,6 +9,10 @@ members = [
     "crates/phantom-supervisor",
     "crates/phantom-semantic",
     "crates/phantom-history",
+    "crates/phantom-agents",
+    "crates/phantom-context",
+    "crates/phantom-memory",
+    "crates/phantom-session",
 ]
 resolver = "2"
 
