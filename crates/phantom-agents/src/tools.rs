@@ -16,7 +16,7 @@ use std::time::Duration;
 // ---------------------------------------------------------------------------
 
 /// Tools available to agents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ToolType {
     ReadFile,
     WriteFile,

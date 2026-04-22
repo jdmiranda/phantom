@@ -1994,6 +1994,7 @@ dependencies = [
  "phantom-renderer",
  "phantom-terminal",
  "phantom-ui",
+ "png",
  "pollster",
  "wgpu",
  "winit",
@@ -2020,6 +2021,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "phantom-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2076,6 +2087,9 @@ dependencies = [
  "log",
  "png",
  "pollster",
+ "serde",
+ "serde_json",
+ "tempfile",
  "wgpu",
  "winit",
 ]
