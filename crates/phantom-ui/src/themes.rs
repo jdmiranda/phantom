@@ -387,6 +387,65 @@ pub fn vapor() -> Theme {
     }
 }
 
+/// **Pip-Boy** — Vault-Tec terminal from the wasteland.
+///
+/// The Fallout Pip-Boy 3000 aesthetic: bright green (#20C20E) on near-black,
+/// heavy scanlines, aggressive bloom, slight curvature. Chunky, utilitarian,
+/// radiation-proof. War never changes, but your terminal can.
+pub fn pipboy() -> Theme {
+    let green = hex(0x20, 0xC2, 0x0E);
+    let dim_green = hex(0x14, 0x7A, 0x0A);
+    let dark_green = hex(0x0A, 0x3D, 0x05);
+    let bg = hex(0x05, 0x0C, 0x04);
+
+    Theme {
+        name: "Pip-Boy".into(),
+        colors: TerminalColors {
+            foreground: green,
+            background: bg,
+            cursor: hex(0x30, 0xFF, 0x15),
+            selection: hexa(0x20, 0xC2, 0x0E, 0.30),
+            ansi: [
+                // Normal 0-7 — monochrome green spectrum
+                hex(0x05, 0x0C, 0x04), // 0  black (bg)
+                hex(0x40, 0xA0, 0x10), // 1  red (olive green)
+                hex(0x20, 0xC2, 0x0E), // 2  green (pip-boy green)
+                hex(0x60, 0xD0, 0x20), // 3  yellow (lime)
+                hex(0x10, 0x80, 0x30), // 4  blue (forest)
+                hex(0x30, 0x90, 0x20), // 5  magenta (mid green)
+                hex(0x18, 0xAA, 0x40), // 6  cyan (emerald)
+                hex(0x70, 0xD0, 0x60), // 7  white (pale green)
+                // Bright 8-15
+                hex(0x0A, 0x1A, 0x08), // 8  bright black
+                hex(0x50, 0xC0, 0x20), // 9  bright red
+                hex(0x30, 0xFF, 0x15), // 10 bright green (max glow)
+                hex(0x80, 0xFF, 0x30), // 11 bright yellow
+                hex(0x20, 0xA0, 0x50), // 12 bright blue
+                hex(0x40, 0xC0, 0x30), // 13 bright magenta
+                hex(0x28, 0xDD, 0x50), // 14 bright cyan
+                hex(0x90, 0xFF, 0x70), // 15 bright white (max)
+            ],
+        },
+        shader_params: ShaderParams {
+            scanline_intensity: 0.25,  // heavy scanlines — CRT authenticity
+            bloom_intensity: 0.20,     // strong phosphor glow
+            chromatic_aberration: 0.02,
+            curvature: 0.06,           // slight barrel distortion
+            vignette_intensity: 0.22,  // dark corners like a real CRT
+            noise_intensity: 0.04,     // wasteland static
+            glow_color: rgb3(dim_green),
+        },
+        ui_colors: UiColors {
+            status_bar_bg: hex(0x03, 0x08, 0x02),
+            status_bar_fg: dim_green,
+            tab_bar_bg: hex(0x03, 0x08, 0x02),
+            tab_bar_fg: dark_green,
+            tab_active_bg: hex(0x0A, 0x1A, 0x06),
+            border: hex(0x14, 0x40, 0x0A),
+        },
+    }
+}
+
 /// Look up a built-in theme by name (case-insensitive).
 ///
 /// Returns `None` if the name doesn't match any built-in theme.
@@ -397,12 +456,13 @@ pub fn builtin_by_name(name: &str) -> Option<Theme> {
         "ice" => Some(ice()),
         "blood" => Some(blood()),
         "vapor" | "vaporwave" => Some(vapor()),
+        "pipboy" | "pip-boy" => Some(pipboy()),
         _ => None,
     }
 }
 
 /// Names of all built-in themes, in presentation order.
-pub const BUILTIN_NAMES: &[&str] = &["Phosphor", "Amber", "Ice", "Blood", "Vapor"];
+pub const BUILTIN_NAMES: &[&str] = &["Phosphor", "Amber", "Ice", "Blood", "Vapor", "Pip-Boy"];
 
 // ---------------------------------------------------------------------------
 // Tests
