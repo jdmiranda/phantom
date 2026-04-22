@@ -257,14 +257,17 @@ impl App {
         let mut max_h: f32 = 0.0;
 
         if show_sys {
-            let h = self.render_monitor_panel(
-                "SYSTEM RESOURCES",
-                &crate::sysmon::build_monitor_lines(&self.sysmon.latest.clone().unwrap()),
-                margin, panel_y, sys_width,
-                [0.15, 0.5, 0.3, 0.7],
-                quads, glyphs,
-            );
-            max_h = max_h.max(h);
+            if let Some(ref stats) = self.sysmon.latest {
+                let lines = crate::sysmon::build_monitor_lines(stats);
+                let h = self.render_monitor_panel(
+                    "SYSTEM RESOURCES",
+                    &lines,
+                    margin, panel_y, sys_width,
+                    [0.15, 0.5, 0.3, 0.7],
+                    quads, glyphs,
+                );
+                max_h = max_h.max(h);
+            }
         }
 
         if show_app {
@@ -459,8 +462,8 @@ impl App {
         };
         let title_text = format!(
             "{status_char} AGENT  {}",
-            if pane.task.len() > 60 {
-                format!("{}…", &pane.task[..59])
+            if pane.task.chars().count() > 60 {
+                format!("{}…", pane.task.chars().take(59).collect::<String>())
             } else {
                 pane.task.clone()
             }

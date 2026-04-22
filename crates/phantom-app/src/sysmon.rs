@@ -83,12 +83,14 @@ pub(crate) fn spawn_sysmon() -> SysmonHandle {
     let active = Arc::new(AtomicBool::new(false));
     let active_clone = active.clone();
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("phantom-sysmon".into())
         .spawn(move || sysmon_loop(tx, active_clone))
-        .expect("failed to spawn sysmon thread");
+    {
+        Ok(_) => info!("System monitor spawned (idle until activated)"),
+        Err(e) => log::warn!("Failed to spawn sysmon thread: {e} — monitor disabled"),
+    }
 
-    info!("System monitor spawned (idle until activated)");
     SysmonHandle { rx, latest: None, active }
 }
 
@@ -147,38 +149,34 @@ fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
 // CPU
 // ---------------------------------------------------------------------------
 
-fn read_cpu_usage() -> f32 {
-    let output = std::process::Command::new("sh")
+/// Run a shell command with a 3-second timeout. Returns stdout or empty string.
+fn shell_with_timeout(cmd: &str) -> String {
+    std::process::Command::new("sh")
         .arg("-c")
-        .arg("top -l 1 -n 0 -s 0 2>/dev/null | grep 'CPU usage'")
-        .output();
+        .arg(format!("timeout 3 sh -c '{cmd}' 2>/dev/null"))
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
 
-    match output {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            if let Some(idle_str) = text.split("idle").next() {
-                let parts: Vec<&str> = idle_str.split(',').collect();
-                if let Some(last) = parts.last() {
-                    let pct: f32 = last.trim().trim_end_matches('%').trim().parse().unwrap_or(100.0);
-                    return (1.0 - pct / 100.0).clamp(0.0, 1.0);
-                }
-            }
-            0.0
+fn read_cpu_usage() -> f32 {
+    let text = shell_with_timeout("top -l 1 -n 0 -s 0 | grep 'CPU usage'");
+    if let Some(idle_str) = text.split("idle").next() {
+        let parts: Vec<&str> = idle_str.split(',').collect();
+        if let Some(last) = parts.last() {
+            let pct: f32 = last.trim().trim_end_matches('%').trim().parse().unwrap_or(100.0);
+            return (1.0 - pct / 100.0).clamp(0.0, 1.0);
         }
-        Err(_) => 0.0,
     }
+    0.0
 }
 
 fn read_load_average() -> f32 {
-    std::process::Command::new("sysctl")
-        .args(["-n", "vm.loadavg"])
-        .output().ok()
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout).trim()
-                .trim_start_matches('{').trim()
-                .split_whitespace().next()
-                .and_then(|s| s.parse::<f32>().ok())
-        })
+    let text = shell_with_timeout("sysctl -n vm.loadavg");
+    text.trim().trim_start_matches('{').trim()
+        .split_whitespace().next()
+        .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(0.0)
 }
 
@@ -186,9 +184,7 @@ fn num_cpus_cached() -> usize {
     use std::sync::OnceLock;
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| {
-        std::process::Command::new("sysctl").args(["-n", "hw.ncpu"]).output().ok()
-            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-            .unwrap_or(4)
+        shell_with_timeout("sysctl -n hw.ncpu").trim().parse().unwrap_or(4)
     })
 }
 
@@ -197,14 +193,10 @@ fn num_cpus_cached() -> usize {
 // ---------------------------------------------------------------------------
 
 fn read_memory() -> (u64, u64) {
-    let total_bytes: u64 = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"]).output().ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(0);
+    let total_bytes: u64 = shell_with_timeout("sysctl -n hw.memsize")
+        .trim().parse().unwrap_or(0);
 
-    let output = std::process::Command::new("vm_stat").output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
+    let output = shell_with_timeout("vm_stat");
 
     let page_size: u64 = output.lines().next()
         .and_then(|l| l.split("page size of ").nth(1).and_then(|s| s.split(' ').next().and_then(|s| s.parse().ok())))
@@ -235,15 +227,13 @@ fn vm_val(line: &str) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn read_disk_space() -> (f32, f32) {
-    std::process::Command::new("df").args(["-g", "/"]).output().ok()
-        .and_then(|o| {
-            let text = String::from_utf8_lossy(&o.stdout);
-            text.lines().nth(1).and_then(|l| {
-                let p: Vec<&str> = l.split_whitespace().collect();
-                if p.len() >= 4 {
-                    Some((p[2].parse().unwrap_or(0.0), p[1].parse().unwrap_or(0.0)))
-                } else { None }
-            })
+    let text = shell_with_timeout("df -g /");
+    text.lines().nth(1)
+        .and_then(|l| {
+            let p: Vec<&str> = l.split_whitespace().collect();
+            if p.len() >= 4 {
+                Some((p[2].parse().unwrap_or(0.0), p[1].parse().unwrap_or(0.0)))
+            } else { None }
         })
         .unwrap_or((0.0, 0.0))
 }
@@ -256,29 +246,14 @@ struct DiskIoCounters { read_kb: u64, write_kb: u64 }
 
 impl DiskIoCounters {
     fn read() -> Self {
-        // iostat -d -c 1 gives KB/t, tps, MB/s for the interval.
-        // We use `iostat -d -c 2 -w 1` and take the second sample for delta.
-        // Simpler: use `iostat -I -d` for cumulative bytes.
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("iostat -I -d 2>/dev/null | tail -1")
-            .output();
-
-        match output {
-            Ok(o) => {
-                let text = String::from_utf8_lossy(&o.stdout);
-                let parts: Vec<&str> = text.trim().split_whitespace().collect();
-                // iostat -I -d: KB/t  xfrs  MB
-                // We want the MB column (cumulative).
-                if parts.len() >= 3 {
-                    let mb: f64 = parts[2].parse().unwrap_or(0.0);
-                    // Approximate: split evenly (we can't distinguish r/w from this).
-                    let kb = (mb * 1024.0) as u64;
-                    return Self { read_kb: kb / 2, write_kb: kb / 2 };
-                }
-                Self { read_kb: 0, write_kb: 0 }
-            }
-            Err(_) => Self { read_kb: 0, write_kb: 0 },
+        let text = shell_with_timeout("iostat -I -d | tail -1");
+        let parts: Vec<&str> = text.trim().split_whitespace().collect();
+        if parts.len() >= 3 {
+            let mb: f64 = parts[2].parse().unwrap_or(0.0);
+            let kb = (mb * 1024.0) as u64;
+            Self { read_kb: kb / 2, write_kb: kb / 2 }
+        } else {
+            Self { read_kb: 0, write_kb: 0 }
         }
     }
 
@@ -297,25 +272,14 @@ struct NetCounters { rx_bytes: u64, tx_bytes: u64 }
 
 impl NetCounters {
     fn read() -> Self {
-        // netstat -ib: parse Ibytes/Obytes columns for en0.
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("netstat -ib 2>/dev/null | grep -E '^en[0-9]' | head -1")
-            .output();
-
-        match output {
-            Ok(o) => {
-                let text = String::from_utf8_lossy(&o.stdout);
-                let parts: Vec<&str> = text.trim().split_whitespace().collect();
-                // Fields: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes
-                if parts.len() >= 10 {
-                    let rx: u64 = parts[6].parse().unwrap_or(0);
-                    let tx: u64 = parts[9].parse().unwrap_or(0);
-                    return Self { rx_bytes: rx, tx_bytes: tx };
-                }
-                Self { rx_bytes: 0, tx_bytes: 0 }
-            }
-            Err(_) => Self { rx_bytes: 0, tx_bytes: 0 },
+        let text = shell_with_timeout("netstat -ib | grep -E '^en[0-9]' | head -1");
+        let parts: Vec<&str> = text.trim().split_whitespace().collect();
+        if parts.len() >= 10 {
+            let rx: u64 = parts[6].parse().unwrap_or(0);
+            let tx: u64 = parts[9].parse().unwrap_or(0);
+            Self { rx_bytes: rx, tx_bytes: tx }
+        } else {
+            Self { rx_bytes: 0, tx_bytes: 0 }
         }
     }
 
@@ -327,12 +291,8 @@ impl NetCounters {
 }
 
 fn read_net_connections() -> u32 {
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg("netstat -an 2>/dev/null | grep -c ESTABLISHED")
-        .output().ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(0)
+    shell_with_timeout("netstat -an | grep -c ESTABLISHED")
+        .trim().parse().unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -340,42 +300,33 @@ fn read_net_connections() -> u32 {
 // ---------------------------------------------------------------------------
 
 fn read_battery() -> (Option<f32>, bool, Option<String>) {
-    let output = std::process::Command::new("pmset")
-        .args(["-g", "batt"]).output();
+    let text = shell_with_timeout("pmset -g batt");
+    let mut pct = None;
+    let mut charging = false;
+    let mut remaining = None;
 
-    match output {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            // "InternalBattery-0 (id=...)	82%; charging; 1:23 remaining"
-            let mut pct = None;
-            let mut charging = false;
-            let mut remaining = None;
-
-            for line in text.lines() {
-                if line.contains("InternalBattery") || line.contains('%') {
-                    // Extract percentage.
-                    if let Some(p) = line.split('%').next() {
-                        let num_str = p.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<String>();
-                        let num_str: String = num_str.chars().rev().collect();
-                        if let Ok(v) = num_str.parse::<f32>() {
-                            pct = Some(v);
-                        }
-                    }
-                    charging = line.contains("charging") && !line.contains("discharging");
-                    // Time remaining.
-                    if let Some(idx) = line.find("remaining") {
-                        let before = &line[..idx];
-                        let time_str = before.rsplit(';').next().unwrap_or("").trim();
-                        if !time_str.is_empty() && time_str != "(no estimate)" {
-                            remaining = Some(time_str.to_string());
-                        }
-                    }
+    for line in text.lines() {
+        if line.contains('%') {
+            if let Some(p) = line.split('%').next() {
+                let num_str: String = p.chars().rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .chars().rev().collect();
+                if let Ok(v) = num_str.parse::<f32>() {
+                    pct = Some(v);
                 }
             }
-            (pct, charging, remaining)
+            charging = line.contains("charging") && !line.contains("discharging");
+            if let Some(idx) = line.find("remaining") {
+                let before = &line[..idx];
+                let time_str = before.rsplit(';').next().unwrap_or("").trim();
+                if !time_str.is_empty() && time_str != "(no estimate)" {
+                    remaining = Some(time_str.to_string());
+                }
+            }
         }
-        Err(_) => (None, false, None),
     }
+    (pct, charging, remaining)
 }
 
 // ---------------------------------------------------------------------------
@@ -383,43 +334,32 @@ fn read_battery() -> (Option<f32>, bool, Option<String>) {
 // ---------------------------------------------------------------------------
 
 fn read_powermetrics() -> (Option<f32>, Option<f32>, Option<f32>) {
-    // powermetrics requires root. Try without sudo; if it fails, return None.
-    // Use a short timeout to avoid blocking.
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("timeout 2 powermetrics --samplers smc,gpu_power -n 1 -i 1000 2>/dev/null")
-        .output();
+    let text = shell_with_timeout("powermetrics --samplers smc,gpu_power -n 1 -i 1000");
+    if text.is_empty() {
+        return (None, None, None);
+    }
 
-    match output {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            let mut cpu_temp = None;
-            let mut gpu_temp = None;
-            let mut gpu_usage = None;
+    let mut cpu_temp = None;
+    let mut gpu_temp = None;
+    let mut gpu_usage = None;
 
-            for line in text.lines() {
-                // SMC: "CPU die temperature: 45.2 C"
-                if line.contains("CPU die temperature") {
-                    cpu_temp = extract_temp(line);
-                }
-                // SMC: "GPU die temperature: 42.1 C"
-                if line.contains("GPU die temperature") {
-                    gpu_temp = extract_temp(line);
-                }
-                // GPU: "GPU Active: 12%"  or "GPU active residency: 12.34%"
-                if line.contains("GPU") && (line.contains("Active") || line.contains("active residency")) {
-                    if let Some(pct_str) = line.split(':').nth(1) {
-                        let cleaned = pct_str.trim().trim_end_matches('%').trim();
-                        if let Ok(v) = cleaned.parse::<f32>() {
-                            gpu_usage = Some(v / 100.0);
-                        }
-                    }
+    for line in text.lines() {
+        if line.contains("CPU die temperature") {
+            cpu_temp = extract_temp(line);
+        }
+        if line.contains("GPU die temperature") {
+            gpu_temp = extract_temp(line);
+        }
+        if line.contains("GPU") && (line.contains("Active") || line.contains("active residency")) {
+            if let Some(pct_str) = line.split(':').nth(1) {
+                let cleaned = pct_str.trim().trim_end_matches('%').trim();
+                if let Ok(v) = cleaned.parse::<f32>() {
+                    gpu_usage = Some(v / 100.0);
                 }
             }
-            (cpu_temp, gpu_temp, gpu_usage)
         }
-        Err(_) => (None, None, None),
     }
+    (cpu_temp, gpu_temp, gpu_usage)
 }
 
 fn extract_temp(line: &str) -> Option<f32> {

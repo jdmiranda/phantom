@@ -402,8 +402,18 @@ impl App {
             Ok(reg) => reg,
             Err(e) => {
                 warn!("Failed to create plugin registry: {e}");
-                PluginRegistry::with_dir(std::env::temp_dir().join("phantom-plugins-fallback"))
-                    .expect("failed to create fallback plugin registry")
+                match PluginRegistry::with_dir(std::env::temp_dir().join("phantom-plugins-fallback")) {
+                    Ok(reg) => reg,
+                    Err(e2) => {
+                        warn!("Failed to create fallback plugin registry: {e2}");
+                        // Return empty registry — plugins disabled but app works.
+                        PluginRegistry::with_dir(std::env::temp_dir())
+                            .unwrap_or_else(|_| {
+                                // Last resort — should never fail on /tmp.
+                                panic!("cannot create plugin registry in /tmp");
+                            })
+                    }
+                }
             }
         };
 
