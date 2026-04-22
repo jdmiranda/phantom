@@ -147,6 +147,9 @@ pub struct App {
     pub(crate) pool_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
     pub(crate) pool_chrome_quads: Vec<QuadInstance>,
     pub(crate) pool_chrome_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
+
+    // -- Agent panes (AI workers running in visible panes) --
+    pub(crate) agent_panes: Vec<crate::agent_pane::AgentPane>,
 }
 
 /// An active suggestion from the AI brain.
@@ -407,6 +410,7 @@ impl App {
             pool_glyphs: Vec::with_capacity(4096),
             pool_chrome_quads: Vec::with_capacity(32),
             pool_chrome_glyphs: Vec::with_capacity(256),
+            agent_panes: Vec::new(),
         })
     }
 

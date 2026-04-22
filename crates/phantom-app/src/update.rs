@@ -160,6 +160,8 @@ impl App {
         }
 
         // AI Brain: send idle events + drain actions.
+        // Collect agent spawn tasks separately to avoid borrow conflict.
+        let mut tasks_to_spawn = Vec::new();
         if let Some(ref brain) = self.brain {
             let idle_secs = now.duration_since(self.last_input_time).as_secs_f32();
             if idle_secs > 5.0 && (idle_secs % 5.0) < dt {
@@ -189,8 +191,9 @@ impl App {
                             );
                         }
                     }
-                    AiAction::SpawnAgent(_task) => {
-                        debug!("Brain requested agent spawn (not yet wired to GUI panes)");
+                    AiAction::SpawnAgent(task) => {
+                        info!("[PHANTOM]: Spawning agent...");
+                        tasks_to_spawn.push(task);
                     }
                     AiAction::RunCommand(cmd) => {
                         debug!("Brain suggested command: {cmd}");
@@ -198,6 +201,11 @@ impl App {
                     AiAction::DoNothing => {}
                 }
             }
+        }
+
+        // Spawn agent panes (deferred from brain action loop to avoid borrow conflict).
+        for task in tasks_to_spawn {
+            self.spawn_agent_pane(task);
         }
 
         // Expire stale suggestions.
@@ -237,6 +245,9 @@ impl App {
                 }
             }
         }
+
+        // Poll agent panes for streaming output.
+        self.poll_agent_panes();
 
         // Update status bar clock.
         let now_wall = chrono_time_string();

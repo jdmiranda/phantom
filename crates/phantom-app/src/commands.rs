@@ -5,6 +5,7 @@
 
 use log::{debug, info, warn};
 
+use phantom_agents::AgentTask;
 use phantom_protocol::{AppMessage, SupervisorCommand};
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
@@ -74,9 +75,18 @@ impl App {
                 self.theme.shader_params.noise_intensity = 0.0;
                 info!("Plain mode: all CRT effects disabled");
             }
+            "agent" => {
+                if parts.len() >= 2 {
+                    let prompt = input[6..].trim().to_string(); // skip "agent "
+                    info!("[PHANTOM]: Spawning agent: {prompt}");
+                    self.spawn_agent_pane(AgentTask::FreeForm { prompt });
+                } else {
+                    warn!("Usage: agent <prompt>");
+                }
+            }
             "help" => {
                 info!(
-                    "Commands: set <k> <v> | theme <name> | plain | debug | reload | boot | quit"
+                    "Commands: set <k> <v> | theme <name> | agent <prompt> | plain | debug | reload | boot | quit"
                 );
             }
             other => {

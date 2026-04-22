@@ -1,3 +1,4 @@
+mod agent_pane;
 pub mod app;
 pub mod boot;
 mod commands;
