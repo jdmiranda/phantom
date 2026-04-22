@@ -9,3 +9,6 @@ phantom-renderer = { path = "../phantom-renderer" }
 taffy.workspace = true
 log.workspace = true
 anyhow.workspace = true
+
+[lints]
+workspace = true

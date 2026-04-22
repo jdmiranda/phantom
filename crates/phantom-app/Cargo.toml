@@ -18,3 +18,6 @@ anyhow.workspace = true
 
 [dev-dependencies]
 png = "0.17"
+
+[lints]
+workspace = true

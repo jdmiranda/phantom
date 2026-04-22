@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use log::{debug, trace, warn};
+use log::{debug, warn};
 
 use phantom_protocol::{
     set_nonblocking, try_read_line, AppMessage, SupervisorCommand, HEARTBEAT_INTERVAL_MS,
