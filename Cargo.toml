@@ -14,6 +14,7 @@ members = [
     "crates/phantom-memory",
     "crates/phantom-session",
     "crates/phantom-nlp",
+    "crates/phantom-plugins",
 ]
 resolver = "2"
 

@@ -1,0 +1,15 @@
+[package]
+name = "phantom-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true
+anyhow.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
