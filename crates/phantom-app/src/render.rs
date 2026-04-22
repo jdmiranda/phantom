@@ -169,10 +169,6 @@ impl App {
                 self.build_suggestion_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
-            // -- Agent pane overlays --
-            if !self.agent_panes.is_empty() {
-                self.build_agent_pane_overlays(screen_size, &mut chrome_quads, &mut chrome_glyphs);
-            }
 
             if !chrome_quads.is_empty() || !chrome_glyphs.is_empty() {
                 // Upload + render overlay in its own pass on the surface.
@@ -302,6 +298,9 @@ impl App {
         let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
         let mut container_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
 
+        // -- Agent panes: render as stacked panels above the terminal --
+        let agent_height = self.render_agent_panels(screen_size, quads, glyphs);
+
         // Build theme-aware color mapping for terminal grid extraction.
         let theme_colors = TerminalThemeColors {
             foreground: self.theme.colors.foreground,
@@ -325,10 +324,9 @@ impl App {
                 output::extract_grid_themed(pane.terminal.term(), &theme_colors);
 
             // -- Get pane rectangle from layout engine --
-            // The scene graph is synced from layout each frame (in update()),
-            // but layout remains the source of truth for rendering to avoid
-            // off-by-one-frame issues during initialization.
-            let layout_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or_else(|e| {
+            // When agent panes are active, shrink and shift the terminal down
+            // to make room for the agent panel stacked above.
+            let mut layout_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or_else(|e| {
                 warn!("Layout missing for pane {:?} in render: {e}", pane.pane_id);
                 phantom_ui::layout::Rect {
                     x: 0.0,
@@ -337,6 +335,13 @@ impl App {
                     height: screen_size[1] - 54.0,
                 }
             });
+            if agent_height > 0.0 {
+                layout_rect.y += agent_height;
+                layout_rect.height -= agent_height;
+                if layout_rect.height < self.cell_size.1 * 4.0 {
+                    layout_rect.height = self.cell_size.1 * 4.0; // minimum 4 rows
+                }
+            }
 
             // Inset by outer margin to create the "floating container" look.
             let pane_rect = container_rect(layout_rect, self.cell_size);

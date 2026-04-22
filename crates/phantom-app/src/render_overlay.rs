@@ -223,25 +223,32 @@ impl App {
         self.render_overlay_text(help, text_x, text_y, [0.3, 0.5, 0.3, 0.6], glyphs);
     }
 
-    /// Build overlay panels for all active agent panes.
+    /// Render agent panes as a stacked panel above the terminal (scene pass).
     ///
-    /// Each agent pane renders as a floating panel on the right side of the
-    /// screen with a status indicator, task title, and scrolling output text.
-    pub(crate) fn build_agent_pane_overlays(
+    /// Returns the total height consumed by agent panels. The terminal
+    /// rendering shifts down by this amount.
+    pub(crate) fn render_agent_panels(
         &mut self,
         screen_size: [f32; 2],
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
-    ) {
-        let panel_width = 420.0_f32.min(screen_size[0] * 0.4);
-        let panel_gap = 8.0;
-        let panel_max_height = 300.0;
+    ) -> f32 {
+        if self.agent_panes.is_empty() {
+            return 0.0;
+        }
+
         let line_height = self.cell_size.1;
         let cell_w = self.cell_size.0;
         let padding = 10.0;
+        let margin = 12.0;
         let title_h = line_height + 8.0;
+        let panel_width = screen_size[0] - margin * 2.0;
+        // Agent panel gets up to 35% of screen height.
+        let max_panel_h = (screen_size[1] * 0.35).min(400.0);
+        let panel_x = margin;
+        let panel_y = 30.0; // below tab bar
 
-        // Collect agent pane data to avoid borrow conflict with self.
+        // Collect to avoid borrow conflict.
         struct AgentRenderData {
             task: String,
             status: crate::agent_pane::AgentPaneStatus,
@@ -255,93 +262,93 @@ impl App {
             }
         }).collect();
 
-        let mut panel_y = 40.0; // below tab bar
+        // For now, render the first (most recent) agent. Stack multiple later.
+        let pane = &agent_data[0];
 
-        for pane in &agent_data {
-            let visible_lines: Vec<&str> = pane.output.lines().collect();
-            let max_text_lines = ((panel_max_height - title_h - padding * 2.0) / line_height)
-                .floor()
-                .max(1.0) as usize;
-            let start = visible_lines.len().saturating_sub(max_text_lines);
-            let display_lines = &visible_lines[start..];
-            let content_h = display_lines.len() as f32 * line_height;
-            let panel_height = (title_h + content_h + padding * 2.0).min(panel_max_height);
+        let visible_lines: Vec<&str> = pane.output.lines().collect();
+        let max_text_lines = ((max_panel_h - title_h - padding * 2.0) / line_height)
+            .floor()
+            .max(1.0) as usize;
+        let start = visible_lines.len().saturating_sub(max_text_lines);
+        let display_lines = &visible_lines[start..];
+        let content_h = display_lines.len() as f32 * line_height;
+        let panel_height = (title_h + content_h + padding * 2.0).min(max_panel_h);
 
-            let panel_x = screen_size[0] - panel_width - 12.0;
+        let bg = self.theme.colors.background;
 
-            if panel_y + panel_height > screen_size[1] - 40.0 {
-                break;
+        // Panel background (slightly different tint from terminal container).
+        quads.push(QuadInstance {
+            pos: [panel_x, panel_y],
+            size: [panel_width, panel_height],
+            color: [
+                (bg[0] + 0.03).min(1.0),
+                (bg[1] + 0.06).min(1.0),
+                (bg[2] + 0.08).min(1.0),
+                1.0,
+            ],
+            border_radius: 6.0,
+        });
+
+        // Status-aware border.
+        let border_color = match pane.status {
+            crate::agent_pane::AgentPaneStatus::Working => [0.0, 0.8, 0.9, 0.8],
+            crate::agent_pane::AgentPaneStatus::Done => [0.2, 1.0, 0.5, 0.8],
+            crate::agent_pane::AgentPaneStatus::Failed => [1.0, 0.3, 0.2, 0.8],
+        };
+        let t = 1.0;
+        quads.push(QuadInstance { pos: [panel_x, panel_y], size: [panel_width, t], color: border_color, border_radius: 0.0 });
+        quads.push(QuadInstance { pos: [panel_x, panel_y + panel_height - t], size: [panel_width, t], color: border_color, border_radius: 0.0 });
+        quads.push(QuadInstance { pos: [panel_x, panel_y], size: [t, panel_height], color: border_color, border_radius: 0.0 });
+        quads.push(QuadInstance { pos: [panel_x + panel_width - t, panel_y], size: [t, panel_height], color: border_color, border_radius: 0.0 });
+
+        // Title bar.
+        let title_bg = [bg[0] * 1.4 + 0.02, bg[1] * 1.6 + 0.04, bg[2] * 1.8 + 0.06, 1.0];
+        quads.push(QuadInstance {
+            pos: [panel_x, panel_y],
+            size: [panel_width, title_h],
+            color: title_bg,
+            border_radius: 6.0,
+        });
+
+        // Title text.
+        let status_char = match pane.status {
+            crate::agent_pane::AgentPaneStatus::Working => "●",
+            crate::agent_pane::AgentPaneStatus::Done => "✓",
+            crate::agent_pane::AgentPaneStatus::Failed => "✗",
+        };
+        let title_text = format!(
+            "{status_char} AGENT  {}",
+            if pane.task.len() > 60 {
+                format!("{}…", &pane.task[..59])
+            } else {
+                pane.task.clone()
             }
+        );
+        self.render_overlay_text(
+            &title_text,
+            panel_x + padding,
+            panel_y + 4.0,
+            border_color,
+            glyphs,
+        );
 
-            // Panel background.
-            quads.push(QuadInstance {
-                pos: [panel_x, panel_y],
-                size: [panel_width, panel_height],
-                color: [0.02, 0.04, 0.06, 0.92],
-                border_radius: 6.0,
-            });
-
-            // Status-aware border color.
-            let border_color = match pane.status {
-                crate::agent_pane::AgentPaneStatus::Working => [0.0, 0.8, 0.9, 0.8],
-                crate::agent_pane::AgentPaneStatus::Done => [0.2, 1.0, 0.5, 0.8],
-                crate::agent_pane::AgentPaneStatus::Failed => [1.0, 0.3, 0.2, 0.8],
-            };
-
-            // Border.
-            let t = 1.0;
-            quads.push(QuadInstance { pos: [panel_x, panel_y], size: [panel_width, t], color: border_color, border_radius: 0.0 });
-            quads.push(QuadInstance { pos: [panel_x, panel_y + panel_height - t], size: [panel_width, t], color: border_color, border_radius: 0.0 });
-            quads.push(QuadInstance { pos: [panel_x, panel_y], size: [t, panel_height], color: border_color, border_radius: 0.0 });
-            quads.push(QuadInstance { pos: [panel_x + panel_width - t, panel_y], size: [t, panel_height], color: border_color, border_radius: 0.0 });
-
-            // Title bar.
-            quads.push(QuadInstance {
-                pos: [panel_x, panel_y],
-                size: [panel_width, title_h],
-                color: [0.04, 0.08, 0.12, 0.95],
-                border_radius: 6.0,
-            });
-
-            // Status dot + task title.
-            let status_char = match pane.status {
-                crate::agent_pane::AgentPaneStatus::Working => "●",
-                crate::agent_pane::AgentPaneStatus::Done => "✓",
-                crate::agent_pane::AgentPaneStatus::Failed => "✗",
-            };
-            let title_text = format!(
-                "{status_char} {}",
-                if pane.task.len() > 45 {
-                    format!("{}…", &pane.task[..44])
-                } else {
-                    pane.task.clone()
-                }
-            );
+        // Output text.
+        let text_color = [0.6, 0.85, 0.75, 0.9];
+        let text_y_start = panel_y + title_h + padding;
+        let max_chars = ((panel_width - padding * 2.0) / cell_w) as usize;
+        for (i, line) in display_lines.iter().enumerate() {
+            let truncated: String = line.chars().take(max_chars).collect();
             self.render_overlay_text(
-                &title_text,
+                &truncated,
                 panel_x + padding,
-                panel_y + 4.0,
-                border_color,
+                text_y_start + i as f32 * line_height,
+                text_color,
                 glyphs,
             );
-
-            // Output text lines.
-            let text_color = [0.6, 0.8, 0.7, 0.9];
-            let text_y_start = panel_y + title_h + padding;
-            let max_chars = ((panel_width - padding * 2.0) / cell_w) as usize;
-            for (i, line) in display_lines.iter().enumerate() {
-                let truncated: String = line.chars().take(max_chars).collect();
-                self.render_overlay_text(
-                    &truncated,
-                    panel_x + padding,
-                    text_y_start + i as f32 * line_height,
-                    text_color,
-                    glyphs,
-                );
-            }
-
-            panel_y += panel_height + panel_gap;
         }
+
+        // Return total height consumed (panel + gap before terminal).
+        panel_height + 4.0
     }
 
     /// Helper: render a text string directly into the overlay glyph buffer.
