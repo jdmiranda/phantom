@@ -58,11 +58,14 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
     // Claude API config (optional -- agents work without it, just no reasoning).
     let claude_config = ClaudeConfig::from_env();
     if claude_config.is_none() {
-        println!("(ANTHROPIC_API_KEY not set \u{2014} agents will not reason)");
+        println!("(ANTHROPIC_API_KEY not set \u{2014} agents and chat will not work)");
     }
 
     // Collect tool_use IDs across the agent loop for multi-turn conversations.
     let mut tool_use_ids: Vec<String> = Vec::new();
+
+    // Chat conversation buffer — persists across messages within the session.
+    let mut chat_history: Vec<AgentMessage> = Vec::new();
 
     print!("> ");
     io::stdout().flush()?;
@@ -113,6 +116,28 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         }
 
         if handled {
+            drain_brain(&brain);
+            print!("> ");
+            io::stdout().flush()?;
+            continue;
+        }
+
+        // ------------------------------------------------------------------
+        // Chat with AI (session-persistent conversation)
+        // ------------------------------------------------------------------
+        if input.starts_with("chat ") || input == "chat" {
+            let msg = if input == "chat" {
+                "What can you help me with?"
+            } else {
+                &input[5..]
+            };
+
+            if let Some(ref cfg) = claude_config {
+                run_chat(cfg, msg, &context, &memory, &mut chat_history);
+            } else {
+                println!("[PHANTOM]: ANTHROPIC_API_KEY not set. Cannot chat.");
+            }
+
             drain_brain(&brain);
             print!("> ");
             io::stdout().flush()?;
@@ -460,12 +485,92 @@ fn print_status(context: &ProjectContext, agents: &AgentManager, memory: &Memory
     println!("  memory:   {} entries", memory.count());
 }
 
+// ---------------------------------------------------------------------------
+// Chat with AI
+// ---------------------------------------------------------------------------
+
+/// Run a chat turn with Claude, maintaining conversation history across the session.
+fn run_chat(
+    config: &ClaudeConfig,
+    user_msg: &str,
+    context: &ProjectContext,
+    memory: &MemoryStore,
+    chat_history: &mut Vec<AgentMessage>,
+) {
+    // Build system prompt with project context + memory on first message.
+    if chat_history.is_empty() {
+        let system = format!(
+            "You are Phantom, an AI-native terminal assistant. You're running in headless mode \
+            inside the user's terminal. Be concise, technical, and helpful.\n\n\
+            PROJECT CONTEXT:\n{}\n\n\
+            PROJECT MEMORY:\n{}",
+            context.agent_context(),
+            memory.agent_context(),
+        );
+        chat_history.push(AgentMessage::System(system));
+    }
+
+    // Add user message.
+    chat_history.push(AgentMessage::User(user_msg.to_string()));
+
+    // Build a temporary agent to send the conversation.
+    use phantom_agents::agent::{Agent, AgentTask};
+    let mut temp_agent = Agent::new(9999, AgentTask::FreeForm {
+        prompt: user_msg.to_string(),
+    });
+
+    // Copy chat history into the agent's messages.
+    for msg in chat_history.iter() {
+        temp_agent.push_message(msg.clone());
+    }
+
+    // Send to Claude (no tools — this is just chat, not agent work).
+    let mut handle = send_message(config, &temp_agent, &[], &[]);
+
+    // Stream the response.
+    let mut full_response = String::new();
+    print!("[PHANTOM]: ");
+    io::stdout().flush().ok();
+
+    loop {
+        match handle.try_recv() {
+            Some(ApiEvent::TextDelta(text)) => {
+                print!("{text}");
+                io::stdout().flush().ok();
+                full_response.push_str(&text);
+            }
+            Some(ApiEvent::Done) => {
+                println!();
+                break;
+            }
+            Some(ApiEvent::Error(e)) => {
+                println!("\n[ERROR]: {e}");
+                break;
+            }
+            Some(_) => {}
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+
+    // Save assistant response to chat history for context in next turn.
+    if !full_response.is_empty() {
+        chat_history.push(AgentMessage::Assistant(full_response));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
+
 fn print_help() {
     println!("PHANTOM HEADLESS MODE");
     println!();
     println!("Commands:");
+    println!("  chat <message>    Talk to AI (session context preserved)");
     println!("  <any command>     Run in shell (semantically parsed)");
-    println!("  agent \"prompt\"    Spawn an AI agent");
+    println!("  agent \"prompt\"    Spawn an AI agent with tools");
     println!("  agents            List running agents");
     println!("  status            Show project/agent/memory status");
     println!("  context           Show detected project context");
@@ -480,4 +585,8 @@ fn print_help() {
     println!("  test              \u{2192} cargo test / npm test / etc");
     println!("  what changed      \u{2192} git log --oneline -10");
     println!("  fix it            \u{2192} spawn agent to fix last error");
+    println!();
+    println!("Chat vs Agent:");
+    println!("  chat     = conversation (no tools, remembers context)");
+    println!("  agent    = worker (has tools, reads/writes files, runs commands)");
 }
