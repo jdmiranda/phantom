@@ -166,6 +166,7 @@ pub struct App {
     // -- System resource monitor --
     pub(crate) sysmon: crate::sysmon::SysmonHandle,
     pub(crate) sysmon_visible: bool,
+    pub(crate) appmon_visible: bool,
 }
 
 /// An active suggestion from the AI brain.
@@ -506,6 +507,7 @@ impl App {
             plugin_registry,
             sysmon,
             sysmon_visible: false,
+            appmon_visible: false,
         })
     }
 

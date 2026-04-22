@@ -7,6 +7,7 @@ pub mod image_handler;
 mod input;
 mod pane;
 mod render;
+mod appmon;
 mod render_overlay;
 pub mod session;
 mod sysmon;

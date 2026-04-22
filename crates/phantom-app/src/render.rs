@@ -298,12 +298,13 @@ impl App {
         let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
         let mut container_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
 
-        // -- Stacked panels above the terminal (sysmon + agent panes) --
-        let sysmon_height = self.render_sysmon_panel(screen_size, quads, glyphs);
+        // -- Monitor panels: hstack (sysmon left, appmon right) --
+        let monitor_height = self.render_monitor_hstack(screen_size, quads, glyphs);
+        // -- Agent panels below monitors --
         let agent_height = self.render_agent_panels_offset(
-            screen_size, quads, glyphs, sysmon_height,
+            screen_size, quads, glyphs, monitor_height,
         );
-        let panels_height = sysmon_height + agent_height;
+        let panels_height = monitor_height + agent_height;
 
         // Build theme-aware color mapping for terminal grid extraction.
         let theme_colors = TerminalThemeColors {

@@ -223,38 +223,88 @@ impl App {
         self.render_overlay_text(help, text_x, text_y, [0.3, 0.5, 0.3, 0.6], glyphs);
     }
 
-    /// Render the system resource monitor panel (scene pass).
-    ///
-    /// Returns the height consumed. Zero when sysmon is hidden.
-    pub(crate) fn render_sysmon_panel(
+    /// Render the monitor hstack: sysmon (left) + appmon (right).
+    /// Side by side when both visible, full-width when only one is.
+    /// Returns total height consumed.
+    pub(crate) fn render_monitor_hstack(
         &mut self,
         screen_size: [f32; 2],
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) -> f32 {
-        if !self.sysmon_visible {
+        let show_sys = self.sysmon_visible && self.sysmon.latest.is_some();
+        let show_app = self.appmon_visible;
+
+        if !show_sys && !show_app {
             return 0.0;
         }
-        let Some(ref stats) = self.sysmon.latest else {
-            return 0.0;
+
+        let margin = 12.0;
+        let gap = 8.0;
+        let panel_y = 30.0;
+        let full_width = screen_size[0] - margin * 2.0;
+
+        let (sys_width, app_width, app_x) = match (show_sys, show_app) {
+            (true, true) => {
+                let half = (full_width - gap) / 2.0;
+                (half, half, margin + half + gap)
+            }
+            (true, false) => (full_width, 0.0, 0.0),
+            (false, true) => (0.0, full_width, margin),
+            (false, false) => unreachable!(),
         };
 
-        let stats = stats.clone();
-        let lines = crate::sysmon::build_monitor_lines(&stats);
+        let mut max_h: f32 = 0.0;
 
+        if show_sys {
+            let h = self.render_monitor_panel(
+                "SYSTEM RESOURCES",
+                &crate::sysmon::build_monitor_lines(&self.sysmon.latest.clone().unwrap()),
+                margin, panel_y, sys_width,
+                [0.15, 0.5, 0.3, 0.7],
+                quads, glyphs,
+            );
+            max_h = max_h.max(h);
+        }
+
+        if show_app {
+            let metrics = self.collect_metrics();
+            let lines = crate::appmon::build_appmon_lines(&metrics);
+            let h = self.render_monitor_panel(
+                "APP DIAGNOSTICS",
+                &lines,
+                app_x, panel_y, app_width,
+                [0.15, 0.3, 0.5, 0.7],
+                quads, glyphs,
+            );
+            max_h = max_h.max(h);
+        }
+
+        max_h + 4.0
+    }
+
+    /// Render a generic monitor panel at a given position/width.
+    /// Returns the panel height.
+    fn render_monitor_panel(
+        &mut self,
+        title: &str,
+        lines: &[(String, [f32; 4])],
+        panel_x: f32,
+        panel_y: f32,
+        panel_width: f32,
+        border_color: [f32; 4],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) -> f32 {
         let line_height = self.cell_size.1;
         let padding = 8.0;
-        let margin = 12.0;
         let title_h = line_height + 6.0;
-        let panel_width = screen_size[0] - margin * 2.0;
-        let panel_x = margin;
-        let panel_y = 30.0; // below tab bar
         let content_h = lines.len() as f32 * line_height;
         let panel_height = title_h + content_h + padding * 2.0;
 
         let bg = self.theme.colors.background;
 
-        // Panel background.
+        // Background.
         quads.push(QuadInstance {
             pos: [panel_x, panel_y],
             size: [panel_width, panel_height],
@@ -268,7 +318,6 @@ impl App {
         });
 
         // Border.
-        let border_color = [0.15, 0.5, 0.3, 0.7];
         let t = 1.0;
         quads.push(QuadInstance { pos: [panel_x, panel_y], size: [panel_width, t], color: border_color, border_radius: 0.0 });
         quads.push(QuadInstance { pos: [panel_x, panel_y + panel_height - t], size: [panel_width, t], color: border_color, border_radius: 0.0 });
@@ -284,15 +333,16 @@ impl App {
         });
 
         // Title text.
+        let title_display = format!("▮ {title}");
         self.render_overlay_text(
-            "▮ SYSTEM RESOURCES",
+            &title_display,
             panel_x + padding,
             panel_y + 3.0,
             [0.3, 0.8, 0.5, 0.9],
             glyphs,
         );
 
-        // Resource bars.
+        // Content lines.
         let text_y_start = panel_y + title_h + padding;
         for (i, (text, color)) in lines.iter().enumerate() {
             self.render_overlay_text(
@@ -304,7 +354,7 @@ impl App {
             );
         }
 
-        panel_height + 4.0
+        panel_height
     }
 
     /// Render agent panes as a stacked panel above the terminal (scene pass).

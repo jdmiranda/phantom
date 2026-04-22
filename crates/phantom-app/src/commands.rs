@@ -89,6 +89,10 @@ impl App {
                 self.sysmon.set_active(self.sysmon_visible);
                 info!("System monitor: {}", if self.sysmon_visible { "ON" } else { "OFF" });
             }
+            "appmon" | "perf" => {
+                self.appmon_visible = !self.appmon_visible;
+                info!("App monitor: {}", if self.appmon_visible { "ON" } else { "OFF" });
+            }
             "plugins" | "plugin" => {
                 let list = self.plugin_registry.list();
                 if list.is_empty() {
