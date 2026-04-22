@@ -42,7 +42,14 @@ impl App {
                         if let Ok(text) = std::str::from_utf8(raw) {
                             pane.output_buf.push_str(text);
                             if pane.output_buf.len() > 8192 {
-                                let trim = pane.output_buf.len() - 8192;
+                                let mut trim = pane.output_buf.len() - 8192;
+                                // Advance to the next char boundary to avoid
+                                // panicking on multi-byte UTF-8 sequences.
+                                while trim < pane.output_buf.len()
+                                    && !pane.output_buf.is_char_boundary(trim)
+                                {
+                                    trim += 1;
+                                }
                                 pane.output_buf.drain(..trim);
                             }
                             pane.error_notified = false;
