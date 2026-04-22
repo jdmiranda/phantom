@@ -473,6 +473,15 @@ impl PostFxPipeline {
         &self.offscreen_view
     }
 
+    /// Returns the offscreen scene texture itself (for screenshot readback).
+    ///
+    /// The texture is created with `COPY_SRC` usage so it can be copied into
+    /// a staging buffer for PNG encoding. This is the pre-CRT scene — clean
+    /// pixels, useful for UI debugging without shader distortion.
+    pub fn scene_texture(&self) -> &Texture {
+        &self.offscreen_texture
+    }
+
     /// Update uniforms and draw the CRT post-processing pass.
     ///
     /// Renders a full-screen triangle that samples the offscreen scene texture
@@ -533,7 +542,7 @@ fn create_offscreen_texture(
         sample_count: 1,
         dimension: TextureDimension::D2,
         format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());

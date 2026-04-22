@@ -10,10 +10,12 @@
 //! The wire format is JSON-RPC 2.0 as defined by the MCP specification.
 
 pub mod client;
+pub mod listener;
 pub mod protocol;
 pub mod server;
 
 pub use client::McpClient;
+pub use listener::{spawn as spawn_listener, AppCommand, McpListener, ScreenshotReply};
 pub use protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpResource, McpTool,
     create_error, create_request, create_response,
