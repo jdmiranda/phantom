@@ -108,12 +108,14 @@ fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
             continue;
         }
 
-        let cpu_usage = read_cpu_usage();
+        // Fast metrics first (< 50ms each) so the panel shows data immediately.
         let (mem_used_mb, mem_total_mb) = read_memory();
         let mem_usage = if mem_total_mb > 0 { mem_used_mb as f32 / mem_total_mb as f32 } else { 0.0 };
         let (disk_used_gb, disk_total_gb) = read_disk_space();
         let disk_usage = if disk_total_gb > 0.0 { disk_used_gb / disk_total_gb } else { 0.0 };
         let load_avg_1m = read_load_average();
+        let (battery_pct, battery_charging, battery_time_remaining) = read_battery();
+        let net_connections = read_net_connections();
 
         // Disk I/O delta.
         let curr_disk_io = DiskIoCounters::read();
@@ -125,9 +127,23 @@ fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
         let (net_rx_kbs, net_tx_kbs) = NetCounters::throughput(&prev_net, &curr_net, 2.0);
         prev_net = curr_net;
 
-        let (battery_pct, battery_charging, battery_time_remaining) = read_battery();
+        // Send fast metrics immediately so the panel populates without waiting for CPU.
+        let fast_stats = SystemStats {
+            cpu_usage: 0.0, // placeholder — updated after slow poll
+            load_avg_1m,
+            mem_usage, mem_used_mb, mem_total_mb,
+            disk_usage, disk_used_gb, disk_total_gb,
+            disk_read_kbs, disk_write_kbs,
+            net_rx_kbs, net_tx_kbs,
+            battery_pct, battery_charging, battery_time_remaining: battery_time_remaining.clone(),
+            cpu_temp_c: None, gpu_temp_c: None, gpu_usage: None,
+            net_connections,
+        };
+        let _ = tx.send(fast_stats);
+
+        // Slow metrics (top takes 1-2s, powermetrics needs sudo).
+        let cpu_usage = read_cpu_usage();
         let (cpu_temp_c, gpu_temp_c, gpu_usage) = read_powermetrics();
-        let net_connections = read_net_connections();
 
         let stats = SystemStats {
             cpu_usage, load_avg_1m,
