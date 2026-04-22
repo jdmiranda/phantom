@@ -382,24 +382,31 @@ impl App {
         let panel_x = margin;
         let panel_y = 30.0 + y_offset; // below tab bar + sysmon
 
-        // Collect to avoid borrow conflict.
+        // Extract only what we need — avoid cloning the entire output string.
         struct AgentRenderData {
             task: String,
             status: crate::agent_pane::AgentPaneStatus,
-            output: String,
+            tail_lines: Vec<String>,
         }
+
+        let max_visible = ((max_panel_h - title_h - padding * 2.0) / line_height)
+            .floor().max(1.0) as usize;
+
         let agent_data: Vec<AgentRenderData> = self.agent_panes.iter().map(|p| {
+            // Only collect the last N visible lines — not the full output.
+            let all_lines: Vec<&str> = p.output.lines().collect();
+            let start = all_lines.len().saturating_sub(max_visible);
+            let tail: Vec<String> = all_lines[start..].iter().map(|s| s.to_string()).collect();
             AgentRenderData {
                 task: p.task.clone(),
                 status: p.status,
-                output: p.output.clone(),
+                tail_lines: tail,
             }
         }).collect();
 
-        // For now, render the first (most recent) agent. Stack multiple later.
         let pane = &agent_data[0];
 
-        let visible_lines: Vec<&str> = pane.output.lines().collect();
+        let visible_lines = &pane.tail_lines;
         let max_text_lines = ((max_panel_h - title_h - padding * 2.0) / line_height)
             .floor()
             .max(1.0) as usize;

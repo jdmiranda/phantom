@@ -89,6 +89,17 @@ impl AgentPane {
             match handle.try_recv() {
                 Some(ApiEvent::TextDelta(text)) => {
                     self.output.push_str(&text);
+                    // Cap output to prevent unbounded memory growth.
+                    if self.output.len() > 65536 {
+                        let mut trim = self.output.len() - 65536;
+                        while trim < self.output.len()
+                            && !self.output.is_char_boundary(trim)
+                        {
+                            trim += 1;
+                        }
+                        self.output.drain(..trim);
+                        self.output.insert_str(0, "[...truncated...]\n");
+                    }
                     got_content = true;
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {

@@ -63,14 +63,17 @@ impl App {
             }
         }
 
-        // Publish terminal output event to bus (batched per frame).
+        // Publish terminal output event to bus (throttled to 1/sec, not every frame).
         if had_output {
-            self.event_bus.emit(BusMessage {
-                topic_id: self.topic_terminal_output,
-                sender: 0,
-                payload: serde_json::json!({ "pane_count": self.panes.len() }),
-                timestamp: now.duration_since(self.start_time).as_secs(),
-            });
+            let elapsed_secs = now.duration_since(self.start_time).as_secs();
+            if self.event_bus.queue_len() < 128 {
+                self.event_bus.emit(BusMessage {
+                    topic_id: self.topic_terminal_output,
+                    sender: 0,
+                    payload: serde_json::json!({ "pane_count": self.panes.len() }),
+                    timestamp: elapsed_secs,
+                });
+            }
         }
 
         // Semantic scan: detect errors in PTY output and notify brain.
