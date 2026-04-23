@@ -8,43 +8,162 @@ use phantom_renderer::quads::QuadInstance;
 use crate::app::App;
 
 impl App {
-    pub(crate) fn build_command_overlay(
+    /// Render the Quake-style drop-down console.
+    ///
+    /// Drops from the top of the screen, ~40% height. Shows scrollback
+    /// history with a command input line at the bottom of the pane.
+    pub(crate) fn build_console_overlay(
         &mut self,
         screen_size: [f32; 2],
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
-        let bar_height = 28.0;
-        let y = screen_size[1] - bar_height;
-        let cmd_text = self.command_input.as_deref().unwrap_or("");
-        let display = format!("> {cmd_text}_");
+        let line_height = self.cell_size.1;
+        let cell_w = self.cell_size.0;
+        let padding = 10.0;
+        let slide = self.console.slide;
 
-        // Dark background bar.
+        // Console takes 40% of screen height, scaled by slide animation.
+        let full_height = (screen_size[1] * 0.40).max(120.0);
+        let console_height = full_height * slide;
+        let console_width = screen_size[0];
+
+        // Slide the entire console upward by offsetting Y.
+        let y_offset = -full_height + console_height; // starts at -full_height, ends at 0
+
+        // -- Background: fully opaque dark --
         quads.push(QuadInstance {
-            pos: [0.0, y],
-            size: [screen_size[0], bar_height],
-            color: [0.02, 0.02, 0.04, 0.95],
+            pos: [0.0, y_offset],
+            size: [console_width, full_height],
+            color: [0.01, 0.01, 0.03, 1.0],
             border_radius: 0.0,
         });
 
-        // Command text.
-        let color = [0.2, 1.0, 0.5, 1.0]; // bright green
-        let cells: Vec<phantom_renderer::text::TerminalCell> = display
-            .chars()
-            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: color })
-            .collect();
+        // -- Glowing bottom edge (cyan scanline, the Quake separator) --
+        // Positioned at the visible bottom of the sliding console.
+        quads.push(QuadInstance {
+            pos: [0.0, y_offset + full_height - 2.0],
+            size: [console_width, 2.0],
+            color: [0.0, 0.85, 0.95, 0.9],
+            border_radius: 0.0,
+        });
+        quads.push(QuadInstance {
+            pos: [0.0, y_offset + full_height],
+            size: [console_width, 6.0],
+            color: [0.0, 0.4, 0.5, 0.25],
+            border_radius: 0.0,
+        });
 
-        if !cells.is_empty() {
-            let cols = cells.len();
-            let origin = (8.0, y + 4.0);
-            let mut g = self.text_renderer.prepare_glyphs(
-                &mut self.atlas,
-                &self.gpu.queue,
-                &cells,
-                cols,
-                origin,
+        // Don't render text content until slide is far enough to be readable.
+        if slide < 0.15 {
+            return;
+        }
+
+        // -- Title bar --
+        let title_h = line_height + 4.0;
+        quads.push(QuadInstance {
+            pos: [0.0, y_offset],
+            size: [console_width, title_h],
+            color: [0.02, 0.04, 0.06, 0.95],
+            border_radius: 0.0,
+        });
+
+        let title = "PHANTOM CONSOLE";
+        self.render_overlay_text(title, padding, y_offset + 2.0, [0.0, 0.8, 0.9, 0.8], glyphs);
+
+        let hint = "[`] close  [Tab] complete  [PgUp/Dn] scroll";
+        let hint_x = console_width - (hint.len() as f32 * cell_w) - padding;
+        self.render_overlay_text(hint, hint_x, y_offset + 2.0, [0.3, 0.5, 0.5, 0.5], glyphs);
+
+        // -- Input line (at bottom of console pane) --
+        let input_y = y_offset + full_height - line_height - padding;
+        let input_bar_y = input_y - 4.0;
+        let input_bar_h = line_height + 8.0;
+
+        quads.push(QuadInstance {
+            pos: [0.0, input_bar_y],
+            size: [console_width, input_bar_h],
+            color: [0.02, 0.03, 0.05, 0.95],
+            border_radius: 0.0,
+        });
+        quads.push(QuadInstance {
+            pos: [0.0, input_bar_y],
+            size: [console_width, 1.0],
+            color: [0.1, 0.3, 0.2, 0.5],
+            border_radius: 0.0,
+        });
+
+        let input_display = format!("> {}_", self.console.input);
+        self.render_overlay_text(
+            &input_display,
+            padding,
+            input_y,
+            [0.2, 1.0, 0.5, 1.0],
+            glyphs,
+        );
+
+        // -- Scrollback history --
+        let history_top = y_offset + title_h + 4.0;
+        let history_bottom = input_bar_y - 4.0;
+        let visible_lines = ((history_bottom - history_top) / line_height).floor().max(0.0) as usize;
+
+        if visible_lines == 0 {
+            return;
+        }
+
+        let total = self.console.history.len();
+        let scroll = self.console.scroll_offset;
+        let end = total.saturating_sub(scroll);
+        let start = end.saturating_sub(visible_lines);
+        let max_chars = ((console_width - padding * 2.0) / cell_w) as usize;
+
+        // Reuse pooled buffer to avoid per-frame allocation.
+        let mut lines_buf = std::mem::take(&mut self.overlay_line_buf);
+        lines_buf.clear();
+
+        for line in &self.console.history[start..end] {
+            let (text, color) = match line {
+                crate::console::ConsoleLine::Command(cmd) => {
+                    (format!("> {cmd}"), [0.2, 1.0, 0.5, 0.9])
+                }
+                crate::console::ConsoleLine::Output(msg) => {
+                    (msg.clone(), [0.6, 0.75, 0.7, 0.85])
+                }
+                crate::console::ConsoleLine::Error(msg) => {
+                    (msg.clone(), [1.0, 0.35, 0.25, 0.9])
+                }
+                crate::console::ConsoleLine::System(msg) => {
+                    (msg.clone(), [0.0, 0.8, 0.9, 0.8])
+                }
+            };
+            // Truncate in-place if needed.
+            let truncated = if text.chars().count() > max_chars {
+                text.chars().take(max_chars).collect()
+            } else {
+                text
+            };
+            lines_buf.push((truncated, color));
+        }
+
+        for (i, (text, color)) in lines_buf.iter().enumerate() {
+            let y = history_top + (i as f32 * line_height);
+            self.render_overlay_text(text, padding, y, *color, glyphs);
+        }
+
+        // Return the buffer to the pool.
+        self.overlay_line_buf = lines_buf;
+
+        // Scroll indicator when not at bottom.
+        if scroll > 0 {
+            let indicator = format!("-- {scroll} more --");
+            let ix = (console_width - indicator.len() as f32 * cell_w) / 2.0;
+            self.render_overlay_text(
+                &indicator,
+                ix,
+                history_bottom - line_height,
+                [0.5, 0.7, 0.5, 0.6],
+                glyphs,
             );
-            glyphs.append(&mut g);
         }
     }
 
@@ -389,36 +508,31 @@ impl App {
         let panel_x = margin;
         let panel_y = 30.0 + y_offset; // below tab bar + sysmon
 
-        // Extract only what we need — avoid cloning the entire output string.
-        struct AgentRenderData {
-            task: String,
-            status: crate::agent_pane::AgentPaneStatus,
-            tail_lines: Vec<String>,
-        }
-
         let max_visible = ((max_panel_h - title_h - padding * 2.0) / line_height)
             .floor().max(1.0) as usize;
 
+        // Rebuild caches first (needs &mut).
+        for p in &mut self.agent_panes {
+            p.tail_lines(max_visible);
+        }
+
+        // Now collect render data from the updated caches.
+        struct AgentRenderData {
+            task: String,
+            status: crate::agent_pane::AgentPaneStatus,
+            display_lines: Vec<String>,
+        }
+
         let agent_data: Vec<AgentRenderData> = self.agent_panes.iter().map(|p| {
-            // Only collect the last N visible lines — not the full output.
-            let all_lines: Vec<&str> = p.output.lines().collect();
-            let start = all_lines.len().saturating_sub(max_visible);
-            let tail: Vec<String> = all_lines[start..].iter().map(|s| s.to_string()).collect();
             AgentRenderData {
                 task: p.task.clone(),
                 status: p.status,
-                tail_lines: tail,
+                display_lines: p.cached_lines.clone(),
             }
         }).collect();
 
         let pane = &agent_data[0];
-
-        let visible_lines = &pane.tail_lines;
-        let max_text_lines = ((max_panel_h - title_h - padding * 2.0) / line_height)
-            .floor()
-            .max(1.0) as usize;
-        let start = visible_lines.len().saturating_sub(max_text_lines);
-        let display_lines = &visible_lines[start..];
+        let display_lines = &pane.display_lines;
         let content_h = display_lines.len() as f32 * line_height;
         let panel_height = (title_h + content_h + padding * 2.0).min(max_panel_h);
 

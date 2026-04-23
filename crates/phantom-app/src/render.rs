@@ -111,6 +111,23 @@ impl App {
             // Draw glyphs (text).
             self.grid_renderer
                 .render(&mut pass, self.atlas.bind_group());
+
+            // Draw video frame (goes through CRT post-processing).
+            if self.video_renderer.has_frame() {
+                // Center the video in the screen.
+                let vw = self.video_playback.as_ref().map_or(0, |p| p.width) as f32;
+                let vh = self.video_playback.as_ref().map_or(0, |p| p.height) as f32;
+                let vx = (screen_size[0] - vw) / 2.0;
+                let vy = (screen_size[1] - vh) / 2.0;
+                self.video_renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    screen_size,
+                    [vx, vy],
+                    [vw, vh],
+                );
+                self.video_renderer.render(&mut pass);
+            }
         }
 
         // -----------------------------------------------------------------
@@ -154,9 +171,9 @@ impl App {
             // Chrome vecs already contain container quads/glyphs from render_terminal.
             // Append command mode / debug HUD / suggestion overlays on top.
 
-            // -- Command input bar --
-            if self.command_mode {
-                self.build_command_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
+            // -- Quake console (renders during slide animation too) --
+            if self.console.visible() {
+                self.build_console_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
             // -- Debug shader HUD --
@@ -295,8 +312,8 @@ impl App {
         _chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         let _has_multiple = self.panes.len() > 1;
-        let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
-        let mut container_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
+        let mut detached_labels: Vec<(usize, f32, f32, [f32; 4])> = Vec::with_capacity(self.panes.len());
+        let mut container_titles: Vec<(usize, usize, f32, f32, [f32; 4])> = Vec::with_capacity(self.panes.len());
 
         // -- Monitor panels: hstack (sysmon left, appmon right) --
         let monitor_height = self.render_monitor_hstack(screen_size, quads, glyphs);
@@ -421,14 +438,13 @@ impl App {
                 } else {
                     [0.4, 0.5, 0.4, 0.7]
                 };
-                let title_text = format!("● shell  {}×{}", cols, rows);
                 let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
                 let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
-                container_titles.push((title_text, title_x, title_y, dot_color));
+                container_titles.push((cols, rows, title_x, title_y, dot_color));
             }
 
             // -- Convert RenderCells to GridCells --
-            let grid_cells: Vec<GridCell> = render_cells
+            let mut grid_cells: Vec<GridCell> = render_cells
                 .iter()
                 .map(|rc| GridCell {
                     ch: rc.ch,
@@ -436,6 +452,11 @@ impl App {
                     bg: rc.bg,
                 })
                 .collect();
+
+            // -- Apply per-keystroke glitch effect --
+            if is_focused {
+                self.keystroke_fx.apply(&mut grid_cells, cols);
+            }
 
             // -- Prepare background quads + glyph instances via GridRenderData --
             let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
@@ -547,25 +568,36 @@ impl App {
                 });
 
                 // Process name label.
-                let label = format!("  {} ", &pane.detached_label);
                 let label_x = dot_x + dot_size + 4.0;
                 let label_y = pane_rect.y + border_thickness + 2.0;
                 let label_color = [0.0, pulse, pulse * 0.8, 1.0];
 
-                detached_labels.push((label, label_x, label_y, label_color));
+                detached_labels.push((pane_index, label_x, label_y, label_color));
             }
             // Note: non-detached pane borders are now drawn as part of the
             // app-container chrome at the top of the pane loop.
         }
 
         // -- Detached pane labels (rendered after the pane loop to avoid borrow issues) --
-        for (label, x, y, color) in &detached_labels {
-            self.render_overlay_text(label, *x, *y, *color, glyphs);
+        for &(pi, x, y, color) in &detached_labels {
+            use std::fmt::Write;
+            let mut buf = std::mem::take(&mut self.title_buf);
+            buf.clear();
+            if let Some(pane) = self.panes.get(pi) {
+                let _ = write!(buf, "  {} ", &pane.detached_label);
+            }
+            self.render_overlay_text(&buf, x, y, color, glyphs);
+            self.title_buf = buf;
         }
 
         // -- App-container title text (scene pass — curves with CRT) --
-        for (label, x, y, color) in &container_titles {
-            self.render_overlay_text(label, *x, *y, *color, glyphs);
+        for &(cols, rows, x, y, color) in &container_titles {
+            use std::fmt::Write;
+            let mut buf = std::mem::take(&mut self.title_buf);
+            buf.clear();
+            let _ = write!(buf, "● shell  {}×{}", cols, rows);
+            self.render_overlay_text(&buf, x, y, color, glyphs);
+            self.title_buf = buf;
         }
 
         // -- Tab bar --
@@ -598,26 +630,22 @@ impl App {
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         for seg in segments {
-            let cells: Vec<phantom_renderer::text::TerminalCell> = seg
-                .text
-                .chars()
-                .map(|ch| phantom_renderer::text::TerminalCell {
-                    ch,
-                    fg: seg.color,
-                })
-                .collect();
+            self.text_cell_buf.clear();
+            self.text_cell_buf.extend(seg.text.chars().map(|ch| {
+                phantom_renderer::text::TerminalCell { ch, fg: seg.color }
+            }));
 
-            if cells.is_empty() {
+            if self.text_cell_buf.is_empty() {
                 continue;
             }
 
-            let cols = cells.len();
+            let cols = self.text_cell_buf.len();
             let origin = (seg.x, seg.y);
 
             let mut seg_glyphs = self.text_renderer.prepare_glyphs(
                 &mut self.atlas,
                 &self.gpu.queue,
-                &cells,
+                &self.text_cell_buf,
                 cols,
                 origin,
             );

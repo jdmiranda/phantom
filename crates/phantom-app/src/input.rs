@@ -19,12 +19,6 @@ use crate::app::{App, AppState};
 // Key conversion (free functions)
 // ---------------------------------------------------------------------------
 
-/// Convert a winit `KeyEvent` to a `KeyCombo` for keybind registry lookup.
-fn winit_key_to_combo(event: &winit::event::KeyEvent) -> Option<KeyCombo> {
-    let ui_key = winit_logical_to_ui_key(&event.logical_key)?;
-    Some(KeyCombo::bare(ui_key))
-}
-
 /// Improved key combo extraction that incorporates externally tracked modifiers.
 pub fn winit_key_to_combo_with_mods(
     event: &winit::event::KeyEvent,
@@ -147,75 +141,6 @@ pub(crate) fn chrono_time_string() -> String {
 // ---------------------------------------------------------------------------
 
 impl App {
-    /// Handle a winit keyboard event.
-    pub fn handle_key(&mut self, event: winit::event::KeyEvent) {
-        if !event.state.is_pressed() {
-            return;
-        }
-
-        self.last_input_time = Instant::now();
-
-        if self.suggestion.is_some() {
-            if let Key::Character(ref s) = event.logical_key {
-                if let Some(ch) = s.chars().next() {
-                    let ch_lower = ch.to_ascii_lowercase();
-                    let matched = self.suggestion.as_ref()
-                        .and_then(|s| s.options.iter().find(|(k, _)| *k == ch_lower).map(|(_, v)| v.clone()));
-                    if let Some(action_text) = matched {
-                        info!("[PHANTOM]: User chose: {action_text}");
-                        self.suggestion = None;
-                        return;
-                    }
-                }
-            }
-            self.suggestion = None;
-        }
-
-        if self.debug_hud {
-            self.handle_debug_hud_key(&event);
-            return;
-        }
-
-        if self.command_mode {
-            self.handle_command_mode_key(&event);
-            return;
-        }
-
-        if matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
-            self.command_mode = true;
-            self.command_input = Some(String::new());
-            debug!("Command mode activated");
-            return;
-        }
-
-        if let Some(combo) = winit_key_to_combo(&event) {
-            if let Some(action) = self.keybinds.lookup(&combo) {
-                self.dispatch_action(*action);
-                return;
-            }
-        }
-
-        if self.state == AppState::Boot {
-            if self.boot.is_waiting() {
-                self.boot.dismiss();
-            } else {
-                self.boot.skip();
-            }
-            return;
-        }
-
-        if let Some(terminal_event) = winit_key_to_terminal(&event) {
-            let bytes = input::encode_key(&terminal_event);
-            if !bytes.is_empty() {
-                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                    if let Err(e) = pane.terminal.pty_write(&bytes) {
-                        warn!("PTY write failed: {e}");
-                    }
-                }
-            }
-        }
-    }
-
     /// Handle modifier state changes from winit.
     pub fn handle_modifiers(&mut self, modifiers: winit::event::Modifiers) {
         let _ = modifiers;
@@ -281,29 +206,45 @@ impl App {
         }
     }
 
-    /// Handle keys when command mode is active.
-    pub(crate) fn handle_command_mode_key(&mut self, event: &winit::event::KeyEvent) {
+    /// Handle keys when the Quake console is open.
+    pub(crate) fn handle_console_key(&mut self, event: &winit::event::KeyEvent) {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                debug!("Command mode cancelled");
-                self.command_mode = false;
-                self.command_input = None;
+                debug!("Console closed via Escape");
+                self.console.open = false;
             }
             Key::Named(NamedKey::Enter) => {
-                let input = self.command_input.take().unwrap_or_default();
-                self.command_mode = false;
-                if !input.is_empty() {
-                    self.execute_user_command(&input);
+                if let Some(cmd) = self.console.submit() {
+                    self.execute_user_command(&cmd);
                 }
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.console.tab_complete();
             }
             Key::Named(NamedKey::Backspace) => {
-                if let Some(ref mut buf) = self.command_input {
-                    buf.pop();
-                }
+                self.console.clear_tab();
+                self.console.input.pop();
+            }
+            Key::Named(NamedKey::Space) => {
+                self.console.clear_tab();
+                self.console.input.push(' ');
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.console.history_up();
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.console.history_down();
+            }
+            Key::Named(NamedKey::PageUp) => {
+                self.console.scroll_up(10);
+            }
+            Key::Named(NamedKey::PageDown) => {
+                self.console.scroll_down(10);
             }
             Key::Character(s) => {
-                if let Some(ref mut buf) = self.command_input {
-                    buf.push_str(s.as_str());
+                if s.as_str() != "`" {
+                    self.console.clear_tab();
+                    self.console.input.push_str(s.as_str());
                 }
             }
             _ => {}
@@ -374,8 +315,30 @@ impl App {
             return;
         }
 
-        if self.command_mode {
-            self.handle_command_mode_key(&event);
+        // Escape kills video playback from anywhere.
+        if self.video_playback.is_some()
+            && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+        {
+            if let Some(ref mut vp) = self.video_playback {
+                vp.stop();
+            }
+            self.video_playback = None;
+            self.video_renderer.clear();
+            self.console.system("Video stopped");
+            return;
+        }
+
+        if self.console.open {
+            // Backtick while console is open = close it (toggle).
+            if !modifiers.state().control_key()
+                && !modifiers.state().alt_key()
+                && !modifiers.state().super_key()
+                && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`")
+            {
+                self.console.toggle();
+                return;
+            }
+            self.handle_console_key(&event);
             return;
         }
 
@@ -384,9 +347,8 @@ impl App {
             && !modifiers.state().super_key()
         {
             if matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
-                self.command_mode = true;
-                self.command_input = Some(String::new());
-                debug!("Command mode activated");
+                self.console.toggle();
+                debug!("Console toggled open");
                 return;
             }
         }
@@ -415,6 +377,14 @@ impl App {
             let bytes = input::encode_key(&terminal_event);
             if !bytes.is_empty() {
                 if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    // Trigger glitch effect at cursor before writing to PTY.
+                    if bytes.len() == 1 && bytes[0] >= 0x20 && bytes[0] < 0x7F {
+                        let content = pane.terminal.term().renderable_content();
+                        let col = content.cursor.point.column.0;
+                        let row = content.cursor.point.line.0.max(0) as usize;
+                        self.keystroke_fx.trigger(col, row);
+                    }
+
                     if let Err(e) = pane.terminal.pty_write(&bytes) {
                         warn!("PTY write failed: {e}");
                     }

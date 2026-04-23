@@ -29,6 +29,10 @@ pub(crate) struct AgentPane {
     api_handle: Option<ApiHandle>,
     /// Tool use IDs for multi-turn conversations.
     tool_use_ids: Vec<String>,
+    /// Cached tail lines for rendering (avoids re-splitting every frame).
+    pub(crate) cached_lines: Vec<String>,
+    /// Output length at last cache rebuild.
+    cached_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +76,8 @@ impl AgentPane {
             output: String::from("● Agent working...\n\n"),
             api_handle: Some(handle),
             tool_use_ids: Vec::new(),
+            cached_lines: Vec::new(),
+            cached_len: 0,
         }
     }
 
@@ -132,6 +138,17 @@ impl AgentPane {
         got_content
     }
 
+    /// Return cached tail lines for rendering. Only re-splits when output grows.
+    pub(crate) fn tail_lines(&mut self, max_lines: usize) -> &[String] {
+        if self.output.len() != self.cached_len {
+            self.cached_len = self.output.len();
+            let all: Vec<&str> = self.output.lines().collect();
+            let start = all.len().saturating_sub(max_lines);
+            self.cached_lines = all[start..].iter().map(|s| s.to_string()).collect();
+        }
+        &self.cached_lines
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -142,23 +159,61 @@ impl App {
     /// Spawn a new agent pane for the given task.
     ///
     /// Creates the agent, starts the Claude API call on a background thread,
-    /// and adds the agent pane to the app's list. The render loop will pick
-    /// it up and display it in a split pane.
-    pub(crate) fn spawn_agent_pane(&mut self, task: AgentTask) {
+    /// and adds the agent pane to the app's list. Returns false if the agent
+    /// could not be spawned (e.g. missing API key).
+    pub(crate) fn spawn_agent_pane(&mut self, task: AgentTask) -> bool {
         let Some(claude_config) = ClaudeConfig::from_env() else {
             warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
-            return;
+            return false;
         };
 
         let agent_pane = AgentPane::spawn(task, &claude_config);
         self.agent_panes.push(agent_pane);
         info!("Agent pane added (total: {})", self.agent_panes.len());
+        true
     }
 
     /// Poll all active agent panes for new output. Call from update().
+    /// Streams new text deltas and status changes into the console.
     pub(crate) fn poll_agent_panes(&mut self) {
+        let mut events: Vec<(String, Option<String>, AgentPaneStatus, AgentPaneStatus)> = Vec::new();
         for pane in &mut self.agent_panes {
+            let prev_status = pane.status;
+            let prev_len = pane.output.len();
             pane.poll();
+            // Capture new text added this frame.
+            let new_text = if pane.output.len() > prev_len {
+                Some(pane.output[prev_len..].to_string())
+            } else {
+                None
+            };
+            if new_text.is_some() || pane.status != prev_status {
+                events.push((pane.task.clone(), new_text, prev_status, pane.status));
+            }
+        }
+        for (task, new_text, prev, current) in events {
+            // Stream new text lines into the console.
+            if let Some(text) = new_text {
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        self.console.output(trimmed.to_string());
+                    }
+                }
+            }
+            // Status transitions.
+            if current != prev {
+                let short: String = task.chars().take(60).collect();
+                match current {
+                    AgentPaneStatus::Done => {
+                        self.console.system(format!("Agent finished: {short}"));
+                    }
+                    AgentPaneStatus::Failed => {
+                        self.console.error(format!("Agent failed: {short}"));
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -181,6 +236,8 @@ mod tests {
             output: String::from("● Agent working...\n\n"),
             api_handle: Some(handle),
             tool_use_ids: Vec::new(),
+            cached_lines: Vec::new(),
+            cached_len: 0,
         };
         (pane, tx)
     }
@@ -247,6 +304,8 @@ mod tests {
             output: String::new(),
             api_handle: None,
             tool_use_ids: Vec::new(),
+            cached_lines: Vec::new(),
+            cached_len: 0,
         };
         assert!(!pane.poll());
     }

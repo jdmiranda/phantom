@@ -144,6 +144,14 @@ impl ApplicationHandler for Phantom {
             }
             WindowEvent::RedrawRequested => {
                 let frame_result = if let Some(app) = &mut self.app {
+                    // Raw-write frame trace to disk (survives SIGKILL, bypasses logger).
+                    // Only writes every ~500 frames to avoid I/O overhead.
+                    if let Some(trace) = app.watchdog_trace(500) {
+                        if let Some(log_path) = LOG_PATH.get() {
+                            raw_append_to_log(log_path, trace.as_bytes());
+                        }
+                    }
+
                     std::panic::catch_unwind(AssertUnwindSafe(|| {
                         app.update();
                         if let Err(e) = app.render() {
@@ -184,6 +192,31 @@ impl ApplicationHandler for Phantom {
     }
 }
 
+/// Load a `.env` file from the current directory if it exists.
+/// Only sets vars that are not already in the environment.
+fn load_dotenv() {
+    let path = std::path::Path::new(".env");
+    if !path.exists() {
+        return;
+    }
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+                if std::env::var(key).is_err() {
+                    // SAFETY: single-threaded at this point (before any spawns).
+                    unsafe { std::env::set_var(key, value); }
+                }
+            }
+        }
+    }
+}
+
 fn print_help() {
     println!(
         r#"PHANTOM v0.1.0 — AI-native terminal emulator
@@ -218,6 +251,184 @@ EXAMPLES:
 /// Home-based config dir.
 fn dirs_or_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+}
+
+// ---------------------------------------------------------------------------
+// Signal-based crash logging
+// ---------------------------------------------------------------------------
+//
+// The Rust panic hook only catches Rust panics. Signals from native code
+// (Metal/wgpu SIGSEGV, libc SIGABRT, etc.) bypass it entirely. This installs
+// async-signal-safe handlers that write a crash marker to disk before dying.
+
+/// Path to the signal crash log. Must be a static — signal handlers can't allocate.
+static SIGNAL_CRASH_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Install signal handlers for SIGSEGV, SIGBUS, SIGABRT, SIGTERM.
+fn install_signal_handlers() {
+    let crash_dir = dirs_or_home().join(".config/phantom");
+    let _ = std::fs::create_dir_all(&crash_dir);
+    let _ = SIGNAL_CRASH_PATH.set(crash_dir.join("signal_crash.log"));
+
+    unsafe {
+        for &sig in &[libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT, libc::SIGTERM] {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = signal_handler as *const () as usize;
+            sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESETHAND; // one-shot, then default
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
+/// Async-signal-safe crash handler. No allocations, no locks.
+/// Writes signal info to disk using raw write(), then re-raises.
+extern "C" fn signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+    // Build a fixed-size crash message on the stack.
+    let sig_name = match sig {
+        libc::SIGSEGV => b"SIGSEGV (segmentation fault)" as &[u8],
+        libc::SIGBUS  => b"SIGBUS (bus error)",
+        libc::SIGABRT => b"SIGABRT (abort)",
+        libc::SIGTERM => b"SIGTERM (terminated)",
+        _             => b"UNKNOWN SIGNAL",
+    };
+
+    // Get si_addr for SIGSEGV/SIGBUS (the faulting address).
+    let fault_addr: usize = if !info.is_null() && (sig == libc::SIGSEGV || sig == libc::SIGBUS) {
+        unsafe { (*info).si_addr as usize }
+    } else {
+        0
+    };
+
+    // Format into a stack buffer. No heap. No String.
+    let mut buf = [0u8; 512];
+    let mut pos = 0;
+
+    let header = b"PHANTOM SIGNAL CRASH\n====================\nSignal: ";
+    pos = append(&mut buf, pos, header);
+    pos = append(&mut buf, pos, sig_name);
+    pos = append(&mut buf, pos, b"\n");
+
+    if fault_addr != 0 {
+        pos = append(&mut buf, pos, b"Fault address: 0x");
+        pos = append_hex(&mut buf, pos, fault_addr);
+        pos = append(&mut buf, pos, b"\n");
+    }
+
+    pos = append(&mut buf, pos, b"PID: ");
+    pos = append_usize(&mut buf, pos, unsafe { libc::getpid() } as usize);
+    pos = append(&mut buf, pos, b"\n");
+
+    // Write to crash file.
+    if let Some(path) = SIGNAL_CRASH_PATH.get() {
+        if let Ok(cstr) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
+            unsafe {
+                let fd = libc::open(
+                    cstr.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o644,
+                );
+                if fd >= 0 {
+                    libc::write(fd, buf.as_ptr() as *const libc::c_void, pos);
+                    libc::close(fd);
+                }
+            }
+        }
+    }
+
+    // Also write to stderr.
+    unsafe {
+        libc::write(libc::STDERR_FILENO, buf.as_ptr() as *const libc::c_void, pos);
+    }
+
+    // Append to phantom.log so the signal crash appears inline with other logs.
+    if let Some(log_path) = LOG_PATH.get() {
+        raw_append_to_log(log_path, &buf[..pos]);
+    }
+
+    // Re-raise so the default handler runs (core dump, exit, etc.).
+    // SA_RESETHAND already restored the default, so this kills the process.
+    unsafe {
+        libc::raise(sig);
+    }
+}
+
+/// Append bytes to a fixed buffer (async-signal-safe, no alloc).
+fn append(buf: &mut [u8], pos: usize, data: &[u8]) -> usize {
+    let end = (pos + data.len()).min(buf.len());
+    let n = end - pos;
+    buf[pos..end].copy_from_slice(&data[..n]);
+    end
+}
+
+/// Append a usize as decimal digits.
+fn append_usize(buf: &mut [u8], pos: usize, mut val: usize) -> usize {
+    if val == 0 {
+        return append(buf, pos, b"0");
+    }
+    let mut digits = [0u8; 20];
+    let mut i = 0;
+    while val > 0 {
+        digits[i] = b'0' + (val % 10) as u8;
+        val /= 10;
+        i += 1;
+    }
+    digits[..i].reverse();
+    append(buf, pos, &digits[..i])
+}
+
+/// Append a usize as hex.
+fn append_hex(buf: &mut [u8], pos: usize, mut val: usize) -> usize {
+    if val == 0 {
+        return append(buf, pos, b"0");
+    }
+    let hex = b"0123456789abcdef";
+    let mut digits = [0u8; 16];
+    let mut i = 0;
+    while val > 0 {
+        digits[i] = hex[val & 0xf];
+        val >>= 4;
+        i += 1;
+    }
+    digits[..i].reverse();
+    append(buf, pos, &digits[..i])
+}
+
+/// Path to the phantom.log for raw append from signal/atexit handlers.
+static LOG_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Register a C-level atexit handler that appends to phantom.log.
+/// This fires on exit(), process::exit(), normal main return — anything
+/// except _exit() and signals. If phantom.log has no atexit marker AND
+/// no signal crash entry, the process was SIGKILL'd.
+fn install_atexit() {
+    extern "C" fn on_exit() {
+        if let Some(path) = LOG_PATH.get() {
+            raw_append_to_log(path, b"[ATEXIT] Process exited via exit() or normal return\n");
+        }
+    }
+
+    unsafe {
+        libc::atexit(on_exit);
+    }
+}
+
+/// Append a message to a log file using raw syscalls (async-signal-safe).
+/// Safe to call from signal handlers and atexit.
+fn raw_append_to_log(path: &std::path::Path, msg: &[u8]) {
+    if let Ok(cstr) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
+        unsafe {
+            let fd = libc::open(
+                cstr.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                0o644,
+            );
+            if fd >= 0 {
+                libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len());
+                libc::close(fd);
+            }
+        }
+    }
 }
 
 /// ISO-ish timestamp without external crate.
@@ -285,6 +496,9 @@ fn main() -> Result<()> {
     }
     builder.init();
 
+    // Store the log path for raw append from signal/atexit handlers.
+    let _ = LOG_PATH.set(log_path);
+
     // -- Panic hook: save crash report to disk --
     let crash_dir = dirs_or_home().join(".config/phantom");
     std::panic::set_hook(Box::new(move |info| {
@@ -323,6 +537,34 @@ fn main() -> Result<()> {
 
         eprintln!("\n{report}");
     }));
+
+    // -- Reset inherited signal mask --
+    // The supervisor blocks SIGINT/SIGTERM before spawning us. Signal masks
+    // are inherited across fork()+exec(), so we must unblock them or our
+    // signal handlers will never fire (SIGTERM stays pending → supervisor
+    // escalates to SIGKILL after 1s → instant death, zero trace).
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGSEGV);
+        libc::sigaddset(&mut set, libc::SIGBUS);
+        libc::sigaddset(&mut set, libc::SIGABRT);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+    }
+
+    // -- Signal handlers: catch SIGSEGV/SIGBUS/SIGABRT/SIGTERM --
+    // These bypass the Rust panic hook entirely, so we need separate handling.
+    install_signal_handlers();
+
+    // -- atexit handler: logs to a file when the process exits for ANY reason --
+    // This catches exit(), process::exit(), normal return, etc.
+    // If phantom.log has no "Process exiting" AND no atexit marker, it was SIGKILL.
+    install_atexit();
+
+    // Load .env file (for ANTHROPIC_API_KEY etc.) before anything reads env vars.
+    load_dotenv();
 
     // Load config file, then apply CLI overrides
     let mut config = PhantomConfig::load();
@@ -437,6 +679,31 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new()?;
     let mut app = Phantom::new(config, supervisor_socket);
-    event_loop.run_app(&mut app)?;
+
+    // Catch every exit path — errors from run_app, panics, and normal exit.
+    let result = event_loop.run_app(&mut app);
+    match &result {
+        Ok(()) => {
+            log::info!("Event loop exited cleanly");
+        }
+        Err(e) => {
+            log::error!("Event loop exited with error: {e}");
+            // Also write to the crash file so we have a record.
+            let crash_path = dirs_or_home().join(".config/phantom/exit_error.log");
+            let report = format!(
+                "PHANTOM EXIT ERROR\n==================\nTime: {}\nError: {e}\n\
+                 Backtrace:\n{}\n",
+                chrono_timestamp(),
+                std::backtrace::Backtrace::force_capture(),
+            );
+            let _ = std::fs::write(&crash_path, &report);
+        }
+    }
+
+    // Log at process exit — if this line is missing from phantom.log,
+    // something killed us before we got here (SIGKILL, _exit, etc.)
+    log::info!("Process exiting (exit code {})", if result.is_ok() { 0 } else { 1 });
+
+    result?;
     Ok(())
 }

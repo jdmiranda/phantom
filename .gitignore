@@ -1,3 +1,18 @@
+# Build
 /target
+
+# OS
 .DS_Store
+
+# Secrets
 .env
+.env.*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code worktrees and local state
+.claude/

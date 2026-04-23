@@ -45,7 +45,7 @@ pub fn capture_frame(
     texture: &wgpu::Texture,
     width: u32,
     height: u32,
-) -> Vec<u8> {
+) -> anyhow::Result<Vec<u8>> {
     // wgpu requires rows to be aligned to 256 bytes.
     let bytes_per_pixel = 4u32;
     let unpadded_bytes_per_row = width * bytes_per_pixel;
@@ -93,10 +93,12 @@ pub fn capture_frame(
     let buffer_slice = staging_buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        tx.send(result).unwrap();
+        let _ = tx.send(result);
     });
     let _ = device.poll(wgpu::PollType::Wait);
-    rx.recv().unwrap().expect("failed to map staging buffer");
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("GPU buffer map channel disconnected"))?
+        .map_err(|e| anyhow::anyhow!("GPU buffer mapping failed: {e}"))?;
 
     let mapped = buffer_slice.get_mapped_range();
 
@@ -111,7 +113,7 @@ pub fn capture_frame(
     drop(mapped);
     staging_buffer.unmap();
 
-    pixels
+    Ok(pixels)
 }
 
 // ---------------------------------------------------------------------------
@@ -121,16 +123,16 @@ pub fn capture_frame(
 /// Encode RGBA pixels to PNG bytes.
 ///
 /// Returns a complete PNG file as a byte vector.
-pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
     let mut png_data = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut png_data, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().unwrap();
-        writer.write_image_data(pixels).unwrap();
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(pixels)?;
     }
-    png_data
+    Ok(png_data)
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +150,7 @@ pub fn save_screenshot(
     metadata: &ScreenshotMetadata,
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let png_bytes = encode_png(pixels, width, height);
+    let png_bytes = encode_png(pixels, width, height)?;
     std::fs::write(path, &png_bytes)?;
 
     // Write metadata sidecar as `.json` next to the PNG.
@@ -176,7 +178,7 @@ mod tests {
             0, 0, 255, 255, // blue
             255, 255, 0, 255, // yellow
         ];
-        let png_bytes = encode_png(&pixels, 2, 2);
+        let png_bytes = encode_png(&pixels, 2, 2).unwrap();
 
         // PNG magic bytes.
         assert_eq!(&png_bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
@@ -196,7 +198,7 @@ mod tests {
     #[test]
     fn encode_png_1x1() {
         let pixels = vec![128, 64, 32, 200];
-        let png_bytes = encode_png(&pixels, 1, 1);
+        let png_bytes = encode_png(&pixels, 1, 1).unwrap();
         assert!(!png_bytes.is_empty());
         assert_eq!(&png_bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
     }

@@ -166,14 +166,34 @@ fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
 // ---------------------------------------------------------------------------
 
 /// Run a shell command with a 3-second timeout. Returns stdout or empty string.
+///
+/// Spawns the command directly and reads stdout with a deadline, killing the
+/// child if it exceeds 3 seconds. Does not rely on GNU `timeout` (unavailable
+/// on macOS by default).
 fn shell_with_timeout(cmd: &str) -> String {
-    std::process::Command::new("sh")
+    let Ok(child) = std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("timeout 3 sh -c '{cmd}' 2>/dev/null"))
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default()
+        .arg(cmd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+
+    // Move child into a thread that waits for output; main thread enforces timeout.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = child.wait_with_output();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(Ok(output)) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        _ => String::new(),
+    }
 }
 
 fn read_cpu_usage() -> f32 {

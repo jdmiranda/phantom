@@ -6,3 +6,4 @@ pub mod quads;
 pub mod postfx;
 pub mod images;
 pub mod screenshot;
+pub mod video;

@@ -16,6 +16,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
@@ -330,7 +331,7 @@ fn dispatch_send_key(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(note)) => protocol::create_response(
             id,
             json!({
@@ -380,7 +381,7 @@ fn dispatch_screenshot(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(shot)) => protocol::create_response(
             id,
             json!({
@@ -429,7 +430,7 @@ fn dispatch_run_command(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => protocol::create_response(
             id,
             json!({
@@ -456,7 +457,7 @@ fn dispatch_get_context(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(ctx_json)) => protocol::create_response(
             id,
             json!({
@@ -501,7 +502,7 @@ fn dispatch_phantom_command(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(msg)) => protocol::create_response(
             id,
             json!({
@@ -537,7 +538,7 @@ fn dispatch_read_output(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(text)) => protocol::create_response(
             id,
             json!({ "content": [{"type": "text", "text": text}] }),
@@ -569,7 +570,7 @@ fn dispatch_split_pane(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(msg)) => protocol::create_response(
             id,
             json!({ "content": [{"type": "text", "text": msg}] }),
@@ -604,7 +605,7 @@ fn dispatch_get_memory(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(value)) => protocol::create_response(
             id,
             json!({ "content": [{"type": "text", "text": value}], "key": key }),
@@ -645,7 +646,7 @@ fn dispatch_set_memory(
         return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
     }
 
-    match reply_rx.recv() {
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(msg)) => protocol::create_response(
             id,
             json!({ "content": [{"type": "text", "text": msg}], "key": key }),

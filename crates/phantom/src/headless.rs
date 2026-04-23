@@ -333,7 +333,7 @@ fn run_agent_loop(
 
     // Ensure the agent has a system prompt and initial user message.
     {
-        let agent = agents.get_mut(agent_id).unwrap();
+        let Some(agent) = agents.get_mut(agent_id) else { return };
         if agent.messages.is_empty() {
             let sys = agent.system_prompt();
             agent.push_message(AgentMessage::System(sys));
@@ -358,7 +358,7 @@ fn run_agent_loop(
     let tools = available_tools();
 
     loop {
-        let agent = agents.get(agent_id).unwrap();
+        let Some(agent) = agents.get(agent_id) else { break };
         if agent.status != AgentStatus::Working && agent.status != AgentStatus::WaitingForTool {
             break;
         }
@@ -376,7 +376,7 @@ fn run_agent_loop(
                 Some(ApiEvent::TextDelta(text)) => {
                     print!("{text}");
                     io::stdout().flush().ok();
-                    let agent = agents.get_mut(agent_id).unwrap();
+                    let Some(agent) = agents.get_mut(agent_id) else { break };
                     agent.push_message(AgentMessage::Assistant(text.clone()));
                     agent.log(&text);
                 }
@@ -398,7 +398,7 @@ fn run_agent_loop(
 
                     tool_use_ids.push(id);
 
-                    let agent = agents.get_mut(agent_id).unwrap();
+                    let Some(agent) = agents.get_mut(agent_id) else { break };
                     agent.push_message(AgentMessage::ToolCall(call));
                     agent.push_message(AgentMessage::ToolResult(result));
                     agent.status = AgentStatus::Working;
@@ -407,14 +407,13 @@ fn run_agent_loop(
                 Some(ApiEvent::Done) => {
                     println!("\n[AGENT #{}]: turn complete", agent_id);
                     if !got_tool_use {
-                        // No tool call -- the agent is done reasoning.
-                        agents.get_mut(agent_id).unwrap().complete(true);
+                        if let Some(a) = agents.get_mut(agent_id) { a.complete(true); }
                     }
                     break;
                 }
                 Some(ApiEvent::Error(e)) => {
                     println!("\n[AGENT #{}]: error: {e}", agent_id);
-                    agents.get_mut(agent_id).unwrap().complete(false);
+                    if let Some(a) = agents.get_mut(agent_id) { a.complete(false); }
                     break;
                 }
                 None => {
@@ -424,14 +423,14 @@ fn run_agent_loop(
         }
 
         // If the agent completed or failed, stop looping.
-        let agent = agents.get(agent_id).unwrap();
+        let Some(agent) = agents.get(agent_id) else { break };
         if agent.status != AgentStatus::Working {
             break;
         }
         // Otherwise the agent made a tool call -- loop back for the next turn.
     }
 
-    let agent = agents.get(agent_id).unwrap();
+    let Some(agent) = agents.get(agent_id) else { return };
     let status_tag = match agent.status {
         AgentStatus::Done => "DONE",
         AgentStatus::Failed => "FAILED",

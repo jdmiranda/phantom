@@ -27,6 +27,11 @@ impl App {
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
 
+        // Warn if a frame takes abnormally long (> 2 seconds).
+        if dt > 2.0 {
+            warn!("SLOW FRAME: dt={dt:.2}s — previous frame blocked the event loop");
+        }
+
         // Read from all panes' PTYs (non-blocking). Collect indices of exited panes.
         let mut exited: Vec<usize> = Vec::new();
         let mut had_output = false;
@@ -49,6 +54,7 @@ impl App {
                                 }
                             }
                             pane.error_notified = false;
+                            pane.has_new_output = true;
                         }
                     }
                 }
@@ -59,25 +65,25 @@ impl App {
             }
         }
 
-        // Publish terminal output event to bus (throttled to 1/sec, not every frame).
-        if had_output {
-            let elapsed_secs = now.duration_since(self.start_time).as_secs();
-            if self.event_bus.queue_len() < 128 {
-                self.event_bus.emit(BusMessage {
-                    topic_id: self.topic_terminal_output,
-                    sender: 0,
-                    payload: serde_json::json!({ "pane_count": self.panes.len() }),
-                    timestamp: elapsed_secs,
-                });
-            }
+        // Publish terminal output event to bus (throttled by queue depth).
+        if had_output && self.event_bus.queue_len() < 128 {
+            self.event_bus.emit(BusMessage {
+                topic_id: self.topic_terminal_output,
+                sender: 0,
+                payload: serde_json::Value::Null,
+                timestamp: now.duration_since(self.start_time).as_secs(),
+            });
         }
 
         // Semantic scan: detect errors in PTY output and notify brain.
+        // Only scans panes that received new output THIS frame.
         if let Some(ref brain) = self.brain {
             for pane in self.panes.iter_mut() {
-                if pane.error_notified || pane.is_detached || pane.output_buf.is_empty() {
+                if !pane.has_new_output || pane.error_notified || pane.is_detached || pane.output_buf.is_empty() {
                     continue;
                 }
+                pane.has_new_output = false;
+
                 let buf = &pane.output_buf;
                 let has_error = buf.contains("error[E")
                     || buf.contains("Error:")
@@ -99,14 +105,6 @@ impl App {
                     if !parsed.errors.is_empty() {
                         let _ = brain.send_event(AiEvent::CommandComplete(parsed));
                         pane.error_notified = true;
-
-                        // Publish error event to bus.
-                        self.event_bus.emit(BusMessage {
-                            topic_id: self.topic_terminal_error,
-                            sender: 0,
-                            payload: serde_json::json!({ "has_errors": true }),
-                            timestamp: now.duration_since(self.start_time).as_secs(),
-                        });
                     }
                 }
 
@@ -178,10 +176,7 @@ impl App {
             }
         }
 
-        // Supervisor heartbeat & command polling.
-        if let Some(ref mut sv) = self.supervisor {
-            sv.send_heartbeat();
-        }
+        // Supervisor command polling (heartbeats are on a dedicated thread).
         let cmd = self.supervisor.as_mut().and_then(|sv| sv.try_recv());
         if let Some(cmd) = cmd {
             self.handle_supervisor_command(cmd);
@@ -233,7 +228,7 @@ impl App {
 
         // Spawn agent panes (deferred from brain action loop to avoid borrow conflict).
         for task in tasks_to_spawn {
-            self.spawn_agent_pane(task);
+            let _ = self.spawn_agent_pane(task);
         }
 
         // Expire stale suggestions.
@@ -243,19 +238,21 @@ impl App {
             }
         }
 
-        // Refresh git context periodically (off main thread).
+        // Refresh git context periodically (off main thread, max once per 30s).
         if let Some(ref ctx) = self.context {
-            let elapsed = now.duration_since(self.start_time).as_secs();
-            if elapsed > 0 && elapsed % 30 == 0 && dt > 0.0 {
+            if now.duration_since(self.git_refresh_last).as_secs() >= 30 {
+                self.git_refresh_last = now;
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
-                std::thread::spawn(move || {
-                    let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
-                    fresh.refresh_git();
-                    if let Some(tx) = brain_tx {
-                        let _ = tx.send(AiEvent::GitStateChanged);
-                    }
-                });
+                let _ = std::thread::Builder::new()
+                    .name("git-refresh".into())
+                    .spawn(move || {
+                        let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
+                        fresh.refresh_git();
+                        if let Some(tx) = brain_tx {
+                            let _ = tx.send(AiEvent::GitStateChanged);
+                        }
+                    });
             }
             if let Some(ref git) = ctx.git {
                 self.status_bar.set_branch(&git.branch);
@@ -316,9 +313,45 @@ impl App {
         // Advance keystroke glitch animations.
         self.keystroke_fx.tick();
 
+        // Advance console slide animation.
+        self.console.animate(dt);
+
+        // Video playback: upload next frame to GPU.
+        if let Some(ref mut playback) = self.video_playback {
+            playback.poll_finished();
+            if let Some(frame) = playback.take_frame() {
+                self.video_renderer.upload_frame(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    frame.width,
+                    frame.height,
+                    &frame.data,
+                );
+            }
+            if playback.finished {
+                self.console.system("Video finished");
+                self.video_playback = None;
+                self.video_renderer.clear();
+            }
+        }
+
         // Update status bar clock.
         let now_wall = chrono_time_string();
         self.status_bar.set_time(&now_wall);
+
+        // Watchdog: log a heartbeat every ~10 seconds for crash forensics.
+        self.watchdog_frame += 1;
+        if now.duration_since(self.watchdog_last).as_secs() >= 10 {
+            let uptime = now.duration_since(self.start_time).as_secs();
+            info!(
+                "watchdog: alive frame={} uptime={}s panes={} agents={}",
+                self.watchdog_frame,
+                uptime,
+                self.panes.len(),
+                self.agent_panes.len(),
+            );
+            self.watchdog_last = now;
+        }
     }
 
     // -----------------------------------------------------------------------

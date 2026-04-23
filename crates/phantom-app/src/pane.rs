@@ -42,6 +42,8 @@ pub(crate) struct Pane {
     pub(crate) detached_label: String,
     pub(crate) output_buf: String,
     pub(crate) error_notified: bool,
+    /// Set when new PTY data arrives; cleared after semantic scan runs.
+    pub(crate) has_new_output: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,7 @@ impl App {
                     detached_label: String::new(),
                     output_buf: String::new(),
                     error_notified: false,
+                    has_new_output: false,
                 });
                 self.focused_pane = new_index;
                 info!("Split: new pane {new_index} ({cols}x{rows})");

@@ -1,7 +1,7 @@
 //! Command execution and supervisor message handling for Phantom.
 //!
-//! Handles backtick command mode input (set, theme, debug, boot, quit, NLP
-//! fallback) and supervisor protocol commands.
+//! Commands entered via the Quake console are parsed here. Output is pushed
+//! back into the console scrollback so users can see results inline.
 
 use log::{debug, info, warn};
 
@@ -16,7 +16,7 @@ use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
 
 impl App {
-    /// Parse and execute a user command string entered via command mode.
+    /// Parse and execute a user command string entered via the console.
     pub(crate) fn execute_user_command(&mut self, input: &str) {
         let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
         if parts.is_empty() {
@@ -29,32 +29,41 @@ impl App {
                     let key = parts[1].to_string();
                     let value = parts[2].to_string();
                     self.apply_set(&key, &value);
+                    self.console.output(format!("set {key} = {value}"));
                     if let Some(ref mut sv) = self.supervisor {
                         sv.send(&AppMessage::Log(format!("set {key}={value}")));
                     }
                 } else {
-                    warn!("Usage: set <key> <value>");
+                    self.console.error("Usage: set <key> <value>");
                 }
             }
             "theme" => {
                 if parts.len() >= 2 {
-                    self.apply_theme(parts[1]);
-                    if let Some(ref mut sv) = self.supervisor {
-                        sv.send(&AppMessage::Log(format!("theme {}", parts[1])));
+                    let name = parts[1];
+                    if themes::builtin_by_name(name).is_some() {
+                        self.apply_theme(name);
+                        self.console.output(format!("Theme switched to: {name}"));
+                        if let Some(ref mut sv) = self.supervisor {
+                            sv.send(&AppMessage::Log(format!("theme {name}")));
+                        }
+                    } else {
+                        self.console.error(format!("Unknown theme: {name}"));
                     }
                 } else {
-                    warn!("Usage: theme <name>");
+                    self.console.error("Usage: theme <name>");
                 }
             }
             "reload" => {
                 self.apply_reload();
+                self.console.system("Config reloaded from disk");
             }
             "quit" | "exit" => {
-                info!("Quit requested via command mode");
+                self.console.system("Shutting down...");
                 self.quit_requested = true;
             }
             "boot" => {
-                info!("Replaying boot sequence via command mode");
+                self.console.system("Replaying boot sequence");
+                self.console.open = false;
                 let w = self.gpu.surface_config.width;
                 let h = self.gpu.surface_config.height;
                 let bc = (w as f32 / self.cell_size.0).floor().max(40.0) as usize;
@@ -64,7 +73,8 @@ impl App {
             }
             "debug" => {
                 self.debug_hud = !self.debug_hud;
-                info!("Debug HUD: {}", if self.debug_hud { "ON" } else { "OFF" });
+                let state = if self.debug_hud { "ON" } else { "OFF" };
+                self.console.output(format!("Debug HUD: {state}"));
             }
             "plain" => {
                 self.theme.shader_params.scanline_intensity = 0.0;
@@ -73,68 +83,122 @@ impl App {
                 self.theme.shader_params.curvature = 0.0;
                 self.theme.shader_params.vignette_intensity = 0.0;
                 self.theme.shader_params.noise_intensity = 0.0;
-                info!("Plain mode: all CRT effects disabled");
+                self.console.output("All CRT effects disabled");
             }
             "agent" => {
                 if parts.len() >= 2 {
-                    let prompt = input[6..].trim().to_string(); // skip "agent "
-                    info!("[PHANTOM]: Spawning agent: {prompt}");
-                    self.spawn_agent_pane(AgentTask::FreeForm { prompt });
+                    let prompt = input[6..].trim().to_string();
+                    if self.spawn_agent_pane(AgentTask::FreeForm { prompt: prompt.clone() }) {
+                        self.console.system(format!("Agent spawned: {prompt}"));
+                        self.console.output("Output streaming in agent panel above terminal");
+                    } else {
+                        self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                        self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
+                    }
                 } else {
-                    warn!("Usage: agent <prompt>");
+                    self.console.error("Usage: agent <prompt>");
                 }
             }
             "sysmon" | "monitor" | "stats" => {
                 self.sysmon_visible = !self.sysmon_visible;
                 self.sysmon.set_active(self.sysmon_visible);
-                info!("System monitor: {}", if self.sysmon_visible { "ON" } else { "OFF" });
+                let state = if self.sysmon_visible { "ON" } else { "OFF" };
+                self.console.output(format!("System monitor: {state}"));
             }
             "appmon" | "perf" => {
                 self.appmon_visible = !self.appmon_visible;
-                info!("App monitor: {}", if self.appmon_visible { "ON" } else { "OFF" });
+                let state = if self.appmon_visible { "ON" } else { "OFF" };
+                self.console.output(format!("App monitor: {state}"));
             }
             "plugins" | "plugin" => {
                 let list = self.plugin_registry.list();
                 if list.is_empty() {
-                    info!("[PHANTOM]: No plugins loaded");
+                    self.console.output("No plugins loaded");
                 } else {
                     for p in &list {
                         let status = if p.enabled { "on" } else { "off" };
-                        info!("[PHANTOM]: {} v{} [{status}] — {}", p.name, p.version, p.description);
+                        self.console.output(format!(
+                            "{} v{} [{status}] — {}", p.name, p.version, p.description
+                        ));
                     }
                 }
             }
+            "video" => {
+                let path_str = if parts.len() >= 2 {
+                    input.trim().strip_prefix("video").unwrap().trim().to_string()
+                } else {
+                    // No path given — open native macOS file picker.
+                    self.console.system("Opening file picker...");
+                    self.console.open = false; // hide console so dialog is visible
+                    match crate::video::pick_video_file() {
+                        Some(p) => p,
+                        None => {
+                            self.console.open = true;
+                            self.console.system("Cancelled");
+                            return;
+                        }
+                    }
+                };
+                let path = std::path::Path::new(&path_str);
+                let w = self.gpu.surface_config.width;
+                let h = self.gpu.surface_config.height;
+                if let Some(playback) = crate::video::VideoPlayback::start(path, w, h) {
+                    self.console.system(format!(
+                        "Playing: {} ({}x{} @ {}fps)",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        playback.width, playback.height, playback.fps as u32,
+                    ));
+                    self.video_playback = Some(playback);
+                } else {
+                    self.console.error("Failed to start video. Is ffmpeg installed?");
+                }
+            }
+            "clear" => {
+                self.console.history.clear();
+                self.console.scroll_offset = 0;
+            }
             "help" => {
-                info!(
-                    "Commands: set <k> <v> | theme <name> | agent <prompt> | sysmon | plugins | plain | debug | reload | boot | quit"
-                );
+                self.console.system("Available commands:");
+                self.console.output("  set <key> <value>   Tune shader params (curvature, scanlines, bloom, aberration, vignette, noise)");
+                self.console.output("  theme <name>        Switch theme");
+                self.console.output("  agent <prompt>      Spawn AI agent");
+                self.console.output("  sysmon              Toggle system monitor");
+                self.console.output("  appmon              Toggle app diagnostics");
+                self.console.output("  plugins             List plugins");
+                self.console.output("  plain               Disable all CRT effects");
+                self.console.output("  debug               Toggle shader debug HUD");
+                self.console.output("  reload              Reload config from disk");
+                self.console.output("  boot                Replay boot sequence");
+                self.console.output("  video <path>        Play video through CRT shader");
+                self.console.output("  clear               Clear console history");
+                self.console.output("  quit                Exit Phantom");
             }
             other => {
                 // NLP fallback: try interpreting as natural language.
                 if let Some(ref ctx) = self.context {
                     match NlpInterpreter::interpret(input, ctx) {
                         ResolvedAction::RunCommand(cmd) => {
-                            info!("[PHANTOM NLP]: running `{cmd}`");
+                            self.console.system(format!("Running: {cmd}"));
                             if let Some(pane) = self.panes.get_mut(self.focused_pane) {
                                 let cmd_bytes = format!("{cmd}\n");
                                 let _ = pane.terminal.pty_write(cmd_bytes.as_bytes());
                             }
                         }
                         ResolvedAction::SpawnAgent(desc) => {
-                            info!("[PHANTOM NLP]: agent requested: {desc}");
+                            self.console.system(format!("Agent requested: {desc}"));
                         }
                         ResolvedAction::ShowInfo(info_text) => {
-                            info!("[PHANTOM]: {info_text}");
+                            self.console.output(info_text);
                         }
                         ResolvedAction::Ambiguous { input: _, options } => {
-                            info!("[PHANTOM]: Did you mean: {}", options.join(", "));
+                            self.console.output(format!("Did you mean: {}", options.join(", ")));
                         }
                         ResolvedAction::PassThrough => {
-                            warn!("Unknown command: {other}");
+                            self.console.error(format!("Unknown command: {other}"));
                         }
                     }
                 } else {
-                    warn!("Unknown command: {other}");
+                    self.console.error(format!("Unknown command: {other}"));
                 }
             }
         }
@@ -187,13 +251,14 @@ impl App {
                 }
                 "font_size" => {
                     debug!("font_size change requires renderer recreation (not yet implemented)");
+                    self.console.error("font_size requires restart (not yet hot-swappable)");
                 }
                 _ => {
-                    warn!("Unknown config key: {key}");
+                    self.console.error(format!("Unknown config key: {key}"));
                 }
             }
         } else {
-            warn!("Invalid value for {key}: {value} (expected f32)");
+            self.console.error(format!("Invalid value for {key}: {value} (expected number)"));
         }
     }
 

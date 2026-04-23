@@ -69,6 +69,14 @@ impl PluginRegistry {
         })
     }
 
+    /// Create an empty registry with no plugin directory. Plugins are disabled.
+    pub fn empty() -> Self {
+        Self {
+            plugins: Vec::new(),
+            plugin_dir: PathBuf::new(),
+        }
+    }
+
     /// The directory this registry scans for plugins.
     pub fn plugin_dir(&self) -> &Path {
         &self.plugin_dir

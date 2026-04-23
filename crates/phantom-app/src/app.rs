@@ -18,6 +18,7 @@ use phantom_renderer::gpu::GpuContext;
 use phantom_renderer::grid::GridRenderer;
 use phantom_renderer::postfx::PostFxPipeline;
 use phantom_renderer::quads::{QuadInstance, QuadRenderer};
+use phantom_renderer::video::VideoRenderer;
 use phantom_renderer::text::TextRenderer;
 
 use phantom_terminal::terminal::PhantomTerminal;
@@ -111,9 +112,8 @@ pub struct App {
     // -- Supervisor connection (None when running standalone) --
     pub(crate) supervisor: Option<SupervisorClient>,
 
-    // -- Command mode (backtick key) --
-    pub(crate) command_mode: bool,
-    pub(crate) command_input: Option<String>,
+    // -- Quake drop-down console --
+    pub(crate) console: crate::console::Console,
 
     // -- Debug shader HUD --
     pub(crate) debug_hud: bool,
@@ -157,6 +157,7 @@ pub struct App {
     // -- Event bus (pub/sub between subsystems) --
     pub(crate) event_bus: EventBus,
     pub(crate) topic_terminal_output: TopicId,
+    #[allow(dead_code)]
     pub(crate) topic_terminal_error: TopicId,
     pub(crate) topic_agent_event: TopicId,
 
@@ -167,6 +168,27 @@ pub struct App {
     pub(crate) sysmon: crate::sysmon::SysmonHandle,
     pub(crate) sysmon_visible: bool,
     pub(crate) appmon_visible: bool,
+
+    // -- Reusable per-frame buffers (avoid allocations in hot loop) --
+    pub(crate) title_buf: String,
+    pub(crate) text_cell_buf: Vec<phantom_renderer::text::TerminalCell>,
+
+    // -- Per-keystroke glitch effect --
+    pub(crate) keystroke_fx: crate::keystroke_fx::KeystrokeFx,
+
+    // -- Watchdog: periodic heartbeat for crash diagnostics --
+    pub(crate) watchdog_last: Instant,
+    pub(crate) watchdog_frame: u64,
+
+    // -- Git refresh tracking (avoid spawning threads from frame loop) --
+    pub(crate) git_refresh_last: Instant,
+
+    // -- Reusable overlay text buffer (avoids per-frame alloc in console render) --
+    pub(crate) overlay_line_buf: Vec<(String, [f32; 4])>,
+
+    // -- Video playback --
+    pub(crate) video_renderer: VideoRenderer,
+    pub(crate) video_playback: Option<crate::video::VideoPlayback>,
 }
 
 /// An active suggestion from the AI brain.
@@ -227,6 +249,7 @@ impl App {
         let grid_renderer =
             GridRenderer::new(&gpu.device, format, atlas.bind_group_layout());
         let postfx = PostFxPipeline::new(&gpu.device, format, width, height);
+        let video_renderer = VideoRenderer::new(&gpu.device, format);
 
         // -- Terminal dimensions from window size --
         // Reserve space for the tab bar (30px), status bar (28px), and the
@@ -261,6 +284,7 @@ impl App {
             detached_label: String::new(),
             output_buf: String::new(),
             error_notified: false,
+            has_new_output: false,
         }];
 
         // -- Keybinds --
@@ -405,13 +429,9 @@ impl App {
                 match PluginRegistry::with_dir(std::env::temp_dir().join("phantom-plugins-fallback")) {
                     Ok(reg) => reg,
                     Err(e2) => {
-                        warn!("Failed to create fallback plugin registry: {e2}");
-                        // Return empty registry — plugins disabled but app works.
+                        warn!("Plugins disabled — all registry paths failed: {e2}");
                         PluginRegistry::with_dir(std::env::temp_dir())
-                            .unwrap_or_else(|_| {
-                                // Last resort — should never fail on /tmp.
-                                panic!("cannot create plugin registry in /tmp");
-                            })
+                            .unwrap_or_else(|_| PluginRegistry::empty())
                     }
                 }
             }
@@ -491,8 +511,7 @@ impl App {
             cell_size,
             quit_requested: false,
             supervisor,
-            command_mode: false,
-            command_input: None,
+            console: crate::console::Console::new(),
             debug_hud: false,
             debug_hud_selected: 0,
             brain: Some(brain),
@@ -518,12 +537,42 @@ impl App {
             sysmon,
             sysmon_visible: false,
             appmon_visible: false,
+            title_buf: String::with_capacity(64),
+            text_cell_buf: Vec::with_capacity(256),
+            keystroke_fx: crate::keystroke_fx::KeystrokeFx::new(),
+            watchdog_last: now,
+            watchdog_frame: 0,
+            git_refresh_last: now,
+            overlay_line_buf: Vec::with_capacity(128),
+            video_renderer,
+            video_playback: None,
         })
     }
 
     /// Returns `true` if the app has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Watchdog trace: returns a log line every `interval` frames.
+    /// Written directly to disk by the event loop (bypasses Rust logger,
+    /// survives SIGKILL mid-frame).
+    pub fn watchdog_trace(&mut self, interval: u64) -> Option<String> {
+        self.watchdog_frame += 1;
+        if self.watchdog_frame % interval != 0 {
+            return None;
+        }
+        let state = match self.state {
+            AppState::Boot => "boot",
+            AppState::Terminal => "term",
+        };
+        Some(format!(
+            "[TRACE] frame={} state={} panes={} agents={}\n",
+            self.watchdog_frame,
+            state,
+            self.panes.len(),
+            self.agent_panes.len(),
+        ))
     }
 
     /// Graceful shutdown: save session, dispatch plugin hooks, shut down brain.
