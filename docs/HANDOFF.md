@@ -100,41 +100,70 @@ phantom-adapter          # AppAdapter trait, registry, pub/sub, spatial negotiat
 
 ---
 
+## Phase 1 Completed (2026-04-24) — v0.2.0-phase1
+
+### What Was Done
+All 15 work units from PHASE1-EXECUTION.md are implemented and wired:
+
+| WU | Description | Status |
+|---|---|---|
+| WU-0 | Trait Split (7 ISP sub-traits: AppCore, Renderable, InputHandler, Commandable, BusParticipant, Lifecycled, Permissioned) | Done |
+| WU-1 | AppCoordinator (mediator pattern, owns registry + bus) | Done |
+| WU-2 | TerminalAdapter (wraps PhantomTerminal as AppAdapter) | Done |
+| WU-3 | RenderOutput Extension (simplified render primitives) | Done |
+| WU-5 | Integration Wiring (strangler fig: coordinator alongside legacy panes) | Done |
+| WU-6 | Clock + DtClamp + Cadence (per-subsystem tick rates) | Done |
+| WU-7 | Subsystem Boot/Shutdown (tiered DAG, ShutdownGuard) | Done |
+| WU-8 | Job Queue + Worker Pool (priority, cancellation, panic recovery) | Done |
+| WU-9 | DebugDrawManager (queued primitives, lifetime decay) | Done |
+| WU-10 | Console Evaluator (fast-path builtins, NLP→brain pipeline) | Done |
+| WU-11 | Channel-Tagged Logging (bitflags, file mirror, panic flush) | Done |
+| WU-12 | Profiler Integration (zero-cost profile_scope!/profile_frame! macros) | Done |
+| WU-14 | ResourceManager (GUID registry, ref-counting, async loading) | Done |
+| WU-15 | Typed Event Bus (compile-time topic checking) | Done |
+| WU-4 | Integration Tests (capability guards, lifecycle, passive adapters) | Done |
+
+### Key Architecture Additions
+- **Capability bitflags** on RegisteredApp (accepts_input, accepts_commands) — prevents Phase 2 breakage when partial adapters arrive
+- **Console→brain round-trip** fully wired: console_eval → Pending → AiEvent::Interrupt → brain OODA → Claude → AiAction::ConsoleReply → console.output()
+- **Agent spawn fixed**: proper User message in Claude API payload
+- **.env loading** via dotenvy at startup
+- **Stale MCP socket cleanup** at startup (kill(pid,0) check)
+- **Knowledge graph** built (2,422 nodes, 4,604 edges, 86 communities) — available in graphify-out/
+
+### Stats After Phase 1
+- **19 crates** in workspace
+- **~33K lines** of Rust
+- **928 tests**, 0 failures
+- **~50 commits** on main
+
+---
+
 ## Priority Queue for Next Session
 
-### P0: Telemetry (quick, high value)
-- Wrap `tracing` + `tracing-subscriber` with Phantom-specific event types
-- Non-blocking structured events (AgentSpawned, CommandExecuted, BrainDecision, etc.)
-- JSONL subscriber for history, brain subscriber for observation
-- ~100 lines wrapping existing ecosystem
+### P0: Sentient Mode (brain always-on with Claude)
+6 changes to uncork the brain (~30 lines):
+1. Send ALL terminal output to brain as AiEvent::OutputChunk
+2. Handle OutputChunk in brain OODA loop — send to Claude for commentary
+3. Force Claude-only router config
+4. Drop quiet_threshold from 0.5 to 0.1
+5. Reduce chattiness dampener
+6. recv_timeout(3s) for proactive ticks
 
-### P1: Integration Wiring (CRITICAL — biggest gap)
-The code exists in 19 crates but many aren't wired into the running app:
+Architecture is ready — just needs the firehose turned on.
 
-| What | Wire From | Wire To |
-|------|-----------|---------|
-| Semantic parser | PTY output stream | Brain + history |
-| AI brain | App event loop | Suggestion overlay |
-| Agent panes | Agent spawn | GUI pane creation |
-| Error suggestions | Error detection | Render overlay |
-| Project context | Startup detection | Status bar |
-| Session restore | App startup | Pane recreation |
-| NLP interpreter | Command mode | Fallback handler |
-| Scene graph | Layout changes | Render pipeline |
+### P1: Phase 2 Adapters
+- Migrate TerminalAdapter from legacy `Vec<Pane>` to coordinator registry
+- Implement AgentAdapter (agent pane as AppAdapter)
+- Implement VideoAdapter, MonitorAdapter
+- Loosen registry to `Box<dyn AppCore>` (partial adapters)
+- Spatial negotiation in the layout arbiter
 
-### P2: AppAdapter Refactor
-- Implement `TerminalApp` wrapping PhantomTerminal
-- Implement `AgentApp` wrapping Agent
-- Refactor `App.panes` from `Vec<Pane>` to `Vec<Box<dyn AppAdapter>>`
-- Wire event bus between apps
-- Spatial negotiation in the arbiter
-
-### P3: Remaining Features
-- TCP/WebSocket remote control listener (#45)
+### P2: Remaining Features
+- TCP/WebSocket remote control listener
 - wasmtime integration (actually run .wasm plugins)
 - GPU visual regression tests (screenshot comparison)
-- Test hardening (integration tests across crates)
-- Demo script
+- Telemetry (wrap tracing with Phantom event types)
 
 ---
 
