@@ -61,9 +61,26 @@ impl AgentPane {
             }
         };
 
-        let mut agent = Agent::new(0, task);
+        let mut agent = Agent::new(0, task.clone());
         let sys_prompt = agent.system_prompt();
         agent.push_message(AgentMessage::System(sys_prompt));
+
+        // Claude API requires at least one user message. Push the task
+        // description as the initial user turn.
+        let user_prompt = match &task {
+            AgentTask::FreeForm { prompt } => prompt.clone(),
+            AgentTask::FixError { error_summary, context, .. } => {
+                format!("Fix this error: {error_summary}\nContext: {context}")
+            }
+            AgentTask::RunCommand { command } => format!("Run: {command}"),
+            AgentTask::ReviewCode { files, context } => {
+                format!("Review these files: {}\nContext: {context}", files.join(", "))
+            }
+            AgentTask::WatchAndNotify { description } => {
+                format!("Watch: {description}")
+            }
+        };
+        agent.push_message(AgentMessage::User(user_prompt));
 
         let tools = available_tools();
         let handle = send_message(claude_config, &agent, &tools, &[]);
