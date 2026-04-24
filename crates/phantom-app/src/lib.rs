@@ -1,3 +1,4 @@
+pub mod adapters;
 mod agent_pane;
 pub mod app;
 pub mod boot;
