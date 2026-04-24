@@ -7,9 +7,10 @@
 use log::warn;
 use serde_json::json;
 
-use phantom_adapter::adapter::{AppAdapter, QuadData, Rect, RenderOutput};
-use phantom_adapter::bus::{BusMessage, TopicDeclaration};
-use phantom_adapter::lifecycle::AppState;
+use phantom_adapter::adapter::{QuadData, Rect, RenderOutput};
+use phantom_adapter::{
+    AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
+};
 use phantom_adapter::spatial::SpatialPreference;
 use phantom_terminal::terminal::PhantomTerminal;
 
@@ -95,30 +96,15 @@ impl TerminalAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// AppAdapter implementation
+// Sub-trait implementations (ISP — each trait is focused)
 // ---------------------------------------------------------------------------
 
-impl AppAdapter for TerminalAdapter {
+impl AppCore for TerminalAdapter {
     fn app_type(&self) -> &str {
         "terminal"
     }
 
-    fn permissions(&self) -> Vec<String> {
-        vec!["filesystem".into(), "pty".into()]
-    }
-
-    fn is_visual(&self) -> bool {
-        true
-    }
-
-    fn spatial_preference(&self) -> Option<SpatialPreference> {
-        Some(SpatialPreference::simple(40, 12))
-    }
-
     fn is_alive(&self) -> bool {
-        // The PTY read returns an error when the child has exited.
-        // Between reads we assume alive; the update() tick will
-        // discover death and the registry will transition to Dead.
         true
     }
 
@@ -129,7 +115,6 @@ impl AppAdapter for TerminalAdapter {
                 let text = String::from_utf8_lossy(raw);
                 self.output_buf.push_str(&text);
 
-                // Cap at OUTPUT_BUF_CAP, draining from the front.
                 if self.output_buf.len() > OUTPUT_BUF_CAP {
                     let mut trim = self.output_buf.len() - OUTPUT_BUF_CAP;
                     while trim < self.output_buf.len()
@@ -143,13 +128,12 @@ impl AppAdapter for TerminalAdapter {
                 self.has_new_output = true;
                 self.error_notified = false;
             }
-            Ok(_) => { /* no data available */ }
+            Ok(_) => {}
             Err(e) => {
                 warn!("TerminalAdapter PTY read error: {e}");
             }
         }
 
-        // Alt-screen tracking.
         let is_alt = phantom_terminal::alt_screen::is_alt_screen(self.terminal.term());
 
         if is_alt && !self.was_alt_screen {
@@ -168,6 +152,17 @@ impl AppAdapter for TerminalAdapter {
         self.was_alt_screen = is_alt;
     }
 
+    fn get_state(&self) -> serde_json::Value {
+        json!({
+            "type": "terminal",
+            "alive": true,
+            "is_detached": self.is_detached,
+            "has_new_output": self.has_new_output,
+        })
+    }
+}
+
+impl Renderable for TerminalAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
         RenderOutput {
             quads: vec![QuadData {
@@ -178,9 +173,20 @@ impl AppAdapter for TerminalAdapter {
                 color: [0.05, 0.05, 0.08, 1.0],
             }],
             text_segments: vec![],
+            grid: None,
         }
     }
 
+    fn is_visual(&self) -> bool {
+        true
+    }
+
+    fn spatial_preference(&self) -> Option<SpatialPreference> {
+        Some(SpatialPreference::simple(40, 12))
+    }
+}
+
+impl InputHandler for TerminalAdapter {
     fn handle_input(&mut self, key: &str) -> bool {
         let bytes = key_name_to_bytes(key);
         if let Err(e) = self.terminal.pty_write(&bytes) {
@@ -188,16 +194,9 @@ impl AppAdapter for TerminalAdapter {
         }
         true
     }
+}
 
-    fn get_state(&self) -> serde_json::Value {
-        json!({
-            "type": "terminal",
-            "alive": self.is_alive(),
-            "is_detached": self.is_detached,
-            "has_new_output": self.has_new_output,
-        })
-    }
-
+impl Commandable for TerminalAdapter {
     fn accept_command(
         &mut self,
         cmd: &str,
@@ -205,9 +204,7 @@ impl AppAdapter for TerminalAdapter {
     ) -> anyhow::Result<String> {
         match cmd {
             "write" => {
-                let text = args["text"]
-                    .as_str()
-                    .unwrap_or_default();
+                let text = args["text"].as_str().unwrap_or_default();
                 self.terminal
                     .pty_write(text.as_bytes())
                     .map_err(|e| anyhow::anyhow!("pty_write failed: {e}"))?;
@@ -222,18 +219,14 @@ impl AppAdapter for TerminalAdapter {
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
     }
+}
 
-    fn on_state_change(&mut self, _new_state: AppState) {}
-
-    fn publishes(&self) -> Vec<TopicDeclaration> {
-        vec![]
+impl BusParticipant for TerminalAdapter {}
+impl Lifecycled for TerminalAdapter {}
+impl Permissioned for TerminalAdapter {
+    fn permissions(&self) -> Vec<String> {
+        vec!["filesystem".into(), "pty".into()]
     }
-
-    fn subscribes_to(&self) -> Vec<String> {
-        vec![]
-    }
-
-    fn on_message(&mut self, _msg: &BusMessage) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +309,7 @@ mod tests {
                 color: [0.05, 0.05, 0.08, 1.0],
             }],
             text_segments: vec![],
+            grid: None,
         };
         assert_eq!(output.quads.len(), 1);
         assert_eq!(output.quads[0].x, 10.0);

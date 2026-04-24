@@ -339,6 +339,7 @@ mod tests {
                     y: rect.y,
                     color: [1.0; 4],
                 }],
+                grid: None,
             }
         }
 
