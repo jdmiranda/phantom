@@ -100,6 +100,11 @@ pub enum AiAction {
     /// Execute a shell command on behalf of the user.
     RunCommand(String),
 
+    /// Reply to a console query (from AiEvent::Interrupt).
+    /// Routed back to the console scrollback so the user sees the answer
+    /// inline where they typed the question.
+    ConsoleReply(String),
+
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,
 }

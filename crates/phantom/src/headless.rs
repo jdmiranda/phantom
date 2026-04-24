@@ -457,6 +457,9 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             AiAction::SpawnAgent(task) => {
                 println!("[BRAIN]: suggested agent: {task:?}");
             }
+            AiAction::ConsoleReply(reply) => {
+                println!("[PHANTOM]: {reply}");
+            }
             AiAction::DoNothing => {}
         }
     }

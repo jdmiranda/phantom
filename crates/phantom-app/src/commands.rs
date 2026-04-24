@@ -11,9 +11,12 @@ use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
 use phantom_ui::themes;
 
+use phantom_brain::events::AiEvent;
+
 use crate::app::{App, AppState};
 use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
+use crate::console_eval::{self, EvalResult};
 
 impl App {
     /// Send a command to a coordinator-managed adapter by app ID.
@@ -36,6 +39,42 @@ impl App {
 impl App {
     /// Parse and execute a user command string entered via the console.
     pub(crate) fn execute_user_command(&mut self, input: &str) {
+        // Fast path: try the console evaluator first (builtin commands).
+        match console_eval::evaluate(input) {
+            EvalResult::Ok(Some(msg)) => {
+                if msg == "__quit__" {
+                    info!("Quit requested via console");
+                    self.quit_requested = true;
+                } else {
+                    self.console.output(msg);
+                }
+                return;
+            }
+            EvalResult::Ok(None) => return, // empty input
+            EvalResult::Err(err) => {
+                self.console.error(err);
+                return;
+            }
+            EvalResult::Pending(routing_msg) => {
+                // Route to brain via AiEvent::Interrupt. The brain will
+                // respond with AiAction::ConsoleReply, which update.rs
+                // routes back to console.output().
+                debug!("{routing_msg}");
+                if let Some(ref brain) = self.brain {
+                    let _ = brain.send_event(AiEvent::Interrupt(input.trim().to_string()));
+                    self.console.system("[routing to brain...]");
+                }
+                // Fall through to legacy command handling below for
+                // commands the evaluator doesn't know about.
+            }
+            EvalResult::Unknown { input: _, suggestions } => {
+                if !suggestions.is_empty() {
+                    self.console.output(format!("Did you mean: {}?", suggestions.join(", ")));
+                }
+                // Fall through to legacy handling.
+            }
+        }
+
         let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
         if parts.is_empty() {
             return;

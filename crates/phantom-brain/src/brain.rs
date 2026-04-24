@@ -154,6 +154,20 @@ fn brain_loop(
             break;
         }
 
+        // DIRECT RESPONSE: Interrupt events are explicit user queries from the
+        // console. Bypass the utility scorer — the user asked directly, so we
+        // always respond. Try Claude first, fall back to heuristic acknowledgement.
+        if let AiEvent::Interrupt(ref query) = event {
+            if !query.is_empty() {
+                let reply = handle_console_query(query, &context, &mut router);
+                if action_tx.send(reply).is_err() {
+                    break;
+                }
+                scorer.user_acted();
+                continue;
+            }
+        }
+
         // ORIENT: update world model.
         orient(&event, &mut scorer);
 
@@ -364,6 +378,58 @@ fn enhance_with_claude(
 }
 
 // ---------------------------------------------------------------------------
+// handle_console_query — direct response to user Interrupt events
+// ---------------------------------------------------------------------------
+
+/// Handle a user's console query. Tries Claude first (if available),
+/// falls back to a heuristic acknowledgement.
+fn handle_console_query(
+    query: &str,
+    context: &ProjectContext,
+    router: &mut BrainRouter,
+) -> AiAction {
+    // Try to find a Claude backend.
+    let claude_backend: Option<ModelBackend> = router
+        .route(TaskComplexity::Simple)
+        .iter()
+        .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
+        .cloned()
+        .cloned();
+
+    if let Some(backend) = claude_backend {
+        let model_name = match &backend.kind {
+            BackendKind::Claude { model } => model.as_str(),
+            _ => unreachable!(),
+        };
+
+        let prompt = format!(
+            "You are Phantom, an AI-native terminal emulator's brain. \
+             The user is working in a {} project ({}) and typed this in the console:\n\n\
+             \"{}\"\n\n\
+             Respond concisely (1-3 sentences). Be helpful and direct.",
+            format!("{:?}", context.project_type),
+            context.name,
+            query,
+        );
+
+        match crate::claude::generate(model_name, &prompt, 200) {
+            Ok((text, latency_ms)) => {
+                log::info!("Console query answered via Claude ({latency_ms:.0}ms)");
+                router.record_result(&backend.name, latency_ms, true);
+                return AiAction::ConsoleReply(text);
+            }
+            Err(e) => {
+                log::warn!("Claude console query failed: {e}");
+                router.record_result(&backend.name, 0.0, false);
+            }
+        }
+    }
+
+    // Fallback: acknowledge the query without LLM.
+    AiAction::ConsoleReply(format!("Received: \"{query}\" (no LLM backend available for query)"))
+}
+
+// ---------------------------------------------------------------------------
 // action_name — for debug logging
 // ---------------------------------------------------------------------------
 
@@ -375,6 +441,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::UpdateMemory { .. } => "update_memory",
         AiAction::ShowNotification(_) => "notify",
         AiAction::RunCommand(_) => "run_command",
+        AiAction::ConsoleReply(_) => "console_reply",
         AiAction::DoNothing => "quiet",
     }
 }

@@ -227,6 +227,10 @@ impl App {
                         info!("[PHANTOM]: Spawning agent...");
                         tasks_to_spawn.push(task);
                     }
+                    AiAction::ConsoleReply(reply) => {
+                        info!("[PHANTOM]: {reply}");
+                        self.console.output(format!("[phantom] {reply}"));
+                    }
                     AiAction::RunCommand(cmd) => {
                         debug!("Brain suggested command: {cmd}");
                     }
