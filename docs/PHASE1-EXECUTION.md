@@ -3,7 +3,7 @@
 **Date**: 2026-04-23
 **Status**: Draft
 **Depends on**: ARD-002, ARD-003, plan-adapter-integration.md
-**Estimated scope**: ~600 lines new code, ~200 lines migration
+**Estimated scope**: ~700 lines new code, ~200 lines migration
 
 ---
 
@@ -15,7 +15,112 @@ After Phase 1, the terminal renders identically to today, but through the adapte
 
 ---
 
-## 2. Pre-Mortem: How This Fails
+## 2. Architecture Validation
+
+External research validates the core approach. One significant design change required.
+
+### 2.1 What's Validated
+
+| Decision | Pattern | Evidence | Sources |
+|----------|---------|----------|---------|
+| AppCoordinator | Mediator (GoF) | Apple Cocoa "coordinating controllers," UIKit Coordinator pattern. Right pattern class for 4-8 heterogeneous components. ECS is overkill (Rust forum: "Please don't put ECS into your game engine"). | Apple Cocoa Design Patterns, Wikipedia Mediator pattern |
+| Dual-path migration | Strangler Fig | Gold standard. Martin Fowler (2004). Shopify used it at CODE level to extract a 3,000-line God Object. Microsoft Azure + AWS document as first-class pattern. | martinfowler.com/bliki/StranglerFigApplication, Shopify Engineering blog, Azure Architecture Center |
+| Two-phase render | Render World / App World | Exactly how Bevy works ("sidestep Rust's borrow checker by ensuring rendering never contends with application logic"). wgpu wiki explicitly recommends `prepare()` → `render()` separation. | Bevy Cheat Book gpu/intro, wgpu Wiki "Encapsulating Graphics Work" |
+| "Everything is an app" | Uniform interface | Emacs (everything is a buffer), Plan 9 (everything is a file), Bevy (everything is an entity) all validate. Alan Perlis: "100 functions on 1 data structure > 10 on 10." Caveat: Smalltalk MVC collapsed in non-"everything is an object" languages — our EventBus + frame-drained bus is the correct mitigation. | HN Emacs discussion, stlab.cc MVC history, Bevy discussions |
+| EventBus pub/sub | Topic-based messaging | Correct for ~6 topics, ~4-8 subscribers. Known risks: silent failures, hidden coupling, debugging at scale (Uber surge pricing incident). Our bus is synchronous/frame-drained, eliminating ordering issues. | TechYourChance EventBus guide, DEV.to "Hidden Cost of Event-Driven Architecture" |
+| Parallel worktree + interface contract | Agent coordination | Industry standard (2025-2026). Claude Code v2.1.50 worktrees, AGENTS.md spec (60K+ repos, Linux Foundation). Sweet spot: 2-4 parallel agents. | Claude Code docs, AGENTS.md spec, Verdent deep dive |
+
+### 2.2 Peer Architecture Comparison
+
+| Project | Pattern | Ownership | Communication | Relevance |
+|---------|---------|-----------|---------------|-----------|
+| **Bevy** | ECS + Plugins | World owns everything, entity IDs | Typed events (2-frame TTL), Resources, Observers | Render World split validates our two-phase render. Plugin system validates "everything is an app." ECS itself is overkill for our scale. |
+| **Zed/GPUI** | Centralized entity store | App owns everything, `Entity<T>` handles with leasing | observe/notify, subscribe/emit (effect queue) | Leasing mechanism is a more elegant solve for F7 borrow conflicts. Effect queue design validates our frame-drained bus. |
+| **WezTerm** | Trait objects + Coordinator | Mux owns `Box<dyn Pane>` | MuxNotification callbacks | **Closest peer.** Pane trait ≈ AppAdapter. Mux ≈ AppCoordinator. Enables GUI/headless/CLI modes sharing same core. Study `mux/src/lib.rs` and `mux/src/localpane.rs` before building. |
+
+### 2.3 Required Change: Split the AppAdapter Trait
+
+**Problem**: The current `AppAdapter` has 15 methods. This violates the Interface Segregation Principle. Every piece of evidence points away from a monolithic trait:
+- Rust stdlib uses small focused traits: `Read`, `Write`, `Seek`, `BufRead` — not a single `IO` trait
+- Xilem's View trait has only 3 methods (`build`, `rebuild`, `event`)
+- Tokio's actor pattern uses NO trait — just structs with channel receivers
+- Bevy uses zero traits for components — pure data queried by systems
+- WezTerm's fat `Pane` trait only works because all panes are terminals. Our adapters are heterogeneous.
+
+**Concrete problems in our code**: `MonitorAdapter` will never meaningfully use `handle_input()`. Headless apps must implement `render()` returning empty output. `permissions()` is a WASM concern but native adapters carry it. `process()` exists only for headless apps.
+
+**Trait split (Phase 1 pre-requisite — WU-0):**
+
+```rust
+/// Required by all adapters. The coordinator stores Box<dyn AppCore>.
+pub trait AppCore: Send {
+    fn app_type(&self) -> &str;
+    fn is_alive(&self) -> bool;
+    fn update(&mut self, dt: f32);
+    fn get_state(&self) -> serde_json::Value;
+}
+
+/// Visual adapters that render into a rect.
+pub trait Renderable {
+    fn render(&self, rect: &Rect) -> RenderOutput;
+    fn is_visual(&self) -> bool { true }
+    fn spatial_preference(&self) -> Option<SpatialPreference> { None }
+}
+
+/// Adapters that accept keyboard input.
+pub trait InputHandler {
+    fn handle_input(&mut self, key: &str) -> bool;
+}
+
+/// Adapters that accept commands from AI or other apps.
+pub trait Commandable {
+    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String>;
+}
+
+/// Adapters that participate in the event bus.
+pub trait BusParticipant {
+    fn publishes(&self) -> Vec<TopicDeclaration> { vec![] }
+    fn subscribes_to(&self) -> Vec<String> { vec![] }
+    fn on_message(&mut self, _msg: &BusMessage) {}
+}
+
+/// Adapters with lifecycle hooks.
+pub trait Lifecycled {
+    fn on_init(&mut self) -> anyhow::Result<()> { Ok(()) }
+    fn on_state_change(&mut self, _new_state: AppState) {}
+}
+
+/// Permission declarations (WASM sandbox boundary).
+pub trait Permissioned {
+    fn permissions(&self) -> Vec<String> { vec![] }
+}
+
+/// Headless processing tick (non-visual adapters only).
+pub trait Processable {
+    fn process(&mut self) {}
+}
+```
+
+**Coordinator stores**: `Box<dyn AppCore>`. For optional capabilities, the coordinator checks trait implementations via downcast or capability flags. `TerminalAdapter` implements `AppCore + Renderable + InputHandler + Commandable + BusParticipant + Lifecycled`. `MonitorAdapter` (Phase 2) implements `AppCore + Renderable + BusParticipant` — no `InputHandler`, no `Commandable`.
+
+**Backward compatibility**: Keep the existing `AppAdapter` as a convenience super-trait that blanket-implements when all sub-traits are present. This means existing tests (MockApp) continue to work.
+
+```rust
+/// Convenience: implement all sub-traits and get AppAdapter for free.
+pub trait AppAdapter: AppCore + Renderable + InputHandler + Commandable
+    + BusParticipant + Lifecycled + Permissioned {}
+
+impl<T> AppAdapter for T where T: AppCore + Renderable + InputHandler + Commandable
+    + BusParticipant + Lifecycled + Permissioned {}
+```
+
+### 2.4 Flagged for Phase 4: Typed Events
+
+Our `serde_json::Value` bus payloads lose type safety. Every framework that scaled (Bevy's `EventWriter<T>`, Zed's `cx.emit(typed_event)`) uses typed events with compile-time checking. For Phase 1, JSON payloads are acceptable. Phase 4 (bus wiring) should migrate to typed event channels. Also add frame number to `BusMessage` for traceability.
+
+---
+
+## 3. Pre-Mortem: How This Fails
 
 ### F1: RenderOutput Can't Carry Terminal Grid Data
 **Risk**: HIGH
@@ -86,7 +191,7 @@ If `Term` is not `Send`, the adapter must own the terminal on the main thread an
 
 ---
 
-## 3. Research References
+## 4. Research References
 
 ### Existing Codebase (read before writing any code)
 
@@ -133,13 +238,15 @@ From ARD-004 and commit history:
 
 ---
 
-## 4. Agent Coordination: Work Decomposition
+## 5. Agent Coordination: Work Decomposition
 
 ### Work Units
 
-Phase 1 decomposes into **4 independent work units** that can be built in parallel, plus **1 integration unit** that depends on all 4.
+Phase 1 decomposes into **1 pre-requisite**, **3 independent work units** that can be built in parallel, plus **1 integration unit** and **1 test unit**.
 
 ```
+WU-0: Trait Split           (phantom-adapter/src/*.rs — modify existing)
+      PRE-REQUISITE: must merge before Wave 1 starts
 WU-1: AppCoordinator       (coordinator.rs — new file)
 WU-2: TerminalAdapter       (adapters/terminal.rs — new file)
 WU-3: RenderOutput Extension (phantom-adapter/src/adapter.rs — modify)
@@ -154,36 +261,65 @@ Each work unit claims exclusive write access to specific files. No two agents to
 
 | Work Unit | Creates | Modifies | Claims |
 |-----------|---------|----------|--------|
+| WU-0 | — | `phantom-adapter/src/adapter.rs`, `phantom-adapter/src/lib.rs` | EXCLUSIVE: phantom-adapter/src/ (during WU-0 only) |
 | WU-1 | `coordinator.rs` | — | EXCLUSIVE: coordinator.rs |
 | WU-2 | `adapters/mod.rs`, `adapters/terminal.rs` | — | EXCLUSIVE: adapters/ |
-| WU-3 | — | `phantom-adapter/src/adapter.rs` | EXCLUSIVE: phantom-adapter/src/adapter.rs |
+| WU-3 | — | `phantom-adapter/src/adapter.rs` | EXCLUSIVE: phantom-adapter/src/adapter.rs (after WU-0 merges) |
 | WU-4 | test files | — | EXCLUSIVE: test files only |
 | WU-5 | — | `app.rs`, `update.rs`, `render.rs`, `input.rs`, `lib.rs`, `commands.rs` | EXCLUSIVE: phantom-app/src/{app,update,render,input,commands,lib}.rs |
 
 ### Dependency Graph
 
 ```
-WU-3 (RenderOutput)  ──┐
-                        ├──► WU-5 (Integration)
-WU-1 (Coordinator)   ──┤
-                        │
-WU-2 (TerminalAdapter)─┘
-                        
-WU-4 (Tests) ──────────► runs after WU-1, WU-2, WU-3
+WU-0 (Trait Split) ─────► MERGE TO MAIN (gate)
+                                │
+                    ┌───────────┼───────────┐
+                    ▼           ▼           ▼
+              WU-1 (Coord)  WU-2 (Term)  WU-3 (Render)
+                    │           │           │
+                    └───────────┼───────────┘
+                                ▼
+                          WU-5 (Integration)
+                                │
+                                ▼
+                          WU-4 (Tests)
 ```
 
 ### Parallelism
 
+- **Wave 0** (sequential): WU-0 — trait split, must merge before anything else
 - **Wave 1** (parallel): WU-1, WU-2, WU-3 — zero file overlap, can run simultaneously
 - **Wave 2** (sequential): WU-5 — depends on all of Wave 1
 - **Wave 3** (sequential): WU-4 — depends on WU-5 for integration tests
 
 ### Interface Contract (shared agreement before Wave 1 starts)
 
-All agents in Wave 1 must agree on these types before starting:
+All agents in Wave 1 must agree on these types before starting. WU-0 (trait split) must be merged first — these signatures reference the split traits.
 
 ```rust
-// RenderOutput (WU-3 implements, WU-2 produces, WU-5 consumes)
+// --- Trait hierarchy (WU-0 delivers, all others depend on) ---
+
+// Core trait — required by all adapters
+pub trait AppCore: Send {
+    fn app_type(&self) -> &str;
+    fn is_alive(&self) -> bool;
+    fn update(&mut self, dt: f32);
+    fn get_state(&self) -> serde_json::Value;
+}
+
+// Optional capability traits
+pub trait Renderable        { fn render(&self, rect: &Rect) -> RenderOutput; ... }
+pub trait InputHandler      { fn handle_input(&mut self, key: &str) -> bool; }
+pub trait Commandable       { fn accept_command(&mut self, cmd: &str, args: &Value) -> Result<String>; }
+pub trait BusParticipant    { fn publishes(&self) -> Vec<TopicDeclaration>; ... }
+pub trait Lifecycled        { fn on_init(&mut self) -> Result<()>; ... }
+
+// Convenience super-trait (backward compat)
+pub trait AppAdapter: AppCore + Renderable + InputHandler + Commandable
+    + BusParticipant + Lifecycled + Permissioned {}
+
+// --- RenderOutput (WU-3 implements, WU-2 produces, WU-5 consumes) ---
+
 pub struct RenderOutput {
     pub quads: Vec<QuadData>,
     pub text_segments: Vec<TextData>,
@@ -204,12 +340,14 @@ pub struct CursorData {
     pub visible: bool,
 }
 
-// AppCoordinator public API (WU-1 implements, WU-5 calls)
+// --- AppCoordinator public API (WU-1 implements, WU-5 calls) ---
+// Stores Box<dyn AppCore>. Checks for optional traits via downcast.
+
 impl AppCoordinator {
     pub fn new(bus: EventBus) -> Self;
     pub fn register_adapter(
         &mut self,
-        adapter: Box<dyn AppAdapter>,
+        adapter: Box<dyn AppAdapter>,  // full adapter for Phase 1; loosen to AppCore in Phase 2
         layout: &mut LayoutEngine,
         scene: &mut SceneTree,
         content_node: NodeId,
@@ -249,9 +387,10 @@ impl AppCoordinator {
     pub fn pane_id_for(&self, app_id: AppId) -> Option<PaneId>;
 }
 
-// TerminalAdapter (WU-2 implements, WU-1 stores as Box<dyn AppAdapter>)
-// Must implement all AppAdapter trait methods.
-// Constructor:
+// --- TerminalAdapter (WU-2 implements) ---
+// Implements: AppCore + Renderable + InputHandler + Commandable + BusParticipant + Lifecycled
+// Constructor + accessor methods:
+
 impl TerminalAdapter {
     pub fn new(terminal: PhantomTerminal) -> Self;
     pub fn terminal(&self) -> &PhantomTerminal;
@@ -268,7 +407,21 @@ impl TerminalAdapter {
 
 ---
 
-## 5. Agent Pipeline: Build → Review → Merge
+## 6. Agent Pipeline: Build → Review → Merge
+
+### Stage 0: Trait Split (Wave 0)
+
+**Agent Z — Trait Split** (WU-0)
+- Branch: `phase1/trait-split`
+- Modifies: `crates/phantom-adapter/src/adapter.rs`, `crates/phantom-adapter/src/lib.rs`
+- What:
+  1. Split `AppAdapter` into 7 focused traits (AppCore, Renderable, InputHandler, Commandable, BusParticipant, Lifecycled, Permissioned)
+  2. Add blanket `AppAdapter` super-trait for backward compatibility
+  3. Update `MockApp` in tests to implement all sub-traits
+  4. Verify all 47 existing phantom-adapter tests still pass
+  5. Verify `cargo check --workspace` passes (phantom-app uses AppAdapter — must still compile)
+- **Gate**: Must merge to main before Wave 1 starts
+- Output: PR to main, reviewed and merged
 
 ### Stage 1: Interface Lock
 
@@ -355,7 +508,7 @@ Same review agent, same checklist, plus:
 **Agent E — Tests** (WU-4)
 - Branch: `phase1/tests`
 - Creates: test modules in `phantom-adapter` and `phantom-app`
-- See Section 6 for full test plan
+- See Section 7 for full test plan
 - Output: PR to main
 
 ### Stage 7: Final Review + Tag
@@ -367,9 +520,25 @@ Human reviews the complete Phase 1 diff (all PRs merged to main). If satisfactor
 
 ---
 
-## 6. Testing Plan
+## 7. Testing Plan
 
-### 6.1 Unit Tests — AppCoordinator
+### 7.0 Unit Tests — Trait Split (WU-0)
+
+All 47 existing tests in `phantom-adapter` must pass unchanged. Additionally:
+
+```
+test_app_core_is_object_safe
+test_renderable_is_object_safe
+test_input_handler_is_object_safe
+test_commandable_is_object_safe
+test_bus_participant_is_object_safe
+test_blanket_app_adapter_impl
+test_mock_implements_all_sub_traits
+```
+
+Location: `crates/phantom-adapter/src/lib.rs` (extend existing `#[cfg(test)]` module)
+
+### 7.1 Unit Tests — AppCoordinator
 
 ```
 test_register_adapter_assigns_unique_id
@@ -388,7 +557,7 @@ test_send_command_proxies_to_adapter
 
 Location: `crates/phantom-app/src/coordinator.rs` (inline `#[cfg(test)]` module)
 
-### 6.2 Unit Tests — TerminalAdapter
+### 7.2 Unit Tests — TerminalAdapter
 
 ```
 test_app_type_returns_terminal
@@ -411,7 +580,7 @@ test_send_assert — compile-time Send check
 
 Location: `crates/phantom-app/src/adapters/terminal.rs` (inline `#[cfg(test)]` module)
 
-### 6.3 Unit Tests — RenderOutput Extension
+### 7.3 Unit Tests — RenderOutput Extension
 
 ```
 test_render_output_default_has_no_grid
@@ -422,7 +591,7 @@ test_existing_quad_text_api_unchanged
 
 Location: `crates/phantom-adapter/src/adapter.rs` (inline `#[cfg(test)]` module)
 
-### 6.4 Integration Tests — Full Pipeline
+### 7.4 Integration Tests — Full Pipeline
 
 ```
 test_app_startup_registers_terminal_adapter
@@ -439,7 +608,7 @@ test_mcp_read_output_works_through_adapter
 
 Location: `crates/phantom-app/tests/integration_coordinator.rs` (new file)
 
-### 6.5 Regression Tests — Screenshot Comparison
+### 7.5 Regression Tests — Screenshot Comparison
 
 Before migration begins, capture reference screenshots:
 1. Single terminal pane, idle (cursor blinking)
@@ -451,7 +620,7 @@ Before migration begins, capture reference screenshots:
 
 After migration, recapture and compare. Acceptable SSIM threshold: 0.95 (CRT noise varies frame-to-frame).
 
-### 6.6 Stress Tests
+### 7.6 Stress Tests
 
 ```
 test_rapid_split_close_cycle_50x — no crash, no leak
@@ -459,14 +628,14 @@ test_high_frequency_pty_output — bus doesn't overflow dangerously
 test_rapid_focus_switching — input always routes correctly
 ```
 
-### 6.7 Compile-Time Checks
+### 7.7 Compile-Time Checks
 
 ```
 assert_send::<TerminalAdapter>()
 assert_send::<AppCoordinator>()
 ```
 
-### 6.8 Quality Gates
+### 7.8 Quality Gates
 
 Every PR must pass ALL of the following before merge:
 
@@ -480,7 +649,25 @@ Every PR must pass ALL of the following before merge:
 
 ---
 
-## 7. Detailed Work Unit Specs
+## 8. Detailed Work Unit Specs
+
+### WU-0: Trait Split (~100 lines of changes)
+
+**File**: `crates/phantom-adapter/src/adapter.rs`, `crates/phantom-adapter/src/lib.rs`
+
+Split the monolithic 15-method `AppAdapter` into focused traits per Section 2.3. Key constraints:
+
+- **Backward compatible**: The `AppAdapter` super-trait auto-implements via blanket impl. Existing code that uses `Box<dyn AppAdapter>` or `impl AppAdapter` continues to compile.
+- **MockApp updates**: The test mock in `lib.rs` must implement each sub-trait explicitly. All 47 existing tests must pass unchanged.
+- **Re-exports**: `lib.rs` must re-export all new trait names at crate root.
+- **No new dependencies**: The split is purely a refactor of `adapter.rs`. No new crate dependencies.
+- **`phantom-app` must still compile**: `phantom-app` imports `AppAdapter` — verify `cargo check -p phantom-app` passes.
+
+**Verification**:
+```bash
+cargo test -p phantom-adapter   # all 47 tests pass
+cargo check --workspace          # 0 errors, 0 warnings
+```
 
 ### WU-1: AppCoordinator (~200 lines)
 
@@ -612,7 +799,7 @@ pub enum CursorShape {
 
 ---
 
-## 8. Success Criteria
+## 9. Success Criteria
 
 Phase 1 is DONE when all of the following are true:
 
@@ -630,7 +817,7 @@ Phase 1 is DONE when all of the following are true:
 
 ---
 
-## 9. What Phase 1 Does NOT Include
+## 10. What Phase 1 Does NOT Include
 
 Explicitly out of scope (deferred to Phase 2+):
 
@@ -639,6 +826,8 @@ Explicitly out of scope (deferred to Phase 2+):
 - Spatial negotiation / SpatialPreference in layout (Phase 3)
 - Bus wiring between adapters (Phase 4)
 - User-created pipes (Phase 4)
+- Typed event channels replacing serde_json::Value bus payloads (Phase 4)
+- Frame number in BusMessage for traceability (Phase 4)
 - AI command routing to adapters (Phase 5)
 - Dynamic MCP tool registration (Phase 5)
 - Pop-out windows (Phase 3b)
