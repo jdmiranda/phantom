@@ -5,6 +5,7 @@ pub mod boot;
 pub mod boot_order;
 mod commands;
 pub mod config;
+pub mod coordinator;
 mod console;
 mod video;
 pub mod image_handler;
