@@ -40,6 +40,7 @@ use phantom_session::session::{SessionManager, SessionState, PaneState};
 use phantom_mcp::{spawn_listener, AppCommand, McpListener};
 
 use crate::boot::BootSequence;
+use crate::boot_order::ShutdownGuard;
 use crate::config::PhantomConfig;
 use crate::coordinator::AppCoordinator;
 use crate::pane::{Pane, pane_cols_rows};
@@ -194,6 +195,16 @@ pub struct App {
     // -- App coordinator (strangler fig: runs alongside legacy pane system,
     //    will gradually absorb update/render/input dispatch in WU-5B..5E) --
     pub(crate) coordinator: AppCoordinator,
+
+    // -- Job pool (async work: brain queries, resource loading, etc.) --
+    pub(crate) job_pool: Option<crate::jobs::JobPool>,
+
+    // -- Resource manager (GUID registry, ref-counting, async loading) --
+    #[allow(dead_code)] // Used by adapters via coordinator in later phases
+    pub(crate) resources: crate::resources::ResourceManager,
+
+    // -- Shutdown guard (logs reverse-tier teardown, idempotent via Drop) --
+    pub(crate) shutdown_guard: ShutdownGuard,
 }
 
 /// An active suggestion from the AI brain.
@@ -442,6 +453,10 @@ impl App {
             }
         };
 
+        // -- Job pool (4 workers for async brain queries, resource loading, etc.) --
+        let job_pool = crate::jobs::JobPool::start_up(4);
+        info!("Job pool initialized: 4 workers");
+
         // -- App coordinator (strangler fig: coexists with legacy pane system) --
         let coordinator = AppCoordinator::new(EventBus::new());
 
@@ -555,6 +570,9 @@ impl App {
             video_renderer,
             video_playback: None,
             coordinator,
+            job_pool: Some(job_pool),
+            resources: crate::resources::ResourceManager::new(),
+            shutdown_guard: ShutdownGuard::new(),
         })
     }
 
@@ -584,8 +602,11 @@ impl App {
         ))
     }
 
-    /// Graceful shutdown: save session, dispatch plugin hooks, shut down brain.
+    /// Graceful shutdown: save session, dispatch plugin hooks, shut down brain,
+    /// and log reverse-tier teardown via the shutdown guard.
     pub fn shutdown(&mut self) {
+        // Begin ordered shutdown (logs tier-by-tier teardown).
+        self.shutdown_guard.shut_down();
         // Tell the supervisor we're exiting on purpose — don't restart.
         if let Some(ref mut sv) = self.supervisor {
             sv.send(&AppMessage::ExitClean);
@@ -617,6 +638,11 @@ impl App {
         // Shut down the brain thread.
         if let Some(ref brain) = self.brain {
             let _ = brain.send_event(AiEvent::Shutdown);
+        }
+
+        // Shut down the job pool (waits up to 5s for workers to finish).
+        if let Some(pool) = self.job_pool.take() {
+            pool.shut_down();
         }
     }
 

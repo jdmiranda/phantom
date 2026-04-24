@@ -27,6 +27,7 @@ impl App {
     /// 1. Renders the scene (boot or terminal) into the PostFx offscreen texture.
     /// 2. Composites CRT effects onto the final surface texture.
     pub fn render(&mut self) -> Result<()> {
+        crate::profile_scope!("render");
         let output = self.gpu.surface.get_current_texture()?;
         let surface_view = output.texture.create_view(&Default::default());
 
@@ -233,6 +234,8 @@ impl App {
         self.pool_glyphs = all_glyphs;
         self.pool_chrome_quads = chrome_quads;
         self.pool_chrome_glyphs = chrome_glyphs;
+
+        crate::profile_frame!();
 
         Ok(())
     }

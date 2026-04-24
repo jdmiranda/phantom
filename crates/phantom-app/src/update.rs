@@ -24,6 +24,7 @@ impl App {
     ///
     /// Call this once per frame before [`render`](Self::render).
     pub fn update(&mut self) {
+        crate::profile_scope!("update");
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         let dt_duration = now.duration_since(self.last_frame);
@@ -302,6 +303,23 @@ impl App {
                         frame: 0,
                         timestamp: now.duration_since(self.start_time).as_secs(),
                     });
+                }
+            }
+        }
+
+        // Drain completed jobs from the worker pool.
+        if let Some(ref pool) = self.job_pool {
+            for (job_id, result) in pool.drain_completed() {
+                match result {
+                    crate::jobs::JobResult::Done(msg) => {
+                        debug!("Job {:?} completed: {msg}", job_id);
+                    }
+                    crate::jobs::JobResult::Err(err) => {
+                        warn!("Job {:?} failed: {err}", job_id);
+                    }
+                    crate::jobs::JobResult::Cancelled => {
+                        debug!("Job {:?} cancelled", job_id);
+                    }
                 }
             }
         }
