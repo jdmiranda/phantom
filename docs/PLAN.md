@@ -1,6 +1,6 @@
 # Phantom Development Plan
 
-**Last updated**: 2026-04-23
+**Last updated**: 2026-04-24
 **Crates**: 19 | **Lines**: 37,645 | **Tests**: 817
 
 ---
@@ -110,6 +110,30 @@
 - [ ] Test hardening (integration tests, GPU visual regression)
 - [ ] Performance profiling + scene graph integration
 - [ ] Demo script
+
+### Engine Foundations (from Game Engine Architecture audit — 2026-04-24)
+
+> Source: Jason Gregory, *Game Engine Architecture* (chs 5, 6, 7, 9, 10, 14). Full notes in [references/Game-Engine-Architecture.pdf](references/Game-Engine-Architecture.pdf) (gitignored). These are not optional polish — they're the missing substrate that every mature engine has and Phantom currently doesn't. Folded into Phase 1 execution.
+
+**Tier 1 — foundational (blocks Phase 1 sign-off):**
+- [ ] **Split render loop from update loop** [ch7]. Render at 60Hz; update subsystems at their own cadences (agents 1–2Hz, context engine 2–5Hz, brain 5–10Hz, sysmon 1Hz, renderer 60Hz). Cadence table lives on AppCoordinator; each adapter declares its own rate. Currently everything ticks off the frame — wastes CPU and stutters agent work.
+- [ ] **`Clock` type with pause/scale/single-step** [ch7.4-7.5]. One type, many instances: real-time, session-time (pausable), per-video playback, per-glitch-FX, per-animation. Slo-mo / freeze-frame / FX scrubbing all fall out. Crate: [phantom-scene](../crates/phantom-scene/).
+- [ ] **dt clamp on main loop** [ch7.5.5]. If measured dt > 100ms (debugger pause, OS suspend), clamp to target frame time. One-line fix in App::tick; prevents physics/animation/FX explosion on resume.
+- [ ] **Explicit `start_up()` / `shut_down()` per subsystem** [ch5.1]. 19 crates have an implicit dep DAG (renderer ↔ scene ↔ terminal ↔ supervisor ↔ brain ↔ adapter). Replace scattered `::new()` calls with an ordered init sequence in `App::new()`, reverse order on drop. Enables clean restart-in-place and crash-report consistency.
+
+**Tier 2 — ship with Phase 1 (user-visible payoff):**
+- [ ] **`DebugDrawManager` with queued primitives** [ch9.2]. `AddLine`, `AddSphere`, `AddCross`, `AddString` — each takes `(color, duration, depth_tested, world_or_screen_space)`. Queue drained by renderer end-of-frame. Unblocks: agent annotation overlays, layout debug boxes for taffy, video bounds, glitch FX origins, scene-node axes. Crate: new `phantom-debug-draw` OR module inside [phantom-renderer](../crates/phantom-renderer/).
+- [ ] **Console overlay speaks full command stack** [ch9.4]. The console (already shipped) must execute anything the brain router / NLP can execute — not a hard-coded command list. Wire [phantom-nlp](../crates/phantom-nlp/) and [phantom-brain](../crates/phantom-brain/) as the console's evaluator. `> deploy staging` works identically typed vs. spoken.
+- [ ] **Channel-tagged logging + file mirror + panic flush** [ch9.1]. Per-subsystem channel (`RENDERER|AGENTS|BRAIN|TERMINAL|MCP|SEMANTIC|...`) as bitmask filter at runtime. Always mirror to `~/.config/phantom/logs/phantom.log`. Flush on panic. Crash report dump: stack + active sessions + open agents + last N commands. `log` crate already present — add target convention + custom logger.
+- [ ] **In-frame hierarchical profiler** [ch9.8]. `profile_scope!("render.shader.crt")` macro; high-res timer builds a per-frame tree; overlay draws flame-graph + per-subsystem bars + timeline. Integrate tracy (don't roll own). Non-negotiable at 60fps with the full shader stack plus agent work plus terminal reflow.
+
+**Tier 3 — architectural upgrades (ALL ship in Phase 1 — no deferrals):**
+- [ ] **Job queue for agent work** [ch7.6.5-7.6.6]. Replace per-agent threads with a worker pool picking up (prompt, context, tools) jobs. Scales 1→N agents naturally; main thread never blocks on agent thread. Aligns perfectly with existing AgentAdapter shape. Crate: [phantom-supervisor](../crates/phantom-supervisor/) + [phantom-agents](../crates/phantom-agents/).
+- [ ] **Async result pattern throughout** [ch7.6.6]. Request on frame N, pick up on frame N+1. Applies to: semantic parse, NLP interpret, memory query, brain decision, MCP call. Never block the render loop. Wired into the job queue.
+- [ ] **Unified `ResourceManager` with GUID registry + ref-count + streaming** [ch6.2]. Single loader for shaders, fonts, videos, themes, plugin WASM, agent system prompts. One copy per GUID, ref-counted across sessions, async loading so frame never stalls. Today these are scattered across [assets/](../assets/), [shaders/](../shaders/), [themes/](../themes/), [crates/phantom-plugins/](../crates/phantom-plugins/) with ad-hoc loaders. Crate: new `phantom-resources` OR module inside [phantom-app](../crates/phantom-app/).
+- [ ] **Typed event bus with topic registry** [ch14.7]. Replace `serde_json::Value` payloads with typed enum (`Event::BuildFailed { ... }`, `Event::AgentTaskComplete { ... }`, `Event::SessionSwitched { ... }`). Compile-time topic checking. Event decouples shader FX (red flash on build fail), supervisor (offer fix), memory (log incident). Crate: [phantom-protocol](../crates/phantom-protocol/).
+
+**Integration with existing Phase 1:** all 11 items (Tiers 1, 2, 3) ship in Phase 1 as WU-6 through WU-16. See [PHASE1-EXECUTION.md](PHASE1-EXECUTION.md) §8a and §11–13. Nothing is deferred to Phase 1.5; Phase 2 (VideoAdapter, AgentAdapter, MonitorAdapter) builds directly on the completed foundations.
 
 ---
 

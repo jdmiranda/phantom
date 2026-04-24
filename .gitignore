@@ -16,3 +16,6 @@
 
 # Claude Code worktrees and local state
 .claude/
+
+# Reference material (copyrighted / bulky)
+docs/references/*.pdf

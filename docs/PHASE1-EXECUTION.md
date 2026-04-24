@@ -1,9 +1,11 @@
-# Phase 1 Execution Plan: AppCoordinator + Terminal Adapter
+# Phase 1 Execution Plan: AppCoordinator + Terminal Adapter + Engine Foundations
 
-**Date**: 2026-04-23
+**Date**: 2026-04-24 (expanded from 2026-04-23 draft)
 **Status**: Draft
-**Depends on**: ARD-002, ARD-003, plan-adapter-integration.md
-**Estimated scope**: ~700 lines new code, ~200 lines migration
+**Depends on**: ARD-002, ARD-003, plan-adapter-integration.md, *Game Engine Architecture* (ch 5, 6, 7, 9)
+**Estimated scope**: ~2,400 lines new code, ~400 lines migration
+
+**Scope expansion (2026-04-24)**: After auditing Jason Gregory's *Game Engine Architecture* against the Phantom codebase, seven foundational patterns that every mature engine has and Phantom currently doesn't were folded into Phase 1. These are not Phase 2 polish — they change the shape of `App::tick()`, the coordinator's update model, and the render/input paths. Adding adapters on top of the current single-rate, single-clock, no-channel-logging, no-debug-draw, no-profiler substrate bakes in tech debt that will cost more to rip out later than to do now. See §11–13 for the new work units (WU-6 through WU-12).
 
 ---
 
@@ -242,18 +244,39 @@ From ARD-004 and commit history:
 
 ### Work Units
 
-Phase 1 decomposes into **1 pre-requisite**, **3 independent work units** that can be built in parallel, plus **1 integration unit** and **1 test unit**.
+Phase 1 decomposes into **3 pre-requisites**, **10 independent work units** that can be built in parallel, **1 integration unit**, and **1 test unit**. Engine foundations (WU-6 through WU-16) were folded in from the *Game Engine Architecture* audit — see §11 for context. All three tiers ship in Phase 1; nothing is deferred to Phase 1.5.
 
 ```
-WU-0: Trait Split           (phantom-adapter/src/*.rs — modify existing)
-      PRE-REQUISITE: must merge before Wave 1 starts
-WU-1: AppCoordinator       (coordinator.rs — new file)
-WU-2: TerminalAdapter       (adapters/terminal.rs — new file)
-WU-3: RenderOutput Extension (phantom-adapter/src/adapter.rs — modify)
-WU-4: Unit Tests            (phantom-adapter tests + phantom-app tests)
-WU-5: Integration Wiring    (app.rs, update.rs, render.rs, input.rs — modify)
-      DEPENDS ON: WU-1, WU-2, WU-3
+Wave 0 — Pre-requisites (gate Wave 1):
+  WU-0:  Trait Split                    (phantom-adapter/src/*.rs)
+  WU-6:  Clock + dt clamp               (phantom-time or phantom-scene; App::tick)
+  WU-15: Typed event bus                (phantom-protocol; replaces serde_json::Value payloads)
+         All three must merge before Wave 1.
+         WU-0, WU-6, WU-15 can themselves run in parallel (no file overlap).
+         Gates downstream: WU-0 gates WU-1/2/3; WU-6 gates WU-1; WU-15 gates WU-1/2.
+
+Wave 1 — Parallel build (no file overlap across all 10):
+  WU-1:  AppCoordinator                 (coordinator.rs — new; uses Clock + Cadence + typed bus)
+  WU-2:  TerminalAdapter                (adapters/terminal.rs — new)
+  WU-3:  RenderOutput Extension         (phantom-adapter/src/adapter.rs)
+  WU-7:  Explicit start_up/shut_down    (phantom-app/src/boot.rs — new)
+  WU-8:  Job queue + worker pool        (new phantom-jobs crate or phantom-supervisor module)
+  WU-9:  DebugDrawManager               (phantom-renderer/src/debug_draw.rs — new)
+  WU-10: Console evaluator wiring       (phantom-app console command handler)
+  WU-11: Channel logging + file mirror  (phantom-app/src/logging.rs — new)
+  WU-12: Tracy profiler integration     (phantom-app + macro crate)
+  WU-14: Unified ResourceManager        (new phantom-resources crate or phantom-app module)
+
+Wave 2 — Integration (sequential, depends on all of Wave 1):
+  WU-5:  Integration Wiring             (app.rs, update.rs, render.rs, input.rs, commands.rs, lib.rs)
+         Also: retrofit agent system to use WU-8 job queue;
+               retrofit brain + MCP + semantic + NLP to async result pattern (WU-13 = async)
+
+Wave 3 — Tests (sequential, depends on WU-5):
+  WU-4:  Unit + integration + regression + stress tests (covers WU-0 through WU-16)
 ```
+
+**Note on WU-13**: "Async result pattern" is not a separate WU but a conversion pattern applied during WU-5 (integration). Semantic parse, NLP interpret, brain decision, memory query, and MCP calls all become "request frame N, pick up frame N+1" via WU-8's job queue. Tracked inside WU-5's checklist.
 
 ### File Claims (Conflict Prevention)
 
@@ -267,30 +290,52 @@ Each work unit claims exclusive write access to specific files. No two agents to
 | WU-3 | — | `phantom-adapter/src/adapter.rs` | EXCLUSIVE: phantom-adapter/src/adapter.rs (after WU-0 merges) |
 | WU-4 | test files | — | EXCLUSIVE: test files only |
 | WU-5 | — | `app.rs`, `update.rs`, `render.rs`, `input.rs`, `lib.rs`, `commands.rs` | EXCLUSIVE: phantom-app/src/{app,update,render,input,commands,lib}.rs |
+| WU-6 | `phantom-time/` (new crate) OR `phantom-scene/src/clock.rs` | `phantom-app/src/app.rs` (dt clamp only) | EXCLUSIVE: phantom-time/ or phantom-scene/src/clock.rs; READ-MODIFY-WRITE: app.rs tick region only |
+| WU-7 | `phantom-app/src/boot.rs` | `phantom-app/src/app.rs` (New::new body only) | EXCLUSIVE: boot.rs |
+| WU-8 | `phantom-jobs/` (new crate) OR `phantom-supervisor/src/jobs.rs` | — | EXCLUSIVE: phantom-jobs/ or phantom-supervisor/src/jobs.rs |
+| WU-9 | `phantom-renderer/src/debug_draw.rs`, `phantom-renderer/src/debug_draw/*.rs` | `phantom-renderer/src/lib.rs` (re-export) | EXCLUSIVE: debug_draw module |
+| WU-10 | — | console command handler in phantom-app | EXCLUSIVE: console eval path only |
+| WU-11 | `phantom-app/src/logging.rs` | `phantom-app/src/main.rs` or entry-point init | EXCLUSIVE: logging.rs |
+| WU-12 | `phantom-app/src/profiler.rs` OR macro crate | `Cargo.toml` workspace deps | EXCLUSIVE: profiler.rs + workspace tracy dep |
+| WU-14 | `phantom-resources/` (new crate) OR `phantom-app/src/resources.rs` | — | EXCLUSIVE: phantom-resources/ or phantom-app/src/resources.rs |
+| WU-15 | `phantom-protocol/src/events.rs` (new or expanded) | `phantom-adapter/src/bus.rs` (payload type) | EXCLUSIVE: phantom-protocol/src/events.rs; READ-MODIFY-WRITE: bus.rs payload field only |
 
 ### Dependency Graph
 
 ```
-WU-0 (Trait Split) ─────► MERGE TO MAIN (gate)
+Wave 0 (pre-requisites — all three can run in parallel; all gate Wave 1):
+  WU-0  (Trait Split)       ─► gates WU-1, WU-2, WU-3
+  WU-6  (Clock + dt clamp)  ─► gates WU-1
+  WU-15 (Typed event bus)   ─► gates WU-1, WU-2
+
+Wave 1 (10 parallel work units — zero file overlap):
+  ┌───────┬───────┬───────┬───────┬──────┬──────┬──────┬──────┬──────┬──────┐
+  ▼       ▼       ▼       ▼       ▼      ▼      ▼      ▼      ▼      ▼
+ WU-1   WU-2    WU-3    WU-7    WU-8  WU-9   WU-10  WU-11  WU-12  WU-14
+ Coord  Term    Render  Boot    Jobs  Debug  Consl  Log    Prof   Resrc
+                                      Draw
+
+Wave 2 (sequential, depends on ALL of Wave 1):
+                        WU-5 (Integration)
+                        - wire coordinator through app.rs/update.rs/render.rs/input.rs
+                        - retrofit agents to WU-8 job queue
+                        - convert semantic/NLP/brain/MCP to async result pattern (WU-13)
+                        - wire shaders/fonts/videos/themes/plugins through WU-14
+                        - wire all bus payloads through WU-15 typed events
                                 │
-                    ┌───────────┼───────────┐
-                    ▼           ▼           ▼
-              WU-1 (Coord)  WU-2 (Term)  WU-3 (Render)
-                    │           │           │
-                    └───────────┼───────────┘
-                                ▼
-                          WU-5 (Integration)
-                                │
-                                ▼
-                          WU-4 (Tests)
+Wave 3 (sequential):            ▼
+                        WU-4 (Tests — full matrix: WU-0 through WU-16)
 ```
 
 ### Parallelism
 
-- **Wave 0** (sequential): WU-0 — trait split, must merge before anything else
-- **Wave 1** (parallel): WU-1, WU-2, WU-3 — zero file overlap, can run simultaneously
-- **Wave 2** (sequential): WU-5 — depends on all of Wave 1
-- **Wave 3** (sequential): WU-4 — depends on WU-5 for integration tests
+- **Wave 0** (3 parallel agents): WU-0, WU-6, WU-15 — all must merge before Wave 1. No file overlap between them, so they can run concurrently.
+- **Wave 1** (10 parallel agents across 3 batches — recommended per ARD-003 finding that 2–4 concurrent agents is the sweet spot):
+  - **Batch A** (adapter framework): WU-1, WU-2, WU-3, WU-7
+  - **Batch B** (engine foundations I): WU-8, WU-9, WU-14
+  - **Batch C** (engine foundations II): WU-10, WU-11, WU-12
+- **Wave 2** (sequential): WU-5 — integration touches app.rs, update.rs, render.rs, input.rs, commands.rs, lib.rs. Single agent. Also absorbs WU-13 (async result pattern — not a standalone WU, converts existing blocking calls to jobs).
+- **Wave 3** (sequential): WU-4 — depends on WU-5 for integration test surface.
 
 ### Interface Contract (shared agreement before Wave 1 starts)
 
@@ -799,10 +844,687 @@ pub enum CursorShape {
 
 ---
 
+## 8a. Engine Foundation Work Units (WU-6 through WU-15)
+
+These were added 2026-04-24 based on the *Game Engine Architecture* audit. Each is self-contained, tested in isolation, and integrated via WU-5. See §11 for why they're here (not Phase 2 or Phase 1.5).
+
+All eleven patterns from the audit ship in Phase 1:
+- **Foundational** (Tier 1): WU-6 (Clock + dt clamp + Cadence), WU-7 (start_up / shut_down)
+- **User-visible** (Tier 2): WU-9 (DebugDraw), WU-10 (console evaluator), WU-11 (channel logging), WU-12 (Tracy profiler)
+- **Architectural** (Tier 3): WU-8 (job queue), WU-14 (ResourceManager), WU-15 (typed event bus), WU-13 (async results, absorbed into WU-5)
+
+Listed below in tiered order (Tier 1 → Tier 2 → Tier 3):
+
+### WU-6: Clock + dt Clamp (~250 lines, new crate)
+
+**Crate**: `phantom-time` (new) OR module `phantom-scene::clock` if adding a crate feels heavy.
+
+**Why**: Every subsystem updating at the frame rate is wrong. Phantom will have a brain thinking every 200ms, agents polling MCP every few seconds, the renderer at 16.6ms. Without per-subsystem clocks and cadences, everything shares one tick and the brain either wakes too often (CPU waste) or not often enough (laggy agent coordination).
+
+**Types**:
+```rust
+pub struct Clock {
+    time_cycles: u64,        // monotonic, CPU-cycle-scale
+    time_scale: f32,         // 1.0 normal, 0.5 half-speed, 0.0 paused-equivalent
+    is_paused: bool,
+    created_at: Instant,
+}
+
+impl Clock {
+    pub fn new() -> Self;
+    pub fn new_paused() -> Self;
+    pub fn tick(&mut self, real_dt: Duration);        // advances time_cycles by real_dt * time_scale
+    pub fn elapsed_seconds(&self) -> f64;             // since creation
+    pub fn dt_seconds(&self, other: &Clock) -> f64;   // delta between two clocks
+    pub fn pause(&mut self);
+    pub fn resume(&mut self);
+    pub fn set_scale(&mut self, scale: f32);          // negative = reverse
+    pub fn single_step(&mut self, step: Duration);    // force-advance while paused
+    pub fn is_paused(&self) -> bool;
+}
+
+pub struct DtClamp {
+    target_dt: Duration,      // e.g. 16.6ms for 60fps
+    max_dt: Duration,         // e.g. 100ms — anything above clamps to target_dt
+}
+
+impl DtClamp {
+    pub fn apply(&self, measured: Duration) -> Duration {
+        if measured > self.max_dt { self.target_dt } else { measured }
+    }
+}
+```
+
+**App integration** (minimal, WU-6 delivers this one-liner in `app.rs`):
+```rust
+let measured = instant_now - last_tick;
+let dt = self.dt_clamp.apply(measured);
+self.real_clock.tick(dt);
+self.session_clock.tick(dt);  // paused during console-overlay, resume on close
+self.fx_clock.tick(dt);       // scaled for slo-mo FX debugging
+```
+
+**Per-subsystem cadences** (WU-6 declares the type; WU-1 consumes):
+```rust
+pub struct Cadence {
+    pub target_hz: f32,       // e.g. 1.0 for agents, 5.0 for brain, 60.0 for renderer
+    last_tick: Duration,
+}
+
+impl Cadence {
+    pub fn should_tick(&mut self, clock: &Clock) -> bool {
+        let now = Duration::from_secs_f64(clock.elapsed_seconds());
+        if now - self.last_tick >= Duration::from_secs_f32(1.0 / self.target_hz) {
+            self.last_tick = now;
+            true
+        } else {
+            false
+        }
+    }
+}
+```
+
+**Tests**:
+```
+test_clock_advances_monotonic
+test_clock_pause_freezes_time
+test_clock_scale_slows_time
+test_clock_negative_scale_reverses
+test_clock_single_step_while_paused
+test_dt_clamp_passes_normal_values
+test_dt_clamp_clamps_breakpoint_lag
+test_cadence_fires_at_target_hz
+test_cadence_skips_when_too_soon
+```
+
+**Gate**: Must merge before WU-1 (AppCoordinator uses Cadence per adapter).
+
+### WU-7: Explicit Subsystem Start-Up / Shut-Down (~150 lines)
+
+**File**: `crates/phantom-app/src/boot.rs` (new), modifies `crates/phantom-app/src/app.rs::new()`.
+
+**Why**: `App::new()` today is a wall of `.new()` calls in whatever order compiled first. 19 crates with real deps (renderer needs GPU device before atlas; atlas before text renderer; text renderer before scene; scene before adapters; adapters before coordinator; coordinator before MCP listener; etc). One subtle bug — brain started before supervisor — and the symptom appears in a completely different module. An explicit ordered sequence makes the DAG legible and crash-report-friendly.
+
+**Pattern** (Gregory ch 5.1.2 — "brute force wins"):
+```rust
+pub struct Subsystems {
+    // Leaves (no deps): logging, gpu, time
+    pub logging: LoggingSystem,
+    pub gpu: GpuContext,
+    pub clocks: ClockBank,
+
+    // Mid-layer (deps: above)
+    pub atlas: GlyphAtlas,
+    pub text_renderer: TextRenderer,
+    pub shader_pipeline: ShaderPipeline,
+    pub resources: ResourceManager,
+
+    // Scene (deps: renderer stack)
+    pub scene: SceneTree,
+    pub layout: LayoutEngine,
+
+    // App layer (deps: scene)
+    pub registry: AppRegistry,
+    pub bus: EventBus,
+    pub coordinator: AppCoordinator,
+
+    // Agents (deps: coordinator + bus)
+    pub supervisor: Supervisor,
+    pub brain: BrainHandle,
+    pub mcp_listener: McpListener,
+}
+
+impl Subsystems {
+    pub fn start_up(config: &Config) -> anyhow::Result<Self> {
+        // Ordered, top-down. Each line can panic-eject with context.
+        let logging = LoggingSystem::start_up(config)?;
+        let gpu = GpuContext::start_up(config)?;
+        let clocks = ClockBank::start_up()?;
+        let atlas = GlyphAtlas::start_up(&gpu)?;
+        let text_renderer = TextRenderer::start_up(&gpu, &atlas)?;
+        // ... etc
+        Ok(Self { logging, gpu, /* ... */ })
+    }
+
+    pub fn shut_down(self) -> anyhow::Result<()> {
+        // Reverse order. Consuming self so drop order is enforced.
+        self.mcp_listener.shut_down()?;
+        self.brain.shut_down()?;
+        self.supervisor.shut_down()?;
+        // ... etc
+        Ok(())
+    }
+}
+```
+
+**Tests**:
+```
+test_subsystems_start_in_declared_order
+test_subsystems_shut_down_in_reverse
+test_start_up_failure_unwinds_prior
+test_full_boot_then_shut_down_no_leak
+```
+
+### WU-9: DebugDrawManager (~400 lines)
+
+**File**: `crates/phantom-renderer/src/debug_draw.rs` + `debug_draw/primitives.rs`.
+
+**Why**: Phantom has a scene graph, video playback, glitch FX origins, layout boxes, agent pane borders, sysmon widgets — all producing visual artifacts whose position/bounds/state are currently invisible to the developer. Gregory ch 9.2: "a picture is worth 1,000 minutes of debugging." The pattern is a global queue any code can push into; renderer drains end-of-frame.
+
+**API**:
+```rust
+pub struct DebugDrawManager {
+    primitives: Vec<(DebugPrimitive, DrawOptions, f32 /*lifetime*/)>,
+    enabled: bool,
+}
+
+pub enum DebugPrimitive {
+    Line { from: Vec3, to: Vec3 },
+    Cross { at: Vec3, size: f32 },
+    Sphere { center: Vec3, radius: f32 },
+    AxisBox { min: Vec3, max: Vec3 },
+    OrientedBox { center: Mat4, scale: Vec3 },
+    Axes { at: Mat4, size: f32 },           // XYZ in R/G/B
+    String { at: Vec3, text: String },
+    Rect2D { min: Vec2, max: Vec2 },        // screen-space
+    String2D { at: Vec2, text: String },    // screen-space
+}
+
+pub struct DrawOptions {
+    pub color: [f32; 4],
+    pub line_width: f32,
+    pub depth_tested: bool,
+    pub space: DrawSpace,  // World | Screen
+}
+
+impl DebugDrawManager {
+    pub fn add_line(&mut self, from: Vec3, to: Vec3, opts: DrawOptions, lifetime: f32);
+    pub fn add_cross(&mut self, at: Vec3, size: f32, opts: DrawOptions, lifetime: f32);
+    pub fn add_sphere(&mut self, center: Vec3, radius: f32, opts: DrawOptions, lifetime: f32);
+    pub fn add_axes(&mut self, at: Mat4, size: f32, opts: DrawOptions, lifetime: f32);
+    pub fn add_string(&mut self, at: Vec3, text: &str, opts: DrawOptions, lifetime: f32);
+    pub fn add_rect_2d(&mut self, min: Vec2, max: Vec2, opts: DrawOptions, lifetime: f32);
+    pub fn add_string_2d(&mut self, at: Vec2, text: &str, opts: DrawOptions, lifetime: f32);
+
+    pub fn flush(&mut self, dt: f32, render_pass: &mut RenderPass);  // drain + decay lifetimes
+    pub fn clear(&mut self);
+    pub fn set_enabled(&mut self, on: bool);
+}
+```
+
+**Wire-up in WU-5**: add `debug_draw: DebugDrawManager` to `App`, call `debug_draw.flush(dt, &mut pass)` at end of frame. Toggle via console command `debug.draw on|off`.
+
+**Screen-space debug strings are the killer feature** — gives agent panes their own overlay annotations, shows layout box rects for every taffy node in debug mode, marks glitch FX origins, draws video bounds, labels scene nodes.
+
+**Tests**:
+```
+test_add_line_queues_primitive
+test_lifetime_decays_on_flush
+test_expired_primitives_removed
+test_clear_empties_queue
+test_disabled_manager_skips_flush
+test_world_vs_screen_space_dispatch
+```
+
+### WU-10: Console Evaluator Wiring (~100 lines)
+
+**File**: Console command handler in [phantom-app](../crates/phantom-app/).
+
+**Why**: The console overlay exists and reads input, but it evaluates a hardcoded switch of commands. Gregory ch 9.4: console and scripting must share an evaluator or the console becomes a second-class surface that drifts. Phantom's NLP + brain already parse natural language into actions — the console should route through that same pipeline.
+
+**Flow**:
+```
+console input text
+    ↓
+    phantom-nlp::interpret(text) → Action | Unknown
+    ↓
+    if Unknown: phantom-brain::route(text) → Action
+    ↓
+    dispatch Action via coordinator.send_command() OR direct App method
+    ↓
+    render result as console output line
+```
+
+**Changes**:
+- Console's current hardcoded command table becomes a fallback (fast-path for trivial `clear`, `quit`, `help`).
+- Anything else → NLP → Brain → Action.
+- `AiEvent::AgentResponse` and other brain replies surface as console output lines.
+
+**Tests**:
+```
+test_console_exec_trivial_command
+test_console_exec_nlp_parsed_command
+test_console_exec_brain_routed_command
+test_console_unknown_command_shows_suggestions
+test_console_agent_response_renders_inline
+```
+
+### WU-11: Channel-Tagged Logging + File Mirror + Panic Flush (~300 lines)
+
+**File**: `crates/phantom-app/src/logging.rs` (new), modifies `main.rs` or `lib.rs` entry point.
+
+**Why**: Today Phantom uses `env_logger` with one global stream. When 19 subsystems all shout at once, debugging is reading a wall of text. Gregory ch 9.1: channels + verbosity + file mirror + flush-on-panic are table stakes.
+
+**Design**:
+```rust
+bitflags! {
+    pub struct Channels: u32 {
+        const RENDERER   = 1 << 0;
+        const SHADER     = 1 << 1;
+        const TERMINAL   = 1 << 2;
+        const ADAPTER    = 1 << 3;
+        const COORDINATOR= 1 << 4;
+        const SCENE      = 1 << 5;
+        const SEMANTIC   = 1 << 6;
+        const NLP        = 1 << 7;
+        const BRAIN      = 1 << 8;
+        const SUPERVISOR = 1 << 9;
+        const AGENTS     = 1 << 10;
+        const MCP        = 1 << 11;
+        const PLUGINS    = 1 << 12;
+        const MEMORY     = 1 << 13;
+        const CONTEXT    = 1 << 14;
+        const SESSION    = 1 << 15;
+        const BOOT       = 1 << 16;
+        const INPUT      = 1 << 17;
+        const FX         = 1 << 18;
+        const PROFILER   = 1 << 19;
+        const ALL        = u32::MAX;
+    }
+}
+
+pub struct PhantomLogger {
+    active_channels: AtomicU32,     // bitmask, runtime-mutable
+    verbosity: AtomicU8,            // 0=error, 1=warn, 2=info, 3=debug, 4=trace
+    file: Mutex<BufWriter<File>>,   // ~/.config/phantom/logs/phantom-{timestamp}.log
+    stderr: bool,
+}
+
+impl log::Log for PhantomLogger { /* ... */ }
+
+pub fn start_up(config: &Config) -> anyhow::Result<()> {
+    let logger = PhantomLogger::new(config)?;
+    log::set_boxed_logger(Box::new(logger))?;
+    log::set_max_level(log::LevelFilter::Trace);
+    install_panic_hook();   // on panic: flush file, dump crash report
+    Ok(())
+}
+
+fn install_panic_hook() {
+    let orig = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(logger) = logger::current() {
+            logger.flush_all();
+            logger.dump_crash_report(info);
+        }
+        orig(info);
+    }));
+}
+```
+
+**Call-site convention**:
+```rust
+log::info!(target: "phantom::brain", "routing command: {}", text);
+log::debug!(target: "phantom::renderer", "frame {} — {} quads, {} glyphs", ...);
+```
+
+Target string prefix maps to a channel bit. Runtime commands: `log.channel brain off`, `log.verbose 3`.
+
+**Crash report contents** (Gregory ch 9.1.5):
+- Timestamp + build hash + panic message + location
+- Stack trace (via `backtrace` crate)
+- Active sessions list, focused app, open agents
+- Last 50 log lines across all channels
+- Memory allocator stats (if available)
+- Last 20 user commands
+
+Writes to `~/.config/phantom/crashes/crash-{timestamp}.txt`.
+
+**Tests**:
+```
+test_channel_filter_suppresses_muted
+test_verbosity_filter_suppresses_below_threshold
+test_file_mirror_writes_all_messages
+test_runtime_channel_toggle
+test_panic_hook_flushes_file
+test_crash_report_has_required_fields
+```
+
+### WU-12: Tracy Profiler Integration (~150 lines)
+
+**Files**: `Cargo.toml` workspace deps, `crates/phantom-app/src/profiler.rs` (new), profile macros in hot paths.
+
+**Why**: 60fps with full shader stack + terminal reflow + agent coordination is not free. Gregory ch 9.8: you need hierarchical timing or you guess. Tracy is the industry-standard tool (used by AAA game studios), `tracy-client` crate exists, integration is ~50 lines + sprinkle macros.
+
+**Design**: Don't roll own. Add `tracy-client = { version = "...", features = ["enable"], optional = true }` as workspace dep. Gated behind `phantom-profile` feature flag — zero cost in release builds without the flag.
+
+```rust
+// phantom-app/src/profiler.rs
+
+#[macro_export]
+macro_rules! profile_scope {
+    ($name:literal) => {
+        #[cfg(feature = "phantom-profile")]
+        let _span = tracy_client::span!($name);
+    };
+}
+
+#[macro_export]
+macro_rules! profile_frame {
+    () => {
+        #[cfg(feature = "phantom-profile")]
+        tracy_client::frame_mark();
+    };
+}
+
+pub fn start_up() {
+    #[cfg(feature = "phantom-profile")]
+    tracy_client::Client::start();
+}
+```
+
+**Instrumentation points** (WU-12 adds these to existing hot paths):
+- `App::tick` → `profile_scope!("tick")`
+- `App::render` → `profile_scope!("render")`, nested: `"render.scene"`, `"render.postfx"`, `"render.overlay"`
+- `AppCoordinator::update_all` → `profile_scope!("coord.update")`
+- `TextRenderer::prepare_glyphs` → `profile_scope!("text.prepare")`
+- `ShaderPipeline::frame` → `profile_scope!("shader.frame")`
+- `BrainHandle::tick` → `profile_scope!("brain.tick")`
+- `Supervisor::tick` → `profile_scope!("supervisor.tick")`
+- End of frame → `profile_frame!()`
+
+**Usage**: `cargo run --features phantom-profile` and connect Tracy GUI. Flamegraph + per-subsystem timeline + frame graph all appear automatically.
+
+**Tests**:
+```
+test_profile_scope_macro_compiles_without_feature  // zero-cost when off
+test_profile_scope_macro_compiles_with_feature
+test_frame_mark_fires_once_per_frame
+```
+
+### WU-8: Job Queue + Worker Pool (~500 lines, new crate)
+
+**Crate**: `phantom-jobs` (new) OR module `phantom-supervisor::jobs`.
+
+**Why**: [ch7.6.5-7.6.6] Phantom's agent model today spawns a thread per agent. That works for 2–3 agents; it falls over at 10+ (thread contention, scheduler thrashing, no priority, no cancellation). The book's prescription is a job queue: small `(code, data)` units picked up by a fixed worker pool. Phantom's agent tasks are already job-shaped — `(prompt, context, tools, callback)`. This WU formalizes it and future-proofs agent coordination for Phase 2+.
+
+**Types**:
+```rust
+pub struct Job {
+    pub id: JobId,
+    pub priority: JobPriority,       // High | Normal | Low | Background
+    pub payload: Box<dyn JobPayload + Send>,
+    pub cancel: Arc<AtomicBool>,
+    pub submitted_at: Instant,
+}
+
+pub trait JobPayload {
+    fn run(&mut self, ctx: &JobContext) -> JobResult;
+    fn describe(&self) -> &str;
+}
+
+pub enum JobResult {
+    Done(serde_json::Value),
+    Err(anyhow::Error),
+    Cancelled,
+}
+
+pub struct JobPool {
+    senders: [Sender<Job>; 4],        // one queue per priority level
+    workers: Vec<JoinHandle<()>>,
+    in_flight: DashMap<JobId, JobStatus>,
+    results: Receiver<(JobId, JobResult)>,
+}
+
+impl JobPool {
+    pub fn start_up(worker_count: usize) -> anyhow::Result<Self>;
+    pub fn submit(&self, job: Job) -> JobHandle;
+    pub fn try_poll(&self, handle: &JobHandle) -> Option<JobResult>;
+    pub fn cancel(&self, handle: &JobHandle);
+    pub fn drain_completed(&self) -> Vec<(JobId, JobResult)>;
+    pub fn shut_down(self) -> anyhow::Result<()>;    // drains in-flight, joins workers
+}
+
+pub struct JobHandle {
+    id: JobId,
+    cancel: Arc<AtomicBool>,
+    _marker: PhantomData<*const ()>,  // !Send, owned by caller
+}
+```
+
+**Priority discipline**: High = user-facing (agent responding to user question). Normal = background agent work. Low = speculative (brain predictions). Background = housekeeping (context index rebuild).
+
+**Integration points** (WU-5 wires these up, WU-8 only provides the pool):
+- Agent supervisor submits agent work as jobs instead of spawning threads
+- Brain submits route/decide calls as jobs
+- Semantic parser submits parse work as jobs
+- NLP interpreter submits interpretation as jobs
+- MCP listener wraps request handlers as jobs
+- Memory queries submit as low-priority jobs
+
+**Tests**:
+```
+test_submit_job_returns_handle
+test_poll_none_when_in_flight
+test_poll_some_when_complete
+test_cancel_aborts_before_run
+test_cancel_sets_flag_during_run
+test_priority_high_preempts_normal
+test_worker_panic_doesnt_kill_pool     // caught, reported, worker respawns
+test_shutdown_drains_in_flight
+test_shutdown_joins_all_workers
+test_stress_1000_jobs_4_workers
+```
+
+### WU-14: Unified ResourceManager (~450 lines, new crate)
+
+**Crate**: `phantom-resources` (new) OR module `phantom-app::resources`.
+
+**Why**: [ch6.2] Today Phantom loads shaders, fonts, videos, themes, and WASM plugins through separate ad-hoc code paths scattered across 5 crates. No single source of truth for "what's loaded," no ref-counting (switching themes reloads shaders from disk), no streaming (opening a large video blocks the render thread), no GUID system (hash collisions possible). Every mature engine has one loader.
+
+**API**:
+```rust
+pub trait Resource: Send + Sync + 'static {
+    fn kind(&self) -> &'static str;
+    fn size_hint(&self) -> usize;
+}
+
+pub struct ResourceId(pub u64);  // hash of canonical path
+
+pub struct ResourceManager {
+    registry: DashMap<ResourceId, Arc<dyn Resource>>,
+    ref_counts: DashMap<ResourceId, AtomicUsize>,
+    loaders: HashMap<&'static str, Box<dyn ResourceLoader>>,
+    streaming_queue: Sender<StreamRequest>,
+    results: Receiver<(ResourceId, Result<Arc<dyn Resource>, LoadError>)>,
+}
+
+impl ResourceManager {
+    pub fn start_up(job_pool: &JobPool) -> anyhow::Result<Self>;  // uses WU-8 for async loads
+
+    pub fn register_loader<L: ResourceLoader + 'static>(&mut self, kind: &'static str, loader: L);
+
+    pub fn load_blocking<R: Resource>(&self, path: &str) -> anyhow::Result<ResourceHandle<R>>;
+    pub fn load_streaming<R: Resource>(&self, path: &str) -> ResourceHandle<R>;
+    pub fn try_get<R: Resource>(&self, handle: &ResourceHandle<R>) -> Option<Arc<R>>;
+
+    pub fn release(&self, id: ResourceId);   // decrement ref count; unload if 0
+
+    pub fn gc(&self);                        // sweep zero-refcount resources
+    pub fn memory_usage(&self) -> usize;
+    pub fn shut_down(self) -> anyhow::Result<()>;
+}
+
+pub trait ResourceLoader: Send + Sync {
+    fn load(&self, path: &str, bytes: &[u8]) -> Result<Arc<dyn Resource>, LoadError>;
+}
+
+pub struct ResourceHandle<R: Resource> {
+    id: ResourceId,
+    manager: Weak<ResourceManager>,
+    _phantom: PhantomData<R>,
+}
+
+impl<R: Resource> Drop for ResourceHandle<R> {
+    fn drop(&mut self) {
+        if let Some(mgr) = self.manager.upgrade() {
+            mgr.release(self.id);
+        }
+    }
+}
+```
+
+**Loaders to register** (WU-5 plumbs these in):
+- `ShaderLoader` → compiles WGSL/GLSL into `CompiledShader` resource
+- `FontLoader` → produces `FontFace` resource via cosmic-text
+- `ThemeLoader` → parses TOML theme into `Theme` resource
+- `VideoLoader` → opens H.264 stream, produces `VideoResource` with frame buffer
+- `WasmPluginLoader` → compiles WASM module into `LoadedPlugin` resource
+- `SystemPromptLoader` → loads agent system prompts from disk into `SystemPrompt` resource
+
+**Streaming design**: `load_streaming` returns handle immediately; manager submits a high-priority job to WU-8 that reads bytes from disk (background thread) and decodes (worker thread). `try_get` returns `None` until load completes. `ResourceHandle` drops release the ref count; `gc()` unloads.
+
+**Tests**:
+```
+test_load_blocking_returns_handle
+test_load_same_path_returns_same_id      // no duplicate load
+test_ref_count_tracks_handle_lifetime
+test_drop_handle_decrements_refcount
+test_gc_unloads_zero_refcount
+test_load_streaming_returns_none_until_ready
+test_load_streaming_completes_via_poll
+test_register_loader_new_kind
+test_load_with_unknown_kind_returns_err
+test_memory_usage_sums_loaded
+```
+
+### WU-15: Typed Event Bus (~300 lines)
+
+**Files**: `crates/phantom-protocol/src/events.rs` (new or expanded), modifies `crates/phantom-adapter/src/bus.rs` (payload type only).
+
+**Why**: [ch14.7] Today `BusMessage.payload: serde_json::Value` — stringly-typed, runtime-only errors, no compile check that publishers and subscribers agree on shape. Every framework that scaled (Bevy `EventWriter<T>`, Zed `cx.emit(event)`, SwiftUI `@Published`) is compile-time typed. Originally flagged for Phase 4 in the adapter plan — pulled forward because every Phase 2+ adapter adds more topics and the JSON tax compounds.
+
+**Design**:
+```rust
+// phantom-protocol/src/events.rs
+
+#[derive(Clone, Debug)]
+pub enum Event {
+    // Terminal / PTY
+    TerminalOutput { app_id: AppId, bytes: u64 },
+    CommandStarted { app_id: AppId, command: String },
+    CommandComplete { app_id: AppId, exit_code: i32 },
+    BuildFailed { app_id: AppId, error: BuildError },
+    BuildSucceeded { app_id: AppId, duration: Duration },
+
+    // Agents
+    AgentSpawned { agent_id: AgentId, task: String },
+    AgentProgress { agent_id: AgentId, fraction: f32, message: String },
+    AgentTaskComplete { agent_id: AgentId, result: AgentResult },
+    AgentError { agent_id: AgentId, error: String },
+
+    // Sessions / Focus
+    SessionSwitched { from: SessionId, to: SessionId },
+    FocusChanged { from: Option<AppId>, to: Option<AppId> },
+
+    // Brain / NLP
+    BrainDecision { decision: Decision, confidence: f32 },
+    NlpInterpreted { input: String, action: Action },
+
+    // Video / FX
+    VideoPlaybackStateChanged { app_id: AppId, playing: bool },
+    GlitchFxTriggered { origin: [f32; 2], intensity: f32 },
+
+    // System
+    MemoryPressure { bytes_free: usize },
+    JobCompleted { job_id: JobId },
+    Shutdown,
+}
+
+#[derive(Clone, Debug)]
+pub struct BusMessage {
+    pub topic: Topic,
+    pub event: Event,
+    pub from: Option<AppId>,
+    pub frame: u64,          // NEW: frame number when published (Phase 4 item, pulled forward)
+    pub timestamp: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Topic {
+    Terminal,
+    Agents,
+    Sessions,
+    Brain,
+    Video,
+    Fx,
+    System,
+}
+
+impl Event {
+    pub const fn topic(&self) -> Topic {
+        match self {
+            Event::TerminalOutput { .. } | Event::CommandStarted { .. }
+                | Event::CommandComplete { .. } | Event::BuildFailed { .. }
+                | Event::BuildSucceeded { .. } => Topic::Terminal,
+            Event::AgentSpawned { .. } | Event::AgentProgress { .. }
+                | Event::AgentTaskComplete { .. } | Event::AgentError { .. } => Topic::Agents,
+            Event::SessionSwitched { .. } | Event::FocusChanged { .. } => Topic::Sessions,
+            Event::BrainDecision { .. } | Event::NlpInterpreted { .. } => Topic::Brain,
+            Event::VideoPlaybackStateChanged { .. } => Topic::Video,
+            Event::GlitchFxTriggered { .. } => Topic::Fx,
+            Event::MemoryPressure { .. } | Event::JobCompleted { .. }
+                | Event::Shutdown => Topic::System,
+        }
+    }
+}
+```
+
+**Bus change** (minimal, WU-15 delivers):
+```rust
+// phantom-adapter/src/bus.rs — change payload field from serde_json::Value to Event
+pub struct BusMessage {
+    // existing fields + payload: serde_json::Value  ← REMOVED
+    pub event: Event,   // NEW
+    pub frame: u64,     // NEW
+    // ...
+}
+```
+
+**Backward-compat**: Adapters previously publishing JSON blobs now publish typed `Event` variants. Unknown / extension events use `Event::Custom(serde_json::Value)` escape hatch for plugins.
+
+**Tests**:
+```
+test_event_topic_routing
+test_event_matches_declared_topic
+test_bus_publish_typed_event
+test_subscriber_receives_only_subscribed_topic
+test_frame_number_monotonic_across_publishes
+test_custom_event_payload_roundtrip
+test_all_events_are_send_sync_clone
+```
+
+### WU-13 (not a standalone WU): Async result pattern
+
+Rolled into WU-5 (integration). During integration wiring, every existing blocking call in the update/render path is converted to the job-queue pattern from WU-8:
+
+| Current (blocking) | After WU-5 |
+|---|---|
+| `let parsed = semantic::parse(output);` | `let job = job_pool.submit(SemanticParseJob::new(output)); // frame N` → `if let Some(result) = job_pool.try_poll(job) { ... } // frame N+k` |
+| `let intent = nlp::interpret(text);` | submit NLP job → poll next frame |
+| `let decision = brain::route(cmd);` | submit brain job → poll next frame |
+| `let memory = memory::query(key);` | submit memory job → poll next frame |
+| `mcp.call(method, args)` | submit MCP job → poll next frame |
+
+Render loop never blocks on any of these. Completion events published via WU-15 typed bus. Checkpoints enforced in WU-5 review (§6 Stage 5).
+
+---
+
 ## 9. Success Criteria
 
 Phase 1 is DONE when all of the following are true:
 
+**Adapter framework:**
 1. `cargo test --workspace` passes with 0 failures
 2. `cargo clippy --workspace` passes with 0 warnings
 3. Terminal renders identically through the adapter path (screenshot regression < 5% drift)
@@ -815,20 +1537,94 @@ Phase 1 is DONE when all of the following are true:
 10. Zero `unwrap()` in new code (outside `#[cfg(test)]`)
 11. All new code is `deny(warnings)` clean
 
+**Engine foundations (added 2026-04-24 — all 11 patterns from GEA audit):**
+12. `Clock` type lives in a dedicated module; `App` holds `real_clock`, `session_clock`, `fx_clock`; all adapter `update(dt)` calls receive their subsystem's clock, not the raw frame dt
+13. Each adapter declares a `Cadence` (target Hz); coordinator skips `update()` calls when the adapter isn't due
+14. `DtClamp` applied in main loop; artificially induced 500ms frame stall does NOT crash physics/FX/animation
+15. `Subsystems::start_up()` boots in explicit, declared order; `shut_down()` unwinds in reverse; full boot→shut_down cycle leaves zero leaked resources in a sanitizer build
+16. `DebugDrawManager` is called at least once from a real code path (agent pane bounds, scene node axes, or layout box overlay); toggle via `debug.draw on|off` console command
+17. Console overlay routes input through NLP → brain path; hardcoded command table is <10 commands (trivial cases only)
+18. `PhantomLogger` is installed; `log.channel <name> on|off` and `log.verbose <n>` work at runtime; panic produces a crash report file
+19. `phantom-profile` feature flag builds; Tracy GUI shows at least 8 named spans (tick, render, coord.update, text.prepare, shader.frame, brain.tick, supervisor.tick, frame_mark)
+20. `JobPool` replaces per-agent threads; running 10 concurrent agents uses ≤4 OS threads; worker panic does not kill pool (caught, logged, worker respawns)
+21. `ResourceManager` is the only loader in the workspace; shaders, fonts, themes, videos, WASM plugins, system prompts all load through it; loading the same path twice returns the same `Arc`; dropping the last handle decrements ref count
+22. All `BusMessage`s carry typed `Event` enum (no `serde_json::Value` payloads in main paths); `frame` field populated; `Event::topic()` matches published topic
+23. Semantic parse, NLP interpret, brain decision, memory query, and MCP call sites no longer block the render loop — all converted to submit-job-poll-next-frame (WU-13 via WU-8); render frame time P99 unchanged or better
+
 ---
 
 ## 10. What Phase 1 Does NOT Include
 
-Explicitly out of scope (deferred to Phase 2+):
+Explicitly out of scope (deferred to Phase 2+). No Phase 1.5 — all engine foundations ship in Phase 1.
 
-- VideoAdapter, AgentAdapter, MonitorAdapter (Phase 2)
-- Floating panes (Phase 3)
-- Spatial negotiation / SpatialPreference in layout (Phase 3)
-- Bus wiring between adapters (Phase 4)
-- User-created pipes (Phase 4)
-- Typed event channels replacing serde_json::Value bus payloads (Phase 4)
-- Frame number in BusMessage for traceability (Phase 4)
-- AI command routing to adapters (Phase 5)
-- Dynamic MCP tool registration (Phase 5)
-- Pop-out windows (Phase 3b)
-- WASM adapter runtime (future)
+**Phase 2:**
+- VideoAdapter, AgentAdapter, MonitorAdapter (now trivial to build on complete adapter + job queue + resource manager + typed bus foundation)
+
+**Phase 3:**
+- Floating panes
+- Spatial negotiation / SpatialPreference in layout
+- Pop-out windows (3b)
+
+**Phase 4:**
+- Bus wiring between adapters (cross-adapter routing rules)
+- User-created pipes
+
+**Phase 5:**
+- AI command routing to adapters
+- Dynamic MCP tool registration
+- WASM adapter runtime
+
+---
+
+## 11. Why Engine Foundations Are In Phase 1 (Not Deferred)
+
+The *Game Engine Architecture* audit (2026-04-24) surfaced eleven patterns that Phantom will need regardless of feature roadmap, because every adapter added in Phase 2+ assumes them:
+
+| Pattern | What happens if deferred |
+|---------|--------------------------|
+| Split render loop from update loop + per-adapter cadences (WU-6, WU-1) | Every Phase 2 adapter (Video at 24fps, Agent at 0.5Hz, Monitor at 1Hz) either over-ticks (CPU waste, battery drain) or is retrofitted later — all adapter `update()` signatures change, cascading through every test |
+| Clock type (WU-6) | Video playback, glitch FX timing, slo-mo debugging, agent replay all roll their own clocks → four incompatible time domains |
+| dt clamp (WU-6) | First debugger session after Phase 2 ships causes a 30-second spike → animation explodes, agent state desyncs, bug report "Phantom crashes when I breakpoint" |
+| Explicit start_up/shut_down (WU-7) | Adding VideoAdapter or AgentAdapter to the wall of `::new()` calls in `App::new()` will put them in an order that compiles but mis-initializes (brain starts before supervisor → silently wrong) |
+| Job queue (WU-8) | Phase 2's AgentAdapter inherits per-agent thread model; scaling past 5 concurrent agents causes scheduler thrashing; retrofitting requires changing every agent call site in supervisor + brain + MCP + NLP |
+| DebugDrawManager (WU-9) | Layout bugs in floating panes (Phase 3) require printf-logging pixel coords → 10x slower development of the hardest UI feature |
+| Console evaluator (WU-10) | Every new command gets hardcoded into the console switch → drift between "what the console can do" and "what NLP can do" grows every release |
+| Channel logging + crash reports (WU-11) | Phase 2 bugs in agent orchestration produce a 10,000-line log wall → impossible to triage; crash reports from users contain nothing actionable |
+| Tracy profiler (WU-12) | First perf regression after Phase 2 lands is debugged by adding `println!` with `Instant::now()` → hours wasted; no historical comparison possible |
+| ResourceManager (WU-14) | VideoAdapter and WasmPlugin registry (Phase 2, Phase 4) reinvent their own loader; switching themes reloads shaders from disk; opening a 4K video blocks the render thread |
+| Typed event bus (WU-15) | Every new topic in Phase 2+ adds a stringly-typed JSON contract that breaks silently; schema drift between publisher and subscriber surfaces as a mysterious missing-field error at runtime |
+| Async result pattern (WU-13 in WU-5) | Brain thinking or agent polling blocks render → visible jank; first time users feel the terminal "freeze" they blame Phantom, not the LLM |
+
+The economic argument: WU-6 through WU-16 total ~2,500 lines of new code (plus ~400 lines of conversion work inside WU-5). The cost of retrofitting these after Phase 2+ ships is 5–10x that, because every adapter, every subsystem, every test touches them. Do it once, now, while there's one adapter to migrate.
+
+---
+
+## 12. Updated Scope Summary (2026-04-24)
+
+| Category | Original Phase 1 | Expanded Phase 1 (full fold-in) |
+|----------|------------------|---------------------------------|
+| Work units | 6 (WU-0 through WU-5) | 15 (WU-0 through WU-15, with WU-13 absorbed into WU-5) |
+| New code | ~700 lines | ~4,300 lines |
+| Migration | ~200 lines | ~600 lines (includes async conversion in WU-5) |
+| Success criteria | 11 | 23 |
+| New crates | 0 | up to 3 (phantom-time, phantom-jobs, phantom-resources — each optional; can be modules in existing crates) |
+| Wave 1 parallelism | 3 agents | 10 agents (recommend 3 batches) |
+| Pre-req gates | 1 (WU-0) | 3 (WU-0, WU-6, WU-15) |
+| Phase 1.5 deferrals | — | None. Everything in Phase 1. |
+
+## 13. Risks of the Expanded Scope
+
+**Risk: Phase 1 grows too large to ship cohesively**
+**Mitigation**: The decomposition is deliberately parallelizable. Wave 1 has 10 agents across disjoint files. Each work unit is independently testable. If any one WU slips, it does not block the others — only WU-5 (integration) serializes them. If extreme schedule pressure appears, WU-12 (profiler) is the only fully-optional item (feature-flagged, zero runtime cost when off). Every other WU has a Phase 2 caller that depends on it.
+
+**Risk: Contract churn as foundations interact with coordinator design**
+**Mitigation**: Three pre-requisite gates (WU-0 trait split, WU-6 Clock+Cadence, WU-15 typed event bus) must merge before Wave 1 starts. Once merged, the contracts are frozen. No speculative building on unmerged contracts.
+
+**Risk: More agents means more merge conflicts**
+**Mitigation**: File-claim matrix in §5 is zero-overlap across all 10 Wave 1 agents. Worktree isolation (per ARD-003 findings on Claude Code v2.1.50 worktrees) eliminates physical conflict. The only sequential point is WU-5 (integration), which is 1 agent by design.
+
+**Risk: WU-5 integration agent must hold context for all of Wave 1 at once**
+**Mitigation**: WU-5 has a detailed checklist (§8). Each integration point is a discrete conversion pattern (replace X with Y) with explicit before/after code. Review gate §6 Stage 5 catches regressions. The integration PR may land in sub-PRs if size becomes unwieldy (e.g., "integration-coordinator", "integration-jobs", "integration-resources") — but must merge together.
+
+**Risk: Running 3 new crates simultaneously increases Cargo resolver churn**
+**Mitigation**: Each new crate (phantom-time, phantom-jobs, phantom-resources) has ≤3 dependencies — no framework-level deps. Alternative: land each as a module inside an existing crate (phantom-scene, phantom-supervisor, phantom-app) to avoid new crate overhead. WU authors have this flexibility per §8a specs.

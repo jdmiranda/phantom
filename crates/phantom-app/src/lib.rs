@@ -12,6 +12,7 @@ pub mod image_handler;
 mod input;
 pub mod jobs;
 mod keystroke_fx;
+pub mod logging;
 mod pane;
 mod render;
 mod appmon;
