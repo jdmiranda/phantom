@@ -14,6 +14,7 @@ pub mod jobs;
 mod keystroke_fx;
 pub mod logging;
 mod pane;
+pub mod profiler;
 mod render;
 mod appmon;
 mod render_overlay;
