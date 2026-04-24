@@ -5,6 +5,7 @@ pub mod boot;
 pub mod boot_order;
 mod commands;
 pub mod config;
+pub mod console_eval;
 pub mod coordinator;
 mod console;
 mod video;
