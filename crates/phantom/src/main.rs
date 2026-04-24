@@ -447,6 +447,9 @@ fn chrono_timestamp() -> String {
 }
 
 fn main() -> Result<()> {
+    // Load .env file (ANTHROPIC_API_KEY, etc.) before anything else.
+    let _ = dotenvy::dotenv();
+
     let args: Vec<String> = std::env::args().collect();
 
     // Quick exits
