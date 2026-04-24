@@ -9,6 +9,7 @@ mod console;
 mod video;
 pub mod image_handler;
 mod input;
+pub mod jobs;
 mod keystroke_fx;
 mod pane;
 mod render;
