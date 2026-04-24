@@ -21,4 +21,5 @@ mod render_overlay;
 pub mod session;
 mod sysmon;
 pub mod supervisor_client;
+pub mod resources;
 mod update;
