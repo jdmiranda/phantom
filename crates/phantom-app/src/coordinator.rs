@@ -673,4 +673,149 @@ mod tests {
         let mut coord = AppCoordinator::new_test(EventBus::new());
         assert!(!coord.route_input("q"));
     }
+
+    // ── Capability guard integration tests ─────────────────────────────
+
+    /// A mock that refuses input and commands (Phase 2 partial adapter).
+    struct PassiveAdapter;
+
+    impl AppCore for PassiveAdapter {
+        fn app_type(&self) -> &str { "passive" }
+        fn is_alive(&self) -> bool { true }
+        fn update(&mut self, _dt: f32) {}
+        fn get_state(&self) -> serde_json::Value { json!({"type": "passive"}) }
+    }
+
+    impl Renderable for PassiveAdapter {
+        fn render(&self, _rect: &Rect) -> RenderOutput { RenderOutput::default() }
+        fn is_visual(&self) -> bool { false }
+    }
+
+    impl InputHandler for PassiveAdapter {
+        fn handle_input(&mut self, _key: &str) -> bool { false }
+        fn accepts_input(&self) -> bool { false }
+    }
+
+    impl Commandable for PassiveAdapter {
+        fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+            Ok("unreachable".into())
+        }
+        fn accepts_commands(&self) -> bool { false }
+    }
+
+    impl BusParticipant for PassiveAdapter {}
+    impl Lifecycled for PassiveAdapter {}
+    impl Permissioned for PassiveAdapter {}
+
+    #[test]
+    fn test_capability_guard_blocks_input_to_passive_adapter() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id = coord.register_adapter(
+            Box::new(PassiveAdapter),
+            &mut layout, &mut scene, content,
+            Cadence::unlimited(),
+        );
+
+        // PassiveAdapter is the only adapter, so it gets auto-focus.
+        assert_eq!(coord.focused(), Some(id));
+
+        // But route_input should return false because accepts_input is false.
+        assert!(!coord.route_input("q"));
+    }
+
+    #[test]
+    fn test_capability_guard_blocks_command_to_passive_adapter() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id = coord.register_adapter(
+            Box::new(PassiveAdapter),
+            &mut layout, &mut scene, content,
+            Cadence::unlimited(),
+        );
+
+        let result = coord.send_command(id, "test", &json!({}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not accept commands"));
+    }
+
+    #[test]
+    fn test_capability_flags_populated_at_registration() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Normal adapter: all capabilities true.
+        let id1 = register_mock(&mut coord, &mut layout, &mut scene, content, "full");
+        let entry1 = coord.registry().get(id1).unwrap();
+        assert!(entry1.visual);
+        assert!(entry1.accepts_input);
+        assert!(entry1.accepts_commands);
+
+        // Passive adapter: visual=false, input=false, commands=false.
+        let id2 = coord.register_adapter(
+            Box::new(PassiveAdapter),
+            &mut layout, &mut scene, content,
+            Cadence::unlimited(),
+        );
+        let entry2 = coord.registry().get(id2).unwrap();
+        assert!(!entry2.visual);
+        assert!(!entry2.accepts_input);
+        assert!(!entry2.accepts_commands);
+    }
+
+    #[test]
+    fn test_headless_adapter_excluded_from_render_all() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Register a visual and a headless adapter.
+        let _vis = register_mock(&mut coord, &mut layout, &mut scene, content, "vis");
+        coord.register_adapter(
+            Box::new(MockAdapter::headless("bg")),
+            &mut layout, &mut scene, content,
+            Cadence::unlimited(),
+        );
+
+        layout.resize(800.0, 600.0).unwrap();
+        let outputs = coord.render_all(&layout);
+
+        // Only the visual adapter should produce output.
+        assert_eq!(outputs.len(), 1);
+    }
+
+    #[test]
+    fn test_full_lifecycle_register_update_render_remove() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Register.
+        let id = register_mock(&mut coord, &mut layout, &mut scene, content, "lifecycle");
+        assert_eq!(coord.adapter_count(), 1);
+        assert_eq!(coord.registry().get(id).unwrap().state, AppState::Running);
+
+        // Update.
+        coord.update_all(Duration::from_millis(16));
+
+        // Render.
+        layout.resize(800.0, 600.0).unwrap();
+        let outputs = coord.render_all(&layout);
+        assert_eq!(outputs.len(), 1);
+
+        // Remove.
+        coord.remove_adapter(id, &mut layout, &mut scene);
+        assert_eq!(coord.registry().get(id).unwrap().state, AppState::Dead);
+        assert_eq!(coord.focused(), None);
+    }
 }
