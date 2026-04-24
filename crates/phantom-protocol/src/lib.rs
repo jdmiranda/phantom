@@ -5,6 +5,11 @@
 //!
 //! Wire format: newline-delimited UTF-8 text. Each message is a single line.
 
+pub mod events;
+
+pub use events::{AgentId, Event, EventTopic, JobId, SessionId};
+// Note: Don't re-export AppId from here -- phantom-adapter owns that type.
+
 use std::io::Read as _;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;

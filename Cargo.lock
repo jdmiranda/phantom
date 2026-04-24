@@ -2028,6 +2028,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "phantom-protocol",
  "serde",
  "serde_json",
  "tempfile",

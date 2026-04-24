@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::AppId;
+use phantom_protocol::Event;
 
 /// Opaque topic identifier.
 pub type TopicId = u32;
@@ -38,11 +39,12 @@ pub enum DataType {
 }
 
 /// A message on the event bus.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BusMessage {
     pub topic_id: TopicId,
     pub sender: AppId,
-    pub payload: serde_json::Value,
+    pub event: Event,
+    pub frame: u64,
     pub timestamp: u64,
 }
 
@@ -217,7 +219,6 @@ impl Default for EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     // ── App-topology integration tests ──────────────────────────────
 
@@ -252,13 +253,14 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: t_output,
             sender: 0,
-            payload: json!({"pane_count": 2}),
+            event: Event::TerminalOutput { app_id: 0, bytes: 2 },
+            frame: 0,
             timestamp: 42,
         });
 
         let msgs = bus.drain_for(brain_id);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].payload["pane_count"], 2);
+        assert!(matches!(msgs[0].event, Event::TerminalOutput { app_id: 0, bytes: 2 }));
         assert_eq!(msgs[0].timestamp, 42);
     }
 
@@ -276,7 +278,8 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: t_error,
             sender: 0,
-            payload: json!({"has_errors": true}),
+            event: Event::Custom { kind: "error".into(), data: "has_errors".into() },
+            frame: 0,
             timestamp: 1,
         });
 
@@ -287,7 +290,7 @@ mod tests {
         // Error subscriber should see it.
         let msgs = bus.drain_for(error_sub);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].payload["has_errors"], true);
+        assert!(matches!(&msgs[0].event, Event::Custom { kind, .. } if kind == "error"));
     }
 
     #[test]
@@ -300,14 +303,22 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: t_agent,
             sender: 0,
-            payload: json!({"task": "fix the bug", "success": true}),
+            event: Event::AgentTaskComplete {
+                agent_id: 1,
+                success: true,
+                summary: "fix the bug".into(),
+            },
+            frame: 0,
             timestamp: 100,
         });
 
         let msgs = bus.drain_for(sub);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].payload["task"], "fix the bug");
-        assert_eq!(msgs[0].payload["success"], true);
+        assert!(matches!(
+            &msgs[0].event,
+            Event::AgentTaskComplete { agent_id: 1, success: true, summary }
+            if summary == "fix the bug"
+        ));
     }
 
     #[test]
@@ -318,19 +329,20 @@ mod tests {
         bus.subscribe(sub, t_output);
 
         // Simulate 3 frames of terminal output.
-        for ts in 1..=3 {
+        for ts in 1..=3u64 {
             bus.emit(BusMessage {
                 topic_id: t_output,
                 sender: 0,
-                payload: json!({"frame": ts}),
+                event: Event::TerminalOutput { app_id: 0, bytes: ts },
+                frame: ts,
                 timestamp: ts,
             });
         }
 
         let msgs = bus.drain_for(sub);
         assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].payload["frame"], 1);
-        assert_eq!(msgs[2].payload["frame"], 3);
+        assert_eq!(msgs[0].frame, 1);
+        assert_eq!(msgs[2].frame, 3);
     }
 
     #[test]
@@ -339,12 +351,13 @@ mod tests {
         let tid = bus.create_topic(0, "spam", DataType::Text);
 
         // Fill past the cap.
-        for i in 0..300 {
+        for i in 0..300u64 {
             bus.emit(BusMessage {
                 topic_id: tid,
                 sender: 0,
-                payload: json!(i),
-                timestamp: i as u64,
+                event: Event::Custom { kind: "spam".into(), data: i.to_string() },
+                frame: i,
+                timestamp: i,
             });
         }
 
@@ -355,7 +368,7 @@ mod tests {
         let sub = 1;
         bus.subscribe(sub, tid);
         let msgs = bus.drain_for(sub);
-        assert_eq!(msgs.last().unwrap().payload, json!(299));
+        assert_eq!(msgs.last().unwrap().timestamp, 299);
     }
 
     #[test]
@@ -368,7 +381,8 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 0,
-            payload: json!("first"),
+            event: Event::Custom { kind: "test".into(), data: "first".into() },
+            frame: 0,
             timestamp: 1,
         });
 

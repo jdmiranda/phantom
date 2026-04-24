@@ -18,6 +18,7 @@ pub use adapter::{
 };
 pub use adapter::{AppId, QuadData, Rect, RenderOutput, TextData};
 pub use bus::{BusMessage, DataType, EventBus, Topic, TopicDeclaration, TopicId};
+pub use phantom_protocol::{Event, EventTopic};
 pub use lifecycle::AppState;
 pub use registry::{AppRegistry, RegisteredApp};
 pub use spatial::{
@@ -27,8 +28,8 @@ pub use spatial::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phantom_protocol::Event;
     use serde_json::json;
-
 
     // -----------------------------------------------------------------------
     // Mock adapter for testing
@@ -382,14 +383,18 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 1,
-            payload: json!({"key": "value"}),
+            event: Event::Custom { kind: "test".into(), data: "value".into() },
+            frame: 0,
             timestamp: 100,
         });
 
         let msgs = bus.drain_for(2);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].sender, 1);
-        assert_eq!(msgs[0].payload, json!({"key": "value"}));
+        assert!(matches!(
+            &msgs[0].event,
+            Event::Custom { kind, data } if kind == "test" && data == "value"
+        ));
     }
 
     #[test]
@@ -402,19 +407,24 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: t1,
             sender: 1,
-            payload: json!("audio_data"),
+            event: Event::Custom { kind: "audio".into(), data: "audio_data".into() },
+            frame: 0,
             timestamp: 1,
         });
         bus.emit(BusMessage {
             topic_id: t2,
             sender: 1,
-            payload: json!("text_data"),
+            event: Event::Custom { kind: "text".into(), data: "text_data".into() },
+            frame: 0,
             timestamp: 2,
         });
 
         let msgs = bus.drain_for(2);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].payload, json!("audio_data"));
+        assert!(matches!(
+            &msgs[0].event,
+            Event::Custom { kind, .. } if kind == "audio"
+        ));
     }
 
     #[test]
@@ -427,7 +437,8 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 1,
-            payload: json!("hello"),
+            event: Event::Custom { kind: "test".into(), data: "hello".into() },
+            frame: 0,
             timestamp: 1,
         });
 
@@ -490,7 +501,8 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 1,
-            payload: json!("will be removed"),
+            event: Event::Custom { kind: "test".into(), data: "will be removed".into() },
+            frame: 0,
             timestamp: 1,
         });
         bus.remove_topic(tid);
