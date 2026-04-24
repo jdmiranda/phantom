@@ -16,6 +16,24 @@ use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
 
 impl App {
+    /// Send a command to a coordinator-managed adapter by app ID.
+    ///
+    /// Returns `Ok(response)` if the adapter accepted the command, or an error
+    /// if the adapter doesn't exist, doesn't accept commands, or rejected it.
+    /// This is the primary API for programmatic adapter control (MCP, AI brain,
+    /// inter-adapter communication).
+    #[allow(dead_code)] // Called by MCP/brain integration in WU-5H
+    pub(crate) fn send_adapter_command(
+        &mut self,
+        app_id: phantom_adapter::AppId,
+        cmd: &str,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<String> {
+        self.coordinator.send_command(app_id, cmd, args)
+    }
+}
+
+impl App {
     /// Parse and execute a user command string entered via the console.
     pub(crate) fn execute_user_command(&mut self, input: &str) {
         let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();

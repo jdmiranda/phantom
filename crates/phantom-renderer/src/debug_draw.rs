@@ -107,6 +107,8 @@ struct QueuedPrimitive {
     remaining_lifetime: f32, // seconds; 0.0 = single frame
 }
 
+const MAX_DEBUG_PRIMITIVES: usize = 4096;
+
 /// Manager that collects debug draw commands and produces renderable output.
 pub struct DebugDrawManager {
     queue: Vec<QueuedPrimitive>,
@@ -192,16 +194,16 @@ impl DebugDrawManager {
             return Vec::new();
         }
 
-        let mut output = Vec::with_capacity(self.queue.len());
-        for item in &self.queue {
+        // Drain the queue, emit all primitives, and re-insert survivors.
+        let items: Vec<QueuedPrimitive> = self.queue.drain(..).collect();
+        let mut output = Vec::with_capacity(items.len());
+        for mut item in items {
             output.push((item.primitive.clone(), item.options.clone()));
-        }
-
-        // Decay lifetimes and remove expired
-        self.queue.retain_mut(|item| {
             item.remaining_lifetime -= dt;
-            item.remaining_lifetime > 0.0
-        });
+            if item.remaining_lifetime > 0.0 {
+                self.queue.push(item);
+            }
+        }
 
         output
     }
@@ -217,6 +219,9 @@ impl DebugDrawManager {
     }
 
     fn push(&mut self, primitive: DebugPrimitive, options: DrawOptions, lifetime: f32) {
+        if self.queue.len() >= MAX_DEBUG_PRIMITIVES {
+            return;
+        }
         self.queue.push(QueuedPrimitive {
             primitive,
             options,

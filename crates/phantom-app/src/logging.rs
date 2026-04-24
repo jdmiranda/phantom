@@ -69,7 +69,7 @@ pub fn channel_for_target(target: &str) -> Channels {
         "input" => Channels::INPUT,
         "fx" | "effects" => Channels::FX,
         "profiler" | "profile" => Channels::PROFILER,
-        _ => Channels::ALL, // unknown targets always pass
+        _ => Channels::BOOT, // unknown targets route to BOOT (general/uncategorized)
     }
 }
 
@@ -86,6 +86,7 @@ pub struct PhantomLogger {
     verbosity: AtomicU8,
     file: Mutex<Option<File>>,
     stderr: bool,
+    file_write_errors: AtomicU32,
 }
 
 impl PhantomLogger {
@@ -103,6 +104,7 @@ impl PhantomLogger {
             verbosity: AtomicU8::new(VERBOSITY_INFO),
             file: Mutex::new(file),
             stderr,
+            file_write_errors: AtomicU32::new(0),
         }
     }
 
@@ -133,12 +135,15 @@ impl PhantomLogger {
         self.verbosity.load(Ordering::Relaxed)
     }
 
-    /// Flush the log file.
+    /// Flush the log file. Recovers from poisoned mutex so that panic
+    /// hooks can still flush even if the panic occurred while holding the lock.
     pub fn flush(&self) {
-        if let Ok(mut file) = self.file.lock() {
-            if let Some(f) = file.as_mut() {
-                let _ = f.flush();
-            }
+        let mut guard = match self.file.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(f) = guard.as_mut() {
+            let _ = f.flush();
         }
     }
 }
@@ -187,7 +192,12 @@ impl log::Log for PhantomLogger {
         // Write to file
         if let Ok(mut file) = self.file.lock() {
             if let Some(f) = file.as_mut() {
-                let _ = writeln!(f, "{msg}");
+                if let Err(_e) = writeln!(f, "{msg}") {
+                    let prev = self.file_write_errors.fetch_add(1, Ordering::Relaxed);
+                    if prev == 0 {
+                        eprintln!("[phantom-logger] log file write failed — subsequent errors will be silent");
+                    }
+                }
             }
         }
 
@@ -255,7 +265,7 @@ mod tests {
 
     #[test]
     fn channel_for_unknown_target_passes() {
-        assert_eq!(channel_for_target("unknown_crate"), Channels::ALL);
+        assert_eq!(channel_for_target("unknown_crate"), Channels::BOOT);
     }
 
     #[test]

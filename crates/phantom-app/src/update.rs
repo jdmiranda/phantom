@@ -10,6 +10,7 @@ use log::{debug, info, trace, warn};
 
 use phantom_adapter::BusMessage;
 use phantom_brain::events::{AiAction, AiEvent};
+use phantom_protocol::Event;
 use phantom_context::ProjectContext;
 use phantom_mcp::{AppCommand, ScreenshotReply};
 use phantom_terminal::output;
@@ -25,12 +26,18 @@ impl App {
     pub fn update(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
+        let dt_duration = now.duration_since(self.last_frame);
         self.last_frame = now;
 
         // Warn if a frame takes abnormally long (> 2 seconds).
         if dt > 2.0 {
             warn!("SLOW FRAME: dt={dt:.2}s — previous frame blocked the event loop");
         }
+
+        // Coordinator: tick all registered adapters and deliver bus messages.
+        // (Strangler fig: runs alongside the legacy PTY loop below. As adapters
+        // migrate to the coordinator, the legacy loop shrinks.)
+        self.coordinator.update_all(dt_duration);
 
         // Read from all panes' PTYs (non-blocking). Collect indices of exited panes.
         let mut exited: Vec<usize> = Vec::new();
@@ -70,7 +77,8 @@ impl App {
             self.event_bus.emit(BusMessage {
                 topic_id: self.topic_terminal_output,
                 sender: 0,
-                payload: serde_json::Value::Null,
+                event: Event::TerminalOutput { app_id: 0, bytes: 0 },
+                frame: 0,
                 timestamp: now.duration_since(self.start_time).as_secs(),
             });
         }
@@ -286,10 +294,12 @@ impl App {
                     self.event_bus.emit(BusMessage {
                         topic_id: self.topic_agent_event,
                         sender: 0,
-                        payload: serde_json::json!({
-                            "task": pane.task,
-                            "success": pane.status == crate::agent_pane::AgentPaneStatus::Done,
-                        }),
+                        event: Event::AgentTaskComplete {
+                            agent_id: 0,
+                            success: pane.status == crate::agent_pane::AgentPaneStatus::Done,
+                            summary: pane.task.clone(),
+                        },
+                        frame: 0,
                         timestamp: now.duration_since(self.start_time).as_secs(),
                     });
                 }

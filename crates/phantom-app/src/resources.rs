@@ -184,6 +184,12 @@ impl ResourceManager {
     pub fn release(&self, id: ResourceId) {
         if let Ok(resources) = self.resources.lock() {
             if let Some(entry) = resources.get(&id) {
+                let prev = entry.ref_count.load(Ordering::Relaxed);
+                if prev == 0 {
+                    log::error!("ResourceManager: release() called on {id:?} with ref_count already 0");
+                    debug_assert!(false, "ref-count underflow on resource {id:?}");
+                    return;
+                }
                 entry.ref_count.fetch_sub(1, Ordering::Relaxed);
             }
         }

@@ -14,11 +14,11 @@ pub mod spatial;
 // Re-export all public types at crate root for convenience.
 pub use adapter::{
     AppAdapter, AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned,
-    Processable, Renderable,
+    Renderable,
 };
 pub use adapter::{AppId, CursorData, CursorShape, GridData, QuadData, Rect, RenderOutput, TerminalCell, TextData};
 pub use bus::{BusMessage, DataType, EventBus, Topic, TopicDeclaration, TopicId};
-pub use phantom_protocol::{Event, EventTopic};
+pub use phantom_protocol::Event;
 pub use lifecycle::AppState;
 pub use registry::{AppRegistry, RegisteredApp};
 pub use spatial::{

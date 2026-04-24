@@ -12,6 +12,8 @@ pub struct RegisteredApp {
     pub app_type: String,
     pub state: AppState,
     pub visual: bool,
+    pub accepts_input: bool,
+    pub accepts_commands: bool,
     pub registered_at: std::time::Instant,
 }
 
@@ -45,6 +47,8 @@ impl AppRegistry {
             app_type: app.app_type().to_string(),
             state: AppState::Initializing,
             visual: app.is_visual(),
+            accepts_input: app.accepts_input(),
+            accepts_commands: app.accepts_commands(),
             registered_at: std::time::Instant::now(),
         };
 

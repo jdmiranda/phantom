@@ -54,12 +54,25 @@ impl AppCoordinator {
         let is_first = self.registry.count() == 0;
 
         let id = self.registry.register(adapter);
+
+        // Invoke the lifecycle init hook before transitioning to Running.
+        if let Some(adapter) = self.registry.get_adapter_mut(id) {
+            if let Err(e) = adapter.on_init() {
+                log::error!("Adapter {id} on_init() failed: {e}");
+            }
+        }
+
         self.registry.ready(id);
 
-        // Layout pane — silently fall back to no pane on error.
-        if let Ok(pane_id) = layout.add_pane() {
-            self.pane_map.insert(pane_id, id);
-            self.app_pane_map.insert(id, pane_id);
+        // Layout pane — warn if layout can't accommodate a new pane.
+        match layout.add_pane() {
+            Ok(pane_id) => {
+                self.pane_map.insert(pane_id, id);
+                self.app_pane_map.insert(id, pane_id);
+            }
+            Err(e) => {
+                log::warn!("Adapter {id} registered without layout pane: {e}");
+            }
         }
 
         // Scene node.
@@ -174,11 +187,19 @@ impl AppCoordinator {
 
     /// Route a key event to the focused adapter.
     ///
-    /// Returns `true` if the input was consumed.
+    /// Returns `true` if the input was consumed. Skips dispatch if the
+    /// focused adapter does not accept input (capability guard for Phase 2
+    /// partial adapters).
     pub fn route_input(&mut self, key: &str) -> bool {
         let Some(id) = self.focused else {
             return false;
         };
+        let Some(entry) = self.registry.get(id) else {
+            return false;
+        };
+        if !entry.accepts_input {
+            return false;
+        }
         let Some(adapter) = self.registry.get_adapter_mut(id) else {
             return false;
         };
@@ -202,12 +223,24 @@ impl AppCoordinator {
     }
 
     /// Send a command to a specific adapter.
+    ///
+    /// Returns an error if the adapter does not exist or does not accept
+    /// commands (capability guard for Phase 2 partial adapters).
     pub fn send_command(
         &mut self,
         app_id: AppId,
         cmd: &str,
         args: &serde_json::Value,
     ) -> anyhow::Result<String> {
+        let Some(entry) = self.registry.get(app_id) else {
+            return Err(anyhow::anyhow!("adapter not found: {app_id}"));
+        };
+        if !entry.accepts_commands {
+            return Err(anyhow::anyhow!(
+                "adapter {app_id} ({}) does not accept commands",
+                entry.app_type
+            ));
+        }
         let Some(adapter) = self.registry.get_adapter_mut(app_id) else {
             return Err(anyhow::anyhow!("adapter not found: {app_id}"));
         };

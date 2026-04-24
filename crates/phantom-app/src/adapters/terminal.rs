@@ -204,15 +204,26 @@ impl Commandable for TerminalAdapter {
     ) -> anyhow::Result<String> {
         match cmd {
             "write" => {
-                let text = args["text"].as_str().unwrap_or_default();
+                let text = args
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("write command requires a \"text\" string field"))?;
                 self.terminal
                     .pty_write(text.as_bytes())
                     .map_err(|e| anyhow::anyhow!("pty_write failed: {e}"))?;
                 Ok("written".into())
             }
             "resize" => {
-                let cols = args["cols"].as_u64().unwrap_or(80) as u16;
-                let rows = args["rows"].as_u64().unwrap_or(24) as u16;
+                let cols = args
+                    .get("cols")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("resize command requires a \"cols\" integer field"))?
+                    as u16;
+                let rows = args
+                    .get("rows")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("resize command requires a \"rows\" integer field"))?
+                    as u16;
                 self.terminal.resize(cols, rows);
                 Ok(format!("resized to {cols}x{rows}"))
             }

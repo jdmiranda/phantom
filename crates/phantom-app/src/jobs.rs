@@ -134,26 +134,45 @@ impl JobPool {
 
     /// Drain completed results from worker threads. Call once per frame.
     pub fn drain_completed(&self) -> Vec<(JobId, JobResult)> {
+        // Collect from the channel into a local vec first, then merge under
+        // a single results lock — avoids nested locking and lost results.
+        let mut incoming = Vec::new();
         if let Ok(rx) = self.result_rx.lock() {
-            if let Ok(mut results) = self.results.lock() {
-                while let Ok(result) = rx.try_recv() {
-                    results.push(result);
-                }
+            while let Ok(result) = rx.try_recv() {
+                incoming.push(result);
             }
         }
         if let Ok(mut results) = self.results.lock() {
+            results.extend(incoming);
             std::mem::take(&mut *results)
         } else {
-            Vec::new()
+            incoming
         }
     }
 
-    /// Signal shutdown and join all worker threads.
+    /// Signal shutdown and join all worker threads (5s timeout per worker).
     pub fn shut_down(self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::SeqCst);
         drop(self.sender);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         for worker in self.workers {
-            let _ = worker.join();
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                log::warn!("JobPool shutdown timed out — abandoning remaining workers");
+                break;
+            }
+            // Park this thread and check periodically if the worker finished.
+            while !worker.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    log::warn!("JobPool worker did not exit within deadline");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if worker.is_finished() {
+                let _ = worker.join();
+            }
         }
     }
 }
@@ -192,9 +211,15 @@ fn worker_loop(
             payload.run(&ctx)
         }));
 
-        let job_result = match result {
-            Ok(r) => r,
-            Err(_) => JobResult::Err("job panicked".into()),
+        // Re-check cancellation after execution — covers the race where
+        // cancel() fires between the pre-check and run().
+        let job_result = if ctx.is_cancelled() {
+            JobResult::Cancelled
+        } else {
+            match result {
+                Ok(r) => r,
+                Err(_) => JobResult::Err("job panicked".into()),
+            }
         };
 
         let _ = tx.send((envelope.id, job_result));

@@ -41,6 +41,7 @@ use phantom_mcp::{spawn_listener, AppCommand, McpListener};
 
 use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
+use crate::coordinator::AppCoordinator;
 use crate::pane::{Pane, pane_cols_rows};
 use crate::supervisor_client::SupervisorClient;
 
@@ -189,6 +190,10 @@ pub struct App {
     // -- Video playback --
     pub(crate) video_renderer: VideoRenderer,
     pub(crate) video_playback: Option<crate::video::VideoPlayback>,
+
+    // -- App coordinator (strangler fig: runs alongside legacy pane system,
+    //    will gradually absorb update/render/input dispatch in WU-5B..5E) --
+    pub(crate) coordinator: AppCoordinator,
 }
 
 /// An active suggestion from the AI brain.
@@ -437,6 +442,9 @@ impl App {
             }
         };
 
+        // -- App coordinator (strangler fig: coexists with legacy pane system) --
+        let coordinator = AppCoordinator::new(EventBus::new());
+
         // -- System monitor --
         let sysmon = crate::sysmon::spawn_sysmon();
 
@@ -546,6 +554,7 @@ impl App {
             overlay_line_buf: Vec::with_capacity(128),
             video_renderer,
             video_playback: None,
+            coordinator,
         })
     }
 

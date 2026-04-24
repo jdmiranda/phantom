@@ -374,6 +374,15 @@ impl App {
                 logo: state.super_key(),
             };
 
+            // Coordinator route: offer input to the focused adapter first.
+            // (Strangler fig: when adapters are registered, they get first
+            // crack at input. Falls through to legacy PTY path if no adapter
+            // consumes it or no adapters are registered.)
+            let key_name = format!("{terminal_event:?}");
+            if self.coordinator.route_input(&key_name) {
+                return;
+            }
+
             let bytes = input::encode_key(&terminal_event);
             if !bytes.is_empty() {
                 if let Some(pane) = self.panes.get_mut(self.focused_pane) {

@@ -21,6 +21,17 @@ pub enum EvalResult {
     },
 }
 
+/// Valid log channel names for `log.channel` validation.
+const VALID_CHANNELS: &[&str] = &[
+    "renderer", "shader", "terminal", "adapter", "coordinator", "scene",
+    "semantic", "nlp", "brain", "supervisor", "agents", "mcp", "plugins",
+    "memory", "context", "session", "boot", "input", "fx", "profiler",
+];
+
+fn is_valid_channel_name(name: &str) -> bool {
+    VALID_CHANNELS.contains(&name)
+}
+
 /// Built-in trivial commands (fast path, no NLP needed).
 const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("clear", "Clear the console scrollback"),
@@ -76,6 +87,13 @@ pub fn evaluate(input: &str) -> EvalResult {
             if lower.starts_with("log.channel ") {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() == 3 && (parts[2] == "on" || parts[2] == "off") {
+                    let name = parts[1].to_lowercase();
+                    if !is_valid_channel_name(&name) {
+                        return EvalResult::Err(format!(
+                            "Unknown channel '{}'. Valid: {}",
+                            parts[1], VALID_CHANNELS.join(", ")
+                        ));
+                    }
                     return EvalResult::Ok(Some(format!(
                         "Channel '{}' {}.",
                         parts[1], parts[2]
@@ -88,25 +106,6 @@ pub fn evaluate(input: &str) -> EvalResult {
             EvalResult::Pending(format!("Routing to brain: \"{trimmed}\""))
         }
     }
-}
-
-/// Find commands that are similar to the input (for suggestions).
-pub fn suggest(input: &str) -> Vec<String> {
-    let lower = input.to_lowercase();
-    BUILTIN_COMMANDS
-        .iter()
-        .filter(|(cmd, _)| cmd.starts_with(&lower) || levenshtein_close(cmd, &lower))
-        .map(|(cmd, _)| (*cmd).to_string())
-        .collect()
-}
-
-/// Simple "close enough" check (prefix match or shared start).
-fn levenshtein_close(a: &str, b: &str) -> bool {
-    if a.len() < 2 || b.len() < 2 {
-        return false;
-    }
-    let prefix_len = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
-    prefix_len >= 2
 }
 
 #[cfg(test)]
@@ -192,14 +191,8 @@ mod tests {
     }
 
     #[test]
-    fn suggest_finds_prefix() {
-        let suggestions = suggest("cle");
-        assert!(suggestions.contains(&"clear".to_string()));
-    }
-
-    #[test]
-    fn suggest_empty_for_unknown() {
-        let suggestions = suggest("xyz");
-        assert!(suggestions.is_empty());
+    fn invalid_channel_rejected() {
+        let result = evaluate("log.channel garbage on");
+        assert!(matches!(result, EvalResult::Err(_)));
     }
 }

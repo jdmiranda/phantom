@@ -11,6 +11,8 @@ use phantom_renderer::quads::QuadInstance;
 use phantom_terminal::output::{self, CursorShape, TerminalThemeColors};
 use phantom_ui::widgets::Widget;
 
+use phantom_renderer::quads::QuadInstance as QI;
+
 use crate::app::{App, AppState};
 use crate::pane::{pane_inner_rect, container_rect,
     CONTAINER_PAD_X_CELLS, CONTAINER_TITLE_H_CELLS};
@@ -311,6 +313,23 @@ impl App {
         _chrome_quads: &mut Vec<QuadInstance>,
         _chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
+        // -- Coordinator two-phase render: collect outputs from all registered adapters --
+        // (Strangler fig: runs alongside the legacy pane loop below.)
+        let coordinator_outputs = self.coordinator.render_all(&self.layout);
+        for (_app_id, _rect, ro) in &coordinator_outputs {
+            for q in &ro.quads {
+                quads.push(QI {
+                    pos: [q.x, q.y],
+                    size: [q.w, q.h],
+                    color: q.color,
+                    border_radius: 0.0,
+                });
+            }
+            for seg in &ro.text_segments {
+                self.render_overlay_text(&seg.text, seg.x, seg.y, seg.color, glyphs);
+            }
+        }
+
         let _has_multiple = self.panes.len() > 1;
         let mut detached_labels: Vec<(usize, f32, f32, [f32; 4])> = Vec::with_capacity(self.panes.len());
         let mut container_titles: Vec<(usize, usize, f32, f32, [f32; 4])> = Vec::with_capacity(self.panes.len());

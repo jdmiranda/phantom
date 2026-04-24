@@ -50,12 +50,24 @@ pub trait Renderable {
 pub trait InputHandler {
     /// Handle keyboard input. Returns `true` if consumed.
     fn handle_input(&mut self, key: &str) -> bool;
+
+    /// Whether this adapter accepts keyboard input dispatch.
+    /// Non-interactive adapters (headless processors, monitors) return `false`.
+    fn accepts_input(&self) -> bool {
+        true
+    }
 }
 
 /// Adapters that accept commands from AI or other apps.
 pub trait Commandable {
     /// Accept a command from the AI or another app.
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String>;
+
+    /// Whether this adapter accepts command dispatch.
+    /// Override to `false` for adapters that are purely observational.
+    fn accepts_commands(&self) -> bool {
+        true
+    }
 }
 
 /// Adapters that participate in the event bus.
@@ -91,12 +103,6 @@ pub trait Permissioned {
     fn permissions(&self) -> Vec<String> {
         vec![]
     }
-}
-
-/// Headless processing tick (non-visual adapters only).
-pub trait Processable {
-    /// Processing tick for headless apps.
-    fn process(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------
