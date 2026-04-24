@@ -16,7 +16,7 @@ pub use adapter::{
     AppAdapter, AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned,
     Processable, Renderable,
 };
-pub use adapter::{AppId, QuadData, Rect, RenderOutput, TextData};
+pub use adapter::{AppId, CursorData, CursorShape, GridData, QuadData, Rect, RenderOutput, TerminalCell, TextData};
 pub use bus::{BusMessage, DataType, EventBus, Topic, TopicDeclaration, TopicId};
 pub use phantom_protocol::{Event, EventTopic};
 pub use lifecycle::AppState;
@@ -97,6 +97,7 @@ mod tests {
                     y: rect.y,
                     color: [1.0, 1.0, 1.0, 1.0],
                 }],
+                grid: None,
             }
         }
 
@@ -594,6 +595,39 @@ mod tests {
         let output = RenderOutput::default();
         assert!(output.quads.is_empty());
         assert!(output.text_segments.is_empty());
+        assert!(output.grid.is_none());
+    }
+
+    #[test]
+    fn render_output_default_has_no_grid() {
+        let output = RenderOutput::default();
+        assert!(output.grid.is_none());
+    }
+
+    #[test]
+    fn grid_data_with_cells() {
+        let grid = GridData {
+            cells: vec![
+                TerminalCell { ch: 'H', fg: [1.0, 1.0, 1.0, 1.0] },
+                TerminalCell { ch: 'i', fg: [0.0, 1.0, 0.0, 1.0] },
+            ],
+            cols: 2,
+            origin: (10.0, 20.0),
+            cursor: Some(CursorData {
+                col: 1,
+                row: 0,
+                shape: CursorShape::Block,
+                visible: true,
+            }),
+        };
+        assert_eq!(grid.cells.len(), 2);
+        assert_eq!(grid.cols, 2);
+    }
+
+    #[test]
+    fn cursor_shape_equality() {
+        assert_eq!(CursorShape::Block, CursorShape::Block);
+        assert_ne!(CursorShape::Block, CursorShape::Bar);
     }
 
     // =======================================================================

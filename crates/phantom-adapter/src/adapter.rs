@@ -126,6 +126,40 @@ impl<T> AppAdapter for T where
 pub struct RenderOutput {
     pub quads: Vec<QuadData>,
     pub text_segments: Vec<TextData>,
+    pub grid: Option<GridData>,
+}
+
+/// Terminal cell grid data for GPU rendering.
+#[derive(Debug, Clone)]
+pub struct GridData {
+    pub cells: Vec<TerminalCell>,
+    pub cols: usize,
+    pub origin: (f32, f32),
+    pub cursor: Option<CursorData>,
+}
+
+/// Terminal cell for text rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminalCell {
+    pub ch: char,
+    pub fg: [f32; 4],
+}
+
+/// Cursor position and appearance.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorData {
+    pub col: usize,
+    pub row: usize,
+    pub shape: CursorShape,
+    pub visible: bool,
+}
+
+/// Cursor visual style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Bar,
 }
 
 /// A colored rectangle.
