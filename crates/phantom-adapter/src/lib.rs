@@ -12,7 +12,11 @@ pub mod registry;
 pub mod spatial;
 
 // Re-export all public types at crate root for convenience.
-pub use adapter::{AppAdapter, AppId, QuadData, Rect, RenderOutput, TextData};
+pub use adapter::{
+    AppAdapter, AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned,
+    Processable, Renderable,
+};
+pub use adapter::{AppId, QuadData, Rect, RenderOutput, TextData};
 pub use bus::{BusMessage, DataType, EventBus, Topic, TopicDeclaration, TopicId};
 pub use lifecycle::AppState;
 pub use registry::{AppRegistry, RegisteredApp};
@@ -60,23 +64,23 @@ mod tests {
         }
     }
 
-    impl AppAdapter for MockApp {
+    impl AppCore for MockApp {
         fn app_type(&self) -> &str {
             &self.app_type
         }
 
-        fn permissions(&self) -> Vec<String> {
-            vec!["filesystem".into()]
+        fn is_alive(&self) -> bool {
+            self.alive
         }
 
-        fn is_visual(&self) -> bool {
-            self.visual
-        }
+        fn update(&mut self, _dt: f32) {}
 
-        fn on_state_change(&mut self, new_state: AppState) {
-            self.state_log.push(new_state);
+        fn get_state(&self) -> serde_json::Value {
+            json!({ "type": self.app_type, "alive": self.alive })
         }
+    }
 
+    impl Renderable for MockApp {
         fn render(&self, rect: &Rect) -> RenderOutput {
             RenderOutput {
                 quads: vec![QuadData {
@@ -95,14 +99,18 @@ mod tests {
             }
         }
 
+        fn is_visual(&self) -> bool {
+            self.visual
+        }
+    }
+
+    impl InputHandler for MockApp {
         fn handle_input(&mut self, key: &str) -> bool {
             key == "q"
         }
+    }
 
-        fn get_state(&self) -> serde_json::Value {
-            json!({ "type": self.app_type, "alive": self.alive })
-        }
-
+    impl Commandable for MockApp {
         fn accept_command(
             &mut self,
             cmd: &str,
@@ -113,15 +121,23 @@ mod tests {
             }
             Ok(format!("executed:{cmd}"))
         }
+    }
 
-        fn update(&mut self, _dt: f32) {}
-
-        fn is_alive(&self) -> bool {
-            self.alive
-        }
-
+    impl BusParticipant for MockApp {
         fn on_message(&mut self, msg: &BusMessage) {
             self.messages.push(msg.clone());
+        }
+    }
+
+    impl Lifecycled for MockApp {
+        fn on_state_change(&mut self, new_state: AppState) {
+            self.state_log.push(new_state);
+        }
+    }
+
+    impl Permissioned for MockApp {
+        fn permissions(&self) -> Vec<String> {
+            vec!["filesystem".into()]
         }
     }
 
@@ -598,5 +614,90 @@ mod tests {
         // Compile-time proof that Box<dyn AppAdapter> is Send.
         fn assert_send<T: Send>() {}
         assert_send::<Box<dyn AppAdapter>>();
+    }
+
+    // =======================================================================
+    // Sub-trait object safety and blanket impl tests
+    // =======================================================================
+
+    #[test]
+    fn test_app_core_is_object_safe() {
+        fn assert_obj_safe(_: &dyn AppCore) {}
+        let app = MockApp::new("test");
+        assert_obj_safe(&app);
+    }
+
+    #[test]
+    fn test_renderable_is_object_safe() {
+        fn assert_obj_safe(_: &dyn Renderable) {}
+        let app = MockApp::new("test");
+        assert_obj_safe(&app);
+    }
+
+    #[test]
+    fn test_input_handler_is_object_safe() {
+        fn assert_obj_safe(_: &dyn InputHandler) {}
+        let app = MockApp::new("test");
+        assert_obj_safe(&app);
+    }
+
+    #[test]
+    fn test_commandable_is_object_safe() {
+        fn assert_obj_safe(_: &dyn Commandable) {}
+        let app = MockApp::new("test");
+        assert_obj_safe(&app);
+    }
+
+    #[test]
+    fn test_bus_participant_is_object_safe() {
+        fn assert_obj_safe(_: &dyn BusParticipant) {}
+        let app = MockApp::new("test");
+        assert_obj_safe(&app);
+    }
+
+    #[test]
+    fn test_blanket_app_adapter_impl() {
+        // MockApp implements all sub-traits, so it should auto-impl AppAdapter.
+        fn assert_app_adapter(_: &dyn AppAdapter) {}
+        let app = MockApp::new("blanket");
+        assert_app_adapter(&app);
+    }
+
+    #[test]
+    fn test_mock_implements_all_sub_traits() {
+        let mut app = MockApp::new("check");
+
+        // AppCore
+        assert_eq!(app.app_type(), "check");
+        assert!(app.is_alive());
+        app.update(0.016);
+        let _ = app.get_state();
+
+        // Renderable
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 24.0,
+        };
+        let _ = app.render(&rect);
+        assert!(app.is_visual());
+
+        // InputHandler
+        let _ = app.handle_input("x");
+
+        // Commandable
+        let _ = app.accept_command("noop", &json!({}));
+
+        // BusParticipant
+        assert!(app.publishes().is_empty());
+        assert!(app.subscribes_to().is_empty());
+
+        // Lifecycled
+        assert!(app.on_init().is_ok());
+        app.on_state_change(AppState::Running);
+
+        // Permissioned
+        assert!(!app.permissions().is_empty());
     }
 }

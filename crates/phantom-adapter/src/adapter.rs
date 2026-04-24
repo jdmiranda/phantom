@@ -1,7 +1,8 @@
-//! The universal app adapter trait.
+//! The universal app adapter trait, split into focused sub-traits.
 //!
 //! Every component in Phantom — terminals, editors, database browsers,
-//! headless transcription services — implements `AppAdapter`.
+//! headless transcription services — implements the relevant sub-traits.
+//! Implementing all required sub-traits grants `AppAdapter` via blanket impl.
 
 use crate::bus::{BusMessage, TopicDeclaration};
 use crate::lifecycle::AppState;
@@ -10,13 +11,29 @@ use crate::spatial::SpatialPreference;
 /// Opaque app identifier assigned by the registry.
 pub type AppId = u32;
 
-/// The universal app interface. Everything in Phantom implements this.
-pub trait AppAdapter: Send {
+// ---------------------------------------------------------------------------
+// Sub-traits (Interface Segregation Principle)
+// ---------------------------------------------------------------------------
+
+/// Required by all adapters. The coordinator stores `Box<dyn AppCore>`.
+pub trait AppCore: Send {
     /// Unique type name for this kind of app (e.g. "terminal", "browser").
     fn app_type(&self) -> &str;
 
-    /// Permissions this app requires (filesystem, network, etc.).
-    fn permissions(&self) -> Vec<String>;
+    /// Whether this app is still alive.
+    fn is_alive(&self) -> bool;
+
+    /// Per-frame update tick.
+    fn update(&mut self, dt: f32);
+
+    /// Current state as structured JSON (the AI brain reads this).
+    fn get_state(&self) -> serde_json::Value;
+}
+
+/// Visual adapters that render into a rect.
+pub trait Renderable {
+    /// Render into simplified quad + text buffers.
+    fn render(&self, rect: &Rect) -> RenderOutput;
 
     /// Whether this app renders visually. Headless apps return `false`.
     fn is_visual(&self) -> bool {
@@ -27,38 +44,22 @@ pub trait AppAdapter: Send {
     fn spatial_preference(&self) -> Option<SpatialPreference> {
         None
     }
+}
 
-    /// Called once when the app starts (state = Initializing).
-    fn on_init(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    /// Called whenever the app's lifecycle state changes.
-    fn on_state_change(&mut self, _new_state: AppState) {}
-
-    /// Render into simplified quad + text buffers.
-    /// The actual GPU types live in phantom-renderer; these are
-    /// intermediate representations.
-    fn render(&self, rect: &Rect) -> RenderOutput;
-
+/// Adapters that accept keyboard input.
+pub trait InputHandler {
     /// Handle keyboard input. Returns `true` if consumed.
     fn handle_input(&mut self, key: &str) -> bool;
+}
 
-    /// Current state as structured JSON (the AI brain reads this).
-    fn get_state(&self) -> serde_json::Value;
-
+/// Adapters that accept commands from AI or other apps.
+pub trait Commandable {
     /// Accept a command from the AI or another app.
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String>;
+}
 
-    /// Per-frame update tick.
-    fn update(&mut self, dt: f32);
-
-    /// Processing tick for headless apps.
-    fn process(&mut self) {}
-
-    /// Whether this app is still alive.
-    fn is_alive(&self) -> bool;
-
+/// Adapters that participate in the event bus.
+pub trait BusParticipant {
     /// Topics this app publishes.
     fn publishes(&self) -> Vec<TopicDeclaration> {
         vec![]
@@ -71,6 +72,49 @@ pub trait AppAdapter: Send {
 
     /// Receive a message from the event bus.
     fn on_message(&mut self, _msg: &BusMessage) {}
+}
+
+/// Adapters with lifecycle hooks.
+pub trait Lifecycled {
+    /// Called once when the app starts (state = Initializing).
+    fn on_init(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Called whenever the app's lifecycle state changes.
+    fn on_state_change(&mut self, _new_state: AppState) {}
+}
+
+/// Permission declarations (WASM sandbox boundary).
+pub trait Permissioned {
+    /// Permissions this app requires (filesystem, network, etc.).
+    fn permissions(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+/// Headless processing tick (non-visual adapters only).
+pub trait Processable {
+    /// Processing tick for headless apps.
+    fn process(&mut self) {}
+}
+
+// ---------------------------------------------------------------------------
+// Convenience super-trait with blanket impl
+// ---------------------------------------------------------------------------
+
+/// Convenience: implement all sub-traits and get `AppAdapter` for free.
+///
+/// The `AppRegistry` stores `Box<dyn AppAdapter>`, so this remains the
+/// primary trait object used throughout the system.
+pub trait AppAdapter:
+    AppCore + Renderable + InputHandler + Commandable + BusParticipant + Lifecycled + Permissioned
+{
+}
+
+impl<T> AppAdapter for T where
+    T: AppCore + Renderable + InputHandler + Commandable + BusParticipant + Lifecycled + Permissioned
+{
 }
 
 // ---------------------------------------------------------------------------
