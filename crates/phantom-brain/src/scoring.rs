@@ -247,7 +247,8 @@ impl UtilityScorer {
     /// Starts at 0.5 and increases with the chattiness dampener. The more
     /// we've suggested recently, the higher the bar to suggest again.
     pub fn quiet_score(&self) -> ScoredAction {
-        let score = (0.5 + self.chattiness).min(1.0);
+        // Sentient mode: low baseline (0.1) so the brain speaks up more often.
+        let score = (0.1 + self.chattiness).min(1.0);
         ScoredAction {
             action: AiAction::DoNothing,
             score,
@@ -327,8 +328,10 @@ impl UtilityScorer {
             .unwrap_or_else(|| self.quiet_score());
 
         // Update chattiness if we're going to act (non-quiet).
+        // Sentient mode: small increment (0.03) so the brain doesn't muzzle
+        // itself after a few suggestions. Decays via idle time.
         if !matches!(best.action, AiAction::DoNothing) && best.score > 0.0 {
-            self.chattiness = (self.chattiness + 0.1).min(1.0);
+            self.chattiness = (self.chattiness + 0.03).min(0.5);
             self.suggestions_since_input += 1;
         }
 

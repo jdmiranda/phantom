@@ -345,7 +345,7 @@ impl App {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
             enable_memory: true,
-            quiet_threshold: 0.5,
+            quiet_threshold: 0.1, // Sentient mode: let most actions through
             router: None,
         });
         info!("AI brain spawned");

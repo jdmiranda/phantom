@@ -363,9 +363,10 @@ mod tests {
     fn quiet_score_baseline() {
         let scorer = UtilityScorer::new();
         let scored = scorer.quiet_score();
+        // Sentient mode: baseline lowered from 0.5 to 0.1.
         assert!(
-            (scored.score - 0.5).abs() < f32::EPSILON,
-            "expected 0.5, got {}",
+            (scored.score - 0.1).abs() < f32::EPSILON,
+            "expected 0.1, got {}",
             scored.score
         );
     }
@@ -380,9 +381,10 @@ mod tests {
         scorer.chattiness = 0.3;
 
         let scored = scorer.quiet_score();
+        // Sentient mode: 0.1 base + 0.3 chattiness = 0.4.
         assert!(
-            (scored.score - 0.8).abs() < f32::EPSILON,
-            "expected 0.8, got {}",
+            (scored.score - 0.4).abs() < f32::EPSILON,
+            "expected 0.4, got {}",
             scored.score
         );
     }

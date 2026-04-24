@@ -63,6 +63,11 @@ impl App {
                             }
                             pane.error_notified = false;
                             pane.has_new_output = true;
+
+                            // Sentient mode: feed terminal output to the brain.
+                            if let Some(ref brain) = self.brain {
+                                let _ = brain.send_event(AiEvent::OutputChunk(text.to_string()));
+                            }
                         }
                     }
                 }

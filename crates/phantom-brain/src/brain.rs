@@ -141,17 +141,52 @@ fn brain_loop(
         context.project_type
     );
 
+    // Accumulated terminal output for batched observation.
+    let mut output_buffer = String::new();
+    let mut last_output_time = std::time::Instant::now();
+
     loop {
-        // OBSERVE: block until an event arrives.
-        let event = match event_rx.recv() {
+        // OBSERVE: wait for an event with timeout for proactive ticks.
+        // The timeout lets the brain act even without incoming events
+        // (e.g., process accumulated output after a quiet period).
+        let event = match event_rx.recv_timeout(std::time::Duration::from_secs(3)) {
             Ok(e) => e,
-            Err(_) => break, // channel closed — all senders dropped
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Proactive tick: if we have accumulated output and enough
+                // time has passed, send it to Claude for commentary.
+                if !output_buffer.is_empty()
+                    && last_output_time.elapsed().as_secs() >= 2
+                {
+                    let batch = std::mem::take(&mut output_buffer);
+                    let reply = observe_terminal_output(&batch, &context, &mut router);
+                    if let Some(action) = reply {
+                        if action_tx.send(action).is_err() {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
         // Handle shutdown.
         if matches!(event, AiEvent::Shutdown) {
             log::info!("AI brain shutting down");
             break;
+        }
+
+        // ACCUMULATE: OutputChunk events are batched — don't process each one
+        // individually. Accumulate and let the timeout tick flush them.
+        if let AiEvent::OutputChunk(ref text) = event {
+            output_buffer.push_str(text);
+            // Cap buffer to prevent unbounded growth.
+            if output_buffer.len() > 4096 {
+                let drain = output_buffer.len() - 4096;
+                output_buffer.drain(..drain);
+            }
+            last_output_time = std::time::Instant::now();
+            continue; // Don't run OODA for raw output — wait for batch.
         }
 
         // DIRECT RESPONSE: Interrupt events are explicit user queries from the
@@ -373,6 +408,105 @@ fn enhance_with_claude(
             log::warn!("Claude escalation failed, using previous: {e}");
             router.record_result(&backend.name, 0.0, false);
             current_action
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// observe_terminal_output — proactive commentary on what the brain sees
+// ---------------------------------------------------------------------------
+
+/// Process a batch of accumulated terminal output. Called from the proactive
+/// timeout tick when output has been quiet for 2+ seconds (e.g., a command
+/// finished and the shell prompt returned).
+///
+/// Returns `Some(AiAction::ConsoleReply)` if Claude has something useful to
+/// say, `None` if the output is unremarkable (empty, just a prompt, etc.).
+fn observe_terminal_output(
+    output: &str,
+    context: &ProjectContext,
+    router: &mut BrainRouter,
+) -> Option<AiAction> {
+    let trimmed = output.trim();
+
+    // Skip trivial output (empty, just prompt characters, very short).
+    if trimmed.is_empty() || trimmed.len() < 10 {
+        return None;
+    }
+
+    // Skip if it's just prompt lines ($ % > #).
+    let non_prompt_lines: Vec<&str> = trimmed
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty()
+                && !t.ends_with("$ ")
+                && !t.ends_with("% ")
+                && !t.ends_with("> ")
+                && !t.ends_with("# ")
+                && t != "$" && t != "%" && t != ">"
+        })
+        .collect();
+
+    if non_prompt_lines.is_empty() {
+        return None;
+    }
+
+    // Try Claude.
+    let claude_backend: Option<ModelBackend> = router
+        .route(TaskComplexity::Simple)
+        .iter()
+        .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
+        .cloned()
+        .cloned();
+
+    let Some(backend) = claude_backend else {
+        return None; // No Claude available — stay quiet.
+    };
+
+    let model_name = match &backend.kind {
+        BackendKind::Claude { model } => model.as_str(),
+        _ => return None,
+    };
+
+    // Only send the last ~2K chars to keep API costs reasonable.
+    let obs = if trimmed.len() > 2000 {
+        &trimmed[trimmed.len() - 2000..]
+    } else {
+        trimmed
+    };
+
+    let prompt = format!(
+        "You are Phantom, an AI brain embedded in a terminal emulator. \
+         You are observing a developer working in a {} project ({}).\n\n\
+         Here is the latest terminal output:\n```\n{}\n```\n\n\
+         If there's something noteworthy (an error, a warning, an interesting result, \
+         a potential issue), comment briefly (1 sentence). \
+         If the output is routine (successful build, normal ls, etc.), respond with \
+         exactly the word QUIET and nothing else.",
+        format!("{:?}", context.project_type),
+        context.name,
+        obs,
+    );
+
+    match crate::claude::generate(model_name, &prompt, 100) {
+        Ok((text, latency_ms)) => {
+            let reply = text.trim().to_string();
+            router.record_result(&backend.name, latency_ms, true);
+
+            // If Claude said QUIET, the output was unremarkable.
+            if reply == "QUIET" || reply.to_uppercase().starts_with("QUIET") {
+                log::trace!("Brain observed output, nothing noteworthy ({latency_ms:.0}ms)");
+                return None;
+            }
+
+            log::info!("Brain observation ({latency_ms:.0}ms): {reply}");
+            Some(AiAction::ConsoleReply(reply))
+        }
+        Err(e) => {
+            log::debug!("Brain observation failed: {e}");
+            router.record_result(&backend.name, 0.0, false);
+            None
         }
     }
 }
