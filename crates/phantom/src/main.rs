@@ -450,6 +450,26 @@ fn main() -> Result<()> {
     // Load .env file (ANTHROPIC_API_KEY, etc.) before anything else.
     let _ = dotenvy::dotenv();
 
+    // Clean up stale MCP sockets from previous Phantom instances.
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("phantom-mcp-") && name.ends_with(".sock") {
+                    // Extract PID from socket name and check if process is alive.
+                    if let Some(pid_str) = name.strip_prefix("phantom-mcp-").and_then(|s| s.strip_suffix(".sock")) {
+                        if let Ok(pid) = pid_str.parse::<i32>() {
+                            // kill(pid, 0) checks if process exists without sending a signal.
+                            if unsafe { libc::kill(pid, 0) } != 0 {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     // Quick exits

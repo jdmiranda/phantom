@@ -83,6 +83,14 @@ impl AgentPane {
         agent.push_message(AgentMessage::User(user_prompt));
 
         let tools = available_tools();
+
+        info!(
+            "Agent pane spawning: {} messages (system={}, user={})",
+            agent.messages.len(),
+            agent.messages.iter().filter(|m| matches!(m, AgentMessage::System(_))).count(),
+            agent.messages.iter().filter(|m| matches!(m, AgentMessage::User(_))).count(),
+        );
+
         let handle = send_message(claude_config, &agent, &tools, &[]);
 
         info!("Agent pane spawned: {task_desc}");
