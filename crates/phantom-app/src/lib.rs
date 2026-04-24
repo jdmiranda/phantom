@@ -1,6 +1,7 @@
 mod agent_pane;
 pub mod app;
 pub mod boot;
+pub mod boot_order;
 mod commands;
 pub mod config;
 mod console;
