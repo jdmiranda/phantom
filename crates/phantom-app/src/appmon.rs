@@ -48,7 +48,7 @@ impl App {
             agent_count: self.agent_panes.len(),
             agent_working,
             scene_nodes: self.scene.node_count(),
-            bus_queue_depth: self.event_bus.queue_len(),
+            bus_queue_depth: self.coordinator.bus().queue_len(),
             memory_entries,
             pty_buf_bytes,
             uptime_secs: now.duration_since(self.start_time).as_secs(),

@@ -159,8 +159,7 @@ pub struct App {
     // -- Agent panes (AI workers running in visible panes) --
     pub(crate) agent_panes: Vec<crate::agent_pane::AgentPane>,
 
-    // -- Event bus (pub/sub between subsystems) --
-    pub(crate) event_bus: EventBus,
+    // -- Event bus topic IDs (bus itself lives in coordinator) --
     pub(crate) topic_terminal_output: TopicId,
     #[allow(dead_code)]
     pub(crate) topic_terminal_error: TopicId,
@@ -443,7 +442,7 @@ impl App {
             }
         }
 
-        // -- Event bus --
+        // -- Event bus (single instance, will be handed to AppCoordinator) --
         let mut event_bus = EventBus::new();
         let topic_terminal_output = event_bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
         let topic_terminal_error = event_bus.create_topic(0, "terminal.error", DataType::Text);
@@ -471,7 +470,9 @@ impl App {
         info!("Job pool initialized: 4 workers");
 
         // -- App coordinator (strangler fig: coexists with legacy pane system) --
-        let coordinator = AppCoordinator::new(EventBus::new());
+        // Pass the single event bus so adapters and the legacy pane system
+        // share the same pub/sub channel.
+        let coordinator = AppCoordinator::new(event_bus);
 
         // -- System monitor --
         let sysmon = crate::sysmon::spawn_sysmon();
@@ -566,7 +567,6 @@ impl App {
             pool_chrome_glyphs: Vec::with_capacity(256),
             fullscreen_pane: None,
             agent_panes: Vec::new(),
-            event_bus,
             topic_terminal_output,
             topic_terminal_error,
             topic_agent_event,
