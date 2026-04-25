@@ -9,7 +9,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::Config;
 use alacritty_terminal::tty::{self, Options as PtyOptions};
 use alacritty_terminal::vte::ansi;
@@ -295,6 +295,48 @@ impl PhantomTerminal {
         &self.pty_reader
     }
 
+    // -- Scroll API --------------------------------------------------------
+
+    /// Scroll the viewport up by the given number of lines.
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.term.scroll_display(Scroll::Delta(lines as i32));
+    }
+
+    /// Scroll the viewport down by the given number of lines.
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.term.scroll_display(Scroll::Delta(-(lines as i32)));
+    }
+
+    /// Scroll the viewport up by one full page.
+    pub fn scroll_page_up(&mut self) {
+        self.term.scroll_display(Scroll::PageUp);
+    }
+
+    /// Scroll the viewport down by one full page.
+    pub fn scroll_page_down(&mut self) {
+        self.term.scroll_display(Scroll::PageDown);
+    }
+
+    /// Scroll to the bottom of the terminal (live output).
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Scroll to the top of the scrollback history.
+    pub fn scroll_to_top(&mut self) {
+        self.term.scroll_display(Scroll::Top);
+    }
+
+    /// Current display offset from the bottom (0 = at live output).
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Total number of lines in scrollback history.
+    pub fn history_size(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {
@@ -310,5 +352,25 @@ impl PhantomTerminal {
                 warn!("failed to write terminal response to PTY: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scroll_methods_exist() {
+        let term = PhantomTerminal::new(80, 24).expect("failed to create terminal");
+        assert_eq!(term.display_offset(), 0);
+        assert_eq!(term.history_size(), 0);
+    }
+
+    #[test]
+    fn test_scroll_to_bottom_noop_when_at_bottom() {
+        let mut term = PhantomTerminal::new(80, 24).expect("failed to create terminal");
+        assert_eq!(term.display_offset(), 0);
+        term.scroll_to_bottom();
+        assert_eq!(term.display_offset(), 0);
     }
 }
