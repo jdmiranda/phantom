@@ -3,6 +3,7 @@
 //! Converts winit mouse events (clicks, scroll, motion) into either
 //! internal scrollback operations or SGR 1006 escape sequences written
 //! to the PTY when the running terminal program requests mouse tracking.
+//! Also handles scrollbar click-to-jump.
 
 use log::{debug, trace, warn};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
@@ -13,7 +14,9 @@ use phantom_terminal::input::{
 use phantom_terminal::terminal::MouseMode;
 
 use crate::app::App;
-use crate::pane::{container_rect, pane_inner_rect};
+use crate::pane::{
+    container_rect, pane_inner_rect, point_in_rect, scrollbar_track_rect, scrollbar_y_to_offset,
+};
 
 // ---------------------------------------------------------------------------
 // Helper: pixel coordinates to terminal cell
@@ -119,7 +122,7 @@ impl App {
 
     /// Handle mouse button press/release.
     pub fn handle_mouse_click(&mut self, state: ElementState, button: MouseButton) {
-        let Some(pane) = self.panes.get_mut(self.focused_pane) else {
+        let Some(pane) = self.panes.get(self.focused_pane) else {
             return;
         };
         let mouse_mode = pane.terminal.mouse_mode();
@@ -136,6 +139,7 @@ impl App {
                 ElementState::Released => self.mouse_button_held = None,
             }
 
+            let pane = &self.panes[self.focused_pane];
             let layout_rect = match self.layout.get_pane_rect(pane.pane_id) {
                 Ok(r) => r,
                 Err(_) => return,
@@ -153,7 +157,7 @@ impl App {
             let pressed = state == ElementState::Pressed;
             let bytes = encode_mouse_sgr(term_button, col, row, pressed);
             trace!("mouse click SGR: btn={term_button:?} col={col} row={row} pressed={pressed}");
-            if let Err(e) = pane.terminal.pty_write(&bytes) {
+            if let Err(e) = self.panes[self.focused_pane].terminal.pty_write(&bytes) {
                 warn!("PTY write (mouse click) failed: {e}");
             }
             return;
@@ -162,6 +166,39 @@ impl App {
         // No mouse tracking — only handle press events.
         if state != ElementState::Pressed {
             return;
+        }
+
+        // Check scrollbar hit first (left click only).
+        if button == MouseButton::Left {
+            let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
+            for pane_idx in 0..self.panes.len() {
+                let pane = &self.panes[pane_idx];
+                let layout_rect = match self.layout.get_pane_rect(pane.pane_id) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let outer = container_rect(layout_rect, self.cell_size);
+                let inner = pane_inner_rect(self.cell_size, outer);
+                let track = scrollbar_track_rect(inner);
+
+                if point_in_rect(mx, my, track) {
+                    let history_size = pane.terminal.history_size();
+                    if history_size == 0 {
+                        return;
+                    }
+                    let target_offset = scrollbar_y_to_offset(track, my, history_size);
+                    let current_offset = pane.terminal.display_offset();
+                    let delta = target_offset as i64 - current_offset as i64;
+                    if delta > 0 {
+                        debug!("Scrollbar jump: pane {pane_idx}, +{delta} lines");
+                        self.panes[pane_idx].terminal.scroll_up(delta as usize);
+                    } else if delta < 0 {
+                        debug!("Scrollbar jump: pane {pane_idx}, {delta} lines");
+                        self.panes[pane_idx].terminal.scroll_down((-delta) as usize);
+                    }
+                    return;
+                }
+            }
         }
 
         // Left click on a pane focuses it.

@@ -158,6 +158,28 @@ pub(crate) fn scrollbar_thumb_rect(
     })
 }
 
+/// Convert a Y pixel coordinate within the scrollbar track to a display_offset.
+///
+/// Returns the offset clamped to `[0, history_size]`.
+pub(crate) fn scrollbar_y_to_offset(
+    track: phantom_ui::layout::Rect,
+    click_y: f32,
+    history_size: usize,
+) -> usize {
+    if track.height <= 0.0 || history_size == 0 {
+        return 0;
+    }
+    // Fraction from top of track (0.0 = top, 1.0 = bottom).
+    let frac = ((click_y - track.y) / track.height).clamp(0.0, 1.0);
+    // Top of track = max offset (fully scrolled up), bottom = 0 (live output).
+    let offset = ((1.0 - frac) * history_size as f32).round() as usize;
+    offset.min(history_size)
+}
+
+/// Check if a point (x, y) is inside a rect.
+pub(crate) fn point_in_rect(x: f32, y: f32, rect: phantom_ui::layout::Rect) -> bool {
+    x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
+}
 // ---------------------------------------------------------------------------
 // Pane management methods on App
 // ---------------------------------------------------------------------------
@@ -305,5 +327,85 @@ mod scrollbar_tests {
         let track = scrollbar_track_rect(test_inner());
         let thumb = scrollbar_thumb_rect(track, 1000, 1000, 24).unwrap();
         assert!((thumb.y - track.y).abs() < 1.0);
+    }
+
+    // -- scrollbar_y_to_offset tests --
+
+    fn make_track() -> Rect {
+        Rect { x: 100.0, y: 50.0, width: 6.0, height: 400.0 }
+    }
+
+    #[test]
+    fn y_to_offset_top_gives_max() {
+        let track = make_track();
+        let offset = scrollbar_y_to_offset(track, track.y, 500);
+        assert_eq!(offset, 500);
+    }
+
+    #[test]
+    fn y_to_offset_bottom_gives_zero() {
+        let track = make_track();
+        let offset = scrollbar_y_to_offset(track, track.y + track.height, 500);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn y_to_offset_middle_gives_half() {
+        let track = make_track();
+        let mid_y = track.y + track.height / 2.0;
+        let offset = scrollbar_y_to_offset(track, mid_y, 500);
+        assert_eq!(offset, 250);
+    }
+
+    #[test]
+    fn y_to_offset_zero_history() {
+        let track = make_track();
+        let offset = scrollbar_y_to_offset(track, track.y + 100.0, 0);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn y_to_offset_zero_height() {
+        let track = Rect { x: 0.0, y: 0.0, width: 6.0, height: 0.0 };
+        let offset = scrollbar_y_to_offset(track, 50.0, 100);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn y_to_offset_clamps_above_track() {
+        let track = make_track();
+        let offset = scrollbar_y_to_offset(track, track.y - 100.0, 500);
+        assert_eq!(offset, 500);
+    }
+
+    #[test]
+    fn y_to_offset_clamps_below_track() {
+        let track = make_track();
+        let offset = scrollbar_y_to_offset(track, track.y + track.height + 100.0, 500);
+        assert_eq!(offset, 0);
+    }
+
+    // -- point_in_rect tests --
+
+    #[test]
+    fn point_inside_rect() {
+        let rect = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        assert!(point_in_rect(50.0, 40.0, rect));
+    }
+
+    #[test]
+    fn point_on_edge() {
+        let rect = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        assert!(point_in_rect(10.0, 20.0, rect)); // top-left corner
+        assert!(point_in_rect(110.0, 70.0, rect)); // bottom-right corner
+    }
+
+    #[test]
+    fn point_outside_rect() {
+        let rect = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        assert!(!point_in_rect(5.0, 40.0, rect)); // left of rect
+        assert!(!point_in_rect(50.0, 15.0, rect)); // above rect
+        assert!(!point_in_rect(111.0, 40.0, rect)); // right of rect
+        assert!(!point_in_rect(50.0, 71.0, rect)); // below rect
     }
 }
