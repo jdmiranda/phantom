@@ -9,7 +9,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::Config;
 use alacritty_terminal::tty::{self, Options as PtyOptions};
 use alacritty_terminal::vte::ansi;
@@ -293,6 +293,26 @@ impl PhantomTerminal {
     #[inline]
     pub fn pty_fd(&self) -> &File {
         &self.pty_reader
+    }
+
+    /// Scroll the viewport one page up in the scrollback buffer.
+    pub fn scroll_page_up(&mut self) {
+        self.term.scroll_display(Scroll::PageUp);
+    }
+
+    /// Scroll the viewport one page down toward the latest output.
+    pub fn scroll_page_down(&mut self) {
+        self.term.scroll_display(Scroll::PageDown);
+    }
+
+    /// Scroll the viewport to the very top of the scrollback buffer.
+    pub fn scroll_to_top(&mut self) {
+        self.term.scroll_display(Scroll::Top);
+    }
+
+    /// Scroll the viewport to the bottom (latest output).
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
     }
 
     /// Flush pending PTY write requests from the terminal's event listener.

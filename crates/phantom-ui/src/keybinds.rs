@@ -24,6 +24,10 @@ pub enum Action {
     ToggleFullscreen,
     ShowCommandPalette,
     CycleTheme,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollToTop,
+    ScrollToBottom,
     Quit,
 }
 
@@ -47,6 +51,10 @@ impl fmt::Display for Action {
             Self::ToggleFullscreen => "Toggle Fullscreen",
             Self::ShowCommandPalette => "Command Palette",
             Self::CycleTheme => "Cycle Theme",
+            Self::ScrollPageUp => "Scroll Page Up",
+            Self::ScrollPageDown => "Scroll Page Down",
+            Self::ScrollToTop => "Scroll To Top",
+            Self::ScrollToBottom => "Scroll To Bottom",
             Self::Quit => "Quit",
         };
         f.write_str(label)
@@ -251,6 +259,12 @@ impl KeybindRegistry {
             (KeyCombo::cmd(Key::Char('=')), Action::ZoomIn),  // =/+ key
             (KeyCombo::cmd(Key::Char('-')), Action::ZoomOut),
             (KeyCombo::cmd(Key::Char('0')), Action::ZoomReset),
+
+            // Scrollback
+            (KeyCombo::bare(Key::PageUp), Action::ScrollPageUp),
+            (KeyCombo::bare(Key::PageDown), Action::ScrollPageDown),
+            (KeyCombo::cmd(Key::Home), Action::ScrollToTop),
+            (KeyCombo::cmd(Key::End), Action::ScrollToBottom),
 
             // Window
             (KeyCombo::cmd_shift(Key::Char('p')), Action::ShowCommandPalette),
