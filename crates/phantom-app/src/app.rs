@@ -167,6 +167,9 @@ pub struct App {
     pub(crate) sysmon: crate::sysmon::SysmonHandle,
     pub(crate) sysmon_visible: bool,
     pub(crate) appmon_visible: bool,
+
+    // -- Fullscreen mode (single pane fills the entire screen) --
+    pub(crate) fullscreen_pane: Option<usize>,
 }
 
 /// An active suggestion from the AI brain.
@@ -518,6 +521,7 @@ impl App {
             sysmon,
             sysmon_visible: false,
             appmon_visible: false,
+            fullscreen_pane: None,
         })
     }
 
