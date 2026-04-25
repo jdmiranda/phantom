@@ -37,6 +37,17 @@ impl App {
                         trace!("Pane {i} PTY read: {n} bytes");
                         had_output = true;
 
+                        // T8: Preserve scroll position when user is reviewing history.
+                        // alacritty_terminal auto-scrolls to bottom when display_offset
+                        // is 0 and new data arrives. If the user has scrolled up, we
+                        // leave display_offset alone so they can keep reading.
+                        if pane.terminal.display_offset() > 0 {
+                            trace!(
+                                "Pane {i} scrolled up {} lines, preserving position",
+                                pane.terminal.display_offset()
+                            );
+                        }
+
                         // Capture raw output for semantic scanning.
                         let raw = &pane.terminal.last_read_buf()[..n];
                         if let Ok(text) = std::str::from_utf8(raw) {
