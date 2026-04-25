@@ -28,6 +28,18 @@ pub(crate) const CONTAINER_PAD_B_CELLS: f32 = 0.3;
 /// Outer margin around each container, in pixels.
 pub(crate) const CONTAINER_MARGIN: f32 = 12.0;
 
+/// Scrollbar track width in pixels.
+#[allow(dead_code)]
+pub(crate) const SCROLLBAR_WIDTH: f32 = 6.0;
+
+/// Scrollbar track padding from pane edge.
+#[allow(dead_code)]
+pub(crate) const SCROLLBAR_PAD: f32 = 2.0;
+
+/// Minimum thumb height in pixels.
+#[allow(dead_code)]
+pub(crate) const SCROLLBAR_MIN_THUMB: f32 = 20.0;
+
 // ---------------------------------------------------------------------------
 // Pane
 // ---------------------------------------------------------------------------
@@ -97,6 +109,106 @@ pub(crate) fn pane_inner_rect(cell_size: (f32, f32), outer: phantom_ui::layout::
         width: w,
         height: h,
     }
+}
+
+/// Compute the scrollbar track rectangle for a pane.
+///
+/// The track is a thin vertical strip on the right edge of the inner rect.
+#[allow(dead_code)]
+pub(crate) fn scrollbar_track_rect(
+    inner: phantom_ui::layout::Rect,
+) -> phantom_ui::layout::Rect {
+    phantom_ui::layout::Rect {
+        x: inner.x + inner.width - SCROLLBAR_WIDTH - SCROLLBAR_PAD,
+        y: inner.y + SCROLLBAR_PAD,
+        width: SCROLLBAR_WIDTH,
+        height: inner.height - SCROLLBAR_PAD * 2.0,
+    }
+}
+
+/// Compute the scrollbar thumb rectangle.
+///
+/// Returns `None` if there's no scrollback history (no scrollbar needed).
+///
+/// - `track`: the scrollbar track rect from `scrollbar_track_rect()`
+/// - `display_offset`: current scroll position (0 = at bottom)
+/// - `history_size`: total scrollback lines available
+/// - `viewport_rows`: visible rows in the terminal
+#[allow(dead_code)]
+pub(crate) fn scrollbar_thumb_rect(
+    track: phantom_ui::layout::Rect,
+    display_offset: usize,
+    history_size: usize,
+    viewport_rows: usize,
+) -> Option<phantom_ui::layout::Rect> {
+    if history_size == 0 {
+        return None;
+    }
+
+    let total_lines = history_size + viewport_rows;
+    let thumb_ratio = viewport_rows as f32 / total_lines as f32;
+    let thumb_height = (track.height * thumb_ratio).max(SCROLLBAR_MIN_THUMB);
+
+    // Position: display_offset=0 means bottom, display_offset=history_size means top.
+    // Thumb at bottom when offset=0, at top when offset=history_size.
+    let scroll_ratio = display_offset as f32 / history_size as f32;
+    let available_travel = track.height - thumb_height;
+    // scroll_ratio=0 (bottom) -> thumb at bottom of track
+    // scroll_ratio=1 (top) -> thumb at top of track
+    let thumb_y = track.y + available_travel * (1.0 - scroll_ratio);
+
+    Some(phantom_ui::layout::Rect {
+        x: track.x,
+        y: thumb_y,
+        width: track.width,
+        height: thumb_height,
+    })
+}
+
+/// Check if a point (x, y) is inside the scrollbar track region.
+///
+/// Used for mouse hit-testing. The hit area is slightly wider than the
+/// visible track for easier clicking.
+#[allow(dead_code)]
+pub(crate) fn point_in_scrollbar(
+    inner: phantom_ui::layout::Rect,
+    x: f32,
+    y: f32,
+) -> bool {
+    let hit_width = SCROLLBAR_WIDTH + SCROLLBAR_PAD * 2.0 + 4.0; // extra 4px for easy clicking
+    let hit_x = inner.x + inner.width - hit_width;
+    x >= hit_x && x <= inner.x + inner.width
+        && y >= inner.y && y <= inner.y + inner.height
+}
+
+/// Convert a y-coordinate click on the scrollbar to a scroll offset.
+///
+/// Returns the target `display_offset` for the given click position.
+#[allow(dead_code)]
+pub(crate) fn scrollbar_y_to_offset(
+    track: phantom_ui::layout::Rect,
+    click_y: f32,
+    history_size: usize,
+    viewport_rows: usize,
+) -> usize {
+    if history_size == 0 {
+        return 0;
+    }
+
+    let total_lines = history_size + viewport_rows;
+    let thumb_ratio = viewport_rows as f32 / total_lines as f32;
+    let thumb_height = (track.height * thumb_ratio).max(SCROLLBAR_MIN_THUMB);
+    let available_travel = track.height - thumb_height;
+
+    if available_travel <= 0.0 {
+        return 0;
+    }
+
+    // click at top of track -> high offset (scrolled up)
+    // click at bottom -> low offset (at bottom)
+    let relative_y = (click_y - track.y).clamp(0.0, available_travel);
+    let scroll_ratio = 1.0 - (relative_y / available_travel);
+    (scroll_ratio * history_size as f32).round() as usize
 }
 
 // ---------------------------------------------------------------------------
@@ -206,5 +318,68 @@ impl App {
         }
 
         info!("Pane closed, focused: {}", self.focused_pane);
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+    use phantom_ui::layout::Rect;
+
+    fn test_inner() -> Rect {
+        Rect { x: 100.0, y: 50.0, width: 400.0, height: 300.0 }
+    }
+
+    #[test]
+    fn track_rect_positioned_at_right_edge() {
+        let track = scrollbar_track_rect(test_inner());
+        assert!((track.x - (100.0 + 400.0 - SCROLLBAR_WIDTH - SCROLLBAR_PAD)).abs() < 0.01);
+        assert_eq!(track.width, SCROLLBAR_WIDTH);
+    }
+
+    #[test]
+    fn thumb_none_when_no_history() {
+        let track = scrollbar_track_rect(test_inner());
+        assert!(scrollbar_thumb_rect(track, 0, 0, 24).is_none());
+    }
+
+    #[test]
+    fn thumb_at_bottom_when_offset_zero() {
+        let track = scrollbar_track_rect(test_inner());
+        let thumb = scrollbar_thumb_rect(track, 0, 1000, 24).unwrap();
+        // thumb should be at the bottom of the track
+        let expected_bottom = track.y + track.height;
+        let actual_bottom = thumb.y + thumb.height;
+        assert!((actual_bottom - expected_bottom).abs() < 1.0);
+    }
+
+    #[test]
+    fn thumb_at_top_when_fully_scrolled() {
+        let track = scrollbar_track_rect(test_inner());
+        let thumb = scrollbar_thumb_rect(track, 1000, 1000, 24).unwrap();
+        assert!((thumb.y - track.y).abs() < 1.0);
+    }
+
+    #[test]
+    fn point_in_scrollbar_hit_test() {
+        let inner = test_inner();
+        // Right edge should hit
+        assert!(point_in_scrollbar(inner, 498.0, 150.0));
+        // Far left should miss
+        assert!(!point_in_scrollbar(inner, 200.0, 150.0));
+    }
+
+    #[test]
+    fn y_to_offset_top_is_max() {
+        let track = scrollbar_track_rect(test_inner());
+        let offset = scrollbar_y_to_offset(track, track.y, 1000, 24);
+        assert_eq!(offset, 1000);
+    }
+
+    #[test]
+    fn y_to_offset_bottom_is_zero() {
+        let track = scrollbar_track_rect(test_inner());
+        let offset = scrollbar_y_to_offset(track, track.y + track.height, 1000, 24);
+        assert_eq!(offset, 0);
     }
 }
