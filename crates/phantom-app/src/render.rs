@@ -375,11 +375,42 @@ impl App {
         // -- Coordinator two-phase render: collect outputs from all registered adapters --
         let coordinator_outputs = self.coordinator.render_all(&self.layout);
         for (_app_id, _rect, ro) in &coordinator_outputs {
+            // Render quads (colored rectangles).
             for q in &ro.quads {
                 quads.push(QI { pos: [q.x, q.y], size: [q.w, q.h], color: q.color, border_radius: 0.0 });
             }
+            // Render text segments.
             for seg in &ro.text_segments {
                 self.render_overlay_text(&seg.text, seg.x, seg.y, seg.color, glyphs);
+            }
+            // Render terminal grid data (the critical path for terminal adapters).
+            if let Some(ref grid) = ro.grid {
+                let grid_cells: Vec<GridCell> = grid.cells.iter()
+                    .map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg })
+                    .collect();
+
+                let origin = (grid.origin.0, grid.origin.1);
+                let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
+                    &grid_cells, grid.cols, grid.rows,
+                    &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
+                    origin, self.cell_size,
+                );
+                quads.append(&mut bg_quads);
+                glyphs.append(&mut glyph_instances);
+
+                // Render cursor.
+                if let Some(ref cursor) = grid.cursor {
+                    if cursor.visible {
+                        let cx = grid.origin.0 + cursor.col as f32 * self.cell_size.0;
+                        let cy = grid.origin.1 + cursor.row as f32 * self.cell_size.1;
+                        quads.push(QI {
+                            pos: [cx, cy],
+                            size: [self.cell_size.0, self.cell_size.1],
+                            color: self.theme.colors.cursor,
+                            border_radius: 0.0,
+                        });
+                    }
+                }
             }
         }
 
