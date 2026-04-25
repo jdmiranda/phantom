@@ -127,6 +127,49 @@ pub fn encode_paste(text: &str) -> Vec<u8> {
     buf
 }
 
+// ─── Mouse encoding (SGR 1006) ─────────────────────────────────────────────
+
+/// Mouse button identifiers for SGR encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    ScrollUp,
+    ScrollDown,
+}
+
+impl MouseButton {
+    /// SGR button code: left=0, middle=1, right=2, scroll_up=64, scroll_down=65
+    fn sgr_code(self) -> u8 {
+        match self {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            MouseButton::ScrollUp => 64,
+            MouseButton::ScrollDown => 65,
+        }
+    }
+}
+
+/// Encode a mouse button press/release as SGR 1006 sequence.
+///
+/// Format: `\x1b[<{button};{col+1};{row+1}{M|m}`
+/// where M = press, m = release. Coordinates are 1-based.
+pub fn encode_mouse_sgr(button: MouseButton, col: usize, row: usize, pressed: bool) -> Vec<u8> {
+    let btn = button.sgr_code();
+    let suffix = if pressed { 'M' } else { 'm' };
+    format!("\x1b[<{};{};{}{}", btn, col + 1, row + 1, suffix).into_bytes()
+}
+
+/// Encode a mouse motion event as SGR 1006 sequence.
+///
+/// Motion events add 32 to the button code.
+pub fn encode_mouse_motion_sgr(button: MouseButton, col: usize, row: usize) -> Vec<u8> {
+    let btn = button.sgr_code() + 32;
+    format!("\x1b[<{};{};{}M", btn, col + 1, row + 1).into_bytes()
+}
+
 // ─── Private helpers ────────────────────────────────────────────────────────
 
 /// Encode a printable character, respecting Ctrl and Alt modifiers.
@@ -516,5 +559,53 @@ mod tests {
     fn bracketed_paste_multiline() {
         let result = encode_paste("line1\nline2");
         assert_eq!(result, b"\x1b[200~line1\nline2\x1b[201~");
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+
+    #[test]
+    fn sgr_left_click_press() {
+        let bytes = encode_mouse_sgr(MouseButton::Left, 0, 0, true);
+        assert_eq!(bytes, b"\x1b[<0;1;1M");
+    }
+
+    #[test]
+    fn sgr_left_click_release() {
+        let bytes = encode_mouse_sgr(MouseButton::Left, 0, 0, false);
+        assert_eq!(bytes, b"\x1b[<0;1;1m");
+    }
+
+    #[test]
+    fn sgr_right_click_at_position() {
+        let bytes = encode_mouse_sgr(MouseButton::Right, 10, 5, true);
+        assert_eq!(bytes, b"\x1b[<2;11;6M");
+    }
+
+    #[test]
+    fn sgr_scroll_up() {
+        let bytes = encode_mouse_sgr(MouseButton::ScrollUp, 3, 7, true);
+        assert_eq!(bytes, b"\x1b[<64;4;8M");
+    }
+
+    #[test]
+    fn sgr_scroll_down() {
+        let bytes = encode_mouse_sgr(MouseButton::ScrollDown, 0, 0, true);
+        assert_eq!(bytes, b"\x1b[<65;1;1M");
+    }
+
+    #[test]
+    fn sgr_motion_left_button() {
+        let bytes = encode_mouse_motion_sgr(MouseButton::Left, 5, 10);
+        // Motion adds 32 to button code: 0 + 32 = 32
+        assert_eq!(bytes, b"\x1b[<32;6;11M");
+    }
+
+    #[test]
+    fn sgr_middle_click() {
+        let bytes = encode_mouse_sgr(MouseButton::Middle, 0, 0, true);
+        assert_eq!(bytes, b"\x1b[<1;1;1M");
     }
 }
