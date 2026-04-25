@@ -10,6 +10,7 @@ mod render;
 mod appmon;
 mod render_overlay;
 pub mod session;
+pub(crate) mod settings_ui;
 mod sysmon;
 pub mod supervisor_client;
 mod update;

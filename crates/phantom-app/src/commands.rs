@@ -104,9 +104,12 @@ impl App {
                     }
                 }
             }
+            "settings" => {
+                self.open_settings_panel();
+            }
             "help" => {
                 info!(
-                    "Commands: set <k> <v> | theme <name> | agent <prompt> | sysmon | plugins | plain | debug | reload | boot | quit"
+                    "Commands: set <k> <v> | theme <name> | settings | agent <prompt> | sysmon | plugins | plain | debug | reload | boot | quit"
                 );
             }
             other => {

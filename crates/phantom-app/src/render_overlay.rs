@@ -499,6 +499,171 @@ impl App {
         panel_height + 4.0
     }
 
+    /// Build the settings overlay panel (post-CRT, crisp).
+    pub(crate) fn build_settings_overlay(
+        &mut self,
+        screen_size: [f32; 2],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        use crate::settings_ui::SettingsPanel;
+
+        let panel_width = 500.0_f32.min(screen_size[0] - 40.0);
+        let line_height = 22.0;
+        let padding = 16.0;
+        let section_gap = 8.0;
+        let bar_chars = 16;
+
+        // Calculate total height.
+        let mut total_lines: usize = 2; // title + separator
+        for (i, section) in self.settings_panel.sections.iter().enumerate() {
+            total_lines += 1; // section header
+            total_lines += section.items.len();
+            if i + 1 < self.settings_panel.sections.len() {
+                total_lines += 1; // gap between sections
+            }
+        }
+        total_lines += 2; // gap + help line
+
+        let panel_height = (total_lines as f32) * line_height + padding * 2.0;
+        let panel_x = (screen_size[0] - panel_width) / 2.0;
+        let panel_y = ((screen_size[1] - panel_height) / 2.0).max(16.0);
+
+        // Full-screen dim backdrop.
+        quads.push(QuadInstance {
+            pos: [0.0, 0.0],
+            size: screen_size,
+            color: [0.0, 0.0, 0.0, 0.55],
+            border_radius: 0.0,
+        });
+
+        // Panel background.
+        quads.push(QuadInstance {
+            pos: [panel_x, panel_y],
+            size: [panel_width, panel_height],
+            color: [0.03, 0.04, 0.06, 0.96],
+            border_radius: 6.0,
+        });
+
+        // Panel border.
+        let accent = [0.2, 1.0, 0.5, 0.7];
+        let t = 1.0;
+        for &(pos, size) in &[
+            ([panel_x, panel_y], [panel_width, t]),
+            ([panel_x, panel_y + panel_height - t], [panel_width, t]),
+            ([panel_x, panel_y], [t, panel_height]),
+            ([panel_x + panel_width - t, panel_y], [t, panel_height]),
+        ] {
+            quads.push(QuadInstance {
+                pos,
+                size,
+                color: accent,
+                border_radius: 0.0,
+            });
+        }
+
+        let text_x = panel_x + padding;
+        let mut text_y = panel_y + padding;
+
+        // Title.
+        self.render_overlay_text(
+            "SETTINGS",
+            text_x,
+            text_y,
+            [0.55, 1.0, 0.72, 1.0],
+            glyphs,
+        );
+        text_y += line_height;
+
+        // Separator.
+        let sep = "────────────────────────────────────────────";
+        self.render_overlay_text(sep, text_x, text_y, [0.15, 0.4, 0.2, 0.5], glyphs);
+        text_y += line_height;
+
+        // Sections and items.
+        let selected_section = self.settings_panel.selected_section;
+        let selected_item = self.settings_panel.selected_item;
+
+        // We need to iterate by index to compare with selected_section/selected_item.
+        let section_count = self.settings_panel.sections.len();
+        for si in 0..section_count {
+            let is_active_section = si == selected_section;
+            let section_name = self.settings_panel.sections[si].name;
+
+            // Section header — Tab-key indicator.
+            let header_marker = if is_active_section { "▸" } else { " " };
+            let header = format!("{header_marker} [{section_name}]");
+            let header_color = if is_active_section {
+                [0.3, 0.9, 0.5, 1.0]
+            } else {
+                [0.25, 0.5, 0.35, 0.7]
+            };
+            self.render_overlay_text(&header, text_x, text_y, header_color, glyphs);
+            text_y += line_height;
+
+            let item_count = self.settings_panel.sections[si].items.len();
+            for ii in 0..item_count {
+                let item = &self.settings_panel.sections[si].items[ii];
+                let is_selected = is_active_section && ii == selected_item;
+
+                // Highlight bar for selected item.
+                if is_selected {
+                    quads.push(QuadInstance {
+                        pos: [panel_x + 2.0, text_y - 1.0],
+                        size: [panel_width - 4.0, line_height],
+                        color: [0.1, 0.3, 0.15, 0.5],
+                        border_radius: 2.0,
+                    });
+                }
+
+                let marker = if is_selected { "▶" } else { " " };
+                let value_str = SettingsPanel::display_value(&item.kind);
+
+                let line = if let Some(frac) = SettingsPanel::bar_fraction(&item.kind) {
+                    let filled = ((frac * bar_chars as f32).round() as usize).min(bar_chars);
+                    let empty = bar_chars - filled;
+                    let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+                    format!(
+                        "{marker}  {:<14} {bar} {value_str}",
+                        item.label
+                    )
+                } else {
+                    format!(
+                        "{marker}  {:<14} ◂ {value_str} ▸",
+                        item.label
+                    )
+                };
+
+                let color = if is_selected {
+                    [0.2, 1.0, 0.5, 1.0]
+                } else if is_active_section {
+                    [0.5, 0.7, 0.5, 0.85]
+                } else {
+                    [0.3, 0.45, 0.35, 0.5]
+                };
+
+                self.render_overlay_text(&line, text_x, text_y, color, glyphs);
+                text_y += line_height;
+            }
+
+            // Gap between sections.
+            if si + 1 < section_count {
+                text_y += section_gap;
+            }
+        }
+
+        // Help line.
+        text_y += line_height * 0.5;
+        let help = "[Tab] section  [↑↓] select  [←→] adjust  [Esc] close";
+        self.render_overlay_text(
+            help,
+            text_x,
+            text_y,
+            [0.3, 0.5, 0.3, 0.55],
+            glyphs,
+        );
+    }
+
     /// Helper: render a text string directly into the overlay glyph buffer.
     pub(crate) fn render_overlay_text(
         &mut self,

@@ -167,6 +167,9 @@ pub struct App {
     pub(crate) sysmon: crate::sysmon::SysmonHandle,
     pub(crate) sysmon_visible: bool,
     pub(crate) appmon_visible: bool,
+
+    // -- Settings overlay panel --
+    pub(crate) settings_panel: crate::settings_ui::SettingsPanel,
 }
 
 /// An active suggestion from the AI brain.
@@ -518,6 +521,7 @@ impl App {
             sysmon,
             sysmon_visible: false,
             appmon_visible: false,
+            settings_panel: crate::settings_ui::SettingsPanel::new(),
         })
     }
 

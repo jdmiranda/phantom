@@ -171,6 +171,12 @@ impl App {
             self.suggestion = None;
         }
 
+        // Settings panel captures all keys when open.
+        if self.settings_panel.open {
+            self.handle_settings_key(&event);
+            return;
+        }
+
         if self.debug_hud {
             self.handle_debug_hud_key(&event);
             return;
@@ -353,6 +359,69 @@ impl App {
         *val = (*val + delta).clamp(0.0, 1.0);
     }
 
+    /// Open the settings panel, loading current values from the app.
+    pub(crate) fn open_settings_panel(&mut self) {
+        let sp = &self.theme.shader_params;
+        let values = crate::settings_ui::CurrentValues {
+            theme_name: self.theme.name.clone(),
+            font_size: self.text_renderer.font_size(),
+            scanline_intensity: sp.scanline_intensity,
+            bloom_intensity: sp.bloom_intensity,
+            chromatic_aberration: sp.chromatic_aberration,
+            curvature: sp.curvature,
+            vignette_intensity: sp.vignette_intensity,
+            noise_intensity: sp.noise_intensity,
+        };
+        self.settings_panel.load_from(&values);
+        self.settings_panel.toggle();
+        info!(
+            "Settings panel: {}",
+            if self.settings_panel.open { "OPEN" } else { "CLOSED" }
+        );
+    }
+
+    /// Handle keys when the settings panel is open.
+    pub(crate) fn handle_settings_key(&mut self, event: &winit::event::KeyEvent) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.settings_panel.open = false;
+                info!("Settings panel: CLOSED");
+            }
+            Key::Named(NamedKey::ArrowUp) => self.settings_panel.prev_item(),
+            Key::Named(NamedKey::ArrowDown) => self.settings_panel.next_item(),
+            Key::Named(NamedKey::ArrowRight) => self.settings_panel.adjust(1.0),
+            Key::Named(NamedKey::ArrowLeft) => self.settings_panel.adjust(-1.0),
+            Key::Named(NamedKey::Tab) => self.settings_panel.next_section(),
+            Key::Character(s) if s.as_str() == "\t" => self.settings_panel.next_section(),
+            _ => {}
+        }
+
+        // Apply changes live to the theme.
+        let snap = self.settings_panel.to_snapshot();
+
+        // Theme switch (only if changed).
+        if snap.theme_name != self.theme.name {
+            self.apply_theme(&snap.theme_name);
+        }
+
+        // CRT shader params — apply unconditionally (cheap).
+        self.theme.shader_params.scanline_intensity = snap.scanline_intensity;
+        self.theme.shader_params.bloom_intensity = snap.bloom_intensity;
+        self.theme.shader_params.chromatic_aberration = snap.chromatic_aberration;
+        self.theme.shader_params.curvature = snap.curvature;
+        self.theme.shader_params.vignette_intensity = snap.vignette_intensity;
+        self.theme.shader_params.noise_intensity = snap.noise_intensity;
+
+        // Font size (requires renderer update).
+        let current_size = self.text_renderer.font_size();
+        if (snap.font_size - current_size).abs() > 0.01 {
+            info!("Font size: {:.0}pt", snap.font_size);
+            self.text_renderer.set_font_size(snap.font_size);
+            self.cell_size = self.text_renderer.measure_cell();
+            self.atlas.clear();
+        }
+    }
+
     /// Handle a keyboard event with externally tracked modifier state.
     pub fn handle_key_with_mods(
         &mut self,
@@ -367,6 +436,22 @@ impl App {
 
         if self.suggestion.is_some() {
             self.suggestion = None;
+        }
+
+        // Ctrl+, toggles the settings overlay.
+        if modifiers.state().control_key() {
+            if let Key::Character(ref s) = event.logical_key {
+                if s.as_str() == "," {
+                    self.open_settings_panel();
+                    return;
+                }
+            }
+        }
+
+        // Settings panel captures all keys when open.
+        if self.settings_panel.open {
+            self.handle_settings_key(&event);
+            return;
         }
 
         if self.debug_hud {

@@ -169,6 +169,11 @@ impl App {
                 self.build_suggestion_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
+            // -- Settings panel overlay --
+            if self.settings_panel.open {
+                self.build_settings_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
+            }
+
 
             if !chrome_quads.is_empty() || !chrome_glyphs.is_empty() {
                 // Upload + render overlay in its own pass on the surface.
