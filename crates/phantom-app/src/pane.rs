@@ -29,7 +29,7 @@ pub(crate) const CONTAINER_PAD_B_CELLS: f32 = 0.3;
 pub(crate) const CONTAINER_MARGIN: f32 = 12.0;
 
 // ---------------------------------------------------------------------------
-// Pane
+// Pane (legacy — kept for compatibility during migration)
 // ---------------------------------------------------------------------------
 
 /// A terminal pane: owns a PTY-backed terminal emulator and its layout node.
@@ -121,9 +121,6 @@ pub(crate) fn scrollbar_track_rect(inner: phantom_ui::layout::Rect) -> phantom_u
 }
 
 /// Compute the scrollbar thumb rectangle within the track.
-///
-/// Returns `None` when the thumb would fill the entire track (i.e. no
-/// scrollback is meaningful to display).
 pub(crate) fn scrollbar_thumb_rect(
     track: phantom_ui::layout::Rect,
     display_offset: usize,
@@ -135,19 +132,15 @@ pub(crate) fn scrollbar_thumb_rect(
         return None;
     }
 
-    // Thumb height proportional to visible portion of total content.
     let ratio = visible_rows as f32 / total as f32;
-    let thumb_h = (track.height * ratio).max(20.0); // min 20px so it stays grabbable
+    let thumb_h = (track.height * ratio).max(20.0);
 
-    // If the thumb would fill the track, nothing to show.
     if thumb_h >= track.height {
         return None;
     }
 
-    // Position: display_offset 0 = bottom (live output), history_size = top.
     let scroll_fraction = display_offset as f32 / history_size as f32;
     let max_y_offset = track.height - thumb_h;
-    // scroll_fraction 0 → thumb at bottom, 1 → thumb at top
     let thumb_y = track.y + max_y_offset * (1.0 - scroll_fraction);
 
     Some(phantom_ui::layout::Rect {
@@ -159,8 +152,6 @@ pub(crate) fn scrollbar_thumb_rect(
 }
 
 /// Convert a Y pixel coordinate within the scrollbar track to a display_offset.
-///
-/// Returns the offset clamped to `[0, history_size]`.
 pub(crate) fn scrollbar_y_to_offset(
     track: phantom_ui::layout::Rect,
     click_y: f32,
@@ -169,9 +160,7 @@ pub(crate) fn scrollbar_y_to_offset(
     if track.height <= 0.0 || history_size == 0 {
         return 0;
     }
-    // Fraction from top of track (0.0 = top, 1.0 = bottom).
     let frac = ((click_y - track.y) / track.height).clamp(0.0, 1.0);
-    // Top of track = max offset (fully scrolled up), bottom = 0 (live output).
     let offset = ((1.0 - frac) * history_size as f32).round() as usize;
     offset.min(history_size)
 }
@@ -180,16 +169,25 @@ pub(crate) fn scrollbar_y_to_offset(
 pub(crate) fn point_in_rect(x: f32, y: f32, rect: phantom_ui::layout::Rect) -> bool {
     x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
 }
+
 // ---------------------------------------------------------------------------
-// Pane management methods on App
+// Pane management methods on App (coordinator-based)
 // ---------------------------------------------------------------------------
 
 impl App {
     /// Split the focused pane. `horizontal` = left|right, otherwise top|bottom.
     pub(crate) fn split_focused_pane(&mut self, horizontal: bool) {
-        let Some(current) = self.panes.get(self.focused_pane) else { return };
-        let current_pane_id = current.pane_id;
+        // Get the focused adapter's PaneId.
+        let Some(focused_app_id) = self.coordinator.focused() else {
+            warn!("Split: no focused adapter");
+            return;
+        };
+        let Some(current_pane_id) = self.coordinator.pane_id_for(focused_app_id) else {
+            warn!("Split: focused adapter has no layout pane");
+            return;
+        };
 
+        // Ask the layout engine to split.
         let split_result = if horizontal {
             self.layout.split_horizontal(current_pane_id)
         } else {
@@ -210,40 +208,57 @@ impl App {
             warn!("Layout resize after split failed: {e}");
         }
 
-        self.panes[self.focused_pane].pane_id = existing_child;
+        // Update the existing adapter's PaneId mapping (split replaced the old PaneId).
+        self.coordinator.remap_pane(focused_app_id, current_pane_id, existing_child);
 
+        // Resize the existing adapter's terminal to fit the new (smaller) pane.
         if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
             let (cols, rows) = pane_cols_rows(self.cell_size, rect);
-            self.panes[self.focused_pane].terminal.resize(cols, rows);
+            let _ = self.coordinator.send_command(
+                focused_app_id,
+                "resize",
+                &serde_json::json!({"cols": cols, "rows": rows}),
+            );
         }
 
+        // Create a new terminal for the new pane.
         let new_rect = self.layout.get_pane_rect(new_child).unwrap_or_else(|e| {
             warn!("Layout missing for new split pane {new_child:?}: {e}");
-            phantom_ui::layout::Rect { x: 0.0, y: 30.0, width: width as f32 / 2.0, height: height as f32 - 54.0 }
+            phantom_ui::layout::Rect {
+                x: 0.0, y: 30.0,
+                width: width as f32 / 2.0,
+                height: height as f32 - 54.0,
+            }
         });
         let (cols, rows) = pane_cols_rows(self.cell_size, new_rect);
 
         match PhantomTerminal::new(cols, rows) {
             Ok(terminal) => {
-                // Create scene graph node for the new pane.
+                use crate::adapters::terminal::TerminalAdapter;
+                use phantom_terminal::output::TerminalThemeColors;
+                use phantom_scene::clock::Cadence;
+
+                let theme_colors = TerminalThemeColors {
+                    foreground: self.theme.colors.foreground,
+                    background: self.theme.colors.background,
+                    cursor: self.theme.colors.cursor,
+                    ansi: Some(self.theme.colors.ansi),
+                };
+
                 let scene_node = self.scene.add_node(
                     self.scene_content_node,
                     phantom_scene::node::NodeKind::Pane,
                 );
-                let new_index = self.focused_pane + 1;
-                self.panes.insert(new_index, Pane {
-                    terminal,
-                    pane_id: new_child,
+
+                let adapter = TerminalAdapter::with_theme(terminal, theme_colors);
+                let new_app_id = self.coordinator.register_adapter_at_pane(
+                    Box::new(adapter),
+                    new_child,
                     scene_node,
-                    was_alt_screen: false,
-                    is_detached: false,
-                    detached_label: String::new(),
-                    output_buf: String::new(),
-                    error_notified: false,
-                    has_new_output: false,
-                });
-                self.focused_pane = new_index;
-                info!("Split: new pane {new_index} ({cols}x{rows})");
+                    Cadence::unlimited(),
+                );
+                self.coordinator.set_focus(new_app_id);
+                info!("Split: new adapter {new_app_id} ({cols}x{rows})");
             }
             Err(e) => {
                 warn!("Failed to spawn terminal for new pane: {e}");
@@ -254,40 +269,39 @@ impl App {
 
     /// Close the focused pane and its terminal.
     pub(crate) fn close_focused_pane(&mut self) {
-        if self.panes.is_empty() {
+        let Some(focused_app_id) = self.coordinator.focused() else {
             return;
-        }
+        };
 
-        if self.panes.len() == 1 {
+        // Last adapter — quit the app.
+        if self.coordinator.adapter_count() <= 1 {
             info!("Last pane closed, quitting");
             self.quit_requested = true;
             return;
         }
 
-        let pane = self.panes.remove(self.focused_pane);
-        if let Err(e) = self.layout.remove_pane(pane.pane_id) {
-            warn!("Failed to remove pane from layout: {e}");
-        }
-        // Remove the corresponding scene graph node.
-        self.scene.remove_node(pane.scene_node);
-        drop(pane);
+        // Remove the adapter (handles layout, scene, focus shift).
+        self.coordinator.remove_adapter(focused_app_id, &mut self.layout, &mut self.scene);
 
         let width = self.gpu.surface_config.width;
         let height = self.gpu.surface_config.height;
         let _ = self.layout.resize(width as f32, height as f32);
 
-        if self.focused_pane >= self.panes.len() {
-            self.focused_pane = self.panes.len().saturating_sub(1);
-        }
-
-        for pane in &mut self.panes {
-            if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
-                let (cols, rows) = pane_cols_rows(self.cell_size, rect);
-                pane.terminal.resize(cols, rows);
+        // Resize remaining adapters to fit the reclaimed space.
+        for app_id in self.coordinator.all_app_ids() {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
+                if let Ok(rect) = self.layout.get_pane_rect(pane_id) {
+                    let (cols, rows) = pane_cols_rows(self.cell_size, rect);
+                    let _ = self.coordinator.send_command(
+                        app_id,
+                        "resize",
+                        &serde_json::json!({"cols": cols, "rows": rows}),
+                    );
+                }
             }
         }
 
-        info!("Pane closed, focused: {}", self.focused_pane);
+        info!("Pane closed, focused: {:?}", self.coordinator.focused());
     }
 }
 

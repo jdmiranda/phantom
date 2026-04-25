@@ -60,6 +60,8 @@ pub struct TerminalAdapter {
     was_alt_screen: bool,
     /// Theme colors for grid extraction (set at construction, updateable).
     theme_colors: TerminalThemeColors,
+    /// Set when the PTY child process exits.
+    pty_dead: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +85,7 @@ impl TerminalAdapter {
             detached_label: String::new(),
             was_alt_screen: false,
             theme_colors,
+            pty_dead: false,
         }
     }
 
@@ -147,7 +150,7 @@ impl AppCore for TerminalAdapter {
     }
 
     fn is_alive(&self) -> bool {
-        true
+        !self.pty_dead
     }
 
     fn update(&mut self, _dt: f32) {
@@ -172,7 +175,8 @@ impl AppCore for TerminalAdapter {
             }
             Ok(_) => {}
             Err(e) => {
-                warn!("TerminalAdapter PTY read error: {e}");
+                warn!("TerminalAdapter PTY exited: {e}");
+                self.pty_dead = true;
             }
         }
 

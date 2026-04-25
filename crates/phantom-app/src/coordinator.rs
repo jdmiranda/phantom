@@ -303,6 +303,13 @@ impl AppCoordinator {
         Some(adapter.get_state())
     }
 
+    /// Remap an adapter's PaneId (e.g. after a layout split replaces the old PaneId).
+    pub fn remap_pane(&mut self, app_id: AppId, old_pane_id: PaneId, new_pane_id: PaneId) {
+        self.pane_map.remove(&old_pane_id);
+        self.pane_map.insert(new_pane_id, app_id);
+        self.app_pane_map.insert(app_id, new_pane_id);
+    }
+
     /// Send a command to a specific adapter.
     ///
     /// Returns an error if the adapter does not exist or does not accept

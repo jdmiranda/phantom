@@ -40,6 +40,20 @@ impl App {
         // migrate to the coordinator, the legacy loop shrinks.)
         self.coordinator.update_all(dt_duration);
 
+        // Reap dead adapters (PTY exited).
+        let dead_adapters: Vec<_> = self.coordinator.all_app_ids()
+            .into_iter()
+            .filter(|id| {
+                self.coordinator.registry()
+                    .get_adapter(*id)
+                    .map_or(false, |a| !a.is_alive())
+            })
+            .collect();
+        for dead_id in dead_adapters {
+            info!("Adapter {dead_id} exited, removing");
+            self.coordinator.remove_adapter(dead_id, &mut self.layout, &mut self.scene);
+        }
+
         // Read from all panes' PTYs (non-blocking). Collect indices of exited panes.
         let mut exited: Vec<usize> = Vec::new();
         let mut had_output = false;
