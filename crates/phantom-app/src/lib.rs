@@ -4,6 +4,7 @@ pub mod boot;
 mod commands;
 pub mod config;
 pub mod image_handler;
+pub mod settings;
 mod input;
 mod pane;
 mod render;
