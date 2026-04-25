@@ -142,6 +142,21 @@ impl ApplicationHandler for Phantom {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(app) = &mut self.app {
+                    app.handle_cursor_moved(position.x, position.y);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(app) = &mut self.app {
+                    app.handle_mouse_click(state, button);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(app) = &mut self.app {
+                    app.handle_mouse_scroll(delta);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let frame_result = if let Some(app) = &mut self.app {
                     // Raw-write frame trace to disk (survives SIGKILL, bypasses logger).

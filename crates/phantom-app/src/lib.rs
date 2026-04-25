@@ -15,6 +15,7 @@ mod input;
 pub mod jobs;
 mod keystroke_fx;
 pub mod logging;
+mod mouse;
 mod pane;
 pub mod profiler;
 mod render;
