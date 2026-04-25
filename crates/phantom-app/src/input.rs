@@ -210,24 +210,16 @@ impl App {
                 }
             }
             Action::ScrollPageUp => {
-                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                    pane.terminal.scroll_page_up();
-                }
+                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "page_up"}));
             }
             Action::ScrollPageDown => {
-                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                    pane.terminal.scroll_page_down();
-                }
+                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "page_down"}));
             }
             Action::ScrollToTop => {
-                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                    pane.terminal.scroll_to_top();
-                }
+                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "top"}));
             }
             Action::ScrollToBottom => {
-                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                    pane.terminal.scroll_to_bottom();
-                }
+                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "bottom"}));
             }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
@@ -442,29 +434,29 @@ impl App {
                 logo: state.super_key(),
             };
 
-            // Coordinator route: offer input to the focused adapter first.
-            // (Strangler fig: when adapters are registered, they get first
-            // crack at input. Falls through to legacy PTY path if no adapter
-            // consumes it or no adapters are registered.)
-            let key_name = format!("{terminal_event:?}");
-            if self.coordinator.route_input(&key_name) {
+            // Encode key event to raw PTY bytes.
+            let bytes = input::encode_key(&terminal_event);
+            if bytes.is_empty() {
                 return;
             }
 
-            let bytes = input::encode_key(&terminal_event);
-            if !bytes.is_empty() {
-                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                    // Trigger glitch effect at cursor before writing to PTY.
-                    if bytes.len() == 1 && bytes[0] >= 0x20 && bytes[0] < 0x7F {
-                        let content = pane.terminal.term().renderable_content();
-                        let col = content.cursor.point.column.0;
-                        let row = content.cursor.point.line.0.max(0) as usize;
-                        self.keystroke_fx.trigger(col, row);
-                    }
+            // Route through coordinator (adapter-managed terminals).
+            if self.coordinator.route_bytes(&bytes) {
+                return;
+            }
 
-                    if let Err(e) = pane.terminal.pty_write(&bytes) {
-                        warn!("PTY write failed: {e}");
-                    }
+            // Legacy fallback: write to focused pane's PTY directly.
+            if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                // Trigger glitch effect at cursor before writing to PTY.
+                if bytes.len() == 1 && bytes[0] >= 0x20 && bytes[0] < 0x7F {
+                    let content = pane.terminal.term().renderable_content();
+                    let col = content.cursor.point.column.0;
+                    let row = content.cursor.point.line.0.max(0) as usize;
+                    self.keystroke_fx.trigger(col, row);
+                }
+
+                if let Err(e) = pane.terminal.pty_write(&bytes) {
+                    warn!("PTY write failed: {e}");
                 }
             }
         }

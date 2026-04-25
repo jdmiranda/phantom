@@ -277,6 +277,42 @@ impl Commandable for TerminalAdapter {
                     .map_err(|e| anyhow::anyhow!("pty_write failed: {e}"))?;
                 Ok("written".into())
             }
+            "scroll" => {
+                let direction = args
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("page_down");
+                match direction {
+                    "page_up" => self.terminal.scroll_page_up(),
+                    "page_down" => self.terminal.scroll_page_down(),
+                    "top" => self.terminal.scroll_to_top(),
+                    "bottom" => self.terminal.scroll_to_bottom(),
+                    "up" => {
+                        let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                        self.terminal.scroll_up(lines);
+                    }
+                    "down" => {
+                        let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                        self.terminal.scroll_down(lines);
+                    }
+                    other => return Err(anyhow::anyhow!("unknown scroll direction: {other}")),
+                }
+                Ok("scrolled".into())
+            }
+            "write_bytes" => {
+                let bytes_val = args
+                    .get("bytes")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("write_bytes requires a \"bytes\" array"))?;
+                let bytes: Vec<u8> = bytes_val
+                    .iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                    .collect();
+                self.terminal
+                    .pty_write(&bytes)
+                    .map_err(|e| anyhow::anyhow!("pty_write failed: {e}"))?;
+                Ok("written".into())
+            }
             "resize" => {
                 let cols = args
                     .get("cols")

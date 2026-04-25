@@ -236,10 +236,11 @@ impl App {
                     match NlpInterpreter::interpret(input, ctx) {
                         ResolvedAction::RunCommand(cmd) => {
                             self.console.system(format!("Running: {cmd}"));
-                            if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                                let cmd_bytes = format!("{cmd}\n");
-                                let _ = pane.terminal.pty_write(cmd_bytes.as_bytes());
-                            }
+                            let cmd_text = format!("{cmd}\n");
+                            let _ = self.coordinator.send_command_to_focused(
+                                "write",
+                                &serde_json::json!({"text": cmd_text}),
+                            );
                         }
                         ResolvedAction::SpawnAgent(desc) => {
                             self.console.system(format!("Agent requested: {desc}"));

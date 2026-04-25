@@ -246,6 +246,47 @@ impl AppCoordinator {
         adapter.handle_input(key)
     }
 
+    /// Write raw bytes to the focused adapter via `accept_command("write_bytes", ...)`.
+    ///
+    /// Returns `true` if the bytes were consumed. Used for keyboard input
+    /// where bytes are pre-encoded by `encode_key()`.
+    pub fn route_bytes(&mut self, bytes: &[u8]) -> bool {
+        let Some(id) = self.focused else {
+            return false;
+        };
+        let Some(entry) = self.registry.get(id) else {
+            return false;
+        };
+        if !entry.accepts_input {
+            return false;
+        }
+        let Some(adapter) = self.registry.get_adapter_mut(id) else {
+            return false;
+        };
+        // Encode bytes as a JSON array for the command interface.
+        let args = serde_json::json!({ "bytes": bytes });
+        match adapter.accept_command("write_bytes", &args) {
+            Ok(_) => true,
+            Err(e) => {
+                log::warn!("route_bytes to adapter {id} failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Send a command to the currently focused adapter.
+    ///
+    /// Returns `Ok` with the response, or `Err` if no adapter is focused
+    /// or the command fails.
+    pub fn send_command_to_focused(
+        &mut self,
+        cmd: &str,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<String> {
+        let id = self.focused.ok_or_else(|| anyhow::anyhow!("no focused adapter"))?;
+        self.send_command(id, cmd, args)
+    }
+
     /// Set focus to a specific adapter.
     pub fn set_focus(&mut self, app_id: AppId) {
         self.focused = Some(app_id);
