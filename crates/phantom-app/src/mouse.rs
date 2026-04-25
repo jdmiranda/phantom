@@ -87,13 +87,46 @@ impl App {
             }
         }
 
-        // Mouse motion forwarding to PTY (SGR) is handled via coordinator
-        // write_bytes command — deferred until mouse mode detection is available
-        // through the adapter interface.
+        // If left button is held, update selection (drag-to-select).
+        if self.mouse_button_held == Some(phantom_terminal::input::MouseButton::Left) {
+            if let Some(focused) = self.coordinator.focused() {
+                if let Some((col, row)) = self.cursor_to_cell(focused) {
+                    let _ = self.coordinator.send_command(
+                        focused,
+                        "select_update",
+                        &serde_json::json!({"col": col, "row": row}),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Convert cursor pixel position to terminal cell (col, row) for the given adapter.
+    fn cursor_to_cell(&self, app_id: u32) -> Option<(usize, usize)> {
+        let pane_id = self.coordinator.pane_id_for(app_id)?;
+        let layout_rect = self.layout.get_pane_rect(pane_id).ok()?;
+        let cr = container_rect(layout_rect, self.cell_size);
+        let inner = pane_inner_rect(self.cell_size, cr);
+        let (px, py) = self.cursor_position;
+        let col = ((px as f32 - inner.x).max(0.0) / self.cell_size.0).floor() as usize;
+        let row = ((py as f32 - inner.y).max(0.0) / self.cell_size.1).floor() as usize;
+        Some((col, row))
     }
 
     /// Handle mouse button press/release.
     pub fn handle_mouse_click(&mut self, state: ElementState, button: MouseButton) {
+        // Track button state for drag selection.
+        if button == MouseButton::Left {
+            match state {
+                ElementState::Pressed => {
+                    self.mouse_button_held = Some(phantom_terminal::input::MouseButton::Left);
+                }
+                ElementState::Released => {
+                    self.mouse_button_held = None;
+                }
+            }
+        }
+
         // Only handle press events for non-SGR operations.
         if state != ElementState::Pressed {
             return;
@@ -101,6 +134,14 @@ impl App {
 
         // Left click — check scrollbar hit on coordinator panes, then focus.
         if button == MouseButton::Left {
+            // Clear any existing selection first.
+            if let Some(focused) = self.coordinator.focused() {
+                let _ = self.coordinator.send_command(
+                    focused,
+                    "select_clear",
+                    &serde_json::json!({}),
+                );
+            }
             let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
 
             // Check scrollbar hit on each coordinator-managed pane.
@@ -130,6 +171,17 @@ impl App {
                 if self.coordinator.focused() != Some(app_id) {
                     debug!("Mouse focus: adapter {app_id}");
                     self.coordinator.set_focus(app_id);
+                }
+            }
+
+            // Start text selection at the clicked cell.
+            if let Some(focused) = self.coordinator.focused() {
+                if let Some((col, row)) = self.cursor_to_cell(focused) {
+                    let _ = self.coordinator.send_command(
+                        focused,
+                        "select_start",
+                        &serde_json::json!({"col": col, "row": row}),
+                    );
                 }
             }
         }

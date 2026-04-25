@@ -5,7 +5,7 @@
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, CursorShape as AlacCursorShape, NamedColor};
 use alacritty_terminal::Term;
@@ -232,6 +232,9 @@ pub fn extract_grid_themed<T: EventListener>(
         }
     }
 
+    // Get selection range for highlight rendering.
+    let selection_range = term.selection.as_ref().and_then(|s| s.to_range(term));
+
     let mut cells = Vec::with_capacity(cols * rows);
 
     for row_idx in 0..rows {
@@ -239,14 +242,27 @@ pub fn extract_grid_themed<T: EventListener>(
         for col_idx in 0..cols {
             let cell = &line[Column(col_idx)];
 
+            // Check if this cell is in the selection.
+            let is_selected = selection_range
+                .as_ref()
+                .map_or(false, |range| {
+                    range.contains(Point::new(Line(row_idx as i32), Column(col_idx)))
+                });
+
             // Skip wide-char spacer cells — emit a space placeholder instead.
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
                 || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             {
+                let mut fg = theme.foreground;
+                let mut bg = color_to_rgba(cell.bg, &table, theme, false);
+                if is_selected {
+                    std::mem::swap(&mut fg, &mut bg);
+                    if bg[3] == 0.0 { bg[3] = 1.0; }
+                }
                 cells.push(RenderCell {
                     ch: ' ',
-                    fg: theme.foreground,
-                    bg: color_to_rgba(cell.bg, &table, theme, false),
+                    fg,
+                    bg,
                     flags: CellFlags::empty(),
                 });
                 continue;
@@ -261,7 +277,6 @@ pub fn extract_grid_themed<T: EventListener>(
             // Handle INVERSE: swap foreground and background.
             if alac_flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
-                // Ensure the swapped background is opaque if it came from fg.
                 if bg[3] == 0.0 {
                     bg[3] = 1.0;
                 }
@@ -277,6 +292,12 @@ pub fn extract_grid_themed<T: EventListener>(
             // HIDDEN: make fg match bg.
             if alac_flags.contains(Flags::HIDDEN) {
                 fg = bg;
+            }
+
+            // Selection highlight: swap fg/bg for selected cells.
+            if is_selected {
+                std::mem::swap(&mut fg, &mut bg);
+                if bg[3] == 0.0 { bg[3] = 1.0; }
             }
 
             cells.push(RenderCell {

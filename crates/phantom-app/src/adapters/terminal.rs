@@ -347,6 +347,30 @@ impl Commandable for TerminalAdapter {
                 self.terminal.resize(cols, rows);
                 Ok(format!("resized to {cols}x{rows}"))
             }
+            "select_start" => {
+                let col = args.get("col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                let point = Point::new(Line(row), Column(col));
+                self.terminal.start_selection(SelectionType::Simple, point, Side::Left);
+                Ok("selection started".into())
+            }
+            "select_update" => {
+                let col = args.get("col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                use phantom_terminal::selection::{Column, Line, Point, Side};
+                let point = Point::new(Line(row), Column(col));
+                self.terminal.update_selection(point, Side::Right);
+                Ok("selection updated".into())
+            }
+            "select_clear" => {
+                self.terminal.clear_selection();
+                Ok("selection cleared".into())
+            }
+            "select_copy" => {
+                let text = self.terminal.selection_to_string().unwrap_or_default();
+                Ok(text)
+            }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
     }

@@ -442,6 +442,39 @@ impl App {
                 logo: state.super_key(),
             };
 
+            // Copy selection to clipboard: Cmd+C (macOS) or Ctrl+Shift+C.
+            if terminal_event.key == PhantomKey::Char('c')
+                && (terminal_event.mods.logo || (terminal_event.mods.ctrl && terminal_event.mods.shift))
+            {
+                if let Some(focused) = self.coordinator.focused() {
+                    if let Ok(text) = self.coordinator.send_command(focused, "select_copy", &serde_json::json!({})) {
+                        if !text.is_empty() {
+                            #[cfg(target_os = "macos")]
+                            {
+                                // Use pbcopy for clipboard on macOS.
+                                use std::io::Write;
+                                if let Ok(mut child) = std::process::Command::new("pbcopy")
+                                    .stdin(std::process::Stdio::piped())
+                                    .spawn()
+                                {
+                                    if let Some(ref mut stdin) = child.stdin {
+                                        let _ = stdin.write_all(text.as_bytes());
+                                    }
+                                    let _ = child.wait();
+                                }
+                            }
+                            debug!("Copied {} chars to clipboard", text.len());
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Clear selection on any other keypress.
+            if let Some(focused) = self.coordinator.focused() {
+                let _ = self.coordinator.send_command(focused, "select_clear", &serde_json::json!({}));
+            }
+
             // Encode key event to raw PTY bytes.
             let bytes = input::encode_key(&terminal_event);
             if bytes.is_empty() {

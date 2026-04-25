@@ -212,8 +212,7 @@ pub struct App {
     // -- Mouse state --
     pub(crate) cursor_position: (f64, f64),
     pub(crate) cursor_over_pane: Option<usize>,
-    /// Which terminal mouse button is currently held (for drag tracking).
-    #[allow(dead_code)] // Will be used when SGR mouse drag is wired through adapters
+    /// Which terminal mouse button is currently held (for drag/selection tracking).
     pub(crate) mouse_button_held: Option<phantom_terminal::input::MouseButton>,
 
     // -- Settings panel --

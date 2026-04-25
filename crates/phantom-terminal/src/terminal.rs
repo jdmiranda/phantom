@@ -381,6 +381,35 @@ impl PhantomTerminal {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
+    // -- Selection API ----------------------------------------------------
+
+    /// Start a new text selection at the given grid position.
+    pub fn start_selection(&mut self, ty: alacritty_terminal::selection::SelectionType, point: alacritty_terminal::index::Point, side: alacritty_terminal::index::Side) {
+        self.term.selection = Some(alacritty_terminal::selection::Selection::new(ty, point, side));
+    }
+
+    /// Update the selection endpoint as the mouse drags.
+    pub fn update_selection(&mut self, point: alacritty_terminal::index::Point, side: alacritty_terminal::index::Side) {
+        if let Some(ref mut sel) = self.term.selection {
+            sel.update(point, side);
+        }
+    }
+
+    /// Clear the current selection.
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// Get the selected text as a string (for clipboard copy).
+    pub fn selection_to_string(&self) -> Option<String> {
+        self.term.selection_to_string()
+    }
+
+    /// Whether any text is currently selected.
+    pub fn has_selection(&self) -> bool {
+        self.term.selection.is_some()
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {
