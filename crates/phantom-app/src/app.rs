@@ -213,6 +213,8 @@ pub struct App {
     // -- Mouse state --
     pub(crate) cursor_position: (f64, f64),
     pub(crate) cursor_over_pane: Option<usize>,
+    /// Which terminal mouse button is currently held (for drag tracking).
+    pub(crate) mouse_button_held: Option<phantom_terminal::input::MouseButton>,
 
     // -- Settings panel --
     pub(crate) settings_panel: crate::settings_ui::SettingsPanel,
@@ -587,6 +589,7 @@ impl App {
             shutdown_guard: ShutdownGuard::new(),
             cursor_position: (0.0, 0.0),
             cursor_over_pane: None,
+            mouse_button_held: None,
             settings_panel: crate::settings_ui::SettingsPanel::new(),
         })
     }

@@ -17,6 +17,7 @@ use alacritty_terminal::Term;
 use anyhow::{Context, Result};
 use log::{debug, trace, warn};
 
+
 /// Default scrollback history in lines.
 const SCROLLBACK_LINES: usize = 10_000;
 

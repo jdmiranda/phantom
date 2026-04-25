@@ -560,6 +560,58 @@ mod tests {
         let result = encode_paste("line1\nline2");
         assert_eq!(result, b"\x1b[200~line1\nline2\x1b[201~");
     }
+
+    // ── Mouse SGR encoding ─────────────────────────────────────
+
+    #[test]
+    fn sgr_left_press() {
+        // Left button press at col=0, row=0 → \x1b[<0;1;1M
+        let bytes = encode_mouse_sgr(MouseButton::Left, 0, 0, true);
+        assert_eq!(bytes, b"\x1b[<0;1;1M");
+    }
+
+    #[test]
+    fn sgr_left_release() {
+        let bytes = encode_mouse_sgr(MouseButton::Left, 5, 10, false);
+        assert_eq!(bytes, b"\x1b[<0;6;11m");
+    }
+
+    #[test]
+    fn sgr_right_press() {
+        let bytes = encode_mouse_sgr(MouseButton::Right, 79, 23, true);
+        assert_eq!(bytes, b"\x1b[<2;80;24M");
+    }
+
+    #[test]
+    fn sgr_middle_press() {
+        let bytes = encode_mouse_sgr(MouseButton::Middle, 0, 0, true);
+        assert_eq!(bytes, b"\x1b[<1;1;1M");
+    }
+
+    #[test]
+    fn sgr_scroll_up() {
+        let bytes = encode_mouse_sgr(MouseButton::ScrollUp, 10, 5, true);
+        assert_eq!(bytes, b"\x1b[<64;11;6M");
+    }
+
+    #[test]
+    fn sgr_scroll_down() {
+        let bytes = encode_mouse_sgr(MouseButton::ScrollDown, 10, 5, true);
+        assert_eq!(bytes, b"\x1b[<65;11;6M");
+    }
+
+    #[test]
+    fn sgr_motion_left_held() {
+        // Motion with left button held: code = 0 + 32 = 32
+        let bytes = encode_mouse_motion_sgr(MouseButton::Left, 20, 10);
+        assert_eq!(bytes, b"\x1b[<32;21;11M");
+    }
+
+    #[test]
+    fn sgr_motion_right_held() {
+        let bytes = encode_mouse_motion_sgr(MouseButton::Right, 0, 0);
+        assert_eq!(bytes, b"\x1b[<34;1;1M");
+    }
 }
 
 #[cfg(test)]
