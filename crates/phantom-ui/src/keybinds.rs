@@ -252,6 +252,10 @@ impl KeybindRegistry {
             (KeyCombo::cmd(Key::Char('-')), Action::ZoomOut),
             (KeyCombo::cmd(Key::Char('0')), Action::ZoomReset),
 
+            // Fullscreen
+            (KeyCombo::ctrl_shift(Key::Char('f')), Action::ToggleFullscreen),
+            (KeyCombo::bare(Key::F(11)), Action::ToggleFullscreen),
+
             // Window
             (KeyCombo::cmd_shift(Key::Char('p')), Action::ShowCommandPalette),
             (KeyCombo::cmd(Key::Char('q')), Action::Quit),
