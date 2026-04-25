@@ -1,4 +1,4 @@
-//! Per-frame update loop: PTY I/O, error scanning, alt-screen detection,
+//! Per-frame update loop: coordinator adapter ticking, dead adapter reaping,
 //! brain event polling, MCP command dispatch, and status bar updates.
 
 use std::path::Path;
@@ -6,18 +6,15 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use anyhow::Result;
-use log::{debug, info, trace, warn};
+use log::{debug, info, warn};
 
 use phantom_adapter::BusMessage;
 use phantom_brain::events::{AiAction, AiEvent};
 use phantom_protocol::Event;
 use phantom_context::ProjectContext;
 use phantom_mcp::{AppCommand, ScreenshotReply};
-use phantom_terminal::output;
-
 use crate::app::{App, AppState, SuggestionOverlay};
 use crate::input::chrono_time_string;
-use crate::pane::pane_cols_rows;
 
 impl App {
     /// Per-frame update: read PTY data, advance boot sequence, update widgets.
@@ -36,8 +33,6 @@ impl App {
         }
 
         // Coordinator: tick all registered adapters and deliver bus messages.
-        // (Strangler fig: runs alongside the legacy PTY loop below. As adapters
-        // migrate to the coordinator, the legacy loop shrinks.)
         self.coordinator.update_all(dt_duration);
 
         // Reap dead adapters (PTY exited).
@@ -54,155 +49,8 @@ impl App {
             self.coordinator.remove_adapter(dead_id, &mut self.layout, &mut self.scene);
         }
 
-        // Read from all panes' PTYs (non-blocking). Collect indices of exited panes.
-        let mut exited: Vec<usize> = Vec::new();
-        let mut had_output = false;
-        for (i, pane) in self.panes.iter_mut().enumerate() {
-            match pane.terminal.pty_read() {
-                Ok(n) => {
-                    if n > 0 {
-                        trace!("Pane {i} PTY read: {n} bytes");
-                        had_output = true;
-
-                        // T8: Preserve scroll position when user is reviewing history.
-                        // alacritty_terminal auto-scrolls to bottom when display_offset
-                        // is 0 and new data arrives. If the user has scrolled up, we
-                        // leave display_offset alone so they can keep reading.
-                        if pane.terminal.display_offset() > 0 {
-                            trace!(
-                                "Pane {i} scrolled up {} lines, preserving position",
-                                pane.terminal.display_offset()
-                            );
-                        }
-
-                        // Capture raw output for semantic scanning.
-                        let raw = &pane.terminal.last_read_buf()[..n];
-                        if let Ok(text) = std::str::from_utf8(raw) {
-                            pane.output_buf.push_str(text);
-                            if pane.output_buf.len() > 8192 {
-                                let excess = pane.output_buf.len() - 8192;
-                                let drain_to = pane.output_buf.floor_char_boundary(excess);
-                                if drain_to > 0 && pane.output_buf.is_char_boundary(drain_to) {
-                                    pane.output_buf.drain(..drain_to);
-                                }
-                            }
-                            pane.error_notified = false;
-                            pane.has_new_output = true;
-
-                            // Sentient mode: feed terminal output to the brain.
-                            if let Some(ref brain) = self.brain {
-                                let _ = brain.send_event(AiEvent::OutputChunk(text.to_string()));
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Pane {i} PTY read error (shell may have exited): {e}");
-                    exited.push(i);
-                }
-            }
-        }
-
-        // Publish terminal output event to bus (throttled by queue depth).
-        if had_output && self.coordinator.bus().queue_len() < 128 {
-            self.coordinator.bus_mut().emit(BusMessage {
-                topic_id: self.topic_terminal_output,
-                sender: 0,
-                event: Event::TerminalOutput { app_id: 0, bytes: 0 },
-                frame: 0,
-                timestamp: now.duration_since(self.start_time).as_secs(),
-            });
-        }
-
-        // Semantic scan: detect errors in PTY output and notify brain.
-        // Only scans panes that received new output THIS frame.
-        if let Some(ref brain) = self.brain {
-            for pane in self.panes.iter_mut() {
-                if !pane.has_new_output || pane.error_notified || pane.is_detached || pane.output_buf.is_empty() {
-                    continue;
-                }
-                pane.has_new_output = false;
-
-                let buf = &pane.output_buf;
-                let has_error = buf.contains("error[E")
-                    || buf.contains("Error:")
-                    || buf.contains("FAILED")
-                    || buf.contains("error: ")
-                    || buf.contains("npm ERR!")
-                    || buf.contains("Traceback (most recent")
-                    || buf.contains("SyntaxError")
-                    || buf.contains("TypeError")
-                    || buf.contains("panic at");
-
-                if has_error {
-                    let parsed = phantom_semantic::SemanticParser::parse(
-                        "",
-                        &pane.output_buf,
-                        &pane.output_buf,
-                        Some(1),
-                    );
-                    if !parsed.errors.is_empty() {
-                        let _ = brain.send_event(AiEvent::CommandComplete(parsed));
-                        pane.error_notified = true;
-                    }
-                }
-
-                let trimmed = buf.trim_end();
-                if trimmed.ends_with("$ ") || trimmed.ends_with("% ") || trimmed.ends_with("> ") || trimmed.ends_with("# ") {
-                    pane.output_buf.clear();
-                }
-            }
-        }
-
-        // Alt-screen detection.
-        for pane in self.panes.iter_mut() {
-            let is_alt = phantom_terminal::alt_screen::is_alt_screen(pane.terminal.term());
-
-            if is_alt && !pane.was_alt_screen {
-                pane.is_detached = true;
-                pane.detached_label = phantom_terminal::process::foreground_process_name(
-                    pane.terminal.pty_fd(),
-                )
-                .unwrap_or_else(|| "interactive".to_string());
-                info!("Pane detached: process \"{}\"", pane.detached_label);
-            }
-
-            if !is_alt && pane.was_alt_screen && pane.is_detached {
-                info!("Pane reattached (was \"{}\")", pane.detached_label);
-                pane.is_detached = false;
-                pane.detached_label.clear();
-            }
-
-            pane.was_alt_screen = is_alt;
-        }
-
-        // Remove exited panes.
-        for &i in exited.iter().rev() {
-            let pane = self.panes.remove(i);
-            if let Err(e) = self.layout.remove_pane(pane.pane_id) {
-                warn!("Failed to remove exited pane from layout: {e}");
-            }
-            self.scene.remove_node(pane.scene_node);
-            if self.focused_pane >= self.panes.len() && !self.panes.is_empty() {
-                self.focused_pane = self.panes.len() - 1;
-            }
-        }
-
-        if !exited.is_empty() {
-            let width = self.gpu.surface_config.width;
-            let height = self.gpu.surface_config.height;
-            let _ = self.layout.resize(width as f32, height as f32);
-
-            for pane in &mut self.panes {
-                if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
-                    let (cols, rows) = pane_cols_rows(self.cell_size, rect);
-                    pane.terminal.resize(cols, rows);
-                }
-            }
-        }
-
-        if self.panes.is_empty() && self.coordinator.adapter_count() == 0 {
-            info!("All panes and adapters exited, quitting");
+        if self.coordinator.adapter_count() == 0 {
+            info!("All adapters exited, quitting");
             self.quit_requested = true;
         }
 
@@ -358,15 +206,6 @@ impl App {
             }
         }
 
-        // Sync scene graph transforms from layout engine.
-        for pane in &self.panes {
-            if let Ok(rect) = self.layout.get_pane_rect(pane.pane_id) {
-                self.scene.set_transform(
-                    pane.scene_node,
-                    rect.x, rect.y, rect.width, rect.height,
-                );
-            }
-        }
         self.scene.update_world_transforms();
 
         // Poll system monitor.
@@ -406,10 +245,10 @@ impl App {
         if now.duration_since(self.watchdog_last).as_secs() >= 10 {
             let uptime = now.duration_since(self.start_time).as_secs();
             info!(
-                "watchdog: alive frame={} uptime={}s panes={} agents={}",
+                "watchdog: alive frame={} uptime={}s adapters={} agents={}",
                 self.watchdog_frame,
                 uptime,
-                self.panes.len(),
+                self.coordinator.adapter_count(),
                 self.agent_panes.len(),
             );
             self.watchdog_last = now;
@@ -499,7 +338,7 @@ impl App {
             width,
             height,
             theme: self.theme.name.clone(),
-            pane_count: self.panes.len(),
+            pane_count: self.coordinator.adapter_count(),
             project: self.context.as_ref().map(|c| c.name.clone()),
             branch: self.context.as_ref().and_then(|c| c.git.as_ref().map(|g| g.branch.clone())),
         };
@@ -529,55 +368,46 @@ impl App {
         }
 
         let bytes = key_name_to_bytes(key);
-        let pane = self.panes.get_mut(self.focused_pane)
-            .ok_or_else(|| "no focused pane".to_string())?;
-        pane.terminal.pty_write(&bytes)
-            .map_err(|e| format!("pty_write failed: {e}"))?;
+        self.coordinator.send_command_to_focused(
+            "write_bytes",
+            &serde_json::json!({"bytes": bytes}),
+        ).map_err(|e| format!("write_bytes failed: {e}"))?;
         self.last_input_time = Instant::now();
         Ok(format!("wrote {} bytes to pty", bytes.len()))
     }
 
     fn mcp_send_to_pty(&mut self, command: &str) -> Result<(), String> {
-        let pane = self.panes.get_mut(self.focused_pane)
-            .ok_or_else(|| "no focused pane".to_string())?;
-
-        let mut bytes = command.as_bytes().to_vec();
-        if !bytes.ends_with(b"\n") {
-            bytes.push(b'\n');
+        let mut text = command.to_string();
+        if !text.ends_with('\n') {
+            text.push('\n');
         }
-        pane.terminal.pty_write(&bytes)
-            .map_err(|e| format!("pty_write failed: {e}"))?;
-
+        self.coordinator.send_command_to_focused(
+            "write",
+            &serde_json::json!({"text": text}),
+        ).map_err(|e| format!("write failed: {e}"))?;
         Ok(())
     }
 
     fn mcp_read_terminal_state(&self) -> String {
-        let Some(pane) = self.panes.get(self.focused_pane) else {
+        let Some(focused) = self.coordinator.focused() else {
             return String::new();
         };
-        let (cells, cols, rows, _cursor) = output::extract_grid(pane.terminal.term());
-
-        let mut out = String::with_capacity(cells.len() + rows);
-        for row in 0..rows {
-            for col in 0..cols {
-                let idx = row * cols + col;
-                if let Some(cell) = cells.get(idx) {
-                    out.push(cell.ch);
-                }
-            }
-            out.push('\n');
-        }
-        while out.ends_with("\n\n") {
-            out.pop();
-        }
-        out
+        let Some(state) = self.coordinator.get_state(focused) else {
+            return String::new();
+        };
+        // The adapter's get_state() returns JSON with a "text" field
+        // containing the rendered terminal grid as text.
+        state.get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
     }
 
     fn mcp_read_output(&self, lines: usize) -> String {
-        if self.panes.get(self.focused_pane).is_none() {
+        let full = self.mcp_read_terminal_state();
+        if full.is_empty() {
             return String::new();
         }
-        let full = self.mcp_read_terminal_state();
         let all_lines: Vec<&str> = full.lines().collect();
         let start = all_lines.len().saturating_sub(lines);
         all_lines[start..].join("\n")
@@ -622,8 +452,8 @@ impl App {
                 "ahead": g.ahead,
                 "behind": g.behind,
             })),
-            "pane_count": self.panes.len(),
-            "focused_pane": self.focused_pane,
+            "adapter_count": self.coordinator.adapter_count(),
+            "focused_adapter": self.coordinator.focused(),
             "theme": self.theme.name,
         })
     }

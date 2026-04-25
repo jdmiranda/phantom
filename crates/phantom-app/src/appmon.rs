@@ -33,9 +33,7 @@ impl App {
             .filter(|p| p.status == crate::agent_pane::AgentPaneStatus::Working)
             .count();
 
-        let pty_buf_bytes: usize = self.panes.iter()
-            .map(|p| p.output_buf.len())
-            .sum();
+        let pty_buf_bytes: usize = 0; // Legacy pane buffers removed; adapters manage their own
 
         let memory_entries = self.memory.as_ref()
             .map(|m| m.count())
@@ -44,7 +42,7 @@ impl App {
         AppMetrics {
             fps,
             frame_time_ms,
-            pane_count: self.panes.len(),
+            pane_count: self.coordinator.adapter_count(),
             agent_count: self.agent_panes.len(),
             agent_working,
             scene_nodes: self.scene.node_count(),

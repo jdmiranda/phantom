@@ -79,8 +79,7 @@ impl App {
                         && y as f32 <= inner.y + inner.height
                     {
                         // Store the AppId in cursor_over_pane for focus-click.
-                        // We repurpose the usize field to hold app_id (u32).
-                        self.cursor_over_pane = Some(app_id as usize);
+                        self.cursor_over_pane = Some(app_id);
                         break;
                     }
                 }
@@ -166,8 +165,7 @@ impl App {
             }
 
             // Click-to-focus: set coordinator focus to the pane under cursor.
-            if let Some(hover_id) = self.cursor_over_pane {
-                let app_id = hover_id as u32;
+            if let Some(app_id) = self.cursor_over_pane {
                 if self.coordinator.focused() != Some(app_id) {
                     debug!("Mouse focus: adapter {app_id}");
                     self.coordinator.set_focus(app_id);

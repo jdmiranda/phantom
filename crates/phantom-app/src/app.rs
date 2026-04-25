@@ -43,7 +43,7 @@ use crate::boot::BootSequence;
 use crate::boot_order::ShutdownGuard;
 use crate::config::PhantomConfig;
 use crate::coordinator::AppCoordinator;
-use crate::pane::{Pane, pane_cols_rows};
+use crate::pane::pane_cols_rows;
 use crate::supervisor_client::SupervisorClient;
 
 // ---------------------------------------------------------------------------
@@ -85,10 +85,6 @@ pub struct App {
     pub(crate) quad_renderer: QuadRenderer,
     pub(crate) grid_renderer: GridRenderer,
     pub(crate) postfx: PostFxPipeline,
-
-    // -- Terminal panes --
-    pub(crate) panes: Vec<Pane>,
-    pub(crate) focused_pane: usize,
 
     // -- UI --
     pub(crate) layout: LayoutEngine,
@@ -153,13 +149,14 @@ pub struct App {
     pub(crate) pool_chrome_quads: Vec<QuadInstance>,
     pub(crate) pool_chrome_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
 
-    // -- Fullscreen pane toggle --
-    pub(crate) fullscreen_pane: Option<usize>,
+    // -- Fullscreen pane toggle (stores AppId of the fullscreen adapter) --
+    pub(crate) fullscreen_pane: Option<u32>,
 
     // -- Agent panes (AI workers running in visible panes) --
     pub(crate) agent_panes: Vec<crate::agent_pane::AgentPane>,
 
     // -- Event bus topic IDs (bus itself lives in coordinator) --
+    #[allow(dead_code)]
     pub(crate) topic_terminal_output: TopicId,
     #[allow(dead_code)]
     pub(crate) topic_terminal_error: TopicId,
@@ -195,8 +192,7 @@ pub struct App {
     pub(crate) video_renderer: VideoRenderer,
     pub(crate) video_playback: Option<crate::video::VideoPlayback>,
 
-    // -- App coordinator (strangler fig: runs alongside legacy pane system,
-    //    will gradually absorb update/render/input dispatch in WU-5B..5E) --
+    // -- App coordinator (owns all terminal adapters, layout, and event bus) --
     pub(crate) coordinator: AppCoordinator,
 
     // -- Job pool (async work: brain queries, resource loading, etc.) --
@@ -211,7 +207,7 @@ pub struct App {
 
     // -- Mouse state --
     pub(crate) cursor_position: (f64, f64),
-    pub(crate) cursor_over_pane: Option<usize>,
+    pub(crate) cursor_over_pane: Option<u32>,
     /// Which terminal mouse button is currently held (for drag/selection tracking).
     pub(crate) mouse_button_held: Option<phantom_terminal::input::MouseButton>,
 
@@ -300,9 +296,6 @@ impl App {
         let mut layout = LayoutEngine::with_scale(scale_factor)?;
         let pane_id = layout.add_pane()?;
         layout.resize(width as f32, height as f32)?;
-
-        // -- Panes (legacy vec — empty; initial terminal is adapter-managed) --
-        let panes: Vec<Pane> = Vec::new();
 
         // -- Keybinds --
         let keybinds = KeybindRegistry::new();
@@ -453,9 +446,7 @@ impl App {
         let job_pool = crate::jobs::JobPool::start_up(4);
         info!("Job pool initialized: 4 workers");
 
-        // -- App coordinator (strangler fig: coexists with legacy pane system) --
-        // Pass the single event bus so adapters and the legacy pane system
-        // share the same pub/sub channel.
+        // -- App coordinator (owns all adapters, dispatches update/render/input) --
         let mut coordinator = AppCoordinator::new(event_bus);
 
         // -- Register initial terminal as adapter (Phase 3 — coordinator-managed) --
@@ -540,8 +531,6 @@ impl App {
             quad_renderer,
             grid_renderer,
             postfx,
-            panes,
-            focused_pane: 0,
             layout,
             keybinds,
             theme,
@@ -618,10 +607,10 @@ impl App {
             AppState::Terminal => "term",
         };
         Some(format!(
-            "[TRACE] frame={} state={} panes={} agents={}\n",
+            "[TRACE] frame={} state={} adapters={} agents={}\n",
             self.watchdog_frame,
             state,
-            self.panes.len(),
+            self.coordinator.adapter_count(),
             self.agent_panes.len(),
         ))
     }
@@ -683,18 +672,15 @@ impl App {
         let git_branch = self.context.as_ref()
             .and_then(|c| c.git.as_ref().map(|g| g.branch.clone()));
 
-        let panes: Vec<PaneState> = self.panes.iter().enumerate().map(|(i, pane)| {
-            let term_size = pane.terminal.size();
+        // Build pane state from coordinator adapters.
+        let focused_app = self.coordinator.focused();
+        let panes: Vec<PaneState> = self.coordinator.all_app_ids().iter().map(|&app_id| {
             PaneState {
                 working_dir: project_dir.clone(),
-                is_focused: i == self.focused_pane,
-                cols: term_size.cols,
-                rows: term_size.rows,
-                title: if pane.is_detached {
-                    pane.detached_label.clone()
-                } else {
-                    "shell".into()
-                },
+                is_focused: focused_app == Some(app_id),
+                cols: 80,
+                rows: 24,
+                title: "shell".into(),
                 split: None,
             }
         }).collect();
@@ -750,17 +736,19 @@ impl App {
             warn!("Layout resize failed: {e}");
         }
 
-        // Recompute terminal dimensions for every pane. Cols/rows come from
-        // the pane's *inner* rect (inside container chrome) so the shell sees
-        // the same area we draw into.
-        for pane in &mut self.panes {
-            let layout_r = self.layout.get_pane_rect(pane.pane_id).unwrap_or_else(|e| {
-                warn!("Layout missing for pane {:?} on resize: {e}", pane.pane_id);
-                phantom_ui::layout::Rect { x: 0.0, y: 30.0, width: width as f32, height: height as f32 - 54.0 }
-            });
-            let (cols, rows) = pane_cols_rows(self.cell_size, layout_r);
-            pane.terminal.resize(cols, rows);
-            trace!("Pane resized to {cols}x{rows}");
+        // Resize coordinator-managed adapters to match new layout dimensions.
+        for app_id in self.coordinator.all_app_ids() {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
+                if let Ok(rect) = self.layout.get_pane_rect(pane_id) {
+                    let (cols, rows) = pane_cols_rows(self.cell_size, rect);
+                    let _ = self.coordinator.send_command(
+                        app_id,
+                        "resize",
+                        &serde_json::json!({"cols": cols, "rows": rows}),
+                    );
+                    trace!("Adapter {app_id} resized to {cols}x{rows}");
+                }
+            }
         }
 
         // Update scene graph root transform.

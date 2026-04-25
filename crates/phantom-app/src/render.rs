@@ -2,14 +2,12 @@
 //! boot sequence, and terminal grid rendering with container chrome.
 
 use anyhow::Result;
-use log::warn;
 use wgpu::CommandEncoderDescriptor;
 
 use phantom_renderer::grid::{GridCell, GridRenderData};
+use phantom_ui::widgets::Widget;
 use phantom_renderer::postfx::PostFxParams;
 use phantom_renderer::quads::QuadInstance;
-use phantom_terminal::output::{self, CursorShape, TerminalThemeColors};
-use phantom_ui::widgets::Widget;
 
 use phantom_renderer::quads::QuadInstance as QI;
 
@@ -321,52 +319,40 @@ impl App {
         chrome_quads: &mut Vec<QuadInstance>,
         chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
-        // -- Fullscreen mode: render only the fullscreen pane at full size --
-        if let Some(fs_idx) = self.fullscreen_pane {
-            if let Some(pane) = self.panes.get(fs_idx) {
-                let theme_colors = TerminalThemeColors {
-                    foreground: self.theme.colors.foreground,
-                    background: self.theme.colors.background,
-                    cursor: self.theme.colors.cursor,
-                    ansi: Some(self.theme.colors.ansi),
-                };
+        // -- Fullscreen mode: render only the fullscreen adapter at full size --
+        if let Some(fs_app_id) = self.fullscreen_pane {
+            // Get render output from the fullscreen adapter.
+            let coordinator_outputs = self.coordinator.render_all(&self.layout);
+            if let Some((_id, _rect, ro)) = coordinator_outputs.iter().find(|(id, _, _)| *id == fs_app_id) {
+                if let Some(ref grid) = ro.grid {
+                    let margin = 12.0;
+                    let origin = (margin, margin);
 
-                let (render_cells, cols, rows, cursor) =
-                    output::extract_grid_themed(pane.terminal.term(), &theme_colors);
+                    let grid_cells: Vec<GridCell> = grid.cells.iter()
+                        .map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg })
+                        .collect();
 
-                let margin = 12.0;
-                let inner_rect = phantom_ui::layout::Rect {
-                    x: margin,
-                    y: margin,
-                    width: screen_size[0] - margin * 2.0,
-                    height: screen_size[1] - margin * 2.0,
-                };
-                let origin = (inner_rect.x, inner_rect.y);
+                    let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
+                        &grid_cells, grid.cols, grid.rows,
+                        &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
+                        origin, self.cell_size,
+                    );
+                    quads.append(&mut bg_quads);
+                    glyphs.append(&mut glyph_instances);
 
-                let grid_cells: Vec<GridCell> = render_cells
-                    .iter()
-                    .map(|rc| GridCell { ch: rc.ch, fg: rc.fg, bg: rc.bg })
-                    .collect();
-
-                let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
-                    &grid_cells, cols, rows,
-                    &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
-                    origin, self.cell_size,
-                );
-                quads.append(&mut bg_quads);
-                glyphs.append(&mut glyph_instances);
-
-                if cursor.visible {
-                    let cx = inner_rect.x + cursor.col as f32 * self.cell_size.0;
-                    let cy = inner_rect.y + cursor.row as f32 * self.cell_size.1;
-                    quads.push(QuadInstance {
-                        pos: [cx, cy],
-                        size: [self.cell_size.0, self.cell_size.1],
-                        color: [self.theme.colors.cursor[0], self.theme.colors.cursor[1], self.theme.colors.cursor[2], 0.7],
-                        border_radius: 0.0,
-                    });
+                    if let Some(ref cursor) = grid.cursor {
+                        if cursor.visible {
+                            let cx = margin + cursor.col as f32 * self.cell_size.0;
+                            let cy = margin + cursor.row as f32 * self.cell_size.1;
+                            quads.push(QuadInstance {
+                                pos: [cx, cy],
+                                size: [self.cell_size.0, self.cell_size.1],
+                                color: [self.theme.colors.cursor[0], self.theme.colors.cursor[1], self.theme.colors.cursor[2], 0.7],
+                                border_radius: 0.0,
+                            });
+                        }
+                    }
                 }
-
                 self.render_overlay_text("ESC to exit fullscreen", screen_size[0] - 200.0, screen_size[1] - 30.0, [0.4, 0.6, 0.4, 0.5], chrome_glyphs);
             }
             return;
@@ -535,314 +521,13 @@ impl App {
             self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
         }
 
-        let _has_multiple = self.panes.len() > 1;
-        let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
-        let mut container_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
-
         // -- Monitor panels: hstack (sysmon left, appmon right) --
         let monitor_height = self.render_monitor_hstack(screen_size, quads, glyphs);
         // -- Agent panels below monitors --
         let agent_height = self.render_agent_panels_offset(
             screen_size, quads, glyphs, monitor_height,
         );
-        let panels_height = monitor_height + agent_height;
-
-        // Build theme-aware color mapping for terminal grid extraction.
-        let theme_colors = TerminalThemeColors {
-            foreground: self.theme.colors.foreground,
-            background: self.theme.colors.background,
-            cursor: self.theme.colors.cursor,
-            ansi: Some(self.theme.colors.ansi),
-        };
-
-        for (pane_index, pane) in self.panes.iter().enumerate() {
-            let is_focused = pane_index == self.focused_pane;
-
-            // Skip panes whose scene node is marked invisible.
-            if let Some(node) = self.scene.get(pane.scene_node) {
-                if !node.visible {
-                    continue;
-                }
-            }
-
-            // -- Extract terminal grid with theme colors --
-            let (render_cells, cols, rows, cursor) =
-                output::extract_grid_themed(pane.terminal.term(), &theme_colors);
-
-            // -- Get pane rectangle from layout engine --
-            // When agent panes are active, shrink and shift the terminal down
-            // to make room for the agent panel stacked above.
-            let mut layout_rect = self.layout.get_pane_rect(pane.pane_id).unwrap_or_else(|e| {
-                warn!("Layout missing for pane {:?} in render: {e}", pane.pane_id);
-                phantom_ui::layout::Rect {
-                    x: 0.0,
-                    y: 30.0,
-                    width: screen_size[0],
-                    height: screen_size[1] - 54.0,
-                }
-            });
-            if panels_height > 0.0 {
-                layout_rect.y += panels_height;
-                layout_rect.height -= panels_height;
-                if layout_rect.height < self.cell_size.1 * 4.0 {
-                    layout_rect.height = self.cell_size.1 * 4.0;
-                }
-            }
-
-            // Inset by outer margin to create the "floating container" look.
-            let pane_rect = container_rect(layout_rect, self.cell_size);
-
-            // -- Inner rect: area inside container chrome where the grid draws --
-            let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
-            let origin = (inner_rect.x, inner_rect.y);
-
-            // -- App-container chrome ----
-            // Non-detached panes only; detached panes have their own (cyan) chrome.
-            //
-            // Background + drop shadow → scene pass (gets CRT, draws UNDER text).
-            // Border + title → overlay pass (stays crisp, draws OVER CRT).
-            if !pane.is_detached {
-                let bg = self.theme.colors.background;
-                let cont_bg = [
-                    (bg[0] + 0.06).min(1.0),
-                    (bg[1] + 0.10).min(1.0),
-                    (bg[2] + 0.06).min(1.0),
-                    1.0,
-                ];
-
-                // Drop shadow (scene pass — gets CRT).
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x + 3.0, pane_rect.y + 3.0],
-                    size: [pane_rect.width, pane_rect.height],
-                    color: [0.0, 0.0, 0.0, 0.35],
-                    border_radius: 6.0,
-                });
-
-                // Container background (scene pass — gets CRT).
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, pane_rect.height],
-                    color: cont_bg,
-                    border_radius: 6.0,
-                });
-
-                // Title strip (scene pass — gets CRT).
-                let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
-                let title_bg = if is_focused {
-                    [bg[0] * 1.6 + 0.04, bg[1] * 2.0 + 0.06, bg[2] * 1.6 + 0.04, 1.0]
-                } else {
-                    [bg[0] * 1.3 + 0.02, bg[1] * 1.5 + 0.03, bg[2] * 1.3 + 0.02, 1.0]
-                };
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, title_h],
-                    color: title_bg,
-                    border_radius: 6.0,
-                });
-
-                // Focus-aware border (overlay pass — crisp, no CRT warp).
-                let border_color = if is_focused {
-                    [0.2, 1.0, 0.5, 0.85]
-                } else {
-                    [0.15, 0.25, 0.18, 0.60]
-                };
-                let t = 1.0;
-                // top
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
-                // bottom
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
-                // left
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
-                // right
-                chrome_quads.push(QuadInstance { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
-
-                // Title text: "● shell · {cols}×{rows}"
-                let dot_color = if is_focused {
-                    [0.2, 1.0, 0.5, 1.0]
-                } else {
-                    [0.4, 0.5, 0.4, 0.7]
-                };
-                let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
-                let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
-                let title_text = format!("● shell  {}×{}", cols, rows);
-                container_titles.push((title_text, title_x, title_y, dot_color));
-            }
-
-            // -- Convert RenderCells to GridCells --
-            let mut grid_cells: Vec<GridCell> = render_cells
-                .iter()
-                .map(|rc| GridCell {
-                    ch: rc.ch,
-                    fg: rc.fg,
-                    bg: rc.bg,
-                })
-                .collect();
-
-            // -- Apply per-keystroke glitch effect --
-            if is_focused {
-                self.keystroke_fx.apply(&mut grid_cells, cols);
-            }
-
-            // -- Prepare background quads + glyph instances via GridRenderData --
-            let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
-                &grid_cells,
-                cols,
-                rows,
-                &mut self.text_renderer,
-                &mut self.atlas,
-                &self.gpu.queue,
-                origin,
-                self.cell_size,
-            );
-
-            quads.append(&mut bg_quads);
-            glyphs.append(&mut glyph_instances);
-
-            // -- Cursor quad (only for focused pane, or dim for unfocused) --
-            if cursor.visible {
-                let cursor_x = inner_rect.x + cursor.col as f32 * self.cell_size.0;
-                let cursor_y = inner_rect.y + cursor.row as f32 * self.cell_size.1;
-                let cursor_color = if is_focused {
-                    self.theme.colors.cursor
-                } else {
-                    // Dim cursor for unfocused panes.
-                    let c = self.theme.colors.cursor;
-                    [c[0] * 0.3, c[1] * 0.3, c[2] * 0.3, c[3] * 0.4]
-                };
-
-                let cursor_quad = match cursor.shape {
-                    CursorShape::Block => QuadInstance {
-                        pos: [cursor_x, cursor_y],
-                        size: [self.cell_size.0, self.cell_size.1],
-                        color: [cursor_color[0], cursor_color[1], cursor_color[2], if is_focused { 0.7 } else { 0.3 }],
-                        border_radius: 0.0,
-                    },
-                    CursorShape::Underline => QuadInstance {
-                        pos: [cursor_x, cursor_y + self.cell_size.1 - 2.0],
-                        size: [self.cell_size.0, 2.0],
-                        color: cursor_color,
-                        border_radius: 0.0,
-                    },
-                    CursorShape::Bar => QuadInstance {
-                        pos: [cursor_x, cursor_y],
-                        size: [2.0, self.cell_size.1],
-                        color: cursor_color,
-                        border_radius: 0.0,
-                    },
-                };
-                quads.push(cursor_quad);
-            }
-
-            // -- Scrollbar (overlay pass — crisp, post-CRT) --
-            let history = pane.terminal.history_size();
-            if history > 0 {
-                let track = crate::pane::scrollbar_track_rect(inner_rect);
-
-                // Track background (subtle).
-                chrome_quads.push(QuadInstance {
-                    pos: [track.x, track.y],
-                    size: [track.width, track.height],
-                    color: [1.0, 1.0, 1.0, 0.05],
-                    border_radius: 3.0,
-                });
-
-                // Thumb.
-                let offset = pane.terminal.display_offset();
-                if let Some(thumb) = crate::pane::scrollbar_thumb_rect(track, offset, history, rows) {
-                    let thumb_color = if is_focused {
-                        [0.2, 1.0, 0.5, 0.4] // theme green
-                    } else {
-                        [0.5, 0.5, 0.5, 0.25] // dim gray
-                    };
-                    chrome_quads.push(QuadInstance {
-                        pos: [thumb.x, thumb.y],
-                        size: [thumb.width, thumb.height],
-                        color: thumb_color,
-                        border_radius: 3.0,
-                    });
-                }
-            }
-
-            // -- Pane border --
-            // Detached panes always get an animated cyan tether border + header.
-            // Non-detached panes get the standard border when multiple panes exist.
-            if pane.is_detached {
-                let elapsed = self.start_time.elapsed().as_secs_f32();
-                let pulse = (elapsed * 2.0).sin() * 0.15 + 0.85;
-                let border_color = [0.0, pulse, pulse * 0.8, 0.9];
-                let border_thickness = 2.0;
-
-                // Top edge (overlay pass — crisp).
-                chrome_quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, border_thickness],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
-                // Bottom edge (overlay pass — crisp).
-                chrome_quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y + pane_rect.height - border_thickness],
-                    size: [pane_rect.width, border_thickness],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
-                // Left edge (overlay pass — crisp).
-                chrome_quads.push(QuadInstance {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [border_thickness, pane_rect.height],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
-                // Right edge (overlay pass — crisp).
-                chrome_quads.push(QuadInstance {
-                    pos: [pane_rect.x + pane_rect.width - border_thickness, pane_rect.y],
-                    size: [border_thickness, pane_rect.height],
-                    color: border_color,
-                    border_radius: 0.0,
-                });
-
-                // -- Detach header bar --
-                let header_height = self.cell_size.1 + 4.0;
-                // Dark semi-transparent header background.
-                quads.push(QuadInstance {
-                    pos: [pane_rect.x + border_thickness, pane_rect.y + border_thickness],
-                    size: [pane_rect.width - border_thickness * 2.0, header_height],
-                    color: [0.02, 0.06, 0.08, 0.85],
-                    border_radius: 0.0,
-                });
-
-                // Tether indicator dot (animated).
-                let dot_size = 6.0;
-                let dot_x = pane_rect.x + border_thickness + 6.0;
-                let dot_y = pane_rect.y + border_thickness + (header_height - dot_size) / 2.0;
-                quads.push(QuadInstance {
-                    pos: [dot_x, dot_y],
-                    size: [dot_size, dot_size],
-                    color: [0.0, pulse, pulse * 0.8, 1.0],
-                    border_radius: 3.0,
-                });
-
-                // Process name label.
-                let label_x = dot_x + dot_size + 4.0;
-                let label_y = pane_rect.y + border_thickness + 2.0;
-                let label_color = [0.0, pulse, pulse * 0.8, 1.0];
-
-                let label = format!("  {} ", &pane.detached_label);
-                detached_labels.push((label, label_x, label_y, label_color));
-            }
-            // Note: non-detached pane borders are now drawn as part of the
-            // app-container chrome at the top of the pane loop.
-        }
-
-        // -- Detached pane labels (overlay pass — crisp text) --
-        for (label, x, y, color) in &detached_labels {
-            self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
-        }
-
-        // -- App-container title text (overlay pass — crisp, readable) --
-        for (label, x, y, color) in &container_titles {
-            self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
-        }
+        let _panels_height = monitor_height + agent_height;
 
         // -- Tab bar --
         if let Ok(tab_rect) = self.layout.get_tab_bar_rect() {

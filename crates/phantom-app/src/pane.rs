@@ -6,9 +6,7 @@
 
 use log::{info, warn};
 
-use phantom_scene::node::NodeId;
 use phantom_terminal::terminal::PhantomTerminal;
-use phantom_ui::layout::PaneId;
 
 use crate::app::App;
 
@@ -27,24 +25,6 @@ pub(crate) const CONTAINER_PAD_B_CELLS: f32 = 0.3;
 
 /// Outer margin around each container, in pixels.
 pub(crate) const CONTAINER_MARGIN: f32 = 12.0;
-
-// ---------------------------------------------------------------------------
-// Pane (legacy — kept for compatibility during migration)
-// ---------------------------------------------------------------------------
-
-/// A terminal pane: owns a PTY-backed terminal emulator and its layout node.
-pub(crate) struct Pane {
-    pub(crate) terminal: PhantomTerminal,
-    pub(crate) pane_id: PaneId,
-    pub(crate) scene_node: NodeId,
-    pub(crate) was_alt_screen: bool,
-    pub(crate) is_detached: bool,
-    pub(crate) detached_label: String,
-    pub(crate) output_buf: String,
-    pub(crate) error_notified: bool,
-    /// Set when new PTY data arrives; cleared after semantic scan runs.
-    pub(crate) has_new_output: bool,
-}
 
 // ---------------------------------------------------------------------------
 // Geometry helpers

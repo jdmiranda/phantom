@@ -13,6 +13,7 @@ pub mod image_handler;
 pub mod settings;
 mod input;
 pub mod jobs;
+#[allow(dead_code)]
 mod keystroke_fx;
 pub mod logging;
 mod mouse;

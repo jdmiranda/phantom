@@ -4,6 +4,10 @@
 //! typed, the cell at the cursor briefly cycles through random glitch
 //! characters before locking in to the real character. The effect is purely
 //! visual — terminal state is never modified.
+//!
+//! NOTE: `trigger()` and `apply()` are temporarily unused after the legacy pane
+//! system was removed. They will be re-wired through the coordinator adapter
+//! render path.
 
 use std::time::Instant;
 

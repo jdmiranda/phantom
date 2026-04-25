@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use winit::keyboard::{Key, NamedKey};
 
 use phantom_terminal::input::{self, KeyEvent, PhantomKey, PhantomModifiers};
@@ -212,9 +212,9 @@ impl App {
                 if self.fullscreen_pane.is_some() {
                     info!("Exiting fullscreen mode");
                     self.fullscreen_pane = None;
-                } else {
-                    info!("Entering fullscreen mode: pane {}", self.focused_pane);
-                    self.fullscreen_pane = Some(self.focused_pane);
+                } else if let Some(focused) = self.coordinator.focused() {
+                    info!("Entering fullscreen mode: adapter {focused}");
+                    self.fullscreen_pane = Some(focused);
                 }
             }
             Action::ScrollPageUp => {
@@ -414,8 +414,12 @@ impl App {
                     Action::ScrollToTop | Action::ScrollToBottom
                 );
                 if is_scroll {
-                    let in_alt = self.panes.get(self.focused_pane)
-                        .map_or(false, |p| phantom_terminal::alt_screen::is_alt_screen(p.terminal.term()));
+                    // Check if focused adapter is in alt-screen mode (vim/htop/less).
+                    // If so, let the keypress fall through to the PTY.
+                    let in_alt = self.coordinator.focused()
+                        .and_then(|id| self.coordinator.get_state(id))
+                        .and_then(|state| state.get("alt_screen").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
                     if !in_alt {
                         self.dispatch_action(*action);
                         return;
@@ -482,24 +486,7 @@ impl App {
             }
 
             // Route through coordinator (adapter-managed terminals).
-            if self.coordinator.route_bytes(&bytes) {
-                return;
-            }
-
-            // Legacy fallback: write to focused pane's PTY directly.
-            if let Some(pane) = self.panes.get_mut(self.focused_pane) {
-                // Trigger glitch effect at cursor before writing to PTY.
-                if bytes.len() == 1 && bytes[0] >= 0x20 && bytes[0] < 0x7F {
-                    let content = pane.terminal.term().renderable_content();
-                    let col = content.cursor.point.column.0;
-                    let row = content.cursor.point.line.0.max(0) as usize;
-                    self.keystroke_fx.trigger(col, row);
-                }
-
-                if let Err(e) = pane.terminal.pty_write(&bytes) {
-                    warn!("PTY write failed: {e}");
-                }
-            }
+            self.coordinator.route_bytes(&bytes);
         }
     }
 
