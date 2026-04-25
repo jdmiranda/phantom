@@ -205,6 +205,10 @@ pub struct App {
 
     // -- Shutdown guard (logs reverse-tier teardown, idempotent via Drop) --
     pub(crate) shutdown_guard: ShutdownGuard,
+
+    // -- Mouse state --
+    pub(crate) cursor_position: (f64, f64),
+    pub(crate) cursor_over_pane: Option<usize>,
 }
 
 /// An active suggestion from the AI brain.
@@ -573,6 +577,8 @@ impl App {
             job_pool: Some(job_pool),
             resources: crate::resources::ResourceManager::new(),
             shutdown_guard: ShutdownGuard::new(),
+            cursor_position: (0.0, 0.0),
+            cursor_over_pane: None,
         })
     }
 
