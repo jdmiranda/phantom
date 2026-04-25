@@ -10,6 +10,7 @@ pub mod coordinator;
 mod console;
 mod video;
 pub mod image_handler;
+pub mod settings;
 mod input;
 pub mod jobs;
 mod keystroke_fx;
