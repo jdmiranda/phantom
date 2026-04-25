@@ -1,7 +1,8 @@
 # Phase 1 Execution Plan: AppCoordinator + Terminal Adapter + Engine Foundations
 
 **Date**: 2026-04-24 (expanded from 2026-04-23 draft)
-**Status**: Draft
+**Status**: COMPLETE — tagged v0.2.0-phase1 on 2026-04-24
+**Completed by**: Jeremy Miranda + Claude Opus 4.6
 **Depends on**: ARD-002, ARD-003, plan-adapter-integration.md, *Game Engine Architecture* (ch 5, 6, 7, 9)
 **Estimated scope**: ~2,400 lines new code, ~400 lines migration
 
