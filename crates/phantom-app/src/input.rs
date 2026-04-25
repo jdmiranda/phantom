@@ -393,8 +393,24 @@ impl App {
 
         if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers) {
             if let Some(action) = self.keybinds.lookup(&combo) {
-                self.dispatch_action(*action);
-                return;
+                // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
+                // Let them fall through to the PTY so the program receives them.
+                let is_scroll = matches!(action,
+                    Action::ScrollPageUp | Action::ScrollPageDown |
+                    Action::ScrollToTop | Action::ScrollToBottom
+                );
+                if is_scroll {
+                    let in_alt = self.panes.get(self.focused_pane)
+                        .map_or(false, |p| phantom_terminal::alt_screen::is_alt_screen(p.terminal.term()));
+                    if !in_alt {
+                        self.dispatch_action(*action);
+                        return;
+                    }
+                    // alt screen: fall through to PTY encoding
+                } else {
+                    self.dispatch_action(*action);
+                    return;
+                }
             }
         }
 
