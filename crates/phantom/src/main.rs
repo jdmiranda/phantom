@@ -132,6 +132,21 @@ impl ApplicationHandler for Phantom {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(app) = &mut self.app {
+                    app.handle_cursor_moved(position.x, position.y);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(app) = &mut self.app {
+                    app.handle_mouse_click(state, button);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(app) = &mut self.app {
+                    app.handle_mouse_scroll(delta);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 if let Some(app) = &mut self.app {
                     // Catch panics in update/render so a single bad frame
