@@ -175,6 +175,7 @@ pub struct App {
     pub(crate) appmon_visible: bool,
 
     // -- Reusable per-frame buffers (avoid allocations in hot loop) --
+    #[allow(dead_code)] // Was used for title formatting, now labels are pre-formatted
     pub(crate) title_buf: String,
     pub(crate) text_cell_buf: Vec<phantom_renderer::text::TerminalCell>,
 
@@ -209,8 +210,10 @@ pub struct App {
     // -- Shutdown guard (logs reverse-tier teardown, idempotent via Drop) --
     pub(crate) shutdown_guard: ShutdownGuard,
 
-    // -- Mouse state --
+    // -- Mouse state (wired in T5/T6: mouse event handlers) --
+    #[allow(dead_code)]
     pub(crate) cursor_position: (f64, f64),
+    #[allow(dead_code)]
     pub(crate) cursor_over_pane: Option<usize>,
 }
 

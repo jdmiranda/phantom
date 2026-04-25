@@ -334,8 +334,8 @@ impl App {
         }
 
         let _has_multiple = self.panes.len() > 1;
-        let mut detached_labels: Vec<(usize, f32, f32, [f32; 4])> = Vec::with_capacity(self.panes.len());
-        let mut container_titles: Vec<(usize, usize, f32, f32, [f32; 4])> = Vec::with_capacity(self.panes.len());
+        let mut detached_labels: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
+        let mut container_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
 
         // -- Monitor panels: hstack (sysmon left, appmon right) --
         let monitor_height = self.render_monitor_hstack(screen_size, quads, glyphs);
@@ -462,7 +462,8 @@ impl App {
                 };
                 let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
                 let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
-                container_titles.push((cols, rows, title_x, title_y, dot_color));
+                let title_text = format!("● shell  {}×{}", cols, rows);
+                container_titles.push((title_text, title_x, title_y, dot_color));
             }
 
             // -- Convert RenderCells to GridCells --
@@ -594,7 +595,8 @@ impl App {
                 let label_y = pane_rect.y + border_thickness + 2.0;
                 let label_color = [0.0, pulse, pulse * 0.8, 1.0];
 
-                detached_labels.push((pane_index, label_x, label_y, label_color));
+                let label = format!("  {} ", &pane.detached_label);
+                detached_labels.push((label, label_x, label_y, label_color));
             }
             // Note: non-detached pane borders are now drawn as part of the
             // app-container chrome at the top of the pane loop.
