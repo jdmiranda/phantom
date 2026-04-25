@@ -90,8 +90,8 @@ impl App {
         }
 
         // Publish terminal output event to bus (throttled by queue depth).
-        if had_output && self.event_bus.queue_len() < 128 {
-            self.event_bus.emit(BusMessage {
+        if had_output && self.coordinator.bus().queue_len() < 128 {
+            self.coordinator.bus_mut().emit(BusMessage {
                 topic_id: self.topic_terminal_output,
                 sender: 0,
                 event: Event::TerminalOutput { app_id: 0, bytes: 0 },
@@ -312,7 +312,7 @@ impl App {
         if agent_count_after < agent_count_before {
             for pane in &self.agent_panes {
                 if matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed) {
-                    self.event_bus.emit(BusMessage {
+                    self.coordinator.bus_mut().emit(BusMessage {
                         topic_id: self.topic_agent_event,
                         sender: 0,
                         event: Event::AgentTaskComplete {
