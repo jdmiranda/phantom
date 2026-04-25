@@ -140,6 +140,7 @@ pub struct RenderOutput {
 pub struct GridData {
     pub cells: Vec<TerminalCell>,
     pub cols: usize,
+    pub rows: usize,
     pub origin: (f32, f32),
     pub cursor: Option<CursorData>,
 }
@@ -149,6 +150,7 @@ pub struct GridData {
 pub struct TerminalCell {
     pub ch: char,
     pub fg: [f32; 4],
+    pub bg: [f32; 4],
 }
 
 /// Cursor position and appearance.

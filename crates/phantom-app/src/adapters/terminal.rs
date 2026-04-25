@@ -7,15 +7,44 @@
 use log::warn;
 use serde_json::json;
 
-use phantom_adapter::adapter::{QuadData, Rect, RenderOutput};
+use phantom_adapter::adapter::{
+    CursorData, CursorShape as AdapterCursorShape, GridData, Rect, RenderOutput,
+    TerminalCell as AdapterCell,
+};
+#[cfg(test)]
+use phantom_adapter::adapter::QuadData;
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
 use phantom_adapter::spatial::SpatialPreference;
+use phantom_terminal::output::{
+    self, CursorShape as TermCursorShape, CursorState, TerminalThemeColors,
+};
 use phantom_terminal::terminal::PhantomTerminal;
 
 /// Maximum bytes retained in the output buffer before the front is drained.
 const OUTPUT_BUF_CAP: usize = 8192;
+
+// ---------------------------------------------------------------------------
+// Type conversions: terminal -> adapter
+// ---------------------------------------------------------------------------
+
+fn convert_cursor_shape(shape: TermCursorShape) -> AdapterCursorShape {
+    match shape {
+        TermCursorShape::Block => AdapterCursorShape::Block,
+        TermCursorShape::Underline => AdapterCursorShape::Underline,
+        TermCursorShape::Bar => AdapterCursorShape::Bar,
+    }
+}
+
+fn convert_cursor(state: &CursorState) -> CursorData {
+    CursorData {
+        col: state.col,
+        row: state.row,
+        shape: convert_cursor_shape(state.shape),
+        visible: state.visible,
+    }
+}
 
 /// A terminal pane wrapped in the `AppAdapter` interface.
 ///
@@ -29,6 +58,8 @@ pub struct TerminalAdapter {
     is_detached: bool,
     detached_label: String,
     was_alt_screen: bool,
+    /// Theme colors for grid extraction (set at construction, updateable).
+    theme_colors: TerminalThemeColors,
 }
 
 // ---------------------------------------------------------------------------
@@ -38,6 +69,11 @@ pub struct TerminalAdapter {
 impl TerminalAdapter {
     /// Wrap an already-spawned terminal in the adapter.
     pub fn new(terminal: PhantomTerminal) -> Self {
+        Self::with_theme(terminal, TerminalThemeColors::default())
+    }
+
+    /// Wrap a terminal with specific theme colors for grid rendering.
+    pub fn with_theme(terminal: PhantomTerminal, theme_colors: TerminalThemeColors) -> Self {
         Self {
             terminal,
             output_buf: String::new(),
@@ -46,7 +82,13 @@ impl TerminalAdapter {
             is_detached: false,
             detached_label: String::new(),
             was_alt_screen: false,
+            theme_colors,
         }
+    }
+
+    /// Update the theme colors used for grid extraction.
+    pub fn set_theme_colors(&mut self, colors: TerminalThemeColors) {
+        self.theme_colors = colors;
     }
 
     /// Immutable access to the inner terminal.
@@ -164,16 +206,38 @@ impl AppCore for TerminalAdapter {
 
 impl Renderable for TerminalAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
+        // Extract the terminal grid with theme-aware colors.
+        let (render_cells, cols, rows, cursor_state) =
+            output::extract_grid_themed(self.terminal.term(), &self.theme_colors);
+
+        // Convert terminal RenderCells to adapter TerminalCells.
+        let cells: Vec<AdapterCell> = render_cells
+            .iter()
+            .map(|rc| AdapterCell {
+                ch: rc.ch,
+                fg: rc.fg,
+                bg: rc.bg,
+            })
+            .collect();
+
+        let cursor = if cursor_state.visible {
+            Some(convert_cursor(&cursor_state))
+        } else {
+            None
+        };
+
+        let grid = GridData {
+            cells,
+            cols,
+            rows,
+            origin: (rect.x, rect.y),
+            cursor,
+        };
+
         RenderOutput {
-            quads: vec![QuadData {
-                x: rect.x,
-                y: rect.y,
-                w: rect.width,
-                h: rect.height,
-                color: [0.05, 0.05, 0.08, 1.0],
-            }],
+            quads: vec![],
             text_segments: vec![],
-            grid: None,
+            grid: Some(grid),
         }
     }
 

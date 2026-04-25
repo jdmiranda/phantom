@@ -608,10 +608,11 @@ mod tests {
     fn grid_data_with_cells() {
         let grid = GridData {
             cells: vec![
-                TerminalCell { ch: 'H', fg: [1.0, 1.0, 1.0, 1.0] },
-                TerminalCell { ch: 'i', fg: [0.0, 1.0, 0.0, 1.0] },
+                TerminalCell { ch: 'H', fg: [1.0, 1.0, 1.0, 1.0], bg: [0.0, 0.0, 0.0, 1.0] },
+                TerminalCell { ch: 'i', fg: [0.0, 1.0, 0.0, 1.0], bg: [0.0, 0.0, 0.0, 1.0] },
             ],
             cols: 2,
+            rows: 1,
             origin: (10.0, 20.0),
             cursor: Some(CursorData {
                 col: 1,
