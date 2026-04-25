@@ -23,6 +23,10 @@ pub enum Action {
     ZoomReset,
     ToggleFullscreen,
     ShowCommandPalette,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollToTop,
+    ScrollToBottom,
     CycleTheme,
     Quit,
 }
@@ -46,6 +50,10 @@ impl fmt::Display for Action {
             Self::ZoomReset => "Zoom Reset",
             Self::ToggleFullscreen => "Toggle Fullscreen",
             Self::ShowCommandPalette => "Command Palette",
+            Self::ScrollPageUp => "Scroll Page Up",
+            Self::ScrollPageDown => "Scroll Page Down",
+            Self::ScrollToTop => "Scroll To Top",
+            Self::ScrollToBottom => "Scroll To Bottom",
             Self::CycleTheme => "Cycle Theme",
             Self::Quit => "Quit",
         };
@@ -252,6 +260,12 @@ impl KeybindRegistry {
             (KeyCombo::cmd(Key::Char('-')), Action::ZoomOut),
             (KeyCombo::cmd(Key::Char('0')), Action::ZoomReset),
 
+            // Scrollback
+            (KeyCombo { key: Key::PageUp, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollPageUp),
+            (KeyCombo { key: Key::PageDown, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollPageDown),
+            (KeyCombo { key: Key::Home, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollToTop),
+            (KeyCombo { key: Key::End, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollToBottom),
+
             // Window
             (KeyCombo::cmd_shift(Key::Char('p')), Action::ShowCommandPalette),
             (KeyCombo::cmd(Key::Char('q')), Action::Quit),
@@ -376,6 +390,22 @@ mod tests {
         let combo = KeyCombo::bare(Key::Escape);
         assert!(!combo.ctrl && !combo.alt && !combo.shift && !combo.logo);
         assert_eq!(format!("{combo}"), "Escape");
+    }
+
+    #[test]
+    fn scroll_keybinds_registered() {
+        let reg = KeybindRegistry::new();
+        let combo = KeyCombo { key: Key::PageUp, ctrl: false, alt: false, shift: true, logo: false };
+        assert_eq!(reg.lookup(&combo), Some(&Action::ScrollPageUp));
+
+        let combo = KeyCombo { key: Key::PageDown, ctrl: false, alt: false, shift: true, logo: false };
+        assert_eq!(reg.lookup(&combo), Some(&Action::ScrollPageDown));
+
+        let combo = KeyCombo { key: Key::Home, ctrl: false, alt: false, shift: true, logo: false };
+        assert_eq!(reg.lookup(&combo), Some(&Action::ScrollToTop));
+
+        let combo = KeyCombo { key: Key::End, ctrl: false, alt: false, shift: true, logo: false };
+        assert_eq!(reg.lookup(&combo), Some(&Action::ScrollToBottom));
     }
 
     #[test]
