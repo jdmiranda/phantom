@@ -301,19 +301,8 @@ impl App {
         let pane_id = layout.add_pane()?;
         layout.resize(width as f32, height as f32)?;
 
-        // -- Panes --
-        // scene_node will be set after the scene graph is created below.
-        let panes = vec![Pane {
-            terminal,
-            pane_id,
-            scene_node: 0, // placeholder; set after scene graph init
-            was_alt_screen: false,
-            is_detached: false,
-            detached_label: String::new(),
-            output_buf: String::new(),
-            error_notified: false,
-            has_new_output: false,
-        }];
+        // -- Panes (legacy vec — empty; initial terminal is adapter-managed) --
+        let panes: Vec<Pane> = Vec::new();
 
         // -- Keybinds --
         let keybinds = KeybindRegistry::new();
@@ -388,12 +377,7 @@ impl App {
         scene.update_world_transforms();
         info!("Scene graph initialized: {} nodes", scene.node_count());
 
-        // Link scene graph pane node back to the first pane.
-        let panes = {
-            let mut p = panes;
-            p[0].scene_node = first_pane_node;
-            p
-        };
+        // first_pane_node and pane_id will be registered with the coordinator below.
 
         // -- Session manager + restore --
         let session_manager = match SessionManager::new() {
@@ -472,7 +456,29 @@ impl App {
         // -- App coordinator (strangler fig: coexists with legacy pane system) --
         // Pass the single event bus so adapters and the legacy pane system
         // share the same pub/sub channel.
-        let coordinator = AppCoordinator::new(event_bus);
+        let mut coordinator = AppCoordinator::new(event_bus);
+
+        // -- Register initial terminal as adapter (Phase 3 — coordinator-managed) --
+        {
+            use crate::adapters::terminal::TerminalAdapter;
+            use phantom_terminal::output::TerminalThemeColors;
+            use phantom_scene::clock::Cadence;
+
+            let theme_colors = TerminalThemeColors {
+                foreground: theme.colors.foreground,
+                background: theme.colors.background,
+                cursor: theme.colors.cursor,
+                ansi: Some(theme.colors.ansi),
+            };
+            let adapter = TerminalAdapter::with_theme(terminal, theme_colors);
+            let _app_id = coordinator.register_adapter_at_pane(
+                Box::new(adapter),
+                pane_id,
+                first_pane_node,
+                Cadence::unlimited(),
+            );
+            info!("Initial terminal registered as adapter (AppId {_app_id})");
+        }
 
         // -- System monitor --
         let sysmon = crate::sysmon::spawn_sysmon();

@@ -187,8 +187,8 @@ impl App {
             }
         }
 
-        if self.panes.is_empty() {
-            info!("All panes exited, quitting");
+        if self.panes.is_empty() && self.coordinator.adapter_count() == 0 {
+            info!("All panes and adapters exited, quitting");
             self.quit_requested = true;
         }
 

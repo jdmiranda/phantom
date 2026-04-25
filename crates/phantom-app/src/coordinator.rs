@@ -88,6 +88,46 @@ impl AppCoordinator {
         id
     }
 
+    /// Register an adapter using an **existing** layout pane and scene node.
+    ///
+    /// Unlike `register_adapter`, this does NOT create a new layout pane or
+    /// scene node — it binds the adapter to IDs that the legacy system
+    /// already created. Used during the strangler-fig migration.
+    pub fn register_adapter_at_pane(
+        &mut self,
+        adapter: Box<dyn AppAdapter>,
+        pane_id: PaneId,
+        scene_node: NodeId,
+        cadence: Cadence,
+    ) -> AppId {
+        let is_first = self.registry.count() == 0;
+
+        let id = self.registry.register(adapter);
+
+        if let Some(adapter) = self.registry.get_adapter_mut(id) {
+            if let Err(e) = adapter.on_init() {
+                log::error!("Adapter {id} on_init() failed: {e}");
+            }
+        }
+
+        self.registry.ready(id);
+
+        // Use the provided PaneId (already in the layout).
+        self.pane_map.insert(pane_id, id);
+        self.app_pane_map.insert(id, pane_id);
+
+        // Use the provided scene node (already in the scene graph).
+        self.scene_map.insert(id, scene_node);
+
+        self.cadences.insert(id, cadence);
+
+        if is_first {
+            self.focused = Some(id);
+        }
+
+        id
+    }
+
     /// Remove an adapter: kill it, strip layout pane and scene node,
     /// shift focus if the removed adapter was focused.
     pub fn remove_adapter(
@@ -260,6 +300,11 @@ impl AppCoordinator {
     /// The layout pane associated with an adapter.
     pub fn pane_id_for(&self, app_id: AppId) -> Option<PaneId> {
         self.app_pane_map.get(&app_id).copied()
+    }
+
+    /// Look up which adapter owns a given layout pane.
+    pub fn app_id_for_pane(&self, pane_id: PaneId) -> Option<AppId> {
+        self.pane_map.get(&pane_id).copied()
     }
 
     /// Immutable access to the event bus.
