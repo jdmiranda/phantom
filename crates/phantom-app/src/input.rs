@@ -200,6 +200,15 @@ impl App {
                 self.cell_size = self.text_renderer.measure_cell();
                 self.atlas.clear();
             }
+            Action::ToggleFullscreen => {
+                if self.fullscreen_pane.is_some() {
+                    info!("Exiting fullscreen mode");
+                    self.fullscreen_pane = None;
+                } else {
+                    info!("Entering fullscreen mode: pane {}", self.focused_pane);
+                    self.fullscreen_pane = Some(self.focused_pane);
+                }
+            }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
             }
@@ -305,6 +314,15 @@ impl App {
         }
 
         self.last_input_time = Instant::now();
+
+        // Escape exits fullscreen mode.
+        if self.fullscreen_pane.is_some()
+            && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+        {
+            info!("Exiting fullscreen via Escape");
+            self.fullscreen_pane = None;
+            return;
+        }
 
         if self.suggestion.is_some() {
             self.suggestion = None;

@@ -266,6 +266,10 @@ impl KeybindRegistry {
             (KeyCombo { key: Key::Home, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollToTop),
             (KeyCombo { key: Key::End, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollToBottom),
 
+            // Fullscreen
+            (KeyCombo::ctrl_shift(Key::Char('f')), Action::ToggleFullscreen),
+            (KeyCombo::bare(Key::F(11)), Action::ToggleFullscreen),
+
             // Window
             (KeyCombo::cmd_shift(Key::Char('p')), Action::ShowCommandPalette),
             (KeyCombo::cmd(Key::Char('q')), Action::Quit),

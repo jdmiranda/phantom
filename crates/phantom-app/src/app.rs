@@ -153,6 +153,9 @@ pub struct App {
     pub(crate) pool_chrome_quads: Vec<QuadInstance>,
     pub(crate) pool_chrome_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
 
+    // -- Fullscreen pane toggle --
+    pub(crate) fullscreen_pane: Option<usize>,
+
     // -- Agent panes (AI workers running in visible panes) --
     pub(crate) agent_panes: Vec<crate::agent_pane::AgentPane>,
 
@@ -555,6 +558,7 @@ impl App {
             pool_glyphs: Vec::with_capacity(4096),
             pool_chrome_quads: Vec::with_capacity(32),
             pool_chrome_glyphs: Vec::with_capacity(256),
+            fullscreen_pane: None,
             agent_panes: Vec::new(),
             event_bus,
             topic_terminal_output,
