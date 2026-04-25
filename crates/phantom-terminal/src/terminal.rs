@@ -295,6 +295,24 @@ impl PhantomTerminal {
         &self.pty_reader
     }
 
+    /// Scroll the viewport up (toward history) by the given number of lines.
+    pub fn scroll_up(&mut self, lines: usize) {
+        use alacritty_terminal::grid::Scroll;
+        self.term.scroll_display(Scroll::Delta(lines as i32));
+    }
+
+    /// Scroll the viewport down (toward the live output) by the given number of lines.
+    pub fn scroll_down(&mut self, lines: usize) {
+        use alacritty_terminal::grid::Scroll;
+        self.term.scroll_display(Scroll::Delta(-(lines as i32)));
+    }
+
+    /// Scroll the viewport to the very bottom (live output).
+    pub fn scroll_to_bottom(&mut self) {
+        use alacritty_terminal::grid::Scroll;
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {

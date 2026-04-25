@@ -167,6 +167,10 @@ pub struct App {
     pub(crate) sysmon: crate::sysmon::SysmonHandle,
     pub(crate) sysmon_visible: bool,
     pub(crate) appmon_visible: bool,
+
+    // -- Mouse state --
+    pub(crate) cursor_position: (f64, f64),
+    pub(crate) cursor_over_pane: Option<usize>,
 }
 
 /// An active suggestion from the AI brain.
@@ -518,6 +522,8 @@ impl App {
             sysmon,
             sysmon_visible: false,
             appmon_visible: false,
+            cursor_position: (0.0, 0.0),
+            cursor_over_pane: None,
         })
     }
 
