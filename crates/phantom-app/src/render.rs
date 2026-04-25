@@ -313,8 +313,8 @@ impl App {
         screen_size: [f32; 2],
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
-        _chrome_quads: &mut Vec<QuadInstance>,
-        _chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+        chrome_quads: &mut Vec<QuadInstance>,
+        chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         // -- Coordinator two-phase render: collect outputs from all registered adapters --
         // (Strangler fig: runs alongside the legacy pane loop below.)
@@ -438,7 +438,7 @@ impl App {
                     border_radius: 6.0,
                 });
 
-                // Focus-aware border (scene pass — curves with CRT alongside bg).
+                // Focus-aware border (overlay pass — crisp, no CRT warp).
                 let border_color = if is_focused {
                     [0.2, 1.0, 0.5, 0.85]
                 } else {
@@ -446,13 +446,13 @@ impl App {
                 };
                 let t = 1.0;
                 // top
-                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
                 // bottom
-                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
                 // left
-                quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QuadInstance { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
                 // right
-                quads.push(QuadInstance { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QuadInstance { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
 
                 // Title text: "● shell · {cols}×{rows}"
                 let dot_color = if is_focused {
@@ -539,29 +539,29 @@ impl App {
                 let border_color = [0.0, pulse, pulse * 0.8, 0.9];
                 let border_thickness = 2.0;
 
-                // Top edge
-                quads.push(QuadInstance {
+                // Top edge (overlay pass — crisp).
+                chrome_quads.push(QuadInstance {
                     pos: [pane_rect.x, pane_rect.y],
                     size: [pane_rect.width, border_thickness],
                     color: border_color,
                     border_radius: 0.0,
                 });
-                // Bottom edge
-                quads.push(QuadInstance {
+                // Bottom edge (overlay pass — crisp).
+                chrome_quads.push(QuadInstance {
                     pos: [pane_rect.x, pane_rect.y + pane_rect.height - border_thickness],
                     size: [pane_rect.width, border_thickness],
                     color: border_color,
                     border_radius: 0.0,
                 });
-                // Left edge
-                quads.push(QuadInstance {
+                // Left edge (overlay pass — crisp).
+                chrome_quads.push(QuadInstance {
                     pos: [pane_rect.x, pane_rect.y],
                     size: [border_thickness, pane_rect.height],
                     color: border_color,
                     border_radius: 0.0,
                 });
-                // Right edge
-                quads.push(QuadInstance {
+                // Right edge (overlay pass — crisp).
+                chrome_quads.push(QuadInstance {
                     pos: [pane_rect.x + pane_rect.width - border_thickness, pane_rect.y],
                     size: [border_thickness, pane_rect.height],
                     color: border_color,
@@ -600,26 +600,14 @@ impl App {
             // app-container chrome at the top of the pane loop.
         }
 
-        // -- Detached pane labels (rendered after the pane loop to avoid borrow issues) --
-        for &(pi, x, y, color) in &detached_labels {
-            use std::fmt::Write;
-            let mut buf = std::mem::take(&mut self.title_buf);
-            buf.clear();
-            if let Some(pane) = self.panes.get(pi) {
-                let _ = write!(buf, "  {} ", &pane.detached_label);
-            }
-            self.render_overlay_text(&buf, x, y, color, glyphs);
-            self.title_buf = buf;
+        // -- Detached pane labels (overlay pass — crisp text) --
+        for (label, x, y, color) in &detached_labels {
+            self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
         }
 
-        // -- App-container title text (scene pass — curves with CRT) --
-        for &(cols, rows, x, y, color) in &container_titles {
-            use std::fmt::Write;
-            let mut buf = std::mem::take(&mut self.title_buf);
-            buf.clear();
-            let _ = write!(buf, "● shell  {}×{}", cols, rows);
-            self.render_overlay_text(&buf, x, y, color, glyphs);
-            self.title_buf = buf;
+        // -- App-container title text (overlay pass — crisp, readable) --
+        for (label, x, y, color) in &container_titles {
+            self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
         }
 
         // -- Tab bar --
