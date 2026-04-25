@@ -295,6 +295,35 @@ impl PhantomTerminal {
         &self.pty_reader
     }
 
+    /// Current display offset (0 = live output, >0 = scrolled into history).
+    #[inline]
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Number of history lines available for scrollback.
+    #[inline]
+    pub fn history_size(&self) -> usize {
+        self.term.history_size()
+    }
+
+    /// Scroll the display by a delta (positive = scroll up into history).
+    pub fn scroll_display(&mut self, scroll: alacritty_terminal::grid::Scroll) {
+        self.term.scroll_display(scroll);
+    }
+
+    /// Scroll by a signed line delta (positive = scroll up into history).
+    pub fn scroll_delta(&mut self, delta: i32) {
+        self.term.scroll_display(alacritty_terminal::grid::Scroll::Delta(delta));
+    }
+
+    /// Returns `true` if the terminal is in any mouse tracking mode.
+    #[inline]
+    pub fn mouse_tracking_active(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {

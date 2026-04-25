@@ -129,6 +129,18 @@ impl ApplicationHandler for Phantom {
                     }
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(app) = &mut self.app {
+                    app.handle_cursor_moved(position.x, position.y);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if state.is_pressed() {
+                    if let Some(app) = &mut self.app {
+                        app.handle_mouse_click(button);
+                    }
+                }
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
             }

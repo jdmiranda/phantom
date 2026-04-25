@@ -5,6 +5,7 @@ mod commands;
 pub mod config;
 pub mod image_handler;
 mod input;
+mod mouse;
 mod pane;
 mod render;
 mod appmon;

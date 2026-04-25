@@ -105,6 +105,9 @@ pub struct App {
     // -- Cached metrics --
     pub(crate) cell_size: (f32, f32),
 
+    // -- Mouse state --
+    pub(crate) cursor_position: (f64, f64),
+
     // -- Whether a quit has been requested --
     pub(crate) quit_requested: bool,
 
@@ -489,6 +492,7 @@ impl App {
             start_time: now,
             last_frame: now,
             cell_size,
+            cursor_position: (0.0, 0.0),
             quit_requested: false,
             supervisor,
             command_mode: false,
