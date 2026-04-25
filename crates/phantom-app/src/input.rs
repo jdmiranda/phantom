@@ -209,6 +209,26 @@ impl App {
                     self.fullscreen_pane = Some(self.focused_pane);
                 }
             }
+            Action::ScrollPageUp => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_page_up();
+                }
+            }
+            Action::ScrollPageDown => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_page_down();
+                }
+            }
+            Action::ScrollToTop => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_to_top();
+                }
+            }
+            Action::ScrollToBottom => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_to_bottom();
+                }
+            }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
             }
