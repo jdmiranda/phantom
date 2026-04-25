@@ -316,17 +316,62 @@ impl App {
         chrome_quads: &mut Vec<QuadInstance>,
         chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
+        // -- Fullscreen mode: render only the fullscreen pane at full size --
+        if let Some(fs_idx) = self.fullscreen_pane {
+            if let Some(pane) = self.panes.get(fs_idx) {
+                let theme_colors = TerminalThemeColors {
+                    foreground: self.theme.colors.foreground,
+                    background: self.theme.colors.background,
+                    cursor: self.theme.colors.cursor,
+                    ansi: Some(self.theme.colors.ansi),
+                };
+
+                let (render_cells, cols, rows, cursor) =
+                    output::extract_grid_themed(pane.terminal.term(), &theme_colors);
+
+                let margin = 12.0;
+                let inner_rect = phantom_ui::layout::Rect {
+                    x: margin,
+                    y: margin,
+                    width: screen_size[0] - margin * 2.0,
+                    height: screen_size[1] - margin * 2.0,
+                };
+                let origin = (inner_rect.x, inner_rect.y);
+
+                let grid_cells: Vec<GridCell> = render_cells
+                    .iter()
+                    .map(|rc| GridCell { ch: rc.ch, fg: rc.fg, bg: rc.bg })
+                    .collect();
+
+                let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
+                    &grid_cells, cols, rows,
+                    &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
+                    origin, self.cell_size,
+                );
+                quads.append(&mut bg_quads);
+                glyphs.append(&mut glyph_instances);
+
+                if cursor.visible {
+                    let cx = inner_rect.x + cursor.col as f32 * self.cell_size.0;
+                    let cy = inner_rect.y + cursor.row as f32 * self.cell_size.1;
+                    quads.push(QuadInstance {
+                        pos: [cx, cy],
+                        size: [self.cell_size.0, self.cell_size.1],
+                        color: [self.theme.colors.cursor[0], self.theme.colors.cursor[1], self.theme.colors.cursor[2], 0.7],
+                        border_radius: 0.0,
+                    });
+                }
+
+                self.render_overlay_text("ESC to exit fullscreen", screen_size[0] - 200.0, screen_size[1] - 30.0, [0.4, 0.6, 0.4, 0.5], chrome_glyphs);
+            }
+            return;
+        }
+
         // -- Coordinator two-phase render: collect outputs from all registered adapters --
-        // (Strangler fig: runs alongside the legacy pane loop below.)
         let coordinator_outputs = self.coordinator.render_all(&self.layout);
         for (_app_id, _rect, ro) in &coordinator_outputs {
             for q in &ro.quads {
-                quads.push(QI {
-                    pos: [q.x, q.y],
-                    size: [q.w, q.h],
-                    color: q.color,
-                    border_radius: 0.0,
-                });
+                quads.push(QI { pos: [q.x, q.y], size: [q.w, q.h], color: q.color, border_radius: 0.0 });
             }
             for seg in &ro.text_segments {
                 self.render_overlay_text(&seg.text, seg.x, seg.y, seg.color, glyphs);
