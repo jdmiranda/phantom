@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::term::Config;
+use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::tty::{self, Options as PtyOptions};
 use alacritty_terminal::vte::ansi;
 use alacritty_terminal::Term;
@@ -26,6 +26,23 @@ const PTY_READ_BUF: usize = 0x10000; // 64 KiB
 /// Default cell dimensions in pixels (used for TIOCSWINSZ pixel fields).
 const DEFAULT_CELL_WIDTH: u16 = 8;
 const DEFAULT_CELL_HEIGHT: u16 = 16;
+
+// ---------------------------------------------------------------------------
+// MouseMode — which mouse tracking the terminal program has requested
+// ---------------------------------------------------------------------------
+
+/// Which mouse tracking mode the terminal program has requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseMode {
+    /// No mouse tracking (default shell).
+    None,
+    /// Report clicks only (mode 1000).
+    Click,
+    /// Report clicks and drag motion (mode 1002).
+    Drag,
+    /// Report all motion (mode 1003).
+    Motion,
+}
 
 // ---------------------------------------------------------------------------
 // EventListener — forwards terminal events to Phantom
@@ -337,6 +354,32 @@ impl PhantomTerminal {
         self.term.grid().history_size()
     }
 
+    // -- Mouse mode API ----------------------------------------------------
+
+    /// Check which mouse tracking mode the running program has requested.
+    pub fn mouse_mode(&self) -> MouseMode {
+        let mode = self.term.mode();
+        if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseMode::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseMode::Drag
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseMode::Click
+        } else {
+            MouseMode::None
+        }
+    }
+
+    /// Whether the terminal is in SGR mouse mode (1006).
+    pub fn sgr_mouse(&self) -> bool {
+        self.term.mode().contains(TermMode::SGR_MOUSE)
+    }
+
+    /// Whether the terminal is using the alternate screen buffer.
+    pub fn is_alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {
@@ -372,5 +415,17 @@ mod tests {
         assert_eq!(term.display_offset(), 0);
         term.scroll_to_bottom();
         assert_eq!(term.display_offset(), 0);
+    }
+
+    #[test]
+    fn default_mouse_mode_is_none() {
+        let term = PhantomTerminal::new(80, 24).unwrap();
+        assert_eq!(term.mouse_mode(), MouseMode::None);
+    }
+
+    #[test]
+    fn default_is_not_alt_screen() {
+        let term = PhantomTerminal::new(80, 24).unwrap();
+        assert!(!term.is_alt_screen());
     }
 }
