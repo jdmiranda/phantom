@@ -167,6 +167,12 @@ pub struct App {
     pub(crate) sysmon: crate::sysmon::SysmonHandle,
     pub(crate) sysmon_visible: bool,
     pub(crate) appmon_visible: bool,
+
+    // -- Mouse state --
+    #[expect(dead_code, reason = "wired in T3 mouse input handler")]
+    pub(crate) cursor_position: (f64, f64),
+    #[expect(dead_code, reason = "wired in T3 mouse input handler")]
+    pub(crate) cursor_over_pane: Option<usize>,
 }
 
 /// An active suggestion from the AI brain.
@@ -518,6 +524,8 @@ impl App {
             sysmon,
             sysmon_visible: false,
             appmon_visible: false,
+            cursor_position: (0.0, 0.0),
+            cursor_over_pane: None,
         })
     }
 
