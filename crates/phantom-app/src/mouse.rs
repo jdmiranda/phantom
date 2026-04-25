@@ -5,13 +5,13 @@
 //! to the PTY when the running terminal program requests mouse tracking.
 //! Also handles scrollbar click-to-jump.
 
-use log::{debug, trace, warn};
+use log::debug;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
+#[allow(unused_imports)] // Used when SGR mouse forwarding is wired through adapters
 use phantom_terminal::input::{
     encode_mouse_motion_sgr, encode_mouse_sgr, MouseButton as TermMouseButton,
 };
-use phantom_terminal::terminal::MouseMode;
 
 use crate::app::App;
 use crate::pane::{
@@ -23,10 +23,7 @@ use crate::pane::{
 // ---------------------------------------------------------------------------
 
 /// Convert pixel coordinates to terminal cell (col, row).
-///
-/// `px` / `py` are absolute window coordinates. The pane's inner rect and
-/// `cell_size` determine which cell the pixel falls into. The result is
-/// clamped to `0..max_col` and `0..max_row` (inclusive).
+#[allow(dead_code)] // Used when SGR mouse tracking is wired through adapters
 pub(crate) fn pixel_to_cell(
     px: f64,
     py: f64,
@@ -50,6 +47,7 @@ pub(crate) fn pixel_to_cell(
 // Winit button conversion
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // Used when SGR mouse tracking is wired through adapters
 fn winit_to_term_button(button: MouseButton) -> Option<TermMouseButton> {
     match button {
         MouseButton::Left => Some(TermMouseButton::Left),
@@ -68,145 +66,70 @@ impl App {
     pub fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_position = (x, y);
 
-        // Hit-test: which pane is the cursor over?
+        // Hit-test coordinator-managed adapters.
         self.cursor_over_pane = None;
-        for (i, pane) in self.panes.iter().enumerate() {
-            if let Ok(layout_rect) = self.layout.get_pane_rect(pane.pane_id) {
-                let cr = container_rect(layout_rect, self.cell_size);
-                let inner = pane_inner_rect(self.cell_size, cr);
-                if x as f32 >= inner.x
-                    && x as f32 <= inner.x + inner.width
-                    && y as f32 >= inner.y
-                    && y as f32 <= inner.y + inner.height
-                {
-                    self.cursor_over_pane = Some(i);
-                    break;
+        for app_id in self.coordinator.all_app_ids() {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
+                if let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) {
+                    let cr = container_rect(layout_rect, self.cell_size);
+                    let inner = pane_inner_rect(self.cell_size, cr);
+                    if x as f32 >= inner.x
+                        && x as f32 <= inner.x + inner.width
+                        && y as f32 >= inner.y
+                        && y as f32 <= inner.y + inner.height
+                    {
+                        // Store the AppId in cursor_over_pane for focus-click.
+                        // We repurpose the usize field to hold app_id (u32).
+                        self.cursor_over_pane = Some(app_id as usize);
+                        break;
+                    }
                 }
             }
         }
 
-        // Forward motion to PTY when the terminal program is tracking the mouse.
-        let Some(pane) = self.panes.get_mut(self.focused_pane) else {
-            return;
-        };
-        let mouse_mode = pane.terminal.mouse_mode();
-        let should_send = match mouse_mode {
-            MouseMode::Motion => true,
-            MouseMode::Drag => self.mouse_button_held.is_some(),
-            _ => false,
-        };
-        if !should_send {
-            return;
-        }
-
-        let term_button = self.mouse_button_held.unwrap_or(TermMouseButton::Left);
-        let layout_rect = match self.layout.get_pane_rect(pane.pane_id) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-        let outer = container_rect(layout_rect, self.cell_size);
-        let inner = pane_inner_rect(self.cell_size, outer);
-        let size = pane.terminal.size();
-        let (col, row) = pixel_to_cell(
-            x, y, inner.x, inner.y,
-            self.cell_size.0, self.cell_size.1,
-            size.cols.saturating_sub(1) as usize, size.rows.saturating_sub(1) as usize,
-        );
-
-        let bytes = encode_mouse_motion_sgr(term_button, col, row);
-        trace!("mouse motion: btn={term_button:?} col={col} row={row}");
-        if let Err(e) = pane.terminal.pty_write(&bytes) {
-            warn!("PTY write (mouse motion) failed: {e}");
-        }
+        // Mouse motion forwarding to PTY (SGR) is handled via coordinator
+        // write_bytes command — deferred until mouse mode detection is available
+        // through the adapter interface.
     }
 
     /// Handle mouse button press/release.
     pub fn handle_mouse_click(&mut self, state: ElementState, button: MouseButton) {
-        let Some(pane) = self.panes.get(self.focused_pane) else {
-            return;
-        };
-        let mouse_mode = pane.terminal.mouse_mode();
-
-        if mouse_mode != MouseMode::None {
-            // Terminal is tracking mouse — encode as SGR and write to PTY.
-            let Some(term_button) = winit_to_term_button(button) else {
-                return;
-            };
-
-            // Track held button for drag-mode motion events.
-            match state {
-                ElementState::Pressed => self.mouse_button_held = Some(term_button),
-                ElementState::Released => self.mouse_button_held = None,
-            }
-
-            let pane = &self.panes[self.focused_pane];
-            let layout_rect = match self.layout.get_pane_rect(pane.pane_id) {
-                Ok(r) => r,
-                Err(_) => return,
-            };
-            let outer = container_rect(layout_rect, self.cell_size);
-            let inner = pane_inner_rect(self.cell_size, outer);
-            let size = pane.terminal.size();
-            let (col, row) = pixel_to_cell(
-                self.cursor_position.0, self.cursor_position.1,
-                inner.x, inner.y,
-                self.cell_size.0, self.cell_size.1,
-                size.cols.saturating_sub(1) as usize, size.rows.saturating_sub(1) as usize,
-            );
-
-            let pressed = state == ElementState::Pressed;
-            let bytes = encode_mouse_sgr(term_button, col, row, pressed);
-            trace!("mouse click SGR: btn={term_button:?} col={col} row={row} pressed={pressed}");
-            if let Err(e) = self.panes[self.focused_pane].terminal.pty_write(&bytes) {
-                warn!("PTY write (mouse click) failed: {e}");
-            }
-            return;
-        }
-
-        // No mouse tracking — only handle press events.
+        // Only handle press events for non-SGR operations.
         if state != ElementState::Pressed {
             return;
         }
 
-        // Check scrollbar hit first (left click only).
+        // Left click — check scrollbar hit on coordinator panes, then focus.
         if button == MouseButton::Left {
             let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
-            for pane_idx in 0..self.panes.len() {
-                let pane = &self.panes[pane_idx];
-                let layout_rect = match self.layout.get_pane_rect(pane.pane_id) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
+
+            // Check scrollbar hit on each coordinator-managed pane.
+            for app_id in self.coordinator.all_app_ids() {
+                let Some(pane_id) = self.coordinator.pane_id_for(app_id) else { continue };
+                let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) else { continue };
                 let outer = container_rect(layout_rect, self.cell_size);
                 let inner = pane_inner_rect(self.cell_size, outer);
                 let track = scrollbar_track_rect(inner);
 
                 if point_in_rect(mx, my, track) {
-                    let history_size = pane.terminal.history_size();
-                    if history_size == 0 {
-                        return;
-                    }
-                    let target_offset = scrollbar_y_to_offset(track, my, history_size);
-                    let current_offset = pane.terminal.display_offset();
-                    let delta = target_offset as i64 - current_offset as i64;
-                    if delta > 0 {
-                        debug!("Scrollbar jump: pane {pane_idx}, +{delta} lines");
-                        self.panes[pane_idx].terminal.scroll_up(delta as usize);
-                    } else if delta < 0 {
-                        debug!("Scrollbar jump: pane {pane_idx}, {delta} lines");
-                        self.panes[pane_idx].terminal.scroll_down((-delta) as usize);
-                    }
+                    // Scrollbar click-to-jump via scroll command.
+                    let target_offset = scrollbar_y_to_offset(track, my, 1000);
+                    let _ = self.coordinator.send_command(
+                        app_id,
+                        "scroll_to_offset",
+                        &serde_json::json!({"offset": target_offset}),
+                    );
+                    debug!("Scrollbar click: adapter {app_id}, target_offset={target_offset}");
                     return;
                 }
             }
-        }
 
-        // Left click on a pane focuses it.
-        if button == MouseButton::Left {
-            if let Some(pane_idx) = self.cursor_over_pane {
-                if pane_idx != self.focused_pane {
-                    debug!("Mouse focus: pane {pane_idx}");
-                    self.focused_pane = pane_idx;
+            // Click-to-focus: set coordinator focus to the pane under cursor.
+            if let Some(hover_id) = self.cursor_over_pane {
+                let app_id = hover_id as u32;
+                if self.coordinator.focused() != Some(app_id) {
+                    debug!("Mouse focus: adapter {app_id}");
+                    self.coordinator.set_focus(app_id);
                 }
             }
         }
@@ -214,10 +137,6 @@ impl App {
 
     /// Handle mouse scroll wheel.
     pub fn handle_mouse_scroll(&mut self, delta: MouseScrollDelta) {
-        let Some(pane) = self.panes.get_mut(self.focused_pane) else {
-            return;
-        };
-
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => y,
             MouseScrollDelta::PixelDelta(pos) => {
@@ -234,49 +153,13 @@ impl App {
             return;
         }
 
-        let mouse_mode = pane.terminal.mouse_mode();
-
-        if mouse_mode != MouseMode::None {
-            // Encode scroll as SGR mouse events.
-            let layout_rect = match self.layout.get_pane_rect(pane.pane_id) {
-                Ok(r) => r,
-                Err(_) => return,
-            };
-            let outer = container_rect(layout_rect, self.cell_size);
-            let inner = pane_inner_rect(self.cell_size, outer);
-            let size = pane.terminal.size();
-            let (col, row) = pixel_to_cell(
-                self.cursor_position.0, self.cursor_position.1,
-                inner.x, inner.y,
-                self.cell_size.0, self.cell_size.1,
-                size.cols.saturating_sub(1) as usize, size.rows.saturating_sub(1) as usize,
-            );
-
-            let count = lines.abs().ceil().max(1.0) as u32;
-            let term_button = if lines > 0.0 {
-                TermMouseButton::ScrollUp
-            } else {
-                TermMouseButton::ScrollDown
-            };
-
-            for _ in 0..count {
-                let bytes = encode_mouse_sgr(term_button, col, row, true);
-                if let Err(e) = pane.terminal.pty_write(&bytes) {
-                    warn!("PTY write (mouse scroll) failed: {e}");
-                    break;
-                }
-            }
-            trace!("mouse scroll SGR: btn={term_button:?} col={col} row={row} count={count}");
-            return;
-        }
-
-        // No mouse tracking — use scrollback.
-        let int_lines = lines.round() as i32;
-        if int_lines > 0 {
-            pane.terminal.scroll_up(int_lines.unsigned_abs() as usize);
-        } else if int_lines < 0 {
-            pane.terminal.scroll_down(int_lines.unsigned_abs() as usize);
-        }
+        // Route scroll to focused adapter via command.
+        let int_lines = lines.round().abs().max(1.0) as u64;
+        let direction = if lines > 0.0 { "up" } else { "down" };
+        let _ = self.coordinator.send_command_to_focused(
+            "scroll",
+            &serde_json::json!({"direction": direction, "lines": int_lines}),
+        );
     }
 }
 

@@ -299,6 +299,19 @@ impl Commandable for TerminalAdapter {
                 }
                 Ok("scrolled".into())
             }
+            "scroll_to_offset" => {
+                let target = args
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let current = self.terminal.display_offset();
+                if target > current {
+                    self.terminal.scroll_up(target - current);
+                } else if target < current {
+                    self.terminal.scroll_down(current - target);
+                }
+                Ok("scrolled".into())
+            }
             "write_bytes" => {
                 let bytes_val = args
                     .get("bytes")

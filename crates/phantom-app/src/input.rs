@@ -172,15 +172,23 @@ impl App {
                 self.split_focused_pane(false);
             }
             Action::FocusNext => {
-                if !self.panes.is_empty() {
-                    self.focused_pane = (self.focused_pane + 1) % self.panes.len();
-                    debug!("Focus next: pane {}", self.focused_pane);
+                let ids = self.coordinator.all_app_ids();
+                if !ids.is_empty() {
+                    let current = self.coordinator.focused().unwrap_or(0);
+                    let idx = ids.iter().position(|&id| id == current).unwrap_or(0);
+                    let next = ids[(idx + 1) % ids.len()];
+                    self.coordinator.set_focus(next);
+                    debug!("Focus next: adapter {next}");
                 }
             }
             Action::FocusPrev => {
-                if !self.panes.is_empty() {
-                    self.focused_pane = (self.focused_pane + self.panes.len() - 1) % self.panes.len();
-                    debug!("Focus prev: pane {}", self.focused_pane);
+                let ids = self.coordinator.all_app_ids();
+                if !ids.is_empty() {
+                    let current = self.coordinator.focused().unwrap_or(0);
+                    let idx = ids.iter().position(|&id| id == current).unwrap_or(0);
+                    let prev = ids[(idx + ids.len() - 1) % ids.len()];
+                    self.coordinator.set_focus(prev);
+                    debug!("Focus prev: adapter {prev}");
                 }
             }
             Action::CloseFocused => {
