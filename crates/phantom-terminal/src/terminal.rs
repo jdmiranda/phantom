@@ -295,6 +295,23 @@ impl PhantomTerminal {
         &self.pty_reader
     }
 
+    /// Number of lines the viewport is scrolled back from the bottom.
+    ///
+    /// Returns 0 when the terminal is showing the live output (not scrolled).
+    #[inline]
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Number of scrollback history lines above the visible viewport.
+    ///
+    /// Returns 0 when no output has scrolled off-screen yet.
+    #[inline]
+    pub fn history_size(&self) -> usize {
+        use alacritty_terminal::grid::Dimensions;
+        self.term.grid().history_size()
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {

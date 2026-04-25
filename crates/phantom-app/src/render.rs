@@ -291,7 +291,7 @@ impl App {
         screen_size: [f32; 2],
         quads: &mut Vec<QuadInstance>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
-        _chrome_quads: &mut Vec<QuadInstance>,
+        chrome_quads: &mut Vec<QuadInstance>,
         _chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         let _has_multiple = self.panes.len() > 1;
@@ -485,6 +485,36 @@ impl App {
                     },
                 };
                 quads.push(cursor_quad);
+            }
+
+            // -- Scrollbar (overlay pass — crisp, post-CRT) --
+            let history = pane.terminal.history_size();
+            if history > 0 {
+                let track = crate::pane::scrollbar_track_rect(inner_rect);
+
+                // Track background (subtle).
+                chrome_quads.push(QuadInstance {
+                    pos: [track.x, track.y],
+                    size: [track.width, track.height],
+                    color: [1.0, 1.0, 1.0, 0.05],
+                    border_radius: 3.0,
+                });
+
+                // Thumb.
+                let offset = pane.terminal.display_offset();
+                if let Some(thumb) = crate::pane::scrollbar_thumb_rect(track, offset, history, rows) {
+                    let thumb_color = if is_focused {
+                        [0.2, 1.0, 0.5, 0.4] // theme green
+                    } else {
+                        [0.5, 0.5, 0.5, 0.25] // dim gray
+                    };
+                    chrome_quads.push(QuadInstance {
+                        pos: [thumb.x, thumb.y],
+                        size: [thumb.width, thumb.height],
+                        color: thumb_color,
+                        border_radius: 3.0,
+                    });
+                }
             }
 
             // -- Pane border --

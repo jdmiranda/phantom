@@ -100,6 +100,63 @@ pub(crate) fn pane_inner_rect(cell_size: (f32, f32), outer: phantom_ui::layout::
 }
 
 // ---------------------------------------------------------------------------
+// Scrollbar geometry
+// ---------------------------------------------------------------------------
+
+/// Width of the scrollbar track in pixels.
+pub(crate) const SCROLLBAR_WIDTH: f32 = 6.0;
+
+/// Compute the scrollbar track rectangle, anchored to the right edge of the
+/// terminal inner rect with a small inset.
+pub(crate) fn scrollbar_track_rect(inner: phantom_ui::layout::Rect) -> phantom_ui::layout::Rect {
+    let margin = 2.0;
+    phantom_ui::layout::Rect {
+        x: inner.x + inner.width - SCROLLBAR_WIDTH - margin,
+        y: inner.y + margin,
+        width: SCROLLBAR_WIDTH,
+        height: inner.height - margin * 2.0,
+    }
+}
+
+/// Compute the scrollbar thumb rectangle within the track.
+///
+/// Returns `None` when the thumb would fill the entire track (i.e. no
+/// scrollback is meaningful to display).
+pub(crate) fn scrollbar_thumb_rect(
+    track: phantom_ui::layout::Rect,
+    display_offset: usize,
+    history_size: usize,
+    visible_rows: usize,
+) -> Option<phantom_ui::layout::Rect> {
+    let total = history_size + visible_rows;
+    if total == 0 || history_size == 0 {
+        return None;
+    }
+
+    // Thumb height proportional to visible portion of total content.
+    let ratio = visible_rows as f32 / total as f32;
+    let thumb_h = (track.height * ratio).max(20.0); // min 20px so it stays grabbable
+
+    // If the thumb would fill the track, nothing to show.
+    if thumb_h >= track.height {
+        return None;
+    }
+
+    // Position: display_offset 0 = bottom (live output), history_size = top.
+    let scroll_fraction = display_offset as f32 / history_size as f32;
+    let max_y_offset = track.height - thumb_h;
+    // scroll_fraction 0 → thumb at bottom, 1 → thumb at top
+    let thumb_y = track.y + max_y_offset * (1.0 - scroll_fraction);
+
+    Some(phantom_ui::layout::Rect {
+        x: track.x,
+        y: thumb_y,
+        width: track.width,
+        height: thumb_h,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Pane management methods on App
 // ---------------------------------------------------------------------------
 
