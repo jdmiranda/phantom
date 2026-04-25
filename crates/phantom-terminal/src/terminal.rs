@@ -10,12 +10,14 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::Config;
+use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::tty::{self, Options as PtyOptions};
 use alacritty_terminal::vte::ansi;
 use alacritty_terminal::Term;
 use anyhow::{Context, Result};
 use log::{debug, trace, warn};
+
+use crate::input::MouseMode;
 
 /// Default scrollback history in lines.
 const SCROLLBACK_LINES: usize = 10_000;
@@ -293,6 +295,36 @@ impl PhantomTerminal {
     #[inline]
     pub fn pty_fd(&self) -> &File {
         &self.pty_reader
+    }
+
+    /// Query the mouse tracking mode the running program has requested.
+    ///
+    /// Derived from the terminal's DEC private mode flags. Returns
+    /// `MouseMode::None` when no mouse reporting has been requested.
+    pub fn mouse_mode(&self) -> MouseMode {
+        let mode = self.term.mode();
+        if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseMode::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseMode::Drag
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseMode::Click
+        } else {
+            MouseMode::None
+        }
+    }
+
+    /// Returns `true` when the running program has enabled SGR 1006 mouse
+    /// encoding (the modern extended coordinate format).
+    #[inline]
+    pub fn sgr_mouse(&self) -> bool {
+        self.term.mode().contains(TermMode::SGR_MOUSE)
+    }
+
+    /// Returns `true` if the terminal is on the alternate screen buffer.
+    #[inline]
+    pub fn is_alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
     /// Flush pending PTY write requests from the terminal's event listener.

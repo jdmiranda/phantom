@@ -167,6 +167,12 @@ pub struct App {
     pub(crate) sysmon: crate::sysmon::SysmonHandle,
     pub(crate) sysmon_visible: bool,
     pub(crate) appmon_visible: bool,
+
+    // -- Mouse state --
+    /// Current cursor position in physical pixels.
+    pub(crate) cursor_position: (f64, f64),
+    /// Which terminal mouse button is currently held, if any (for drag tracking).
+    pub(crate) mouse_button_held: Option<phantom_terminal::input::MouseButton>,
 }
 
 /// An active suggestion from the AI brain.
@@ -518,6 +524,8 @@ impl App {
             sysmon,
             sysmon_visible: false,
             appmon_visible: false,
+            cursor_position: (0.0, 0.0),
+            mouse_button_held: None,
         })
     }
 

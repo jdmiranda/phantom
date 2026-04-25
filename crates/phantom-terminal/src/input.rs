@@ -230,6 +230,66 @@ fn encode_function_key(n: u8, mods: PhantomModifiers) -> Vec<u8> {
     }
 }
 
+// ─── Mouse types and SGR 1006 encoding ─────────────────────────────────────
+
+/// Terminal mouse button identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    ScrollUp,
+    ScrollDown,
+}
+
+/// Terminal mouse tracking mode (derived from DEC private modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseMode {
+    /// No mouse tracking requested by the running program.
+    None,
+    /// Basic click tracking (mode 1000).
+    Click,
+    /// Button-event tracking — clicks + drag with held button (mode 1002).
+    Drag,
+    /// Any-event tracking — all motion, whether a button is held or not (mode 1003).
+    Motion,
+}
+
+/// SGR button code for the given mouse button.
+fn sgr_button_code(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::ScrollUp => 64,
+        MouseButton::ScrollDown => 65,
+    }
+}
+
+/// Encode a mouse button press or release using SGR 1006 format.
+///
+/// Format: `\x1b[<Cb;Cx;CyM` (press) or `\x1b[<Cb;Cx;Cym` (release).
+/// Coordinates are 1-based.
+pub fn encode_mouse_sgr(button: MouseButton, col: u16, row: u16, pressed: bool) -> Vec<u8> {
+    let cb = sgr_button_code(button);
+    let cx = col.saturating_add(1);
+    let cy = row.saturating_add(1);
+    let suffix = if pressed { 'M' } else { 'm' };
+    format!("\x1b[<{cb};{cx};{cy}{suffix}").into_bytes()
+}
+
+/// Encode a mouse motion event using SGR 1006 format.
+///
+/// Motion events use button code + 32.
+/// Format: `\x1b[<Cb;Cx;CyM`.
+/// Coordinates are 1-based.
+pub fn encode_mouse_motion_sgr(button: MouseButton, col: u16, row: u16) -> Vec<u8> {
+    let cb = sgr_button_code(button) + 32;
+    let cx = col.saturating_add(1);
+    let cy = row.saturating_add(1);
+    format!("\x1b[<{cb};{cx};{cy}M").into_bytes()
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -516,5 +576,57 @@ mod tests {
     fn bracketed_paste_multiline() {
         let result = encode_paste("line1\nline2");
         assert_eq!(result, b"\x1b[200~line1\nline2\x1b[201~");
+    }
+
+    // ── Mouse SGR encoding ─────────────────────────────────────
+
+    #[test]
+    fn sgr_left_press() {
+        // Left button press at col=0, row=0 → \x1b[<0;1;1M
+        let bytes = encode_mouse_sgr(MouseButton::Left, 0, 0, true);
+        assert_eq!(bytes, b"\x1b[<0;1;1M");
+    }
+
+    #[test]
+    fn sgr_left_release() {
+        let bytes = encode_mouse_sgr(MouseButton::Left, 5, 10, false);
+        assert_eq!(bytes, b"\x1b[<0;6;11m");
+    }
+
+    #[test]
+    fn sgr_right_press() {
+        let bytes = encode_mouse_sgr(MouseButton::Right, 79, 23, true);
+        assert_eq!(bytes, b"\x1b[<2;80;24M");
+    }
+
+    #[test]
+    fn sgr_middle_press() {
+        let bytes = encode_mouse_sgr(MouseButton::Middle, 0, 0, true);
+        assert_eq!(bytes, b"\x1b[<1;1;1M");
+    }
+
+    #[test]
+    fn sgr_scroll_up() {
+        let bytes = encode_mouse_sgr(MouseButton::ScrollUp, 10, 5, true);
+        assert_eq!(bytes, b"\x1b[<64;11;6M");
+    }
+
+    #[test]
+    fn sgr_scroll_down() {
+        let bytes = encode_mouse_sgr(MouseButton::ScrollDown, 10, 5, true);
+        assert_eq!(bytes, b"\x1b[<65;11;6M");
+    }
+
+    #[test]
+    fn sgr_motion_left_held() {
+        // Motion with left button held: code = 0 + 32 = 32
+        let bytes = encode_mouse_motion_sgr(MouseButton::Left, 20, 10);
+        assert_eq!(bytes, b"\x1b[<32;21;11M");
+    }
+
+    #[test]
+    fn sgr_motion_right_held() {
+        let bytes = encode_mouse_motion_sgr(MouseButton::Right, 0, 0);
+        assert_eq!(bytes, b"\x1b[<34;1;1M");
     }
 }
