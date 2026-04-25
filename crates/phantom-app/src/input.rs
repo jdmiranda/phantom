@@ -190,8 +190,24 @@ impl App {
 
         if let Some(combo) = winit_key_to_combo(&event) {
             if let Some(action) = self.keybinds.lookup(&combo) {
-                self.dispatch_action(*action);
-                return;
+                let is_scroll = matches!(
+                    action,
+                    Action::ScrollPageUp
+                        | Action::ScrollPageDown
+                        | Action::ScrollToTop
+                        | Action::ScrollToBottom
+                );
+                let in_alt = is_scroll
+                    && self
+                        .panes
+                        .get(self.focused_pane)
+                        .map_or(false, |p| {
+                            phantom_terminal::alt_screen::is_alt_screen(p.terminal.term())
+                        });
+                if !in_alt {
+                    self.dispatch_action(*action);
+                    return;
+                }
             }
         }
 
@@ -274,6 +290,26 @@ impl App {
                 self.text_renderer.set_font_size(new_size);
                 self.cell_size = self.text_renderer.measure_cell();
                 self.atlas.clear();
+            }
+            Action::ScrollPageUp => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_page_up();
+                }
+            }
+            Action::ScrollPageDown => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_page_down();
+                }
+            }
+            Action::ScrollToTop => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_to_top();
+                }
+            }
+            Action::ScrollToBottom => {
+                if let Some(pane) = self.panes.get_mut(self.focused_pane) {
+                    pane.terminal.scroll_to_bottom();
+                }
             }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
@@ -393,8 +429,26 @@ impl App {
 
         if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers) {
             if let Some(action) = self.keybinds.lookup(&combo) {
-                self.dispatch_action(*action);
-                return;
+                // Don't consume scroll keybinds when in alt screen (vim, htop, etc.)
+                // — let them fall through to the PTY instead.
+                let is_scroll = matches!(
+                    action,
+                    Action::ScrollPageUp
+                        | Action::ScrollPageDown
+                        | Action::ScrollToTop
+                        | Action::ScrollToBottom
+                );
+                let in_alt = is_scroll
+                    && self
+                        .panes
+                        .get(self.focused_pane)
+                        .map_or(false, |p| {
+                            phantom_terminal::alt_screen::is_alt_screen(p.terminal.term())
+                        });
+                if !in_alt {
+                    self.dispatch_action(*action);
+                    return;
+                }
             }
         }
 
