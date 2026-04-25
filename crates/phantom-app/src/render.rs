@@ -14,7 +14,7 @@ use phantom_ui::widgets::Widget;
 use phantom_renderer::quads::QuadInstance as QI;
 
 use crate::app::{App, AppState};
-use crate::pane::{pane_inner_rect, container_rect,
+use crate::pane::{pane_inner_rect, container_rect, scrollbar_track_rect, scrollbar_thumb_rect,
     CONTAINER_PAD_X_CELLS, CONTAINER_TITLE_H_CELLS};
 
 impl App {
@@ -374,7 +374,10 @@ impl App {
 
         // -- Coordinator two-phase render: collect outputs from all registered adapters --
         let coordinator_outputs = self.coordinator.render_all(&self.layout);
-        for (_app_id, _rect, ro) in &coordinator_outputs {
+        let focused_app = self.coordinator.focused();
+        let mut coord_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
+
+        for (app_id, _rect, ro) in &coordinator_outputs {
             // Render quads (colored rectangles).
             for q in &ro.quads {
                 quads.push(QI { pos: [q.x, q.y], size: [q.w, q.h], color: q.color, border_radius: 0.0 });
@@ -383,6 +386,119 @@ impl App {
             for seg in &ro.text_segments {
                 self.render_overlay_text(&seg.text, seg.x, seg.y, seg.color, glyphs);
             }
+
+            // -- Container chrome for this adapter --
+            let is_focused = focused_app == Some(*app_id);
+            let pane_id = self.coordinator.pane_id_for(*app_id);
+            let layout_rect = pane_id.and_then(|pid| self.layout.get_pane_rect(pid).ok());
+
+            if let Some(layout_rect) = layout_rect {
+                let pane_rect = container_rect(layout_rect, self.cell_size);
+                let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
+                let bg = self.theme.colors.background;
+
+                // -- Scene pass chrome (gets CRT effects) --
+
+                // Drop shadow.
+                quads.push(QI {
+                    pos: [pane_rect.x + 3.0, pane_rect.y + 3.0],
+                    size: [pane_rect.width, pane_rect.height],
+                    color: [0.0, 0.0, 0.0, 0.15],
+                    border_radius: 6.0,
+                });
+
+                // Container background.
+                let cont_bg = [
+                    (bg[0] + 0.06).min(1.0),
+                    (bg[1] + 0.10).min(1.0),
+                    (bg[2] + 0.06).min(1.0),
+                    1.0,
+                ];
+                quads.push(QI {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [pane_rect.width, pane_rect.height],
+                    color: cont_bg,
+                    border_radius: 6.0,
+                });
+
+                // Title strip.
+                let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
+                let title_bg = if is_focused {
+                    [bg[0] * 1.6 + 0.04, bg[1] * 2.0 + 0.06, bg[2] * 1.6 + 0.04, 1.0]
+                } else {
+                    [bg[0] * 1.3 + 0.02, bg[1] * 1.5 + 0.03, bg[2] * 1.3 + 0.02, 1.0]
+                };
+                quads.push(QI {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [pane_rect.width, title_h],
+                    color: title_bg,
+                    border_radius: 6.0,
+                });
+
+                // -- Overlay pass chrome (crisp, post-CRT) --
+
+                // Focus-aware border (1px lines).
+                let border_color = if is_focused {
+                    [0.2, 1.0, 0.5, 0.85]
+                } else {
+                    [0.15, 0.25, 0.18, 0.60]
+                };
+                let t = 1.0;
+                // top
+                chrome_quads.push(QI { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                // bottom
+                chrome_quads.push(QI { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                // left
+                chrome_quads.push(QI { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                // right
+                chrome_quads.push(QI { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+
+                // Title text.
+                let dot_color = if is_focused {
+                    [0.2, 1.0, 0.5, 1.0]
+                } else {
+                    [0.4, 0.5, 0.4, 0.7]
+                };
+                let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
+                let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
+                let app_type = self.coordinator.registry().get(*app_id)
+                    .map(|e| e.app_type.as_str())
+                    .unwrap_or("app");
+                let grid_dims = ro.grid.as_ref()
+                    .map(|g| format!("  {}x{}", g.cols, g.rows))
+                    .unwrap_or_default();
+                let title_text = format!("\u{25cf} {}{}", app_type, grid_dims);
+                coord_titles.push((title_text, title_x, title_y, dot_color));
+
+                // -- Scrollbar (overlay pass — crisp, post-CRT) --
+                if let Some(ref scroll) = ro.scroll {
+                    if scroll.history_size > 0 {
+                        let track = scrollbar_track_rect(inner_rect);
+                        // Track background.
+                        chrome_quads.push(QI {
+                            pos: [track.x, track.y],
+                            size: [track.width, track.height],
+                            color: [0.2, 0.2, 0.2, 0.3],
+                            border_radius: 3.0,
+                        });
+                        // Thumb.
+                        if let Some(thumb) = scrollbar_thumb_rect(track, scroll.display_offset, scroll.history_size, scroll.visible_rows) {
+                            let thumb_color = if is_focused {
+                                [0.2, 1.0, 0.5, 0.4]
+                            } else {
+                                [0.5, 0.5, 0.5, 0.5]
+                            };
+                            chrome_quads.push(QI {
+                                pos: [thumb.x, thumb.y],
+                                size: [thumb.width, thumb.height],
+                                color: thumb_color,
+                                border_radius: 3.0,
+                            });
+                        }
+                    }
+                }
+            }
+
             // Render terminal grid data (the critical path for terminal adapters).
             if let Some(ref grid) = ro.grid {
                 let grid_cells: Vec<GridCell> = grid.cells.iter()
@@ -412,6 +528,11 @@ impl App {
                     }
                 }
             }
+        }
+
+        // -- Coordinator adapter title text (overlay pass — crisp, readable) --
+        for (label, x, y, color) in &coord_titles {
+            self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
         }
 
         let _has_multiple = self.panes.len() > 1;

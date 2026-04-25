@@ -98,6 +98,7 @@ mod tests {
                     color: [1.0, 1.0, 1.0, 1.0],
                 }],
                 grid: None,
+                scroll: None,
             }
         }
 

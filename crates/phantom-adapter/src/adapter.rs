@@ -133,6 +133,15 @@ pub struct RenderOutput {
     pub quads: Vec<QuadData>,
     pub text_segments: Vec<TextData>,
     pub grid: Option<GridData>,
+    pub scroll: Option<ScrollState>,
+}
+
+/// Scroll position data for scrollbar rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct ScrollState {
+    pub display_offset: usize,
+    pub history_size: usize,
+    pub visible_rows: usize,
 }
 
 /// Terminal cell grid data for GPU rendering.

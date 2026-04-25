@@ -459,6 +459,7 @@ mod tests {
                     color: [1.0; 4],
                 }],
                 grid: None,
+                scroll: None,
             }
         }
 

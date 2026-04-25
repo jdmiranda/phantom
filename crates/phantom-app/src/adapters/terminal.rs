@@ -9,7 +9,7 @@ use serde_json::json;
 
 use phantom_adapter::adapter::{
     CursorData, CursorShape as AdapterCursorShape, GridData, Rect, RenderOutput,
-    TerminalCell as AdapterCell,
+    ScrollState, TerminalCell as AdapterCell,
 };
 #[cfg(test)]
 use phantom_adapter::adapter::QuadData;
@@ -234,10 +234,17 @@ impl Renderable for TerminalAdapter {
             cursor,
         };
 
+        let scroll = Some(ScrollState {
+            display_offset: self.terminal.display_offset(),
+            history_size: self.terminal.history_size(),
+            visible_rows: self.terminal.size().rows as usize,
+        });
+
         RenderOutput {
             quads: vec![],
             text_segments: vec![],
             grid: Some(grid),
+            scroll,
         }
     }
 
@@ -434,6 +441,7 @@ mod tests {
             }],
             text_segments: vec![],
             grid: None,
+            scroll: None,
         };
         assert_eq!(output.quads.len(), 1);
         assert_eq!(output.quads[0].x, 10.0);
