@@ -81,6 +81,7 @@ impl PhantomSettings {
     }
 
     /// Load settings from a specific path, falling back to defaults.
+    #[allow(dead_code)]
     pub fn load_from(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(contents) => match toml::from_str(&contents) {

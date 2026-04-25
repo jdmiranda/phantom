@@ -306,15 +306,6 @@ impl PhantomTerminal {
         self.size
     }
 
-    /// Number of lines the viewport is scrolled back from the bottom.
-    ///
-    /// Returns 0 when the user is at the latest output (the bottom). A value
-    /// greater than 0 means the user has scrolled up to review history.
-    #[inline]
-    pub fn display_offset(&self) -> usize {
-        self.term.grid().display_offset()
-    }
-
     /// The PTY file descriptor for ioctl queries (e.g. foreground process group).
     #[inline]
     pub fn pty_fd(&self) -> &File {

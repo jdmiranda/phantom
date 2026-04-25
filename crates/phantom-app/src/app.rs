@@ -210,11 +210,12 @@ pub struct App {
     // -- Shutdown guard (logs reverse-tier teardown, idempotent via Drop) --
     pub(crate) shutdown_guard: ShutdownGuard,
 
-    // -- Mouse state (wired in T5/T6: mouse event handlers) --
-    #[allow(dead_code)]
+    // -- Mouse state --
     pub(crate) cursor_position: (f64, f64),
-    #[allow(dead_code)]
     pub(crate) cursor_over_pane: Option<usize>,
+
+    // -- Settings panel --
+    pub(crate) settings_panel: crate::settings_ui::SettingsPanel,
 }
 
 /// An active suggestion from the AI brain.
@@ -586,6 +587,7 @@ impl App {
             shutdown_guard: ShutdownGuard::new(),
             cursor_position: (0.0, 0.0),
             cursor_over_pane: None,
+            settings_panel: crate::settings_ui::SettingsPanel::new(),
         })
     }
 
