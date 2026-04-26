@@ -217,6 +217,12 @@ impl AppCore for TerminalAdapter {
     }
 
     fn get_state(&self) -> serde_json::Value {
+        let mouse_mode = match self.terminal.mouse_mode() {
+            phantom_terminal::terminal::MouseMode::None => "none",
+            phantom_terminal::terminal::MouseMode::Click => "click",
+            phantom_terminal::terminal::MouseMode::Drag => "drag",
+            phantom_terminal::terminal::MouseMode::Motion => "motion",
+        };
         json!({
             "type": "terminal",
             "alive": true,
@@ -224,6 +230,7 @@ impl AppCore for TerminalAdapter {
             "has_new_output": self.has_new_output,
             "history_size": self.terminal.history_size(),
             "display_offset": self.terminal.display_offset(),
+            "mouse_mode": mouse_mode,
         })
     }
 }

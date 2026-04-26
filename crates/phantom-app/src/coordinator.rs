@@ -412,13 +412,21 @@ impl AppCoordinator {
         let Some(id) = self.focused else {
             return false;
         };
-        let Some(entry) = self.registry.get(id) else {
+        self.route_bytes_to(id, bytes)
+    }
+
+    /// Write raw bytes to a specific adapter via `accept_command("write_bytes", ...)`.
+    ///
+    /// Returns `true` if the bytes were consumed. Used for SGR mouse
+    /// forwarding where the target may differ from the focused adapter.
+    pub fn route_bytes_to(&mut self, app_id: AppId, bytes: &[u8]) -> bool {
+        let Some(entry) = self.registry.get(app_id) else {
             return false;
         };
         if !entry.accepts_input {
             return false;
         }
-        let Some(adapter) = self.registry.get_adapter_mut(id) else {
+        let Some(adapter) = self.registry.get_adapter_mut(app_id) else {
             return false;
         };
         // Encode bytes as a JSON array for the command interface.
@@ -426,10 +434,23 @@ impl AppCoordinator {
         match adapter.accept_command("write_bytes", &args) {
             Ok(_) => true,
             Err(e) => {
-                log::warn!("route_bytes to adapter {id} failed: {e}");
+                log::warn!("route_bytes to adapter {app_id} failed: {e}");
                 false
             }
         }
+    }
+
+    /// Whether the adapter at `app_id` has requested mouse event forwarding.
+    ///
+    /// Checks the adapter's state JSON for a `mouse_mode` field that is
+    /// not `"none"`. Terminal adapters report this based on DEC mode
+    /// tracking (modes 1000/1002/1003).
+    pub fn adapter_wants_mouse(&self, app_id: AppId) -> bool {
+        self.registry
+            .get_adapter(app_id)
+            .map(|a| a.get_state())
+            .and_then(|s| s.get("mouse_mode").and_then(|v| v.as_str().map(String::from)))
+            .is_some_and(|m| m != "none")
     }
 
     /// Send a command to the currently focused adapter.

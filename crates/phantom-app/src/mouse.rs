@@ -8,9 +8,8 @@
 use log::debug;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
-#[allow(unused_imports)] // Deferred: SGR mouse forwarding through adapters planned for Phase 4
 use phantom_terminal::input::{
-    encode_mouse_motion_sgr, encode_mouse_sgr, MouseButton as TermMouseButton,
+    encode_mouse_sgr, MouseButton as TermMouseButton,
 };
 
 use crate::app::App;
@@ -23,7 +22,6 @@ use crate::pane::{
 // ---------------------------------------------------------------------------
 
 /// Convert pixel coordinates to terminal cell (col, row).
-#[allow(dead_code)] // Used when SGR mouse tracking is wired through adapters
 pub(crate) fn pixel_to_cell(
     px: f64,
     py: f64,
@@ -47,7 +45,6 @@ pub(crate) fn pixel_to_cell(
 // Winit button conversion
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)] // Used when SGR mouse tracking is wired through adapters
 fn winit_to_term_button(button: MouseButton) -> Option<TermMouseButton> {
     match button {
         MouseButton::Left => Some(TermMouseButton::Left),
@@ -125,9 +122,22 @@ impl App {
         let cr = container_rect(layout_rect, self.cell_size);
         let inner = pane_inner_rect(self.cell_size, cr);
         let (px, py) = self.cursor_position;
-        let col = ((px as f32 - inner.x).max(0.0) / self.cell_size.0).floor() as usize;
-        let row = ((py as f32 - inner.y).max(0.0) / self.cell_size.1).floor() as usize;
-        Some((col, row))
+        // Compute grid dimensions from the pane inner rect for clamping.
+        let max_col = if self.cell_size.0 > 0.0 {
+            (inner.width / self.cell_size.0).floor() as usize
+        } else {
+            0
+        };
+        let max_row = if self.cell_size.1 > 0.0 {
+            (inner.height / self.cell_size.1).floor() as usize
+        } else {
+            0
+        };
+        Some(pixel_to_cell(
+            px, py, inner.x, inner.y,
+            self.cell_size.0, self.cell_size.1,
+            max_col.saturating_sub(1), max_row.saturating_sub(1),
+        ))
     }
 
     /// Handle mouse button press/release.
@@ -140,6 +150,21 @@ impl App {
                 }
                 ElementState::Released => {
                     self.mouse_button_held = None;
+                }
+            }
+        }
+
+        // SGR mouse forwarding: if the focused adapter has mouse tracking
+        // enabled, encode the click/release as SGR 1006 and send to the PTY.
+        if let Some(term_btn) = winit_to_term_button(button) {
+            if let Some(focused) = self.coordinator.focused() {
+                if self.coordinator.adapter_wants_mouse(focused) {
+                    let pressed = state == ElementState::Pressed;
+                    if let Some((col, row)) = self.cursor_to_cell(focused) {
+                        let sgr = encode_mouse_sgr(term_btn, col, row, pressed);
+                        let _ = self.coordinator.route_bytes_to(focused, &sgr);
+                        return;
+                    }
                 }
             }
         }
@@ -240,6 +265,23 @@ impl App {
                 self.console.scroll_down(int_lines);
             }
             return;
+        }
+
+        // SGR mouse forwarding: if the focused adapter has mouse tracking
+        // enabled, encode scroll as SGR 1006 wheel events.
+        if let Some(focused) = self.coordinator.focused() {
+            if self.coordinator.adapter_wants_mouse(focused) {
+                let btn = if lines > 0.0 {
+                    TermMouseButton::ScrollUp
+                } else {
+                    TermMouseButton::ScrollDown
+                };
+                if let Some((col, row)) = self.cursor_to_cell(focused) {
+                    let sgr = encode_mouse_sgr(btn, col, row, true);
+                    let _ = self.coordinator.route_bytes_to(focused, &sgr);
+                    return;
+                }
+            }
         }
 
         // Route scroll to focused adapter via command.
