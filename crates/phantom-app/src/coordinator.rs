@@ -690,6 +690,7 @@ mod tests {
                 }],
                 grid: None,
                 scroll: None,
+                selection: None,
             }
         }
 

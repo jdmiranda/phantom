@@ -5,6 +5,8 @@
 //! to the PTY when the running terminal program requests mouse tracking.
 //! Also handles scrollbar click-to-jump.
 
+use std::time::{Duration, Instant};
+
 use log::debug;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
@@ -181,14 +183,38 @@ impl App {
 
         // Left click — check scrollbar hit on coordinator panes, then focus.
         if button == MouseButton::Left {
-            // Clear any existing selection first.
-            if let Some(focused) = self.coordinator.focused() {
-                let _ = self.coordinator.send_command(
-                    focused,
-                    "select_clear",
-                    &serde_json::json!({}),
-                );
+            // -- Multi-click detection (double = word, triple = line) --
+            let now = Instant::now();
+            let (px, py) = self.cursor_position;
+            let max_dist = 5.0; // pixels — clicks must be near each other
+            let near = {
+                let dx = px - self.last_click_pos.0;
+                let dy = py - self.last_click_pos.1;
+                (dx * dx + dy * dy).sqrt() < max_dist
+            };
+
+            let rapid = self.last_click_time
+                .map_or(false, |t| now.duration_since(t) < Duration::from_millis(400));
+
+            if rapid && near {
+                self.click_count = (self.click_count + 1).min(3);
+            } else {
+                self.click_count = 1;
             }
+            self.last_click_time = Some(now);
+            self.last_click_pos = (px, py);
+
+            // Clear any existing selection first (single click resets).
+            if self.click_count == 1 {
+                if let Some(focused) = self.coordinator.focused() {
+                    let _ = self.coordinator.send_command(
+                        focused,
+                        "select_clear",
+                        &serde_json::json!({}),
+                    );
+                }
+            }
+
             let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
 
             // Check scrollbar hit on each coordinator-managed pane.
@@ -225,14 +251,37 @@ impl App {
                 }
             }
 
-            // Start text selection at the clicked cell.
+            // Dispatch selection based on click count.
             if let Some(focused) = self.coordinator.focused() {
                 if let Some((col, row)) = self.cursor_to_cell(focused) {
-                    let _ = self.coordinator.send_command(
-                        focused,
-                        "select_start",
-                        &serde_json::json!({"col": col, "row": row}),
-                    );
+                    match self.click_count {
+                        2 => {
+                            // Double-click: select word.
+                            let _ = self.coordinator.send_command(
+                                focused,
+                                "select_word",
+                                &serde_json::json!({"col": col, "row": row}),
+                            );
+                            debug!("Double-click word select at ({col}, {row})");
+                        }
+                        3 => {
+                            // Triple-click: select line.
+                            let _ = self.coordinator.send_command(
+                                focused,
+                                "select_line",
+                                &serde_json::json!({"row": row}),
+                            );
+                            debug!("Triple-click line select at row {row}");
+                        }
+                        _ => {
+                            // Single click: start simple selection.
+                            let _ = self.coordinator.send_command(
+                                focused,
+                                "select_start",
+                                &serde_json::json!({"col": col, "row": row}),
+                            );
+                        }
+                    }
                 }
             }
         }

@@ -219,6 +219,12 @@ pub struct App {
     pub(crate) cursor_over_pane: Option<u32>,
     /// Which terminal mouse button is currently held (for drag/selection tracking).
     pub(crate) mouse_button_held: Option<phantom_terminal::input::MouseButton>,
+    /// Timestamp of the last left-click (for double/triple-click detection).
+    pub(crate) last_click_time: Option<Instant>,
+    /// Position of the last left-click (for double/triple-click detection).
+    pub(crate) last_click_pos: (f64, f64),
+    /// Number of rapid consecutive clicks (1 = single, 2 = double, 3 = triple).
+    pub(crate) click_count: u8,
 
     // -- Settings panel --
     pub(crate) settings_panel: crate::settings_ui::SettingsPanel,
@@ -610,6 +616,9 @@ impl App {
             cursor_position: (0.0, 0.0),
             cursor_over_pane: None,
             mouse_button_held: None,
+            last_click_time: None,
+            last_click_pos: (0.0, 0.0),
+            click_count: 0,
             settings_panel: crate::settings_ui::SettingsPanel::new(),
         })
     }

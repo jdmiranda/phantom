@@ -491,21 +491,10 @@ impl App {
                 if let Some(focused) = self.coordinator.focused() {
                     if let Ok(text) = self.coordinator.send_command(focused, "select_copy", &serde_json::json!({})) {
                         if !text.is_empty() {
-                            #[cfg(target_os = "macos")]
-                            {
-                                // Use pbcopy for clipboard on macOS.
-                                use std::io::Write;
-                                if let Ok(mut child) = std::process::Command::new("pbcopy")
-                                    .stdin(std::process::Stdio::piped())
-                                    .spawn()
-                                {
-                                    if let Some(ref mut stdin) = child.stdin {
-                                        let _ = stdin.write_all(text.as_bytes());
-                                    }
-                                    let _ = child.wait();
-                                }
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let _ = clipboard.set_text(&text);
                             }
-                            debug!("Copied {} chars to clipboard", text.len());
+                            info!("Copied {} chars to clipboard", text.len());
                             return;
                         }
                     }

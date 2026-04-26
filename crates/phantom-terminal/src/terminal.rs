@@ -410,6 +410,19 @@ impl PhantomTerminal {
         self.term.selection.is_some()
     }
 
+    /// Get the selection range as (start_col, start_row, end_col, end_row).
+    ///
+    /// Row values are relative to the visible screen (0 = top visible row).
+    /// Returns `None` if there is no selection.
+    pub fn selection_range(&self) -> Option<(usize, usize, usize, usize)> {
+        let range = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term))?;
+        let start_col = range.start.column.0;
+        let start_row = range.start.line.0.max(0) as usize;
+        let end_col = range.end.column.0;
+        let end_row = range.end.line.0.max(0) as usize;
+        Some((start_col, start_row, end_col, end_row))
+    }
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {

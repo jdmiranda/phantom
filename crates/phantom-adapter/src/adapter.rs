@@ -157,6 +157,16 @@ pub struct RenderOutput {
     pub text_segments: Vec<TextData>,
     pub grid: Option<GridData>,
     pub scroll: Option<ScrollState>,
+    pub selection: Option<SelectionRange>,
+}
+
+/// Active text selection range in grid coordinates.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionRange {
+    pub start_col: usize,
+    pub start_row: usize,
+    pub end_col: usize,
+    pub end_row: usize,
 }
 
 /// Scroll position data for scrollbar rendering.

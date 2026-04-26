@@ -135,6 +135,7 @@ impl Renderable for AgentAdapter {
             text_segments,
             grid: None,
             scroll: None,
+            selection: None,
         }
     }
 
@@ -252,6 +253,7 @@ mod tests {
             ],
             grid: None,
             scroll: None,
+            selection: None,
         };
 
         assert_eq!(output.text_segments.len(), 2);
@@ -296,6 +298,7 @@ mod tests {
             text_segments: vec![],
             grid: None,
             scroll: None,
+            selection: None,
         };
         assert_eq!(output.quads.len(), 1);
     }

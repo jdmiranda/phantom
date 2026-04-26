@@ -9,7 +9,7 @@ use serde_json::json;
 
 use phantom_adapter::adapter::{
     CursorData, CursorShape as AdapterCursorShape, GridData, Rect, RenderOutput,
-    ScrollState, TerminalCell as AdapterCell,
+    ScrollState, SelectionRange, TerminalCell as AdapterCell,
 };
 #[cfg(test)]
 use phantom_adapter::adapter::QuadData;
@@ -271,11 +271,21 @@ impl Renderable for TerminalAdapter {
             visible_rows: self.terminal.size().rows as usize,
         });
 
+        let selection = self.terminal.selection_range().map(|(sc, sr, ec, er)| {
+            SelectionRange {
+                start_col: sc,
+                start_row: sr,
+                end_col: ec,
+                end_row: er,
+            }
+        });
+
         RenderOutput {
             quads: vec![],
             text_segments: vec![],
             grid: Some(grid),
             scroll,
+            selection,
         }
     }
 
@@ -406,6 +416,23 @@ impl Commandable for TerminalAdapter {
                 self.terminal.clear_selection();
                 Ok("selection cleared".into())
             }
+            "select_word" => {
+                let col = args.get("col").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                let point = Point::new(Line(row), Column(col));
+                self.terminal.start_selection(SelectionType::Semantic, point, Side::Left);
+                self.terminal.update_selection(point, Side::Right);
+                Ok("word selected".into())
+            }
+            "select_line" => {
+                let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                let point = Point::new(Line(row), Column(0));
+                self.terminal.start_selection(SelectionType::Lines, point, Side::Left);
+                self.terminal.update_selection(point, Side::Right);
+                Ok("line selected".into())
+            }
             "select_copy" => {
                 let text = self.terminal.selection_to_string().unwrap_or_default();
                 Ok(text)
@@ -514,6 +541,7 @@ mod tests {
             text_segments: vec![],
             grid: None,
             scroll: None,
+            selection: None,
         };
         assert_eq!(output.quads.len(), 1);
         assert_eq!(output.quads[0].x, 10.0);
