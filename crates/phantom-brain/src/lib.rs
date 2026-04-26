@@ -320,18 +320,32 @@ mod tests {
     }
 
     // =======================================================================
-    // 10. watcher_score: 0.5 when project has build commands
+    // 10. watcher_score: 0.5 only when an active process is detected
     // =======================================================================
 
     #[test]
-    fn watcher_score_positive_with_build_commands() {
-        let scorer = UtilityScorer::new();
+    fn watcher_score_positive_with_active_process() {
+        let mut scorer = UtilityScorer::new();
+        scorer.has_active_process = true;
         let ctx = test_context();
 
         let scored = scorer.watcher_score(&ctx);
         assert!(
             (scored.score - 0.5).abs() < f32::EPSILON,
             "expected 0.5, got {}",
+            scored.score
+        );
+    }
+
+    #[test]
+    fn watcher_score_zero_without_active_process() {
+        let scorer = UtilityScorer::new();
+        let ctx = test_context();
+
+        let scored = scorer.watcher_score(&ctx);
+        assert!(
+            scored.score.abs() < f32::EPSILON,
+            "expected 0.0, got {}",
             scored.score
         );
     }

@@ -62,9 +62,27 @@ fn winit_to_term_button(button: MouseButton) -> Option<TermMouseButton> {
 // ---------------------------------------------------------------------------
 
 impl App {
+    /// Returns true if the cursor is inside the visible console overlay region.
+    fn cursor_in_console(&self) -> bool {
+        if !self.console.visible() {
+            return false;
+        }
+        let screen_h = self.gpu.surface_config.height as f32;
+        let full_height = (screen_h * 0.40).max(120.0);
+        let console_height = full_height * self.console.slide;
+        let (_, cy) = self.cursor_position;
+        cy < console_height as f64
+    }
+
     /// Handle cursor movement -- update position and hit-test panes.
     pub fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_position = (x, y);
+
+        // Console overlay captures all mouse interaction when visible.
+        if self.cursor_in_console() {
+            self.cursor_over_pane = None;
+            return;
+        }
 
         // Hit-test coordinator-managed adapters.
         self.cursor_over_pane = None;
@@ -128,6 +146,11 @@ impl App {
 
         // Only handle press events for non-SGR operations.
         if state != ElementState::Pressed {
+            return;
+        }
+
+        // Console overlay captures mouse clicks when visible.
+        if self.cursor_in_console() {
             return;
         }
 
@@ -205,6 +228,17 @@ impl App {
         };
 
         if lines.abs() < 0.01 {
+            return;
+        }
+
+        // Console overlay captures scroll when visible — scroll console history.
+        if self.cursor_in_console() {
+            let int_lines = lines.round().abs().max(1.0) as usize;
+            if lines > 0.0 {
+                self.console.scroll_up(int_lines);
+            } else {
+                self.console.scroll_down(int_lines);
+            }
             return;
         }
 
