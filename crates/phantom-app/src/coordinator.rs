@@ -11,7 +11,7 @@ use phantom_adapter::{AppAdapter, AppId, AppRegistry, EventBus, Rect, RenderOutp
 use phantom_adapter::spatial::SpatialPreference;
 use phantom_scene::clock::Cadence;
 use phantom_scene::dirty::DirtyFlags;
-use phantom_scene::node::{NodeId, NodeKind};
+use phantom_scene::node::{NodeId, NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
 use phantom_ui::arbiter::LayoutArbiter;
 use phantom_ui::layout::{LayoutEngine, PaneId};
@@ -19,6 +19,13 @@ use phantom_ui::layout::{LayoutEngine, PaneId};
 /// A set of position allocations produced by the layout arbiter or Taffy.
 pub struct LayoutPlan {
     pub allocations: HashMap<AppId, Rect>,
+}
+
+/// Render outputs partitioned by scene layer.
+#[allow(dead_code)]
+pub struct LayeredRenderOutputs {
+    pub scene: Vec<(AppId, Rect, RenderOutput)>,
+    pub overlay: Vec<(AppId, Rect, RenderOutput)>,
 }
 
 /// Orchestrates all registered adapters, the event bus, layout panes,
@@ -153,6 +160,7 @@ impl AppCoordinator {
         if let Some(node) = scene.get_mut(node_id) {
             let app_type = self.registry.get(id).map(|e| e.app_type.as_str()).unwrap_or("unknown");
             node.z_order = match app_type { "video" => 10, _ => 0 };
+            node.render_layer = RenderLayer::Scene;
         }
         self.scene_map.insert(id, node_id);
 
@@ -405,6 +413,40 @@ impl AppCoordinator {
         });
 
         outputs
+    }
+
+    /// Query which render layer an adapter's scene node belongs to.
+    pub fn render_layer_for(&self, app_id: AppId, scene: &SceneTree) -> RenderLayer {
+        self.scene_map.get(&app_id)
+            .and_then(|&nid| scene.get(nid))
+            .map(|n| n.render_layer)
+            .unwrap_or(RenderLayer::Scene)
+    }
+
+    /// Collect render outputs partitioned by RenderLayer.
+    #[allow(dead_code)]
+    pub fn render_all_layered(&self, layout: &LayoutEngine, scene: &SceneTree) -> LayeredRenderOutputs {
+        let all = self.render_all(layout);
+        let mut result = LayeredRenderOutputs { scene: Vec::new(), overlay: Vec::new() };
+        for item in all {
+            let (app_id, _, _) = &item;
+            match self.render_layer_for(*app_id, scene) {
+                RenderLayer::Scene => result.scene.push(item),
+                RenderLayer::Overlay => result.overlay.push(item),
+            }
+        }
+        result
+    }
+
+    /// Switch an adapter's scene node to a different render layer.
+    #[allow(dead_code)]
+    pub fn set_render_layer(&self, app_id: AppId, layer: RenderLayer, scene: &mut SceneTree) {
+        if let Some(&node_id) = self.scene_map.get(&app_id) {
+            if let Some(node) = scene.get_mut(node_id) {
+                node.render_layer = layer;
+                node.dirty |= DirtyFlags::VISIBILITY;
+            }
+        }
     }
 
     /// Mark all adapter scene nodes as dirty (call on window resize).
