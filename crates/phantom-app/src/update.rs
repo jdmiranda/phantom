@@ -119,6 +119,10 @@ impl App {
                             &serde_json::json!({"text": cmd_text}),
                         );
                     }
+                    AiAction::DismissAdapter { app_id } => {
+                        info!("[PHANTOM]: Dismissing adapter {app_id}");
+                        self.coordinator.remove_adapter(app_id, &mut self.layout, &mut self.scene);
+                    }
                     AiAction::DoNothing => {}
                 }
             }

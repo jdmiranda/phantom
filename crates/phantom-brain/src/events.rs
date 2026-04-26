@@ -105,6 +105,9 @@ pub enum AiAction {
     /// inline where they typed the question.
     ConsoleReply(String),
 
+    /// Dismiss (remove) an adapter by its AppId.
+    DismissAdapter { app_id: u32 },
+
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,
 }

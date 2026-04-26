@@ -460,6 +460,9 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             AiAction::ConsoleReply(reply) => {
                 println!("[PHANTOM]: {reply}");
             }
+            AiAction::DismissAdapter { app_id } => {
+                println!("[BRAIN]: dismiss adapter {app_id}");
+            }
             AiAction::DoNothing => {}
         }
     }

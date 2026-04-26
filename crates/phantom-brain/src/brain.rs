@@ -576,6 +576,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::ShowNotification(_) => "notify",
         AiAction::RunCommand(_) => "run_command",
         AiAction::ConsoleReply(_) => "console_reply",
+        AiAction::DismissAdapter { .. } => "dismiss_adapter",
         AiAction::DoNothing => "quiet",
     }
 }
