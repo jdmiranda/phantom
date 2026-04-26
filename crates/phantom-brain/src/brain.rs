@@ -268,6 +268,8 @@ fn orient(event: &AiEvent, scorer: &mut UtilityScorer) {
     match event {
         AiEvent::CommandComplete(parsed) => {
             scorer.last_had_errors = !parsed.errors.is_empty();
+            // A command completed — no longer an active process.
+            scorer.has_active_process = false;
             // User just ran a command — reset idle tracking.
             scorer.user_acted();
         }
@@ -278,6 +280,10 @@ fn orient(event: &AiEvent, scorer: &mut UtilityScorer) {
         AiEvent::Interrupt(_) | AiEvent::AgentRequest(_) => {
             // Explicit user action — reset chattiness.
             scorer.user_acted();
+        }
+        AiEvent::WatcherTick { .. } => {
+            // A watcher tick means something is actively running.
+            scorer.has_active_process = true;
         }
         _ => {}
     }
@@ -332,8 +338,8 @@ fn enhance_with_ollama(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    ('y', "Fix it".into()),
-                    ('n', "Dismiss".into()),
+                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }))) },
+                    crate::events::SuggestionOption { key: 'n', label: "Dismiss".into(), action: None },
                 ],
             }
         }
@@ -399,8 +405,8 @@ fn enhance_with_claude(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    ('y', "Fix it".into()),
-                    ('n', "Dismiss".into()),
+                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }))) },
+                    crate::events::SuggestionOption { key: 'n', label: "Dismiss".into(), action: None },
                 ],
             }
         }

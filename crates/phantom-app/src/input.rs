@@ -359,12 +359,31 @@ impl App {
             }
         }
 
-        if let Some(dismissed) = self.suggestion.take() {
-            // Save to history before clearing.
-            self.suggestion_history.push_back(dismissed);
-            if self.suggestion_history.len() > 10 {
-                self.suggestion_history.pop_front();
+        // Suggestion overlay: route option keys or dismiss.
+        if let Some(ref suggestion) = self.suggestion {
+            if let Key::Character(ref ch) = event.logical_key {
+                let pressed = ch.chars().next().unwrap_or('\0');
+                if let Some(opt) = suggestion.options.iter().find(|o| o.key == pressed) {
+                    if let Some(ref action) = opt.action {
+                        self.pending_brain_actions.push((**action).clone());
+                    }
+                    let dismissed = self.suggestion.take().unwrap();
+                    self.suggestion_history.push_back(dismissed);
+                    if self.suggestion_history.len() > 10 {
+                        self.suggestion_history.pop_front();
+                    }
+                    return;
+                }
             }
+            if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+                let dismissed = self.suggestion.take().unwrap();
+                self.suggestion_history.push_back(dismissed);
+                if self.suggestion_history.len() > 10 {
+                    self.suggestion_history.pop_front();
+                }
+                return;
+            }
+            // Other keys pass through to the focused pane.
         }
 
         // Settings panel captures all keys when open.

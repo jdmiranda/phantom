@@ -75,6 +75,15 @@ pub enum AiEvent {
 // Outbound: actions the brain decides to take
 // ---------------------------------------------------------------------------
 
+/// An option in a brain suggestion overlay.
+#[derive(Debug, Clone)]
+pub struct SuggestionOption {
+    pub key: char,
+    pub label: String,
+    /// Action to execute if the user picks this option. None = just dismiss.
+    pub action: Option<Box<AiAction>>,
+}
+
 /// Actions the AI brain can emit (sent back to the render / app thread).
 ///
 /// The render thread polls for these and applies them to the UI or system
@@ -85,7 +94,7 @@ pub enum AiAction {
     /// Show an inline suggestion with optional shortcut options.
     ShowSuggestion {
         text: String,
-        options: Vec<(char, String)>,
+        options: Vec<SuggestionOption>,
     },
 
     /// Spawn a new agent to work on a task.

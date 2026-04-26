@@ -188,11 +188,19 @@ impl App {
         let box_x = (screen_size[0] - box_width) / 2.0;
         let box_y = screen_size[1] - box_height - 60.0; // above status bar
 
-        // Background panel.
+        // Opaque background to fully cover any terminal text behind the popup.
+        // A slightly larger shadow quad ensures no bleed-through at rounded corners.
+        quads.push(QuadInstance {
+            pos: [box_x - 2.0, box_y - 2.0],
+            size: [box_width + 4.0, box_height + 4.0],
+            color: [0.01, 0.02, 0.04, 1.0],
+            border_radius: 6.0,
+        });
+        // Background panel (fully opaque to prevent text bleed-through artifacts).
         quads.push(QuadInstance {
             pos: [box_x, box_y],
             size: [box_width, box_height],
-            color: [0.02, 0.04, 0.08, 0.92],
+            color: [0.02, 0.04, 0.08, 1.0],
             border_radius: 4.0,
         });
 
@@ -235,8 +243,8 @@ impl App {
 
         // Option labels.
         let opt_color = [0.6, 0.8, 0.4, 1.0];
-        for (i, (key, label)) in suggestion.options.iter().enumerate() {
-            let opt_text = format!("  [{key}] {label}");
+        for (i, opt) in suggestion.options.iter().enumerate() {
+            let opt_text = format!("  [{}] {}", opt.key, opt.label);
             let opt_cells: Vec<phantom_renderer::text::TerminalCell> = opt_text
                 .chars()
                 .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: opt_color })

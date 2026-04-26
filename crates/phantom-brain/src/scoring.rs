@@ -7,11 +7,14 @@
 //!
 //! Inspired by game AI utility systems — see `docs/research/ai-control-loop.md`.
 
+use std::collections::VecDeque;
+use std::time::Instant;
+
 use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 use phantom_semantic::ParsedOutput;
 
-use crate::events::{AiAction, AiEvent};
+use crate::events::{AiAction, AiEvent, SuggestionOption};
 
 // ---------------------------------------------------------------------------
 // ScoredAction
@@ -27,6 +30,15 @@ pub struct ScoredAction {
     /// Human-readable explanation (for debug logging).
     pub reason: String,
 }
+
+/// Maximum number of suggestions without user input before dampening hard.
+const MAX_SUGGESTIONS_WITHOUT_INPUT: u32 = 2;
+
+/// Minimum seconds between any two non-quiet actions from the brain.
+const ACTION_COOLDOWN_SECS: f32 = 15.0;
+
+/// How long a duplicate suggestion is suppressed (seconds).
+const DEDUP_WINDOW_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // UtilityScorer
@@ -47,6 +59,12 @@ pub struct UtilityScorer {
     /// Increments by 0.1 per action, decays by 0.05 per second of idle time,
     /// resets to 0 on [`user_acted`].
     pub chattiness: f32,
+    /// Recent suggestion texts for deduplication (text, timestamp).
+    recent_suggestions: VecDeque<(String, Instant)>,
+    /// When the last non-quiet action was emitted (for cooldown).
+    last_action_time: Option<Instant>,
+    /// Whether a long-running command is currently active.
+    pub has_active_process: bool,
 }
 
 impl UtilityScorer {
@@ -57,7 +75,41 @@ impl UtilityScorer {
             last_had_errors: false,
             suggestions_since_input: 0,
             chattiness: 0.0,
+            recent_suggestions: VecDeque::with_capacity(6),
+            last_action_time: None,
+            has_active_process: false,
         }
+    }
+
+    /// Check if a suggestion text was recently shown (within dedup window).
+    fn is_duplicate(&self, text: &str) -> bool {
+        let now = Instant::now();
+        self.recent_suggestions.iter().any(|(t, when)| {
+            t == text && now.duration_since(*when).as_secs() < DEDUP_WINDOW_SECS
+        })
+    }
+
+    /// Record a suggestion that was emitted (for dedup tracking).
+    fn record_suggestion(&mut self, text: &str) {
+        let now = Instant::now();
+        // Evict expired entries.
+        while self.recent_suggestions.front().is_some_and(|(_, when)| {
+            now.duration_since(*when).as_secs() >= DEDUP_WINDOW_SECS
+        }) {
+            self.recent_suggestions.pop_front();
+        }
+        self.recent_suggestions.push_back((text.to_string(), now));
+        // Cap at 5 entries.
+        while self.recent_suggestions.len() > 5 {
+            self.recent_suggestions.pop_front();
+        }
+    }
+
+    /// Returns true if the action cooldown has not yet elapsed.
+    fn on_cooldown(&self) -> bool {
+        self.last_action_time.is_some_and(|t| {
+            t.elapsed().as_secs_f32() < ACTION_COOLDOWN_SECS
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -126,7 +178,10 @@ impl UtilityScorer {
             return ScoredAction {
                 action: AiAction::ShowSuggestion {
                     text: "Want me to explain this error?".into(),
-                    options: vec![('y', "Yes, explain".into()), ('n', "No thanks".into())],
+                    options: vec![
+                        SuggestionOption { key: 'y', label: "Yes, explain".into(), action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))) },
+                        SuggestionOption { key: 'n', label: "No thanks".into(), action: None },
+                    ],
                 },
                 score: 0.7,
                 reason: "user idle after error — may be stuck".into(),
@@ -137,7 +192,10 @@ impl UtilityScorer {
             return ScoredAction {
                 action: AiAction::ShowSuggestion {
                     text: "Need help with anything?".into(),
-                    options: vec![('y', "Yes".into()), ('n', "No".into())],
+                    options: vec![
+                        SuggestionOption { key: 'y', label: "Yes".into(), action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))) },
+                        SuggestionOption { key: 'n', label: "No".into(), action: None },
+                    ],
                 },
                 score: 0.3,
                 reason: "user idle for a while, offering help".into(),
@@ -188,26 +246,29 @@ impl UtilityScorer {
 
     /// Score "spawn a watcher" action.
     ///
-    /// - **0.5** if a long-running process is likely (deploy, CI commands).
-    /// - **0.0** otherwise.
-    pub fn watcher_score(&self, context: &ProjectContext) -> ScoredAction {
-        // Heuristic: if the project has CI/deploy-related context, offer a watcher.
-        let has_ci = context.commands.build.is_some() || context.commands.test.is_some();
-
-        if has_ci {
+    /// - **0.5** if a long-running process is *actively running*.
+    /// - **0.0** otherwise (just having build commands isn't enough).
+    pub fn watcher_score(&self, _context: &ProjectContext) -> ScoredAction {
+        // Only offer to watch if there's evidence of an active long-running process.
+        // Previously this fired for any project with build/test commands, causing
+        // "Want me to watch this build?" spam every 5s on idle.
+        if self.has_active_process {
             ScoredAction {
                 action: AiAction::ShowSuggestion {
                     text: "Want me to watch this build?".into(),
-                    options: vec![('y', "Watch it".into()), ('n', "No".into())],
+                    options: vec![
+                        SuggestionOption { key: 'y', label: "Watch it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm { prompt: "Watch the build".into() }))) },
+                        SuggestionOption { key: 'n', label: "No".into(), action: None },
+                    ],
                 },
                 score: 0.5,
-                reason: "project has build commands, watcher may help".into(),
+                reason: "active long-running process detected".into(),
             }
         } else {
             ScoredAction {
                 action: AiAction::DoNothing,
                 score: 0.0,
-                reason: "no long-running process detected".into(),
+                reason: "no active process to watch".into(),
             }
         }
     }
@@ -322,17 +383,53 @@ impl UtilityScorer {
         }
 
         // Pick the highest-scoring action.
-        let best = candidates
+        let mut best = candidates
             .into_iter()
             .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap_or_else(|| self.quiet_score());
 
+        // --- Spam prevention gates ---
+
+        // Gate 1: If we've already suggested too many times without user input,
+        // heavily dampen all non-urgent scores.
+        if self.suggestions_since_input >= MAX_SUGGESTIONS_WITHOUT_INPUT
+            && !matches!(best.action, AiAction::DoNothing)
+            && best.score < 0.8 // Allow truly urgent actions (agent complete, etc.)
+        {
+            best.score *= 0.2;
+            best.reason = format!("{} (dampened: {} suggestions without input)", best.reason, self.suggestions_since_input);
+        }
+
+        // Gate 2: Dedup — suppress if we recently showed the same suggestion text.
+        if let AiAction::ShowSuggestion { ref text, .. } = best.action {
+            if self.is_duplicate(text) {
+                return ScoredAction {
+                    action: AiAction::DoNothing,
+                    score: 0.0,
+                    reason: format!("suppressed duplicate: {}", text),
+                };
+            }
+        }
+
+        // Gate 3: Cooldown — enforce minimum gap between actions.
+        if !matches!(best.action, AiAction::DoNothing) && self.on_cooldown() {
+            return ScoredAction {
+                action: AiAction::DoNothing,
+                score: 0.0,
+                reason: "on cooldown".into(),
+            };
+        }
+
         // Update chattiness if we're going to act (non-quiet).
-        // Sentient mode: small increment (0.03) so the brain doesn't muzzle
-        // itself after a few suggestions. Decays via idle time.
         if !matches!(best.action, AiAction::DoNothing) && best.score > 0.0 {
-            self.chattiness = (self.chattiness + 0.03).min(0.5);
+            self.chattiness = (self.chattiness + 0.1).min(0.5);
             self.suggestions_since_input += 1;
+            self.last_action_time = Some(Instant::now());
+
+            // Record suggestion text for dedup.
+            if let AiAction::ShowSuggestion { ref text, .. } = best.action {
+                self.record_suggestion(text);
+            }
         }
 
         best
@@ -346,6 +443,8 @@ impl UtilityScorer {
         self.chattiness = 0.0;
         self.suggestions_since_input = 0;
         self.idle_time = 0.0;
+        // Don't clear recent_suggestions — dedup persists across user actions.
+        // Don't clear last_action_time — cooldown is absolute, not relative to user.
     }
 
     /// Decay chattiness based on elapsed idle time.
@@ -371,9 +470,9 @@ impl UtilityScorer {
         AiAction::ShowSuggestion {
             text: format!("Fix: {error_summary}"),
             options: vec![
-                ('f', "Fix it".into()),
-                ('e', "Explain".into()),
-                ('d', "Dismiss".into()),
+                SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm { prompt: error_summary }))) },
+                SuggestionOption { key: 'e', label: "Explain".into(), action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))) },
+                SuggestionOption { key: 'd', label: "Dismiss".into(), action: None },
             ],
         }
     }
@@ -382,5 +481,16 @@ impl UtilityScorer {
 impl Default for UtilityScorer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+impl UtilityScorer {
+    /// Create a scorer with a pre-set last_action_time for testing.
+    pub fn new_with_expired_cooldown() -> Self {
+        let mut s = Self::new();
+        // Set last_action_time far enough in the past that cooldown is expired.
+        s.last_action_time = Some(Instant::now() - std::time::Duration::from_secs(60));
+        s
     }
 }

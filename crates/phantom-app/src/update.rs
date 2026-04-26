@@ -81,51 +81,22 @@ impl App {
             }
 
             while let Some(action) = brain.try_recv_action() {
-                match action {
-                    AiAction::ShowSuggestion { text, options } => {
-                        info!("[PHANTOM]: {text}");
-                        self.suggestion = Some(SuggestionOverlay {
-                            text,
-                            options,
-                            shown_at: now,
-                        });
-                    }
-                    AiAction::ShowNotification(msg) => {
-                        info!("[PHANTOM]: {msg}");
-                    }
-                    AiAction::UpdateMemory { key, value } => {
-                        if let Some(ref mut mem) = self.memory {
-                            let _ = mem.set(
-                                &key,
-                                &value,
-                                phantom_memory::MemoryCategory::Context,
-                                phantom_memory::MemorySource::Auto,
-                            );
-                        }
-                    }
-                    AiAction::SpawnAgent(task) => {
-                        info!("[PHANTOM]: Spawning agent...");
-                        tasks_to_spawn.push(task);
-                    }
-                    AiAction::ConsoleReply(reply) => {
-                        info!("[PHANTOM]: {reply}");
-                        self.console.output(format!("[phantom] {reply}"));
-                    }
-                    AiAction::RunCommand(cmd) => {
-                        info!("[PHANTOM]: Running command: {cmd}");
-                        let cmd_text = if cmd.ends_with('\n') { cmd } else { format!("{cmd}\n") };
-                        let _ = self.coordinator.send_command_to_focused(
-                            "write",
-                            &serde_json::json!({"text": cmd_text}),
-                        );
-                    }
-                    AiAction::DismissAdapter { app_id } => {
-                        info!("[PHANTOM]: Dismissing adapter {app_id}");
-                        self.coordinator.remove_adapter(app_id, &mut self.layout, &mut self.scene);
-                    }
-                    AiAction::DoNothing => {}
-                }
+                Self::execute_brain_action(
+                    action, now, &mut self.suggestion, &mut self.memory,
+                    &mut self.console, &mut self.coordinator, &mut self.layout,
+                    &mut self.scene, &mut tasks_to_spawn,
+                );
             }
+        }
+
+        // Execute actions triggered by user interaction with suggestion options.
+        let pending = std::mem::take(&mut self.pending_brain_actions);
+        for action in pending {
+            Self::execute_brain_action(
+                action, now, &mut self.suggestion, &mut self.memory,
+                &mut self.console, &mut self.coordinator, &mut self.layout,
+                &mut self.scene, &mut tasks_to_spawn,
+            );
         }
 
         // Spawn agent panes (deferred from brain action loop to avoid borrow conflict).
@@ -327,6 +298,56 @@ impl App {
             if let Some(event) = ai_event {
                 let _ = brain.send_event(event);
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Brain action execution (shared by brain drain + user-triggered pending)
+    // -----------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_brain_action(
+        action: AiAction,
+        now: Instant,
+        suggestion: &mut Option<SuggestionOverlay>,
+        memory: &mut Option<phantom_memory::MemoryStore>,
+        console: &mut crate::console::Console,
+        coordinator: &mut crate::coordinator::AppCoordinator,
+        layout: &mut phantom_ui::layout::LayoutEngine,
+        scene: &mut phantom_scene::tree::SceneTree,
+        tasks_to_spawn: &mut Vec<phantom_agents::AgentTask>,
+    ) {
+        match action {
+            AiAction::ShowSuggestion { text, options } => {
+                info!("[PHANTOM]: {text}");
+                *suggestion = Some(SuggestionOverlay { text, options, shown_at: now });
+            }
+            AiAction::ShowNotification(msg) => {
+                info!("[PHANTOM]: {msg}");
+            }
+            AiAction::UpdateMemory { key, value } => {
+                if let Some(mem) = memory {
+                    let _ = mem.set(&key, &value, phantom_memory::MemoryCategory::Context, phantom_memory::MemorySource::Auto);
+                }
+            }
+            AiAction::SpawnAgent(task) => {
+                info!("[PHANTOM]: Spawning agent...");
+                tasks_to_spawn.push(task);
+            }
+            AiAction::ConsoleReply(reply) => {
+                info!("[PHANTOM]: {reply}");
+                console.output(format!("[phantom] {reply}"));
+            }
+            AiAction::RunCommand(cmd) => {
+                info!("[PHANTOM]: Running command: {cmd}");
+                let cmd_text = if cmd.ends_with('\n') { cmd } else { format!("{cmd}\n") };
+                let _ = coordinator.send_command_to_focused("write", &serde_json::json!({"text": cmd_text}));
+            }
+            AiAction::DismissAdapter { app_id } => {
+                info!("[PHANTOM]: Dismissing adapter {app_id}");
+                coordinator.remove_adapter(app_id, layout, scene);
+            }
+            AiAction::DoNothing => {}
         }
     }
 
