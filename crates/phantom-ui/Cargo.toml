@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 phantom-renderer = { path = "../phantom-renderer" }
+phantom-adapter = { path = "../phantom-adapter" }
 taffy.workspace = true
 log.workspace = true
 anyhow.workspace = true

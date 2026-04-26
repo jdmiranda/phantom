@@ -1,3 +1,4 @@
+pub mod arbiter;
 pub mod layout;
 pub mod widgets;
 pub mod keybinds;
