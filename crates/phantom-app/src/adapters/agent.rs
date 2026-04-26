@@ -77,25 +77,27 @@ impl AppCore for AgentAdapter {
     fn update(&mut self, _dt: f32) {
         self.pane.poll();
 
-        // Detect status transitions and emit a bus event on completion.
+        // Emit a bus event only on terminal status transitions (Done/Failed).
         if self.pane.status != self.prev_status {
-            let (success, summary) = match self.pane.status {
-                AgentPaneStatus::Done => (true, "Agent finished successfully".to_string()),
-                AgentPaneStatus::Failed => (false, "Agent failed".to_string()),
-                AgentPaneStatus::Working => (true, "Agent resumed".to_string()),
+            let event = match self.pane.status {
+                AgentPaneStatus::Done => Some((true, "Agent finished successfully".to_string())),
+                AgentPaneStatus::Failed => Some((false, "Agent failed".to_string())),
+                AgentPaneStatus::Working => None, // Not a completion event
             };
 
-            self.outbox.push(phantom_adapter::BusMessage {
-                topic_id: 0,
-                sender: self.app_id,
-                event: phantom_protocol::Event::AgentTaskComplete {
-                    agent_id: self.app_id,
-                    success,
-                    summary,
-                },
-                frame: 0,
-                timestamp: 0,
-            });
+            if let Some((success, summary)) = event {
+                self.outbox.push(phantom_adapter::BusMessage {
+                    topic_id: 0,
+                    sender: self.app_id,
+                    event: phantom_protocol::Event::AgentTaskComplete {
+                        agent_id: self.app_id,
+                        success,
+                        summary,
+                    },
+                    frame: 0,
+                    timestamp: 0,
+                });
+            }
 
             self.prev_status = self.pane.status;
         }

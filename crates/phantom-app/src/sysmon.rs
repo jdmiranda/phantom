@@ -69,6 +69,16 @@ impl SysmonHandle {
         }
     }
 
+    /// Poll and return true if new stats were received this call.
+    pub fn poll_changed(&mut self) -> bool {
+        let mut received = false;
+        while let Ok(stats) = self.rx.try_recv() {
+            self.latest = Some(stats);
+            received = true;
+        }
+        received
+    }
+
     pub fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Relaxed);
     }

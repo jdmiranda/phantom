@@ -279,6 +279,10 @@ impl App {
         bus: &mut phantom_adapter::EventBus,
         brain: &Option<phantom_brain::brain::BrainHandle>,
     ) {
+        // Skip the drain entirely if no brain is running (avoids Vec alloc).
+        if brain.is_none() {
+            return;
+        }
         const BRAIN_OBSERVER_ID: u32 = 0xFFFF_FFFE;
         let msgs = bus.drain_for(BRAIN_OBSERVER_ID);
         if msgs.is_empty() {

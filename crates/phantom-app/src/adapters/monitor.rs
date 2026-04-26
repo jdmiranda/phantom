@@ -59,12 +59,10 @@ impl AppCore for MonitorAdapter {
             return;
         }
 
-        let had_stats = self.handle.latest.is_some();
-        self.handle.poll();
-        let has_stats = self.handle.latest.is_some();
+        let changed = self.handle.poll_changed();
 
-        // Emit a bus event when new stats arrive.
-        if has_stats && (!had_stats || has_stats) {
+        // Emit a bus event when new stats arrive from the sysmon thread.
+        if changed {
             if let Some(ref stats) = self.handle.latest {
                 let data = json!({
                     "cpu_usage": stats.cpu_usage,

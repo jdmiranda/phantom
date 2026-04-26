@@ -190,11 +190,15 @@ impl AppCoordinator {
                     let topic_name = match msg.event.topic() {
                         phantom_protocol::events::EventTopic::Terminal => "terminal.output",
                         phantom_protocol::events::EventTopic::Agents => "agent.event",
+                        phantom_protocol::events::EventTopic::Video => "video",
                         phantom_protocol::events::EventTopic::System => "system",
                         _ => "custom",
                     };
                     if let Some(tid) = self.bus.topic_id_by_name(topic_name) {
                         msg.topic_id = tid;
+                    } else {
+                        log::warn!("Outbox event dropped: no topic '{topic_name}' registered");
+                        continue;
                     }
                 }
                 self.bus.emit(msg);
