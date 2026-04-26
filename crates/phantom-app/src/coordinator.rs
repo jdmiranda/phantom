@@ -8,9 +8,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use phantom_adapter::{AppAdapter, AppId, AppRegistry, EventBus, Rect, RenderOutput};
+use phantom_adapter::spatial::SpatialPreference;
 use phantom_scene::clock::Cadence;
 use phantom_scene::node::{NodeId, NodeKind};
 use phantom_scene::tree::SceneTree;
+use phantom_ui::arbiter::LayoutArbiter;
 use phantom_ui::layout::{LayoutEngine, PaneId};
 
 /// Orchestrates all registered adapters, the event bus, layout panes,
@@ -23,10 +25,15 @@ pub struct AppCoordinator {
     scene_map: HashMap<AppId, NodeId>,
     cadences: HashMap<AppId, Cadence>,
     focused: Option<AppId>,
+    arbiter: LayoutArbiter,
 }
 
 impl AppCoordinator {
     /// Create a new coordinator with the given event bus.
+    ///
+    /// The arbiter is initialized with zero size; call
+    /// `set_arbiter_size()` once the window content area and cell size
+    /// are known (typically right after window creation).
     pub fn new(bus: EventBus) -> Self {
         Self {
             registry: AppRegistry::new(),
@@ -36,6 +43,61 @@ impl AppCoordinator {
             scene_map: HashMap::new(),
             cadences: HashMap::new(),
             focused: None,
+            arbiter: LayoutArbiter::new((0.0, 0.0), (1.0, 1.0)),
+        }
+    }
+
+    /// Configure the arbiter with the actual window content area and cell
+    /// size. Should be called once during app initialization and again if
+    /// `cell_size` changes (e.g. font size change).
+    pub fn set_arbiter_size(&mut self, available: (f32, f32), cell_size: (f32, f32)) {
+        self.arbiter = LayoutArbiter::new(available, cell_size);
+    }
+
+    /// Handle a window resize: update the arbiter's available area and
+    /// re-negotiate spatial allocations.
+    pub fn on_window_resize(&mut self, available: (f32, f32)) {
+        self.arbiter.set_available(available);
+        self.run_arbiter_negotiation();
+    }
+
+    /// Collect spatial preferences from all running adapters, run the
+    /// arbiter, and log the resulting plan.
+    ///
+    /// TODO: Apply the plan's allocations as Taffy min/max constraints
+    /// on the corresponding pane nodes. For now we just log.
+    fn run_arbiter_negotiation(&self) {
+        let default_pref = SpatialPreference::simple(40, 10);
+
+        let participants: Vec<(AppId, SpatialPreference)> = self
+            .registry
+            .all_running()
+            .into_iter()
+            .map(|id| {
+                let pref = self
+                    .registry
+                    .get_adapter(id)
+                    .and_then(|a| a.spatial_preference())
+                    .unwrap_or_else(|| default_pref.clone());
+                (id, pref)
+            })
+            .collect();
+
+        let plan = self.arbiter.negotiate(&participants);
+
+        log::debug!(
+            "Arbiter negotiation: {} participants -> {} allocations",
+            participants.len(),
+            plan.allocations.len(),
+        );
+        for (id, rect) in &plan.allocations {
+            log::trace!(
+                "  AppId {id}: ({:.0}, {:.0}) {:.0}x{:.0}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+            );
         }
     }
 
@@ -86,6 +148,9 @@ impl AppCoordinator {
             self.focused = Some(id);
         }
 
+        // Re-negotiate spatial allocations with the new participant.
+        self.run_arbiter_negotiation();
+
         id
     }
 
@@ -127,6 +192,9 @@ impl AppCoordinator {
             self.focused = Some(id);
         }
 
+        // Re-negotiate spatial allocations with the new participant.
+        self.run_arbiter_negotiation();
+
         id
     }
 
@@ -154,6 +222,9 @@ impl AppCoordinator {
         if self.focused == Some(app_id) {
             self.focused = self.registry.all_running().into_iter().next();
         }
+
+        // Re-negotiate so remaining adapters can claim freed space.
+        self.run_arbiter_negotiation();
     }
 
     /// Update all running adapters whose cadence fires this frame.

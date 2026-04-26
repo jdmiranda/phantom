@@ -486,6 +486,12 @@ impl App {
             info!("Initial terminal registered as adapter (AppId {_app_id})");
         }
 
+        // Configure the arbiter with window content area and cell metrics.
+        {
+            let content_area = (width as f32, content_height);
+            coordinator.set_arbiter_size(content_area, cell_size);
+        }
+
         // -- System monitor --
         let sysmon = crate::sysmon::spawn_sysmon();
 
@@ -754,6 +760,18 @@ impl App {
         if let Err(e) = self.layout.resize(width as f32, height as f32) {
             warn!("Layout resize failed: {e}");
         }
+
+        // Re-negotiate arbiter allocations with updated content area.
+        // Chrome height = tab bar + status bar (same formula as constructor).
+        let chrome_h = self.layout.get_tab_bar_rect()
+            .map(|r| r.height)
+            .unwrap_or(0.0)
+            + self.layout.get_status_bar_rect()
+                .map(|r| r.height)
+                .unwrap_or(0.0);
+        let content_w = width as f32;
+        let content_h = (height as f32 - chrome_h).max(0.0);
+        self.coordinator.on_window_resize((content_w, content_h));
 
         // Resize coordinator-managed adapters to match new layout dimensions.
         for app_id in self.coordinator.all_app_ids() {
