@@ -786,6 +786,85 @@ impl App {
         );
     }
 
+    /// Build the context menu overlay (post-CRT, crisp).
+    pub(crate) fn build_context_menu_overlay(
+        &mut self,
+        _screen_size: [f32; 2],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        if !self.context_menu.visible || self.context_menu.items.is_empty() {
+            return;
+        }
+
+        let menu_x = self.context_menu.x;
+        let menu_y = self.context_menu.y;
+        let menu_w = self.context_menu.width();
+        let menu_h = self.context_menu.height();
+        let item_h = self.context_menu.item_height();
+        let padding = self.context_menu.padding();
+
+        // Drop shadow.
+        quads.push(QuadInstance {
+            pos: [menu_x + 3.0, menu_y + 3.0],
+            size: [menu_w, menu_h],
+            color: [0.0, 0.0, 0.0, 0.3],
+            border_radius: 4.0,
+        });
+
+        // Background.
+        quads.push(QuadInstance {
+            pos: [menu_x, menu_y],
+            size: [menu_w, menu_h],
+            color: [0.03, 0.04, 0.06, 0.96],
+            border_radius: 4.0,
+        });
+
+        // Cyan border.
+        let border_color = [0.0, 0.8, 0.9, 0.7];
+        let t = 1.0;
+        for &(pos, size) in &[
+            ([menu_x, menu_y], [menu_w, t]),
+            ([menu_x, menu_y + menu_h - t], [menu_w, t]),
+            ([menu_x, menu_y], [t, menu_h]),
+            ([menu_x + menu_w - t, menu_y], [t, menu_h]),
+        ] {
+            quads.push(QuadInstance {
+                pos,
+                size,
+                color: border_color,
+                border_radius: 0.0,
+            });
+        }
+
+        // Items.
+        let hovered = self.context_menu.hovered;
+        let item_count = self.context_menu.items.len();
+        for i in 0..item_count {
+            let item_y = menu_y + padding + i as f32 * item_h;
+            let is_hovered = hovered == Some(i);
+
+            // Hover highlight.
+            if is_hovered {
+                quads.push(QuadInstance {
+                    pos: [menu_x + 2.0, item_y],
+                    size: [menu_w - 4.0, item_h],
+                    color: [0.1, 0.3, 0.15, 0.5],
+                    border_radius: 2.0,
+                });
+            }
+
+            let label = self.context_menu.items[i].label.clone();
+            let color = if is_hovered {
+                [0.2, 1.0, 0.5, 1.0]
+            } else {
+                [0.6, 0.8, 0.7, 0.9]
+            };
+            let text_y = item_y + (item_h - self.cell_size.1) * 0.5;
+            self.render_overlay_text(&label, menu_x + 12.0, text_y, color, glyphs);
+        }
+    }
+
     /// Helper: render a text string directly into the overlay glyph buffer.
     pub(crate) fn render_overlay_text(
         &mut self,

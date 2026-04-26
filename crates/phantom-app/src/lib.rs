@@ -8,6 +8,7 @@ pub mod config;
 pub mod console_eval;
 pub mod coordinator;
 mod console;
+mod context_menu;
 mod video;
 pub mod image_handler;
 pub mod settings;

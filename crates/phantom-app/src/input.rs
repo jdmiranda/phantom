@@ -335,6 +335,14 @@ impl App {
 
         self.last_input_time = Instant::now();
 
+        // Escape dismisses context menu.
+        if self.context_menu.visible {
+            if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+                self.context_menu.hide();
+                return;
+            }
+        }
+
         // Escape exits fullscreen mode.
         if self.fullscreen_pane.is_some()
             && matches!(&event.logical_key, Key::Named(NamedKey::Escape))

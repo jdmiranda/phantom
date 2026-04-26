@@ -190,6 +190,11 @@ impl App {
                 self.build_settings_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
+            // -- Context menu overlay --
+            if self.context_menu.visible {
+                self.build_context_menu_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
+            }
+
 
             if !chrome_quads.is_empty() || !chrome_glyphs.is_empty() {
                 // Upload + render overlay in its own pass on the surface.

@@ -15,6 +15,7 @@ use phantom_terminal::input::{
 };
 
 use crate::app::App;
+use crate::context_menu::{MenuAction, MenuItem};
 use crate::pane::{
     container_rect, pane_inner_rect, point_in_rect, scrollbar_track_rect, scrollbar_y_to_offset,
 };
@@ -76,6 +77,11 @@ impl App {
     /// Handle cursor movement -- update position and hit-test panes.
     pub fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_position = (x, y);
+
+        // Update context menu hover tracking.
+        if self.context_menu.visible {
+            self.context_menu.update_hover(x as f32, y as f32);
+        }
 
         // Console overlay captures all mouse interaction when visible.
         if self.cursor_in_console() {
@@ -192,6 +198,27 @@ impl App {
 
         // Console overlay captures mouse clicks when visible.
         if self.cursor_in_console() {
+            return;
+        }
+
+        let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
+
+        // Right-click opens context menu.
+        if button == MouseButton::Right {
+            let items = self.build_context_menu_items();
+            self.context_menu.show(mx, my, items);
+            return;
+        }
+
+        // Left-click on context menu dispatches action or dismisses.
+        if button == MouseButton::Left && self.context_menu.visible {
+            if let Some(idx) = self.context_menu.hit_test(mx, my) {
+                let action = self.context_menu.items[idx].action.clone();
+                self.context_menu.hide();
+                self.execute_menu_action(action);
+                return;
+            }
+            self.context_menu.hide();
             return;
         }
 
@@ -377,6 +404,54 @@ impl App {
             "scroll",
             &serde_json::json!({"direction": direction, "lines": int_lines}),
         );
+    }
+    fn build_context_menu_items(&self) -> Vec<MenuItem> {
+        vec![
+            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
+            MenuItem { label: "Paste".into(), action: MenuAction::Paste, enabled: true },
+            MenuItem { label: "Select All".into(), action: MenuAction::SelectAll, enabled: true },
+            MenuItem { label: "Split Horizontal".into(), action: MenuAction::SplitHorizontal, enabled: true },
+            MenuItem { label: "Split Vertical".into(), action: MenuAction::SplitVertical, enabled: true },
+            MenuItem { label: "Fullscreen".into(), action: MenuAction::Fullscreen, enabled: true },
+        ]
+    }
+
+    fn execute_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::Copy => {
+                if let Some(focused) = self.coordinator.focused() {
+                    if let Ok(text) = self.coordinator.send_command(focused, "select_copy", &serde_json::json!({})) {
+                        if !text.is_empty() {
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let _ = clipboard.set_text(&text);
+                            }
+                            debug!("Context menu: copied {} chars", text.len());
+                        }
+                    }
+                }
+            }
+            MenuAction::Paste => {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if let Ok(text) = clipboard.get_text() {
+                        self.coordinator.route_bytes(text.as_bytes());
+                        debug!("Context menu: pasted {} bytes", text.len());
+                    }
+                }
+            }
+            MenuAction::SelectAll => {
+                if let Some(focused) = self.coordinator.focused() {
+                    let _ = self.coordinator.send_command(focused, "select_all", &serde_json::json!({}));
+                }
+            }
+            MenuAction::SplitHorizontal => { self.split_focused_pane(true); }
+            MenuAction::SplitVertical => { self.split_focused_pane(false); }
+            MenuAction::Fullscreen => {
+                if let Some(focused) = self.coordinator.focused() {
+                    self.fullscreen_pane = Some(focused);
+                }
+            }
+            MenuAction::Close => { self.close_focused_pane(); }
+        }
     }
 }
 

@@ -142,6 +142,9 @@ pub struct App {
     // -- Pending brain actions queued by suggestion option selection --
     pub(crate) pending_brain_actions: Vec<phantom_brain::events::AiAction>,
 
+    // -- Right-click context menu --
+    pub(crate) context_menu: crate::context_menu::ContextMenu,
+
     // -- Scene graph (retained, dirty-tracked) --
     pub(crate) scene: SceneTree,
     pub(crate) scene_content_node: phantom_scene::node::NodeId,
@@ -581,6 +584,7 @@ impl App {
             suggestion: None,
             suggestion_history: VecDeque::with_capacity(10),
             pending_brain_actions: Vec::new(),
+            context_menu: crate::context_menu::ContextMenu::new(),
             scene,
             scene_content_node: content_node,
             mcp_cmd_rx,
