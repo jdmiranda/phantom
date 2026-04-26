@@ -10,10 +10,16 @@ use std::time::Duration;
 use phantom_adapter::{AppAdapter, AppId, AppRegistry, EventBus, Rect, RenderOutput};
 use phantom_adapter::spatial::SpatialPreference;
 use phantom_scene::clock::Cadence;
+use phantom_scene::dirty::DirtyFlags;
 use phantom_scene::node::{NodeId, NodeKind};
 use phantom_scene::tree::SceneTree;
 use phantom_ui::arbiter::LayoutArbiter;
 use phantom_ui::layout::{LayoutEngine, PaneId};
+
+/// A set of position allocations produced by the layout arbiter or Taffy.
+pub struct LayoutPlan {
+    pub allocations: HashMap<AppId, Rect>,
+}
 
 /// Orchestrates all registered adapters, the event bus, layout panes,
 /// and scene nodes within a single frame loop.
@@ -325,6 +331,55 @@ impl AppCoordinator {
             outputs.push((id, rect, output));
         }
 
+        outputs
+    }
+
+    /// Sync positions into the scene graph from a layout plan.
+    pub fn sync_arbiter_to_scene(&self, plan: &LayoutPlan, scene: &mut SceneTree) {
+        for (&app_id, rect) in &plan.allocations {
+            if let Some(&node_id) = self.scene_map.get(&app_id) {
+                if let Some(node) = scene.get_mut(node_id) {
+                    node.transform.x = rect.x;
+                    node.transform.y = rect.y;
+                    node.transform.width = rect.width;
+                    node.transform.height = rect.height;
+                    node.dirty |= DirtyFlags::TRANSFORM;
+                    log::debug!(
+                        "Scene sync: adapter {app_id} -> node {node_id} at ({:.0}, {:.0}, {:.0}x{:.0})",
+                        rect.x, rect.y, rect.width, rect.height,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Build a `LayoutPlan` from the current Taffy layout.
+    pub fn build_layout_plan(&self, layout: &LayoutEngine) -> LayoutPlan {
+        let mut allocations = HashMap::new();
+        for id in self.registry.all_running() {
+            if let Some(pane_id) = self.app_pane_map.get(&id) {
+                if let Ok(r) = layout.get_pane_rect(*pane_id) {
+                    allocations.insert(id, Rect { x: r.x, y: r.y, width: r.width, height: r.height });
+                }
+            }
+        }
+        LayoutPlan { allocations }
+    }
+
+    /// Scene-graph-aware render: reads positions from world_transform.
+    pub fn render_all_with_scene(&self, scene: &SceneTree) -> Vec<(AppId, Rect, RenderOutput)> {
+        let mut outputs = Vec::new();
+        for id in self.registry.all_running() {
+            let Some(entry) = self.registry.get(id) else { continue };
+            if !entry.visual { continue; }
+            let Some(&node_id) = self.scene_map.get(&id) else { continue };
+            let Some(node) = scene.get(node_id) else { continue };
+            let wt = node.world_transform;
+            let rect = Rect { x: wt.x, y: wt.y, width: wt.width, height: wt.height };
+            let Some(adapter) = self.registry.get_adapter(id) else { continue };
+            let output = adapter.render(&rect);
+            outputs.push((id, rect, output));
+        }
         outputs
     }
 

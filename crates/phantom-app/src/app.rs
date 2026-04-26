@@ -791,6 +791,11 @@ impl App {
         // Update scene graph root transform.
         let root = self.scene.root();
         self.scene.set_transform(root, 0.0, 0.0, width as f32, height as f32);
+
+        // Sync adapter positions from Taffy layout into the scene graph.
+        let plan = self.coordinator.build_layout_plan(&self.layout);
+        self.coordinator.sync_arbiter_to_scene(&plan, &mut self.scene);
+
         self.scene.update_world_transforms();
     }
 
