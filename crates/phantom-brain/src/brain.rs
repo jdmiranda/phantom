@@ -268,6 +268,7 @@ fn orient(event: &AiEvent, scorer: &mut UtilityScorer) {
     match event {
         AiEvent::CommandComplete(parsed) => {
             scorer.last_had_errors = !parsed.errors.is_empty();
+            scorer.last_command = Some(parsed.command.clone());
             // A command completed — no longer an active process.
             scorer.has_active_process = false;
             // User just ran a command — reset idle tracking.

@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn fix_score_zero_on_success() {
-        let scorer = UtilityScorer::new();
+        let mut scorer = UtilityScorer::new();
         let ctx = test_context();
         let parsed = parsed_success();
 

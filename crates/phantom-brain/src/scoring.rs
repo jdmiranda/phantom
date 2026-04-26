@@ -7,7 +7,9 @@
 //!
 //! Inspired by game AI utility systems — see `docs/research/ai-control-loop.md`.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use phantom_context::ProjectContext;
@@ -65,6 +67,10 @@ pub struct UtilityScorer {
     last_action_time: Option<Instant>,
     /// Whether a long-running command is currently active.
     pub has_active_process: bool,
+    /// Hash of the last error text we suggested a fix for.
+    pub last_error_signature: Option<u64>,
+    /// The most recent command the user ran (from `CommandComplete`).
+    pub last_command: Option<String>,
 }
 
 impl UtilityScorer {
@@ -78,6 +84,8 @@ impl UtilityScorer {
             recent_suggestions: VecDeque::with_capacity(6),
             last_action_time: None,
             has_active_process: false,
+            last_error_signature: None,
+            last_command: None,
         }
     }
 
@@ -121,7 +129,7 @@ impl UtilityScorer {
     /// - **0.9** if errors just appeared and no fix is in progress.
     /// - **0.3** if errors are old (idle > 30s since the error).
     /// - **0.0** if no errors or the user is actively typing (idle < 2s).
-    pub fn fix_score(&self, parsed: &ParsedOutput, _context: &ProjectContext) -> ScoredAction {
+    pub fn fix_score(&mut self, parsed: &ParsedOutput, _context: &ProjectContext) -> ScoredAction {
         let has_errors = !parsed.errors.is_empty();
 
         if !has_errors {
@@ -129,6 +137,23 @@ impl UtilityScorer {
                 action: AiAction::DoNothing,
                 score: 0.0,
                 reason: "no errors to fix".into(),
+            };
+        }
+
+        // Compute error signature for dedup.
+        let sig = {
+            let mut hasher = DefaultHasher::new();
+            for e in &parsed.errors {
+                e.message.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+
+        if self.last_error_signature == Some(sig) {
+            return ScoredAction {
+                action: AiAction::DoNothing,
+                score: 0.0,
+                reason: "already suggested for this error".into(),
             };
         }
 
@@ -140,6 +165,9 @@ impl UtilityScorer {
                 reason: "errors present but user is typing".into(),
             };
         }
+
+        // Record signature so we don't re-suggest for the same error.
+        self.last_error_signature = Some(sig);
 
         // Fresh errors.
         if self.idle_time < 30.0 {
@@ -164,6 +192,22 @@ impl UtilityScorer {
     /// - **0.3** if idle > 30s without an error (user might want context).
     /// - **0.0** if user is actively typing (idle < 5s).
     pub fn explain_score(&self, parsed: &ParsedOutput, idle_time: f32) -> ScoredAction {
+        // Suppress "user stuck" heuristic when inside a REPL session.
+        const REPL_COMMANDS: &[&str] = &[
+            "python", "python3", "node", "irb", "ghci", "psql", "mysql",
+            "sqlite3", "lua", "julia", "erl", "iex",
+        ];
+        if let Some(ref cmd) = self.last_command {
+            let first_word = cmd.split_whitespace().next().unwrap_or("");
+            if REPL_COMMANDS.iter().any(|r| first_word.ends_with(r)) {
+                return ScoredAction {
+                    action: AiAction::DoNothing,
+                    score: 0.0,
+                    reason: "user in REPL, not stuck".into(),
+                };
+            }
+        }
+
         if idle_time < 5.0 {
             return ScoredAction {
                 action: AiAction::DoNothing,
@@ -443,6 +487,7 @@ impl UtilityScorer {
         self.chattiness = 0.0;
         self.suggestions_since_input = 0;
         self.idle_time = 0.0;
+        self.last_error_signature = None; // re-enable fix suggestions for re-runs
         // Don't clear recent_suggestions — dedup persists across user actions.
         // Don't clear last_action_time — cooldown is absolute, not relative to user.
     }
