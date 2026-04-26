@@ -146,6 +146,10 @@ impl AppCoordinator {
 
         // Scene node.
         let node_id = scene.add_node(content_node, NodeKind::Pane);
+        if let Some(node) = scene.get_mut(node_id) {
+            let app_type = self.registry.get(id).map(|e| e.app_type.as_str()).unwrap_or("unknown");
+            node.z_order = match app_type { "video" => 10, _ => 0 };
+        }
         self.scene_map.insert(id, node_id);
 
         self.cadences.insert(id, cadence);
@@ -366,7 +370,9 @@ impl AppCoordinator {
         LayoutPlan { allocations }
     }
 
-    /// Scene-graph-aware render: reads positions from world_transform.
+    /// Scene-graph-aware render: reads positions from world_transform,
+    /// sorted by z_order (lowest first = drawn first = behind).
+    /// Focused adapter gets +1 z_order bonus.
     pub fn render_all_with_scene(&self, scene: &SceneTree) -> Vec<(AppId, Rect, RenderOutput)> {
         let mut outputs = Vec::new();
         for id in self.registry.all_running() {
@@ -380,6 +386,16 @@ impl AppCoordinator {
             let output = adapter.render(&rect);
             outputs.push((id, rect, output));
         }
+
+        // Sort by z_order; focused adapter gets +1 bonus.
+        outputs.sort_by_key(|(app_id, _, _)| {
+            let base = self.scene_map.get(app_id)
+                .and_then(|&nid| scene.get(nid))
+                .map(|n| n.z_order)
+                .unwrap_or(0);
+            if self.focused == Some(*app_id) { base + 1 } else { base }
+        });
+
         outputs
     }
 
