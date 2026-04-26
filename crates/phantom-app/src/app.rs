@@ -426,7 +426,13 @@ impl App {
         let topic_terminal_output = event_bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
         let topic_terminal_error = event_bus.create_topic(0, "terminal.error", DataType::Text);
         let topic_agent_event = event_bus.create_topic(0, "agent.event", DataType::Json);
-        info!("Event bus initialized: {} topics", event_bus.topic_count());
+
+        // Subscribe a virtual "brain observer" so the AI brain receives bus events.
+        const BRAIN_OBSERVER_ID: u32 = 0xFFFF_FFFE;
+        event_bus.subscribe(BRAIN_OBSERVER_ID, topic_terminal_output);
+        event_bus.subscribe(BRAIN_OBSERVER_ID, topic_terminal_error);
+        event_bus.subscribe(BRAIN_OBSERVER_ID, topic_agent_event);
+        info!("Event bus initialized: {} topics, brain observer subscribed", event_bus.topic_count());
 
         // -- Plugin registry --
         let plugin_registry = match PluginRegistry::new() {

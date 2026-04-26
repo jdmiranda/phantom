@@ -55,8 +55,9 @@ impl AppCoordinator {
 
         let id = self.registry.register(adapter);
 
-        // Invoke the lifecycle init hook before transitioning to Running.
+        // Inform the adapter of its assigned ID and invoke lifecycle init.
         if let Some(adapter) = self.registry.get_adapter_mut(id) {
+            adapter.set_app_id(id);
             if let Err(e) = adapter.on_init() {
                 log::error!("Adapter {id} on_init() failed: {e}");
             }
@@ -105,6 +106,7 @@ impl AppCoordinator {
         let id = self.registry.register(adapter);
 
         if let Some(adapter) = self.registry.get_adapter_mut(id) {
+            adapter.set_app_id(id);
             if let Err(e) = adapter.on_init() {
                 log::error!("Adapter {id} on_init() failed: {e}");
             }
@@ -172,6 +174,31 @@ impl AppCoordinator {
                 continue;
             };
             adapter.update(dt_secs);
+        }
+
+        // Collect outbound messages from adapters and emit them on the bus.
+        // Adapters emit with topic_id=0; we resolve the correct ID from the
+        // event's topic category.
+        for id in &running {
+            let Some(adapter) = self.registry.get_adapter_mut(*id) else {
+                continue;
+            };
+            let outbox = adapter.drain_outbox();
+            for mut msg in outbox {
+                if msg.topic_id == 0 {
+                    // Resolve topic ID from the event's topic name.
+                    let topic_name = match msg.event.topic() {
+                        phantom_protocol::events::EventTopic::Terminal => "terminal.output",
+                        phantom_protocol::events::EventTopic::Agents => "agent.event",
+                        phantom_protocol::events::EventTopic::System => "system",
+                        _ => "custom",
+                    };
+                    if let Some(tid) = self.bus.topic_id_by_name(topic_name) {
+                        msg.topic_id = tid;
+                    }
+                }
+                self.bus.emit(msg);
+            }
         }
 
         // Deliver bus messages to all running subscribers (not gated by cadence —

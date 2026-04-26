@@ -62,6 +62,10 @@ pub struct TerminalAdapter {
     theme_colors: TerminalThemeColors,
     /// Set when the PTY child process exits.
     pty_dead: bool,
+    /// Assigned by the coordinator after registration (for outbox messages).
+    app_id: u32,
+    /// Pending outbound bus messages, drained by coordinator each frame.
+    outbox: Vec<phantom_adapter::BusMessage>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,8 @@ impl TerminalAdapter {
             was_alt_screen: false,
             theme_colors,
             pty_dead: false,
+            app_id: 0,
+            outbox: Vec::new(),
         }
     }
 
@@ -172,6 +178,18 @@ impl AppCore for TerminalAdapter {
 
                 self.has_new_output = true;
                 self.error_notified = false;
+
+                // Emit a bus event for the brain observer.
+                self.outbox.push(phantom_adapter::BusMessage {
+                    topic_id: 0, // Filled by coordinator from registered topic
+                    sender: self.app_id,
+                    event: phantom_protocol::Event::TerminalOutput {
+                        app_id: self.app_id,
+                        bytes: n as u64,
+                    },
+                    frame: 0,
+                    timestamp: 0,
+                });
             }
             Ok(_) => {}
             Err(e) => {
@@ -382,8 +400,17 @@ impl Commandable for TerminalAdapter {
     }
 }
 
-impl BusParticipant for TerminalAdapter {}
-impl Lifecycled for TerminalAdapter {}
+impl BusParticipant for TerminalAdapter {
+    fn drain_outbox(&mut self) -> Vec<phantom_adapter::BusMessage> {
+        std::mem::take(&mut self.outbox)
+    }
+}
+
+impl Lifecycled for TerminalAdapter {
+    fn set_app_id(&mut self, id: u32) {
+        self.app_id = id;
+    }
+}
 impl Permissioned for TerminalAdapter {
     fn permissions(&self) -> Vec<String> {
         vec!["filesystem".into(), "pty".into()]

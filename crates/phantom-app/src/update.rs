@@ -35,6 +35,9 @@ impl App {
         // Coordinator: tick all registered adapters and deliver bus messages.
         self.coordinator.update_all(dt_duration);
 
+        // Bridge: drain bus events for the brain observer and forward as AiEvents.
+        Self::drain_bus_to_brain(self.coordinator.bus_mut(), &self.brain);
+
         // Reap dead adapters (PTY exited).
         let dead_adapters: Vec<_> = self.coordinator.all_app_ids()
             .into_iter()
@@ -109,7 +112,12 @@ impl App {
                         self.console.output(format!("[phantom] {reply}"));
                     }
                     AiAction::RunCommand(cmd) => {
-                        debug!("Brain suggested command: {cmd}");
+                        info!("[PHANTOM]: Running command: {cmd}");
+                        let cmd_text = if cmd.ends_with('\n') { cmd } else { format!("{cmd}\n") };
+                        let _ = self.coordinator.send_command_to_focused(
+                            "write",
+                            &serde_json::json!({"text": cmd_text}),
+                        );
                     }
                     AiAction::DoNothing => {}
                 }
@@ -254,6 +262,60 @@ impl App {
                 self.agent_panes.len(),
             );
             self.watchdog_last = now;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bus → Brain bridge
+    // -----------------------------------------------------------------------
+
+    /// Drain bus events for the brain observer (ID 0xFFFF_FFFE) and convert
+    /// them to AiEvents. Static method to avoid borrow conflicts.
+    fn drain_bus_to_brain(
+        bus: &mut phantom_adapter::EventBus,
+        brain: &Option<phantom_brain::brain::BrainHandle>,
+    ) {
+        const BRAIN_OBSERVER_ID: u32 = 0xFFFF_FFFE;
+        let msgs = bus.drain_for(BRAIN_OBSERVER_ID);
+        if msgs.is_empty() {
+            return;
+        }
+        let Some(brain) = brain else { return };
+
+        for msg in msgs {
+            let ai_event = match msg.event {
+                Event::TerminalOutput { bytes, .. } => {
+                    Some(AiEvent::OutputChunk(format!("[{bytes} bytes]")))
+                }
+                Event::CommandComplete { exit_code, .. } => {
+                    Some(AiEvent::CommandComplete(
+                        phantom_semantic::ParsedOutput {
+                            command: String::new(),
+                            command_type: phantom_semantic::CommandType::Unknown,
+                            exit_code: Some(exit_code),
+                            content_type: phantom_semantic::ContentType::PlainText,
+                            errors: vec![],
+                            warnings: vec![],
+                            duration_ms: None,
+                            raw_output: String::new(),
+                        },
+                    ))
+                }
+                Event::AgentTaskComplete { agent_id, success, summary } => {
+                    Some(AiEvent::AgentComplete { id: agent_id, success, summary })
+                }
+                Event::AgentError { agent_id, error } => {
+                    Some(AiEvent::AgentComplete {
+                        id: agent_id,
+                        success: false,
+                        summary: error,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(event) = ai_event {
+                let _ = brain.send_event(event);
+            }
         }
     }
 

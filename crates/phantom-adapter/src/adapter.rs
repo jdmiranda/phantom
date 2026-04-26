@@ -84,6 +84,15 @@ pub trait BusParticipant {
 
     /// Receive a message from the event bus.
     fn on_message(&mut self, _msg: &BusMessage) {}
+
+    /// Drain pending outbound messages queued during `update()`.
+    ///
+    /// Called by the coordinator after the update pass and before message
+    /// delivery, so adapters can emit bus events without needing direct
+    /// bus access (which would cause borrow conflicts).
+    fn drain_outbox(&mut self) -> Vec<BusMessage> {
+        vec![]
+    }
 }
 
 /// Adapters with lifecycle hooks.
@@ -95,6 +104,11 @@ pub trait Lifecycled {
 
     /// Called whenever the app's lifecycle state changes.
     fn on_state_change(&mut self, _new_state: AppState) {}
+
+    /// Called by the coordinator immediately after registration to inform
+    /// the adapter of its assigned AppId. Override to store the ID for
+    /// use in outbox messages.
+    fn set_app_id(&mut self, _id: AppId) {}
 }
 
 /// Permission declarations (WASM sandbox boundary).

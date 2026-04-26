@@ -204,6 +204,11 @@ impl EventBus {
     pub fn topic_count(&self) -> usize {
         self.topics.len()
     }
+
+    /// Find a topic ID by name.
+    pub fn topic_id_by_name(&self, name: &str) -> Option<TopicId> {
+        self.topics.iter().find(|t| t.name == name).map(|t| t.id)
+    }
 }
 
 impl Default for EventBus {
