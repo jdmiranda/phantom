@@ -4,7 +4,7 @@
 //! `AppRegistry` and `EventBus`, maps adapters to layout panes and
 //! scene nodes, and governs per-adapter tick cadences.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use phantom_adapter::{AppAdapter, AppId, AppRegistry, EventBus, Rect, RenderOutput};
@@ -32,6 +32,8 @@ pub struct AppCoordinator {
     cadences: HashMap<AppId, Cadence>,
     focused: Option<AppId>,
     arbiter: LayoutArbiter,
+    render_cache: HashMap<AppId, RenderOutput>,
+    dirty_adapters: HashSet<AppId>,
 }
 
 impl AppCoordinator {
@@ -50,6 +52,8 @@ impl AppCoordinator {
             cadences: HashMap::new(),
             focused: None,
             arbiter: LayoutArbiter::new((0.0, 0.0), (1.0, 1.0)),
+            render_cache: HashMap::new(),
+            dirty_adapters: HashSet::new(),
         }
     }
 
@@ -160,6 +164,7 @@ impl AppCoordinator {
 
         // Re-negotiate spatial allocations with the new participant.
         self.run_arbiter_negotiation();
+        self.dirty_adapters.insert(id);
 
         id
     }
@@ -204,6 +209,7 @@ impl AppCoordinator {
 
         // Re-negotiate spatial allocations with the new participant.
         self.run_arbiter_negotiation();
+        self.dirty_adapters.insert(id);
 
         id
     }
@@ -235,6 +241,8 @@ impl AppCoordinator {
 
         // Re-negotiate so remaining adapters can claim freed space.
         self.run_arbiter_negotiation();
+        self.render_cache.remove(&app_id);
+        self.dirty_adapters.remove(&app_id);
     }
 
     /// Update all running adapters whose cadence fires this frame.
@@ -397,6 +405,26 @@ impl AppCoordinator {
         });
 
         outputs
+    }
+
+    /// Mark all adapter scene nodes as dirty (call on window resize).
+    pub fn mark_all_dirty(&mut self, scene: &mut SceneTree) {
+        for (&app_id, &node_id) in &self.scene_map {
+            if let Some(node) = scene.get_mut(node_id) {
+                node.dirty |= DirtyFlags::TRANSFORM;
+            }
+            self.dirty_adapters.insert(app_id);
+        }
+    }
+
+    /// Clear dirty flags on all adapter scene nodes (call after render).
+    pub fn clear_render_dirty(&mut self, scene: &mut SceneTree) {
+        for &node_id in self.scene_map.values() {
+            if let Some(node) = scene.get_mut(node_id) {
+                node.dirty = DirtyFlags::empty();
+            }
+        }
+        self.dirty_adapters.clear();
     }
 
     /// Route a key event to the focused adapter.
