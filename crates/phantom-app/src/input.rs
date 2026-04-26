@@ -410,6 +410,19 @@ impl App {
             return;
         }
 
+        // Ctrl+Shift+F: detach focused pane to floating mode.
+        if modifiers.state().control_key()
+            && modifiers.state().shift_key()
+            && matches!(&event.logical_key, Key::Character(s) if s == "F" || s == "f")
+        {
+            if let Some(focused) = self.coordinator.focused() {
+                if !self.coordinator.is_floating(focused) {
+                    self.coordinator.detach_to_float(focused, &mut self.layout, &mut self.scene);
+                }
+            }
+            return;
+        }
+
         if self.console.open {
             // Backtick while console is open = close it (toggle).
             if !modifiers.state().control_key()

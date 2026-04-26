@@ -41,6 +41,10 @@ pub struct AppCoordinator {
     arbiter: LayoutArbiter,
     render_cache: HashMap<AppId, RenderOutput>,
     dirty_adapters: HashSet<AppId>,
+    /// Adapters detached from the tiled grid into floating mode.
+    floating: HashSet<AppId>,
+    /// Pixel-space rects for floating panes.
+    float_rects: HashMap<AppId, Rect>,
 }
 
 impl AppCoordinator {
@@ -61,6 +65,8 @@ impl AppCoordinator {
             arbiter: LayoutArbiter::new((0.0, 0.0), (1.0, 1.0)),
             render_cache: HashMap::new(),
             dirty_adapters: HashSet::new(),
+            floating: HashSet::new(),
+            float_rects: HashMap::new(),
         }
     }
 
@@ -251,6 +257,8 @@ impl AppCoordinator {
         self.run_arbiter_negotiation();
         self.render_cache.remove(&app_id);
         self.dirty_adapters.remove(&app_id);
+        self.floating.remove(&app_id);
+        self.float_rects.remove(&app_id);
     }
 
     /// Update all running adapters whose cadence fires this frame.
@@ -437,6 +445,41 @@ impl AppCoordinator {
         }
         result
     }
+
+    /// Detach a pane from the tiled grid into floating mode.
+    pub fn detach_to_float(&mut self, app_id: AppId, layout: &mut LayoutEngine, scene: &mut SceneTree) {
+        let rect = self.app_pane_map.get(&app_id)
+            .and_then(|pid| layout.get_pane_rect(*pid).ok())
+            .map(|r| Rect { x: r.x, y: r.y, width: r.width, height: r.height })
+            .unwrap_or(Rect { x: 100.0, y: 100.0, width: 600.0, height: 400.0 });
+
+        if let Some(pane_id) = self.app_pane_map.remove(&app_id) {
+            self.pane_map.remove(&pane_id);
+            let _ = layout.remove_pane(pane_id);
+        }
+
+        self.floating.insert(app_id);
+        self.float_rects.insert(app_id, rect.clone());
+
+        if let Some(&node_id) = self.scene_map.get(&app_id) {
+            if let Some(node) = scene.get_mut(node_id) {
+                node.z_order = 50;
+                node.render_layer = RenderLayer::Overlay;
+                node.transform.x = rect.x;
+                node.transform.y = rect.y;
+                node.transform.width = rect.width;
+                node.transform.height = rect.height;
+                node.dirty |= DirtyFlags::TRANSFORM;
+            }
+        }
+
+        self.run_arbiter_negotiation();
+        log::info!("Detached adapter {app_id} to floating at ({:.0},{:.0} {:.0}x{:.0})", rect.x, rect.y, rect.width, rect.height);
+    }
+
+    pub fn is_floating(&self, app_id: AppId) -> bool { self.floating.contains(&app_id) }
+    pub fn float_rect(&self, app_id: AppId) -> Option<&Rect> { self.float_rects.get(&app_id) }
+    pub fn floating_ids(&self) -> impl Iterator<Item = AppId> + '_ { self.floating.iter().copied() }
 
     /// Switch an adapter's scene node to a different render layer.
     #[allow(dead_code)]

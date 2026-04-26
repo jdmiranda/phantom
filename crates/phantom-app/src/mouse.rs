@@ -83,8 +83,22 @@ impl App {
             return;
         }
 
-        // Hit-test coordinator-managed adapters.
+        // Hit-test floating panes first (highest z-order).
         self.cursor_over_pane = None;
+        let fx = x as f32;
+        let fy = y as f32;
+        for fid in self.coordinator.floating_ids() {
+            if let Some(rect) = self.coordinator.float_rect(fid) {
+                if fx >= rect.x && fx <= rect.x + rect.width
+                    && fy >= rect.y && fy <= rect.y + rect.height
+                {
+                    self.cursor_over_pane = Some(fid);
+                    return;
+                }
+            }
+        }
+
+        // Hit-test tiled coordinator-managed adapters.
         for app_id in self.coordinator.all_app_ids() {
             if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
                 if let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) {
@@ -179,6 +193,29 @@ impl App {
         // Console overlay captures mouse clicks when visible.
         if self.cursor_in_console() {
             return;
+        }
+
+        // Click-to-focus for floating panes (check first, highest z).
+        if button == MouseButton::Left {
+            let (fmx, fmy) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
+            let float_ids: Vec<_> = self.coordinator.floating_ids().collect();
+            let mut float_focus = None;
+            for fid in &float_ids {
+                if let Some(rect) = self.coordinator.float_rect(*fid) {
+                    if fmx >= rect.x && fmx <= rect.x + rect.width
+                        && fmy >= rect.y && fmy <= rect.y + rect.height
+                    {
+                        float_focus = Some(*fid);
+                        break;
+                    }
+                }
+            }
+            if let Some(fid) = float_focus {
+                if self.coordinator.focused() != Some(fid) {
+                    self.coordinator.set_focus(fid);
+                }
+                return;
+            }
         }
 
         // Left click — check scrollbar hit on coordinator panes, then focus.
