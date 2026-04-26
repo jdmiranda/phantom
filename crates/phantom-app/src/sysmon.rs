@@ -72,6 +72,16 @@ impl SysmonHandle {
     pub fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Relaxed);
     }
+
+    /// Test-only constructor for creating a handle with an injected channel.
+    #[cfg(test)]
+    pub(crate) fn for_test(rx: mpsc::Receiver<SystemStats>) -> Self {
+        Self {
+            rx,
+            latest: None,
+            active: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

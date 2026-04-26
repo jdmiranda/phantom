@@ -1,2 +1,8 @@
+pub mod agent;
+pub mod monitor;
 pub mod terminal;
+pub mod video;
+pub use agent::AgentAdapter;
+pub use monitor::MonitorAdapter;
 pub use terminal::TerminalAdapter;
+pub use video::VideoAdapter;
