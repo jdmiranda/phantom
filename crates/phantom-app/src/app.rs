@@ -5,6 +5,7 @@
 //! loop. It is created after the window and GPU context are established and
 //! handed control for the lifetime of the application.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Instant;
@@ -134,6 +135,9 @@ pub struct App {
 
     // -- Suggestion overlay (from brain) --
     pub(crate) suggestion: Option<SuggestionOverlay>,
+
+    // -- History of dismissed/expired suggestions (most recent at back) --
+    pub(crate) suggestion_history: VecDeque<SuggestionOverlay>,
 
     // -- Scene graph (retained, dirty-tracked) --
     pub(crate) scene: SceneTree,
@@ -560,6 +564,7 @@ impl App {
             session_manager,
             last_input_time: now,
             suggestion: None,
+            suggestion_history: VecDeque::with_capacity(10),
             scene,
             scene_content_node: content_node,
             mcp_cmd_rx,

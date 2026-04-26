@@ -133,10 +133,13 @@ impl App {
             let _ = self.spawn_agent_pane(task);
         }
 
-        // Expire stale suggestions.
-        if let Some(ref s) = self.suggestion {
-            if now.duration_since(s.shown_at).as_secs() > 10 {
-                self.suggestion = None;
+        // Expire stale suggestions (save to history before clearing).
+        if self.suggestion.as_ref().is_some_and(|s| now.duration_since(s.shown_at).as_secs() > 10) {
+            if let Some(expired) = self.suggestion.take() {
+                self.suggestion_history.push_back(expired);
+                if self.suggestion_history.len() > 10 {
+                    self.suggestion_history.pop_front();
+                }
             }
         }
 

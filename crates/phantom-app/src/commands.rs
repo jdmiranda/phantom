@@ -210,6 +210,17 @@ impl App {
                     self.console.error("Failed to start video. Is ffmpeg installed?");
                 }
             }
+            "suggestions" => {
+                if self.suggestion_history.is_empty() {
+                    self.console.output("No suggestion history.");
+                } else {
+                    self.console.output(format!("{} recent suggestions:", self.suggestion_history.len()));
+                    for (i, s) in self.suggestion_history.iter().enumerate() {
+                        let age = std::time::Instant::now().duration_since(s.shown_at).as_secs();
+                        self.console.output(format!("  {}. [{}s ago] {}", i + 1, age, s.text));
+                    }
+                }
+            }
             "clear" => {
                 self.console.history.clear();
                 self.console.scroll_offset = 0;
@@ -227,6 +238,7 @@ impl App {
                 self.console.output("  reload              Reload config from disk");
                 self.console.output("  boot                Replay boot sequence");
                 self.console.output("  video <path>        Play video through CRT shader");
+                self.console.output("  suggestions         List dismissed/expired suggestion history");
                 self.console.output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");
             }

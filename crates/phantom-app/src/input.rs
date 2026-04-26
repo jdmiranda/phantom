@@ -344,8 +344,27 @@ impl App {
             return;
         }
 
-        if self.suggestion.is_some() {
-            self.suggestion = None;
+        // Ctrl+Shift+Space: recall last dismissed suggestion.
+        {
+            let mods = modifiers.state();
+            if mods.control_key()
+                && mods.shift_key()
+                && matches!(&event.logical_key, Key::Named(NamedKey::Space))
+            {
+                if let Some(mut recalled) = self.suggestion_history.pop_back() {
+                    recalled.shown_at = Instant::now();
+                    self.suggestion = Some(recalled);
+                }
+                return;
+            }
+        }
+
+        if let Some(dismissed) = self.suggestion.take() {
+            // Save to history before clearing.
+            self.suggestion_history.push_back(dismissed);
+            if self.suggestion_history.len() > 10 {
+                self.suggestion_history.pop_front();
+            }
         }
 
         // Settings panel captures all keys when open.
