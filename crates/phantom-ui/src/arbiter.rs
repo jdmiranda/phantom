@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use phantom_adapter::spatial::{ResizeResult, SpatialPreference};
+use phantom_adapter::spatial::{NegotiationResult, ResizeResult, SpatialPreference};
 
 use crate::layout::Rect;
 
@@ -278,6 +278,50 @@ impl LayoutArbiter {
             .collect();
 
         self.negotiate(&patched)
+    }
+
+    /// Two-phase negotiation: compute a plan, query adapters for
+    /// accept/counter/reject, adjust, repeat up to 3 rounds.
+    pub fn negotiate_with_feedback<F>(
+        &self,
+        preferences: &[(AppId, SpatialPreference)],
+        mut query: F,
+    ) -> LayoutPlan
+    where
+        F: FnMut(AppId, f32, f32) -> NegotiationResult,
+    {
+        let mut plan = self.negotiate(preferences);
+
+        for _round in 0..3 {
+            let mut any_counter = false;
+            let mut adjusted: Vec<(AppId, SpatialPreference)> = preferences.to_vec();
+
+            for (app_id, rect) in &plan.allocations {
+                let result = query(*app_id, rect.width, rect.height);
+                match result {
+                    NegotiationResult::Accepted => {}
+                    NegotiationResult::CounterOffer { width, height } => {
+                        if let Some((_, pref)) = adjusted.iter_mut().find(|(id, _)| id == app_id) {
+                            let cols = (width / self.cell_size.0).round() as u32;
+                            let rows = (height / self.cell_size.1).round() as u32;
+                            pref.preferred_size = (cols.max(pref.min_size.0), rows.max(pref.min_size.1));
+                        }
+                        any_counter = true;
+                    }
+                    NegotiationResult::Rejected { .. } => {
+                        if let Some((_, pref)) = adjusted.iter_mut().find(|(id, _)| id == app_id) {
+                            pref.preferred_size = pref.min_size;
+                        }
+                        any_counter = true;
+                    }
+                }
+            }
+
+            if !any_counter { break; }
+            plan = self.negotiate(&adjusted);
+        }
+
+        plan
     }
 }
 

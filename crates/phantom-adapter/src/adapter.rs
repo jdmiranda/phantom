@@ -6,7 +6,7 @@
 
 use crate::bus::{BusMessage, TopicDeclaration};
 use crate::lifecycle::AppState;
-use crate::spatial::SpatialPreference;
+use crate::spatial::{NegotiationResult, SpatialPreference};
 
 /// Opaque app identifier assigned by the registry.
 pub type AppId = u32;
@@ -43,6 +43,15 @@ pub trait Renderable {
     /// Spatial layout preferences (size constraints, priority).
     fn spatial_preference(&self) -> Option<SpatialPreference> {
         None
+    }
+
+    /// Respond to a proposed resize from the layout arbiter.
+    ///
+    /// The arbiter calls this during two-phase negotiation. The default
+    /// accepts any proposal.
+    fn on_resize_propose(&mut self, width: f32, height: f32) -> NegotiationResult {
+        let _ = (width, height);
+        NegotiationResult::Accepted
     }
 }
 
