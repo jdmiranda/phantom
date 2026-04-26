@@ -481,6 +481,48 @@ impl AppCoordinator {
     pub fn float_rect(&self, app_id: AppId) -> Option<&Rect> { self.float_rects.get(&app_id) }
     pub fn floating_ids(&self) -> impl Iterator<Item = AppId> + '_ { self.floating.iter().copied() }
 
+    pub fn move_floating(&mut self, app_id: AppId, x: f32, y: f32) {
+        if let Some(rect) = self.float_rects.get_mut(&app_id) {
+            rect.x = x;
+            rect.y = y;
+        }
+    }
+
+    pub fn resize_floating(&mut self, app_id: AppId, width: f32, height: f32) {
+        if let Some(rect) = self.float_rects.get_mut(&app_id) {
+            rect.width = width.max(100.0);
+            rect.height = height.max(80.0);
+        }
+    }
+
+    /// Dock a floating pane back into the tiled grid.
+    pub fn dock_to_grid(&mut self, app_id: AppId, layout: &mut LayoutEngine, scene: &mut SceneTree) {
+        if !self.floating.remove(&app_id) { return; }
+        self.float_rects.remove(&app_id);
+
+        match layout.add_pane() {
+            Ok(pane_id) => {
+                self.pane_map.insert(pane_id, app_id);
+                self.app_pane_map.insert(app_id, pane_id);
+            }
+            Err(e) => {
+                log::warn!("Failed to dock adapter {app_id}: {e}");
+                return;
+            }
+        }
+
+        if let Some(&node_id) = self.scene_map.get(&app_id) {
+            if let Some(node) = scene.get_mut(node_id) {
+                node.z_order = 0;
+                node.render_layer = RenderLayer::Scene;
+                node.dirty |= DirtyFlags::TRANSFORM;
+            }
+        }
+
+        self.run_arbiter_negotiation();
+        log::info!("Docked adapter {app_id} back to grid");
+    }
+
     /// Switch an adapter's scene node to a different render layer.
     #[allow(dead_code)]
     pub fn set_render_layer(&self, app_id: AppId, layer: RenderLayer, scene: &mut SceneTree) {

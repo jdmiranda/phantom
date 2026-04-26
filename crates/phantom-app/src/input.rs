@@ -418,14 +418,29 @@ impl App {
             return;
         }
 
-        // Ctrl+Shift+F: detach focused pane to floating mode.
+        // Ctrl+Shift+F: toggle float/dock for focused pane.
         if modifiers.state().control_key()
             && modifiers.state().shift_key()
             && matches!(&event.logical_key, Key::Character(s) if s == "F" || s == "f")
         {
             if let Some(focused) = self.coordinator.focused() {
-                if !self.coordinator.is_floating(focused) {
+                if self.coordinator.is_floating(focused) {
+                    self.coordinator.dock_to_grid(focused, &mut self.layout, &mut self.scene);
+                } else {
                     self.coordinator.detach_to_float(focused, &mut self.layout, &mut self.scene);
+                }
+            }
+            return;
+        }
+
+        // Ctrl+Shift+D: dock focused floating pane back to grid.
+        if modifiers.state().control_key()
+            && modifiers.state().shift_key()
+            && matches!(&event.logical_key, Key::Character(s) if s == "D" || s == "d")
+        {
+            if let Some(focused) = self.coordinator.focused() {
+                if self.coordinator.is_floating(focused) {
+                    self.coordinator.dock_to_grid(focused, &mut self.layout, &mut self.scene);
                 }
             }
             return;

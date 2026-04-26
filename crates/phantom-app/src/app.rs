@@ -68,6 +68,21 @@ pub enum AppState {
     Terminal,
 }
 
+/// Which edge a floating pane is being resized from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResizeEdge {
+    Right,
+    Bottom,
+    BottomRight,
+}
+
+/// State for dragging or resizing a floating pane.
+#[derive(Debug, Clone)]
+pub(crate) enum FloatInteraction {
+    Dragging { app_id: u32, offset_x: f32, offset_y: f32 },
+    Resizing { app_id: u32, edge: ResizeEdge, initial_rect: phantom_adapter::Rect },
+}
+
 
 // ---------------------------------------------------------------------------
 // App
@@ -144,6 +159,9 @@ pub struct App {
 
     // -- Right-click context menu --
     pub(crate) context_menu: crate::context_menu::ContextMenu,
+
+    // -- Floating pane drag/resize interaction --
+    pub(crate) float_interaction: Option<FloatInteraction>,
 
     // -- Scene graph (retained, dirty-tracked) --
     pub(crate) scene: SceneTree,
@@ -585,6 +603,7 @@ impl App {
             suggestion_history: VecDeque::with_capacity(10),
             pending_brain_actions: Vec::new(),
             context_menu: crate::context_menu::ContextMenu::new(),
+            float_interaction: None,
             scene,
             scene_content_node: content_node,
             mcp_cmd_rx,

@@ -14,7 +14,7 @@ use phantom_terminal::input::{
     encode_mouse_sgr, MouseButton as TermMouseButton,
 };
 
-use crate::app::App;
+use crate::app::{App, FloatInteraction, ResizeEdge};
 use crate::context_menu::{MenuAction, MenuItem};
 use crate::pane::{
     container_rect, pane_inner_rect, point_in_rect, scrollbar_track_rect, scrollbar_y_to_offset,
@@ -77,6 +77,26 @@ impl App {
     /// Handle cursor movement -- update position and hit-test panes.
     pub fn handle_cursor_moved(&mut self, x: f64, y: f64) {
         self.cursor_position = (x, y);
+
+        // Handle active floating pane drag/resize.
+        if let Some(ref interaction) = self.float_interaction {
+            match interaction {
+                FloatInteraction::Dragging { app_id, offset_x, offset_y } => {
+                    let new_x = (x as f32 - offset_x).max(0.0);
+                    let new_y = (y as f32 - offset_y).max(0.0);
+                    self.coordinator.move_floating(*app_id, new_x, new_y);
+                }
+                FloatInteraction::Resizing { app_id, edge, initial_rect } => {
+                    let (new_w, new_h) = match edge {
+                        ResizeEdge::Right => ((x as f32 - initial_rect.x).max(100.0), initial_rect.height),
+                        ResizeEdge::Bottom => (initial_rect.width, (y as f32 - initial_rect.y).max(80.0)),
+                        ResizeEdge::BottomRight => ((x as f32 - initial_rect.x).max(100.0), (y as f32 - initial_rect.y).max(80.0)),
+                    };
+                    self.coordinator.resize_floating(*app_id, new_w, new_h);
+                }
+            }
+            return;
+        }
 
         // Update context menu hover tracking.
         if self.context_menu.visible {
@@ -191,6 +211,12 @@ impl App {
             }
         }
 
+        // End float interaction on release.
+        if state == ElementState::Released && self.float_interaction.is_some() {
+            self.float_interaction = None;
+            return;
+        }
+
         // Only handle press events for non-SGR operations.
         if state != ElementState::Pressed {
             return;
@@ -240,6 +266,24 @@ impl App {
             if let Some(fid) = float_focus {
                 if self.coordinator.focused() != Some(fid) {
                     self.coordinator.set_focus(fid);
+                }
+                // Check title bar (top 24px) → drag, or edges → resize.
+                if let Some(rect) = self.coordinator.float_rect(fid).cloned() {
+                    if fmy < rect.y + 24.0 {
+                        self.float_interaction = Some(FloatInteraction::Dragging {
+                            app_id: fid, offset_x: fmx - rect.x, offset_y: fmy - rect.y,
+                        });
+                    } else {
+                        let right = fmx > rect.x + rect.width - 8.0;
+                        let bottom = fmy > rect.y + rect.height - 8.0;
+                        if right && bottom {
+                            self.float_interaction = Some(FloatInteraction::Resizing { app_id: fid, edge: ResizeEdge::BottomRight, initial_rect: rect });
+                        } else if right {
+                            self.float_interaction = Some(FloatInteraction::Resizing { app_id: fid, edge: ResizeEdge::Right, initial_rect: rect });
+                        } else if bottom {
+                            self.float_interaction = Some(FloatInteraction::Resizing { app_id: fid, edge: ResizeEdge::Bottom, initial_rect: rect });
+                        }
+                    }
                 }
                 return;
             }
