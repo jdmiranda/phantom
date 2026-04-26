@@ -7,6 +7,7 @@
 use serde_json::json;
 
 use phantom_adapter::adapter::{Rect, RenderOutput};
+use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
@@ -116,6 +117,22 @@ impl Renderable for MonitorAdapter {
 
     fn is_visual(&self) -> bool {
         false
+    }
+
+    fn spatial_preference(&self) -> Option<SpatialPreference> {
+        if self.is_visual() {
+            Some(SpatialPreference {
+                min_size: (20, 6),
+                preferred_size: (40, 12),
+                max_size: Some((60, 20)),
+                aspect_ratio: None,
+                internal_panes: 1,
+                internal_layout: InternalLayout::Single,
+                priority: 2.0,
+            })
+        } else {
+            None
+        }
     }
 }
 

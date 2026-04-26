@@ -7,6 +7,7 @@
 use serde_json::json;
 
 use phantom_adapter::adapter::{Rect, RenderOutput, TextData};
+use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
@@ -139,6 +140,18 @@ impl Renderable for AgentAdapter {
 
     fn is_visual(&self) -> bool {
         true
+    }
+
+    fn spatial_preference(&self) -> Option<SpatialPreference> {
+        Some(SpatialPreference {
+            min_size: (30, 8),
+            preferred_size: (80, 20),
+            max_size: Some((120, 40)),
+            aspect_ratio: None,
+            internal_panes: 1,
+            internal_layout: InternalLayout::Single,
+            priority: 5.0,
+        })
     }
 }
 

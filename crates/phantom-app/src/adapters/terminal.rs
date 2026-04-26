@@ -16,7 +16,7 @@ use phantom_adapter::adapter::QuadData;
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
-use phantom_adapter::spatial::SpatialPreference;
+use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_terminal::output::{
     self, CursorShape as TermCursorShape, CursorState, TerminalThemeColors,
 };
@@ -277,7 +277,15 @@ impl Renderable for TerminalAdapter {
     }
 
     fn spatial_preference(&self) -> Option<SpatialPreference> {
-        Some(SpatialPreference::simple(40, 12))
+        Some(SpatialPreference {
+            min_size: (40, 10),
+            preferred_size: (120, 40),
+            max_size: None,
+            aspect_ratio: None,
+            internal_panes: 1,
+            internal_layout: InternalLayout::Single,
+            priority: 10.0,
+        })
     }
 }
 

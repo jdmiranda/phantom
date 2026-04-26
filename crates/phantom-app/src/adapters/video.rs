@@ -8,6 +8,7 @@
 use serde_json::json;
 
 use phantom_adapter::adapter::{Rect, RenderOutput};
+use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
@@ -106,6 +107,18 @@ impl Renderable for VideoAdapter {
 
     fn is_visual(&self) -> bool {
         true
+    }
+
+    fn spatial_preference(&self) -> Option<SpatialPreference> {
+        Some(SpatialPreference {
+            min_size: (40, 20),
+            preferred_size: (80, 45),
+            max_size: None,
+            aspect_ratio: Some(16.0 / 9.0),
+            internal_panes: 1,
+            internal_layout: InternalLayout::Single,
+            priority: 8.0,
+        })
     }
 }
 
