@@ -8,7 +8,7 @@
 use log::debug;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
-#[allow(unused_imports)] // Used when SGR mouse forwarding is wired through adapters
+#[allow(unused_imports)] // Deferred: SGR mouse forwarding through adapters planned for Phase 4
 use phantom_terminal::input::{
     encode_mouse_motion_sgr, encode_mouse_sgr, MouseButton as TermMouseButton,
 };
@@ -152,14 +152,19 @@ impl App {
                 let track = scrollbar_track_rect(inner);
 
                 if point_in_rect(mx, my, track) {
-                    // Scrollbar click-to-jump via scroll command.
-                    let target_offset = scrollbar_y_to_offset(track, my, 1000);
-                    let _ = self.coordinator.send_command(
-                        app_id,
-                        "scroll_to_offset",
-                        &serde_json::json!({"offset": target_offset}),
-                    );
-                    debug!("Scrollbar click: adapter {app_id}, target_offset={target_offset}");
+                    // Query actual history size from adapter state for accurate jump.
+                    let history_size = self.coordinator.get_state(app_id)
+                        .and_then(|s| s.get("history_size").and_then(|v| v.as_u64()))
+                        .unwrap_or(0) as usize;
+                    if history_size > 0 {
+                        let target_offset = scrollbar_y_to_offset(track, my, history_size);
+                        let _ = self.coordinator.send_command(
+                            app_id,
+                            "scroll_to_offset",
+                            &serde_json::json!({"offset": target_offset}),
+                        );
+                        debug!("Scrollbar click: adapter {app_id}, target_offset={target_offset}, history={history_size}");
+                    }
                     return;
                 }
             }

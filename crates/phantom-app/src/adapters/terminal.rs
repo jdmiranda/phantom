@@ -204,6 +204,8 @@ impl AppCore for TerminalAdapter {
             "alive": true,
             "is_detached": self.is_detached,
             "has_new_output": self.has_new_output,
+            "history_size": self.terminal.history_size(),
+            "display_offset": self.terminal.display_offset(),
         })
     }
 }
@@ -352,7 +354,7 @@ impl Commandable for TerminalAdapter {
                 Ok(format!("resized to {cols}x{rows}"))
             }
             "select_start" => {
-                let col = args.get("col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let col = args.get("col").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
                 let point = Point::new(Line(row), Column(col));
@@ -360,7 +362,7 @@ impl Commandable for TerminalAdapter {
                 Ok("selection started".into())
             }
             "select_update" => {
-                let col = args.get("col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let col = args.get("col").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                 use phantom_terminal::selection::{Column, Line, Point, Side};
                 let point = Point::new(Line(row), Column(col));

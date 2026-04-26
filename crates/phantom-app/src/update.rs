@@ -63,9 +63,8 @@ impl App {
             }
         }
 
-        // Supervisor command polling (heartbeats are on a dedicated thread).
-        let cmd = self.supervisor.as_mut().and_then(|sv| sv.try_recv());
-        if let Some(cmd) = cmd {
+        // Supervisor command polling (drain all pending; heartbeats are on a dedicated thread).
+        while let Some(cmd) = self.supervisor.as_mut().and_then(|sv| sv.try_recv()) {
             self.handle_supervisor_command(cmd);
         }
 
@@ -129,13 +128,21 @@ impl App {
             }
         }
 
-        // Refresh git context periodically (off main thread, max once per 30s).
+        // Refresh git context periodically (off main thread, max once per 30s, one at a time).
         if let Some(ref ctx) = self.context {
             if now.duration_since(self.git_refresh_last).as_secs() >= 30 {
+                // Reap completed handle only when the timer fires (not every frame).
+                if self.git_refresh_handle.as_ref().is_some_and(|h| h.is_finished()) {
+                    self.git_refresh_handle = None;
+                }
+            }
+            if now.duration_since(self.git_refresh_last).as_secs() >= 30
+                && self.git_refresh_handle.is_none()
+            {
                 self.git_refresh_last = now;
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
-                let _ = std::thread::Builder::new()
+                self.git_refresh_handle = std::thread::Builder::new()
                     .name("git-refresh".into())
                     .spawn(move || {
                         let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
@@ -143,7 +150,8 @@ impl App {
                         if let Some(tx) = brain_tx {
                             let _ = tx.send(AiEvent::GitStateChanged);
                         }
-                    });
+                    })
+                    .ok();
             }
             if let Some(ref git) = ctx.git {
                 self.status_bar.set_branch(&git.branch);
@@ -163,29 +171,23 @@ impl App {
         }
 
         // Poll agent panes for streaming output and emit bus events on completion.
-        let agent_count_before = self.agent_panes.iter()
-            .filter(|p| p.status == crate::agent_pane::AgentPaneStatus::Working)
-            .count();
         self.poll_agent_panes();
-        let agent_count_after = self.agent_panes.iter()
-            .filter(|p| p.status == crate::agent_pane::AgentPaneStatus::Working)
-            .count();
-        // If any agent just finished this frame, emit bus events.
-        if agent_count_after < agent_count_before {
-            for pane in &self.agent_panes {
-                if matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed) {
-                    self.coordinator.bus_mut().emit(BusMessage {
-                        topic_id: self.topic_agent_event,
-                        sender: 0,
-                        event: Event::AgentTaskComplete {
-                            agent_id: 0,
-                            success: pane.status == crate::agent_pane::AgentPaneStatus::Done,
-                            summary: pane.task.clone(),
-                        },
-                        frame: 0,
-                        timestamp: now.duration_since(self.start_time).as_secs(),
-                    });
-                }
+        for pane in &mut self.agent_panes {
+            if !pane.event_emitted
+                && matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed)
+            {
+                pane.event_emitted = true;
+                self.coordinator.bus_mut().emit(BusMessage {
+                    topic_id: self.topic_agent_event,
+                    sender: 0,
+                    event: Event::AgentTaskComplete {
+                        agent_id: 0,
+                        success: pane.status == crate::agent_pane::AgentPaneStatus::Done,
+                        summary: pane.task.clone(),
+                    },
+                    frame: 0,
+                    timestamp: now.duration_since(self.start_time).as_secs(),
+                });
             }
         }
 

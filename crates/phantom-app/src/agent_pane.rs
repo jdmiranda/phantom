@@ -33,6 +33,8 @@ pub(crate) struct AgentPane {
     pub(crate) cached_lines: Vec<String>,
     /// Output length at last cache rebuild.
     cached_len: usize,
+    /// Whether a completion bus event has been emitted for this agent.
+    pub(crate) event_emitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +105,7 @@ impl AgentPane {
             tool_use_ids: Vec::new(),
             cached_lines: Vec::new(),
             cached_len: 0,
+            event_emitted: false,
         }
     }
 
@@ -263,6 +266,7 @@ mod tests {
             tool_use_ids: Vec::new(),
             cached_lines: Vec::new(),
             cached_len: 0,
+            event_emitted: false,
         };
         (pane, tx)
     }
@@ -331,6 +335,7 @@ mod tests {
             tool_use_ids: Vec::new(),
             cached_lines: Vec::new(),
             cached_len: 0,
+            event_emitted: false,
         };
         assert!(!pane.poll());
     }

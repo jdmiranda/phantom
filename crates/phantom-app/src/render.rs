@@ -7,8 +7,6 @@ use wgpu::CommandEncoderDescriptor;
 use phantom_renderer::grid::{GridCell, GridRenderData};
 use phantom_ui::widgets::Widget;
 use phantom_renderer::postfx::PostFxParams;
-use phantom_renderer::quads::QuadInstance;
-
 use phantom_renderer::quads::QuadInstance as QI;
 
 use crate::app::{App, AppState};
@@ -253,7 +251,7 @@ impl App {
     fn render_boot(
         &mut self,
         _screen_size: [f32; 2],
-        _quads: &mut Vec<QuadInstance>,
+        _quads: &mut Vec<QI>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         let boot_lines = self.boot.visible_text();
@@ -314,9 +312,9 @@ impl App {
     fn render_terminal(
         &mut self,
         screen_size: [f32; 2],
-        quads: &mut Vec<QuadInstance>,
+        quads: &mut Vec<QI>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
-        chrome_quads: &mut Vec<QuadInstance>,
+        chrome_quads: &mut Vec<QI>,
         chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         // -- Fullscreen mode: render only the fullscreen adapter at full size --
@@ -328,12 +326,11 @@ impl App {
                     let margin = 12.0;
                     let origin = (margin, margin);
 
-                    let grid_cells: Vec<GridCell> = grid.cells.iter()
-                        .map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg })
-                        .collect();
+                    self.pool_grid_cells.clear();
+                    self.pool_grid_cells.extend(grid.cells.iter().map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg }));
 
                     let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
-                        &grid_cells, grid.cols, grid.rows,
+                        &self.pool_grid_cells, grid.cols, grid.rows,
                         &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
                         origin, self.cell_size,
                     );
@@ -344,7 +341,7 @@ impl App {
                         if cursor.visible {
                             let cx = margin + cursor.col as f32 * self.cell_size.0;
                             let cy = margin + cursor.row as f32 * self.cell_size.1;
-                            quads.push(QuadInstance {
+                            quads.push(QI {
                                 pos: [cx, cy],
                                 size: [self.cell_size.0, self.cell_size.1],
                                 color: [self.theme.colors.cursor[0], self.theme.colors.cursor[1], self.theme.colors.cursor[2], 0.7],
@@ -487,13 +484,12 @@ impl App {
 
             // Render terminal grid data (the critical path for terminal adapters).
             if let Some(ref grid) = ro.grid {
-                let grid_cells: Vec<GridCell> = grid.cells.iter()
-                    .map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg })
-                    .collect();
+                self.pool_grid_cells.clear();
+                self.pool_grid_cells.extend(grid.cells.iter().map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg }));
 
                 let origin = (grid.origin.0, grid.origin.1);
                 let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
-                    &grid_cells, grid.cols, grid.rows,
+                    &self.pool_grid_cells, grid.cols, grid.rows,
                     &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
                     origin, self.cell_size,
                 );

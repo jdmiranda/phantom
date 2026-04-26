@@ -174,7 +174,8 @@ impl AppCoordinator {
             adapter.update(dt_secs);
         }
 
-        // Deliver bus messages to subscribers.
+        // Deliver bus messages to all running subscribers (not gated by cadence —
+        // messages should never be silently delayed).
         for id in &running {
             let msgs = self.bus.drain_for(*id);
             if msgs.is_empty() {

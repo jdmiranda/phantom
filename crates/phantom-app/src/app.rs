@@ -174,6 +174,7 @@ pub struct App {
     #[allow(dead_code)] // Was used for title formatting, now labels are pre-formatted
     pub(crate) title_buf: String,
     pub(crate) text_cell_buf: Vec<phantom_renderer::text::TerminalCell>,
+    pub(crate) pool_grid_cells: Vec<phantom_renderer::grid::GridCell>,
 
     // -- Per-keystroke glitch effect --
     pub(crate) keystroke_fx: crate::keystroke_fx::KeystrokeFx,
@@ -182,8 +183,9 @@ pub struct App {
     pub(crate) watchdog_last: Instant,
     pub(crate) watchdog_frame: u64,
 
-    // -- Git refresh tracking (avoid spawning threads from frame loop) --
+    // -- Git refresh tracking (bounded: only one thread at a time) --
     pub(crate) git_refresh_last: Instant,
+    pub(crate) git_refresh_handle: Option<std::thread::JoinHandle<()>>,
 
     // -- Reusable overlay text buffer (avoids per-frame alloc in console render) --
     pub(crate) overlay_line_buf: Vec<(String, [f32; 4])>,
@@ -571,10 +573,12 @@ impl App {
             appmon_visible: false,
             title_buf: String::with_capacity(64),
             text_cell_buf: Vec::with_capacity(256),
+            pool_grid_cells: Vec::with_capacity(80 * 24),
             keystroke_fx: crate::keystroke_fx::KeystrokeFx::new(),
             watchdog_last: now,
             watchdog_frame: 0,
             git_refresh_last: now,
+            git_refresh_handle: None,
             overlay_line_buf: Vec::with_capacity(128),
             video_renderer,
             video_playback: None,
