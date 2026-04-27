@@ -335,15 +335,16 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn watcher_score_positive_with_active_process() {
+    fn watcher_score_always_zero() {
         let mut scorer = UtilityScorer::new();
         scorer.has_active_process = true;
         let ctx = test_context();
 
+        // Watcher is disabled — always returns 0.0.
         let scored = scorer.watcher_score(&ctx);
         assert!(
-            (scored.score - 0.5).abs() < f32::EPSILON,
-            "expected 0.5, got {}",
+            scored.score.abs() < f32::EPSILON,
+            "expected 0.0, got {}",
             scored.score
         );
     }
@@ -388,10 +389,9 @@ mod tests {
     fn quiet_score_baseline() {
         let scorer = UtilityScorer::new();
         let scored = scorer.quiet_score();
-        // Sentient mode: baseline lowered from 0.5 to 0.1.
         assert!(
-            (scored.score - 0.1).abs() < f32::EPSILON,
-            "expected 0.1, got {}",
+            (scored.score - 0.3).abs() < f32::EPSILON,
+            "expected 0.3, got {}",
             scored.score
         );
     }
@@ -406,10 +406,10 @@ mod tests {
         scorer.chattiness = 0.3;
 
         let scored = scorer.quiet_score();
-        // Sentient mode: 0.1 base + 0.3 chattiness = 0.4.
+        // 0.3 base + 0.3 chattiness = 0.6.
         assert!(
-            (scored.score - 0.4).abs() < f32::EPSILON,
-            "expected 0.4, got {}",
+            (scored.score - 0.6).abs() < f32::EPSILON,
+            "expected 0.6, got {}",
             scored.score
         );
     }

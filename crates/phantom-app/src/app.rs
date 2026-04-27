@@ -378,7 +378,7 @@ impl App {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
             enable_memory: true,
-            quiet_threshold: 0.1, // Sentient mode: let most actions through
+            quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real errors
             router: None,
         });
         info!("AI brain spawned");

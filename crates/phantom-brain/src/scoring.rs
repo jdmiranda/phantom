@@ -293,27 +293,14 @@ impl UtilityScorer {
     /// - **0.5** if a long-running process is *actively running*.
     /// - **0.0** otherwise (just having build commands isn't enough).
     pub fn watcher_score(&self, _context: &ProjectContext) -> ScoredAction {
-        // Only offer to watch if there's evidence of an active long-running process.
-        // Previously this fired for any project with build/test commands, causing
-        // "Want me to watch this build?" spam every 5s on idle.
-        if self.has_active_process {
-            ScoredAction {
-                action: AiAction::ShowSuggestion {
-                    text: "Want me to watch this build?".into(),
-                    options: vec![
-                        SuggestionOption { key: 'y', label: "Watch it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm { prompt: "Watch the build".into() }))) },
-                        SuggestionOption { key: 'n', label: "No".into(), action: None },
-                    ],
-                },
-                score: 0.5,
-                reason: "active long-running process detected".into(),
-            }
-        } else {
-            ScoredAction {
-                action: AiAction::DoNothing,
-                score: 0.0,
-                reason: "no active process to watch".into(),
-            }
+        // Disabled: watcher was the source of "Want me to watch this build?" spam.
+        // The WatcherTick event path that sets has_active_process is never triggered
+        // in normal usage, so this scorer always returned 0.0 anyway. Keeping it
+        // as an explicit no-op until the watcher agent system is properly built.
+        ScoredAction {
+            action: AiAction::DoNothing,
+            score: 0.0,
+            reason: "watcher disabled".into(),
         }
     }
 
@@ -352,8 +339,9 @@ impl UtilityScorer {
     /// Starts at 0.5 and increases with the chattiness dampener. The more
     /// we've suggested recently, the higher the bar to suggest again.
     pub fn quiet_score(&self) -> ScoredAction {
-        // Sentient mode: low baseline (0.1) so the brain speaks up more often.
-        let score = (0.1 + self.chattiness).min(1.0);
+        // Baseline score the brain must beat to act. 0.3 prevents noise while
+        // still allowing real errors (0.9) and explanations (0.7) through.
+        let score = (0.3 + self.chattiness).min(1.0);
         ScoredAction {
             action: AiAction::DoNothing,
             score,
