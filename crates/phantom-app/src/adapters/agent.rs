@@ -38,7 +38,6 @@ pub struct AgentAdapter {
 
 impl AgentAdapter {
     /// Wrap an already-spawned agent pane in the adapter.
-    #[allow(dead_code)]
     pub(crate) fn new(pane: AgentPane) -> Self {
         let status = pane.status;
         Self {
@@ -72,11 +71,16 @@ impl AppCore for AgentAdapter {
     }
 
     fn is_alive(&self) -> bool {
-        self.pane.status == AgentPaneStatus::Working
+        // Keep the adapter alive even after completion so the user can
+        // read the output. It can be dismissed via the "dismiss" command
+        // or closed manually.
+        true
     }
 
     fn update(&mut self, _dt: f32) {
         self.pane.poll();
+        // Refresh cached lines for rendering.
+        self.pane.tail_lines(200);
 
         // Emit a bus event only on terminal status transitions (Done/Failed).
         if self.pane.status != self.prev_status {
@@ -117,15 +121,21 @@ impl AppCore for AgentAdapter {
 
 impl Renderable for AgentAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
-        let text_segments: Vec<TextData> = self
-            .pane
-            .cached_lines
+        // Calculate how many lines fit in the rect.
+        let max_lines = (rect.height / LINE_HEIGHT).floor().max(1.0) as usize;
+
+        // Use cached_lines (updated during poll/update).
+        let lines = &self.pane.cached_lines;
+        let start = lines.len().saturating_sub(max_lines);
+        let visible = &lines[start..];
+
+        let text_segments: Vec<TextData> = visible
             .iter()
             .enumerate()
             .map(|(i, line)| TextData {
                 text: line.clone(),
-                x: rect.x,
-                y: rect.y + (i as f32) * LINE_HEIGHT,
+                x: rect.x + 4.0,
+                y: rect.y + 4.0 + (i as f32) * LINE_HEIGHT,
                 color: TEXT_COLOR,
             })
             .collect();

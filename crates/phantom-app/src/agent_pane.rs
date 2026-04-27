@@ -459,11 +459,11 @@ fn format_tool_args(tool: &ToolType, args: &serde_json::Value) -> String {
 // ---------------------------------------------------------------------------
 
 impl App {
-    /// Spawn a new agent pane for the given task.
+    /// Spawn a new agent pane as a first-class coordinator adapter.
     ///
-    /// Creates the agent, starts the Claude API call on a background thread,
-    /// and adds the agent pane to the app's list. Returns false if the agent
-    /// could not be spawned (e.g. missing API key).
+    /// Creates the agent, wraps it in an AgentAdapter, and registers it
+    /// with the coordinator so it gets its own layout pane, scene node,
+    /// and input routing — just like a terminal.
     pub(crate) fn spawn_agent_pane(&mut self, task: AgentTask) -> bool {
         let Some(claude_config) = ClaudeConfig::from_env() else {
             warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
@@ -471,8 +471,20 @@ impl App {
         };
 
         let agent_pane = AgentPane::spawn(task, &claude_config);
-        self.agent_panes.push(agent_pane);
-        info!("Agent pane added (total: {})", self.agent_panes.len());
+        let adapter = crate::adapters::agent::AgentAdapter::new(agent_pane);
+
+        let content_node = self.scene_content_node;
+        let _app_id = self.coordinator.register_adapter(
+            Box::new(adapter),
+            &mut self.layout,
+            &mut self.scene,
+            content_node,
+            phantom_scene::clock::Cadence::unlimited(),
+        );
+
+        // Also keep in agent_panes for legacy polling (skill extraction, etc.)
+        // TODO: migrate skill extraction to coordinator event bus and remove agent_panes Vec.
+        info!("Agent adapter registered (AppId {_app_id})");
         true
     }
 
