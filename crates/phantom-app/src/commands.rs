@@ -221,6 +221,10 @@ impl App {
                     }
                 }
             }
+            "selftest" => {
+                self.console.system("SELFTEST: brain exercising its own features...");
+                self.selftest = Some(crate::selftest::SelfTestRunner::new());
+            }
             "clear" => {
                 self.console.history.clear();
                 self.console.scroll_offset = 0;
@@ -239,6 +243,7 @@ impl App {
                 self.console.output("  boot                Replay boot sequence");
                 self.console.output("  video <path>        Play video through CRT shader");
                 self.console.output("  suggestions         List dismissed/expired suggestion history");
+                self.console.output("  selftest            Brain exercises its own features");
                 self.console.output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");
             }

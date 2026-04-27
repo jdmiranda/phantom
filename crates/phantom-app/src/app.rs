@@ -163,6 +163,9 @@ pub struct App {
     // -- Floating pane drag/resize interaction --
     pub(crate) float_interaction: Option<FloatInteraction>,
 
+    // -- Self-test runner (brain exercises its own features) --
+    pub(crate) selftest: Option<crate::selftest::SelfTestRunner>,
+
     // -- Scene graph (retained, dirty-tracked) --
     pub(crate) scene: SceneTree,
     pub(crate) scene_content_node: phantom_scene::node::NodeId,
@@ -604,6 +607,7 @@ impl App {
             pending_brain_actions: Vec::new(),
             context_menu: crate::context_menu::ContextMenu::new(),
             float_interaction: None,
+            selftest: None,
             scene,
             scene_content_node: content_node,
             mcp_cmd_rx,

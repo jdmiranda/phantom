@@ -114,6 +114,21 @@ impl App {
             }
         }
 
+        // Self-test runner: advance one step per frame.
+        if self.selftest.as_ref().is_some_and(|r| !r.is_done()) {
+            // Take the runner out to satisfy borrow checker (tick needs &mut App).
+            let mut runner = self.selftest.take().unwrap();
+            let lines = runner.tick(self);
+            for line in &lines {
+                self.console.system(line.clone());
+            }
+            if runner.is_done() {
+                self.selftest = None;
+            } else {
+                self.selftest = Some(runner);
+            }
+        }
+
         // Refresh git context periodically (off main thread, max once per 30s, one at a time).
         if let Some(ref ctx) = self.context {
             if now.duration_since(self.git_refresh_last).as_secs() >= 30 {
