@@ -8,10 +8,13 @@ use log::{info, warn};
 
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::agent::{Agent, AgentMessage};
-use phantom_agents::tools::available_tools;
+use phantom_agents::tools::{ToolCall, available_tools};
 use phantom_agents::AgentTask;
 
 use crate::app::App;
+
+/// Maximum number of tool-use rounds before the agent is force-stopped.
+const MAX_TOOL_ROUNDS: u32 = 25;
 
 // ---------------------------------------------------------------------------
 // AgentPane — a running agent with its output stream
@@ -35,6 +38,18 @@ pub(crate) struct AgentPane {
     cached_len: usize,
     /// Whether a completion bus event has been emitted for this agent.
     pub(crate) event_emitted: bool,
+    /// The agent's conversation state (owns the message history).
+    agent: Agent,
+    /// Tool calls pending execution: (api_id, call).
+    pending_tools: Vec<(String, ToolCall)>,
+    /// Project root for tool sandbox.
+    working_dir: String,
+    /// Claude API config for re-invoking on tool-result turns.
+    claude_config: ClaudeConfig,
+    /// Number of tool-use rounds completed (capped at [`MAX_TOOL_ROUNDS`]).
+    turn_count: u32,
+    /// Accumulator for assistant text within the current API response.
+    current_assistant_text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +110,10 @@ impl AgentPane {
 
         let handle = send_message(claude_config, &agent, &tools, &[]);
 
+        let working_dir = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".into());
+
         info!("Agent pane spawned: {task_desc}");
 
         Self {
@@ -106,6 +125,12 @@ impl AgentPane {
             cached_lines: Vec::new(),
             cached_len: 0,
             event_emitted: false,
+            agent,
+            pending_tools: Vec::new(),
+            working_dir,
+            claude_config: claude_config.clone(),
+            turn_count: 0,
+            current_assistant_text: String::new(),
         }
     }
 
@@ -123,6 +148,7 @@ impl AgentPane {
             match handle.try_recv() {
                 Some(ApiEvent::TextDelta(text)) => {
                     self.output.push_str(&text);
+                    self.current_assistant_text.push_str(&text);
                     // Cap output to prevent unbounded memory growth.
                     if self.output.len() > 65536 {
                         let mut trim = self.output.len() - 65536;
@@ -142,13 +168,26 @@ impl AgentPane {
                         call.tool,
                         serde_json::to_string(&call.args).unwrap_or_default()
                     ));
-                    self.tool_use_ids.push(id);
+                    self.tool_use_ids.push(id.clone());
+                    self.pending_tools.push((id, call));
                     got_content = true;
                 }
                 Some(ApiEvent::Done) => {
-                    self.output.push_str("\n\n✓ Agent finished.\n");
-                    self.status = AgentPaneStatus::Done;
-                    self.api_handle = None;
+                    // Flush accumulated assistant text into the conversation.
+                    if !self.current_assistant_text.is_empty() {
+                        let text = std::mem::take(&mut self.current_assistant_text);
+                        self.agent.push_message(AgentMessage::Assistant(text));
+                    }
+
+                    if self.pending_tools.is_empty() {
+                        // No tools pending — agent is truly done.
+                        self.output.push_str("\n\n✓ Agent finished.\n");
+                        self.status = AgentPaneStatus::Done;
+                        self.api_handle = None;
+                    } else {
+                        // Execute pending tools and continue conversation.
+                        self.execute_pending_tools();
+                    }
                     got_content = true;
                     break;
                 }
@@ -164,6 +203,73 @@ impl AgentPane {
         }
 
         got_content
+    }
+
+    /// Execute all pending tool calls, append results to the conversation,
+    /// and re-invoke the Claude API for the next turn.
+    fn execute_pending_tools(&mut self) {
+        if self.turn_count >= MAX_TOOL_ROUNDS {
+            self.output.push_str(&format!(
+                "\n\n✗ Agent hit iteration limit ({MAX_TOOL_ROUNDS} tool rounds).\n"
+            ));
+            self.status = AgentPaneStatus::Failed;
+            self.api_handle = None;
+            return;
+        }
+        self.turn_count += 1;
+
+        // Append all tool calls to the agent's message history.
+        for (_, call) in &self.pending_tools {
+            self.agent
+                .push_message(AgentMessage::ToolCall(call.clone()));
+        }
+
+        // Execute each tool and append results.
+        let working_dir = self.working_dir.clone();
+        for (_, call) in self.pending_tools.drain(..) {
+            let start = std::time::Instant::now();
+            let result =
+                phantom_agents::tools::execute_tool(call.tool, &call.args, &working_dir);
+            let elapsed = start.elapsed();
+
+            // Display in pane.
+            let status_char = if result.success { "✓" } else { "✗" };
+            self.output.push_str(&format!(
+                "  {} {:.0}ms\n",
+                status_char,
+                elapsed.as_millis(),
+            ));
+
+            // Show truncated output (max 200 chars for display).
+            if result.output.len() > 200 {
+                let truncated: String = result.output.chars().take(200).collect();
+                self.output.push_str(&format!(
+                    "  ← {}... ({} bytes)\n",
+                    truncated,
+                    result.output.len()
+                ));
+            } else if !result.output.is_empty() {
+                self.output.push_str(&format!(
+                    "  ← {}\n",
+                    result.output.lines().next().unwrap_or("")
+                ));
+            }
+
+            self.agent.push_message(AgentMessage::ToolResult(result));
+        }
+
+        // Re-invoke Claude with the updated conversation.
+        let tools = available_tools();
+        let handle = send_message(
+            &self.claude_config,
+            &self.agent,
+            &tools,
+            &self.tool_use_ids,
+        );
+        self.api_handle = Some(handle);
+
+        self.output
+            .push_str(&format!("\n● Continuing... (turn {})\n", self.turn_count));
     }
 
     /// Return cached tail lines for rendering. Only re-splits when output grows.
@@ -255,6 +361,14 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    fn test_agent() -> Agent {
+        Agent::new(0, AgentTask::FreeForm { prompt: "test task".into() })
+    }
+
+    fn test_config() -> ClaudeConfig {
+        ClaudeConfig::new("sk-test-fake")
+    }
+
     fn agent_with_handle() -> (AgentPane, mpsc::Sender<ApiEvent>) {
         let (tx, rx) = mpsc::channel();
         let handle = ApiHandle::from_receiver(rx);
@@ -267,6 +381,12 @@ mod tests {
             cached_lines: Vec::new(),
             cached_len: 0,
             event_emitted: false,
+            agent: test_agent(),
+            pending_tools: Vec::new(),
+            working_dir: ".".into(),
+            claude_config: test_config(),
+            turn_count: 0,
+            current_assistant_text: String::new(),
         };
         (pane, tx)
     }
@@ -336,6 +456,12 @@ mod tests {
             cached_lines: Vec::new(),
             cached_len: 0,
             event_emitted: false,
+            agent: test_agent(),
+            pending_tools: Vec::new(),
+            working_dir: ".".into(),
+            claude_config: test_config(),
+            turn_count: 0,
+            current_assistant_text: String::new(),
         };
         assert!(!pane.poll());
     }
@@ -362,6 +488,89 @@ mod tests {
         pane.poll();
         assert_eq!(pane.tool_use_ids, vec!["tool_123"]);
         assert!(pane.output.contains("Tool:"));
+        // New: also tracked in pending_tools.
+        assert_eq!(pane.pending_tools.len(), 1);
+        assert_eq!(pane.pending_tools[0].0, "tool_123");
+    }
+
+    #[test]
+    fn text_delta_accumulates_assistant_text() {
+        let (mut pane, tx) = agent_with_handle();
+        tx.send(ApiEvent::TextDelta("hello ".into())).unwrap();
+        tx.send(ApiEvent::TextDelta("world".into())).unwrap();
+
+        pane.poll();
+        assert_eq!(pane.current_assistant_text, "hello world");
+    }
+
+    #[test]
+    fn done_without_tools_marks_finished() {
+        let (mut pane, tx) = agent_with_handle();
+        tx.send(ApiEvent::TextDelta("result".into())).unwrap();
+        tx.send(ApiEvent::Done).unwrap();
+
+        pane.poll();
+        assert_eq!(pane.status, AgentPaneStatus::Done);
+        assert!(pane.api_handle.is_none());
+        // Assistant text should have been flushed to agent messages.
+        assert!(pane.current_assistant_text.is_empty());
+        assert!(pane.agent.messages.iter().any(|m| matches!(m, AgentMessage::Assistant(t) if t == "result")));
+    }
+
+    #[test]
+    fn done_with_tools_executes_and_continues() {
+        let (mut pane, tx) = agent_with_handle();
+        // Set working_dir to temp dir so ListFiles works.
+        pane.working_dir = std::env::temp_dir().to_string_lossy().into_owned();
+
+        tx.send(ApiEvent::TextDelta("Let me check.".into())).unwrap();
+        tx.send(ApiEvent::ToolUse {
+            id: "toolu_1".into(),
+            call: phantom_agents::tools::ToolCall {
+                tool: phantom_agents::tools::ToolType::ListFiles,
+                args: serde_json::json!({"path": "."}),
+            },
+        }).unwrap();
+        tx.send(ApiEvent::Done).unwrap();
+
+        pane.poll();
+
+        // Should NOT be Done — should have re-invoked.
+        assert_eq!(pane.status, AgentPaneStatus::Working);
+        // pending_tools should be drained.
+        assert!(pane.pending_tools.is_empty());
+        // turn_count should have incremented.
+        assert_eq!(pane.turn_count, 1);
+        // Agent messages should include ToolCall and ToolResult.
+        let has_tool_call = pane.agent.messages.iter().any(|m| matches!(m, AgentMessage::ToolCall(_)));
+        let has_tool_result = pane.agent.messages.iter().any(|m| matches!(m, AgentMessage::ToolResult(_)));
+        assert!(has_tool_call, "agent should have a ToolCall message");
+        assert!(has_tool_result, "agent should have a ToolResult message");
+        // Output should show the continuation.
+        assert!(pane.output.contains("Continuing... (turn 1)"));
+        // A new api_handle should have been created (by send_message).
+        assert!(pane.api_handle.is_some());
+    }
+
+    #[test]
+    fn iteration_limit_stops_agent() {
+        let (mut pane, tx) = agent_with_handle();
+        pane.turn_count = MAX_TOOL_ROUNDS; // Already at limit.
+
+        tx.send(ApiEvent::ToolUse {
+            id: "toolu_limit".into(),
+            call: phantom_agents::tools::ToolCall {
+                tool: phantom_agents::tools::ToolType::GitStatus,
+                args: serde_json::json!({}),
+            },
+        }).unwrap();
+        tx.send(ApiEvent::Done).unwrap();
+
+        pane.poll();
+
+        assert_eq!(pane.status, AgentPaneStatus::Failed);
+        assert!(pane.output.contains("iteration limit"));
+        assert!(pane.api_handle.is_none());
     }
 
     #[test]
