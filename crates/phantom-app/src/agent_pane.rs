@@ -513,6 +513,10 @@ impl App {
             }
         };
 
+        // Set flex ratio: terminal gets 75%, agent gets 25%.
+        let _ = self.layout.set_flex_grow(existing_child, 3.0);
+        let _ = self.layout.set_flex_grow(new_child, 1.0);
+
         // Resize layout after split.
         let width = self.gpu.surface_config.width;
         let height = self.gpu.surface_config.height;

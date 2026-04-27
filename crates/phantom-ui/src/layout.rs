@@ -192,6 +192,16 @@ impl LayoutEngine {
         self.split(pane, FlexDirection::Column)
     }
 
+    /// Set the flex_grow weight of a pane (controls how much space it gets).
+    pub fn set_flex_grow(&mut self, pane: PaneId, grow: f32) -> Result<()> {
+        let mut style = self.tree.style(pane.0)
+            .map_err(|e| anyhow::anyhow!("cannot read style: {e}"))?
+            .clone();
+        style.flex_grow = grow;
+        self.tree.set_style(pane.0, style)
+            .map_err(|e| anyhow::anyhow!("cannot set style: {e}"))
+    }
+
     /// Get the computed pixel rectangle for a pane.
     pub fn get_pane_rect(&self, id: PaneId) -> Result<Rect> {
         self.absolute_rect(id.0)

@@ -17,8 +17,8 @@ use crate::agent_pane::{AgentPane, AgentPaneStatus};
 /// Line height in logical pixels used to stack text lines in render output.
 const LINE_HEIGHT: f32 = 18.0;
 
-/// Default text color: soft green on dark background.
-const TEXT_COLOR: [f32; 4] = [0.6, 0.9, 0.6, 1.0];
+/// Agent response text: soft cyan (distinct from terminal green).
+const TEXT_COLOR: [f32; 4] = [0.55, 0.85, 0.95, 1.0];
 
 /// An agent pane wrapped in the `AppAdapter` interface.
 ///
@@ -124,14 +124,14 @@ impl AppCore for AgentAdapter {
 
 /// Height of the input bar at the bottom of the agent pane.
 const INPUT_BAR_HEIGHT: f32 = 28.0;
-/// Input bar background color.
-const INPUT_BAR_BG: [f32; 4] = [0.06, 0.12, 0.08, 1.0];
-/// Input bar separator line color.
-const INPUT_BAR_SEP: [f32; 4] = [0.15, 0.5, 0.25, 0.6];
-/// Input prompt color (brighter green).
-const INPUT_COLOR: [f32; 4] = [0.3, 1.0, 0.5, 1.0];
-/// Output area background.
-const OUTPUT_BG: [f32; 4] = [0.02, 0.04, 0.03, 0.95];
+/// Input bar background: slightly lighter than output so it's distinct.
+const INPUT_BAR_BG: [f32; 4] = [0.08, 0.10, 0.12, 1.0];
+/// Input bar separator: cyan accent line.
+const INPUT_BAR_SEP: [f32; 4] = [0.0, 0.6, 0.7, 0.5];
+/// User input text: warm yellow-green (distinct from agent cyan).
+const INPUT_COLOR: [f32; 4] = [0.9, 1.0, 0.4, 1.0];
+/// Output area background: near-transparent so it doesn't fight the theme.
+const OUTPUT_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 impl Renderable for AgentAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
