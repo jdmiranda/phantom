@@ -392,7 +392,11 @@ impl Supervisor {
             self.child = None;
             self.app_stream = None;
             self.app_read_buf.clear();
-            self.restart_phantom()?;
+            if self.shutdown.load(Ordering::Relaxed) {
+                info!("phantom exited cleanly — not restarting");
+            } else {
+                self.restart_phantom()?;
+            }
         }
         Ok(())
     }
