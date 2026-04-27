@@ -381,11 +381,15 @@ impl App {
             }
 
             // -- Container chrome for this adapter --
+            // Skip chrome when only 1 tiled pane (no need for borders/title).
+            let tiled_count = coordinator_outputs.len();
             let is_focused = focused_app == Some(*app_id);
             let pane_id = self.coordinator.pane_id_for(*app_id);
             let layout_rect = pane_id.and_then(|pid| self.layout.get_pane_rect(pid).ok());
 
-            if let Some(layout_rect) = layout_rect {
+            if tiled_count <= 1 {
+                // Single pane — skip chrome, just render the grid below.
+            } else if let Some(layout_rect) = layout_rect {
                 let pane_rect = container_rect(layout_rect, self.cell_size);
                 let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
                 let bg = self.theme.colors.background;
