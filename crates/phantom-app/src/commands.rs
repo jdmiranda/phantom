@@ -56,16 +56,9 @@ impl App {
                 return;
             }
             EvalResult::Pending(routing_msg) => {
-                // Route to brain via AiEvent::Interrupt. The brain will
-                // respond with AiAction::ConsoleReply, which update.rs
-                // routes back to console.output().
+                // Fall through to legacy command handling below.
+                // Only route to brain as Interrupt if no command matches.
                 debug!("{routing_msg}");
-                if let Some(ref brain) = self.brain {
-                    let _ = brain.send_event(AiEvent::Interrupt(input.trim().to_string()));
-                    self.console.system("[routing to brain...]");
-                }
-                // Fall through to legacy command handling below for
-                // commands the evaluator doesn't know about.
             }
             EvalResult::Unknown { input: _, suggestions } => {
                 if !suggestions.is_empty() {
@@ -300,11 +293,23 @@ impl App {
                             self.console.output(format!("Did you mean: {}", options.join(", ")));
                         }
                         ResolvedAction::PassThrough => {
-                            self.console.error(format!("Unknown command: {other}"));
+                            // No NLP match — route to brain as a natural language query.
+                            if let Some(ref brain) = self.brain {
+                                let _ = brain.send_event(AiEvent::Interrupt(input.trim().to_string()));
+                                self.console.system("[routing to brain...]");
+                            } else {
+                                self.console.error(format!("Unknown command: {other}"));
+                            }
                         }
                     }
                 } else {
-                    self.console.error(format!("Unknown command: {other}"));
+                    // No context — route to brain directly.
+                    if let Some(ref brain) = self.brain {
+                        let _ = brain.send_event(AiEvent::Interrupt(input.trim().to_string()));
+                        self.console.system("[routing to brain...]");
+                    } else {
+                        self.console.error(format!("Unknown command: {other}"));
+                    }
                 }
             }
         }
