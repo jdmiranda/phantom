@@ -133,18 +133,22 @@ impl App {
                 self.theme.shader_params.noise_intensity = 0.0;
                 self.console.output("All CRT effects disabled");
             }
-            "agent" => {
-                if parts.len() >= 2 {
-                    let prompt = input[6..].trim().to_string();
-                    if self.spawn_agent_pane(AgentTask::FreeForm { prompt: prompt.clone() }) {
-                        self.console.system(format!("Agent spawned: {prompt}"));
-                        self.console.output("Output streaming in agent panel above terminal");
-                    } else {
-                        self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
-                        self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
-                    }
+            cmd if cmd == "agent" || cmd.starts_with("agent ") => {
+                let prompt = if cmd == "agent" {
+                    // No prompt — open interactive agent pane.
+                    "You are an interactive AI assistant in the Phantom terminal. \
+                     The user opened an agent pane to chat with you. Help them with \
+                     whatever they need. You have tools to read files, edit code, \
+                     run commands, and search the project.".to_string()
                 } else {
-                    self.console.error("Usage: agent <prompt>");
+                    input[6..].trim().to_string()
+                };
+                if self.spawn_agent_pane(AgentTask::FreeForm { prompt: prompt.clone() }) {
+                    self.console.system("Agent pane opened.");
+                    self.console.open = false; // Close console so the pane is visible.
+                } else {
+                    self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                    self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
                 }
             }
             "sysmon" | "monitor" | "stats" => {
