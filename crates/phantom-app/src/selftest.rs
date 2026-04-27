@@ -214,41 +214,38 @@ impl SelfTestRunner {
             HealStage::Pending => {
                 let repair_prompt = self.build_combined_repair_prompt();
                 output.push(format!(
-                    "SELFHEAL: {} failure(s) detected. Invoking claude to fix...",
+                    "SELFHEAL: {} failure(s) detected. Spawning autonomous repair agent...",
                     self.failures.len()
                 ));
 
-                // Write the repair prompt to a temp file, then invoke claude CLI
-                // in the terminal. Claude Code can read files, edit them, run
-                // tests, and commit — this is the real self-heal loop.
-                //
-                // The command:
-                // 1. Writes the diagnosis to a temp file
-                // 2. Pipes it to `claude` with --print so it executes autonomously
-                // 3. Claude fixes the code, runs tests, commits
-                //
-                // We escape the prompt for shell safety.
-                let escaped = repair_prompt.replace('\'', "'\\''");
-                let heal_cmd = format!(
-                    "echo '{}' | claude --print \
-                    'Fix these selftest failures. After fixing, run cargo test --workspace. \
-                    If all tests pass, commit with message fix(selfheal): auto-repair selftest failures \
-                    and push to origin.'\n",
-                    escaped
-                );
+                // Spawn an internal FixError agent with tool use. The agent
+                // can read_file, edit_file, run_command, and git operations
+                // — no external CLI needed. The tool-use loop in agent_pane
+                // handles the execute → re-invoke → iterate cycle.
+                let first_file = self.failures.first()
+                    .and_then(|f| f.files.first().cloned());
 
                 app.pending_brain_actions.push(
-                    phantom_brain::events::AiAction::RunCommand(heal_cmd)
+                    phantom_brain::events::AiAction::SpawnAgent(
+                        phantom_agents::AgentTask::FixError {
+                            error_summary: format!(
+                                "{} selftest failure(s)",
+                                self.failures.len()
+                            ),
+                            file: first_file,
+                            context: repair_prompt,
+                        }
+                    )
                 );
 
                 self.heal_stage = HealStage::Repairing;
             }
             HealStage::Repairing => {
-                // Claude is working in the terminal. The brain will observe
-                // the output via OutputChunk events. We transition immediately
-                // — the actual fix happens asynchronously in the PTY.
-                output.push("SELFHEAL: Claude is working in the terminal...".into());
-                output.push("SELFHEAL: Watch the terminal for progress.".into());
+                // The agent is now autonomous — it will read files, edit code,
+                // run tests, and commit via its tool-use loop. The agent pane
+                // shows progress in real-time.
+                output.push("SELFHEAL: Repair agent is autonomous. Watch its pane for progress.".into());
+                output.push("SELFHEAL: The agent can read_file, edit_file, run_command, git_status.".into());
                 output.push("SELFHEAL: When done, run `selftest` to verify.".into());
                 self.heal_stage = HealStage::Complete;
                 self.done = true;
