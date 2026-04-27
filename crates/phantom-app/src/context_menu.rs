@@ -4,7 +4,7 @@
 //! The menu is rendered in the overlay pass (post-CRT, crisp).
 
 /// A right-click context menu overlay.
-pub(crate) struct ContextMenu {
+pub struct ContextMenu {
     /// Screen position of the top-left corner.
     pub x: f32,
     pub y: f32,
@@ -16,7 +16,7 @@ pub(crate) struct ContextMenu {
     pub visible: bool,
 }
 
-pub(crate) struct MenuItem {
+pub struct MenuItem {
     pub label: String,
     pub action: MenuAction,
     #[allow(dead_code)]
@@ -25,7 +25,7 @@ pub(crate) struct MenuItem {
 
 #[derive(Clone)]
 #[allow(dead_code)]
-pub(crate) enum MenuAction {
+pub enum MenuAction {
     Copy,
     Paste,
     SelectAll,

@@ -477,6 +477,11 @@ impl AppCoordinator {
         log::info!("Detached adapter {app_id} to floating at ({:.0},{:.0} {:.0}x{:.0})", rect.x, rect.y, rect.width, rect.height);
     }
 
+    /// Get the scene node ID for an adapter, if it exists.
+    pub fn scene_node_for(&self, app_id: AppId) -> Option<phantom_scene::node::NodeId> {
+        self.scene_map.get(&app_id).copied()
+    }
+
     pub fn is_floating(&self, app_id: AppId) -> bool { self.floating.contains(&app_id) }
     pub fn float_rect(&self, app_id: AppId) -> Option<&Rect> { self.float_rects.get(&app_id) }
     pub fn floating_ids(&self) -> impl Iterator<Item = AppId> + '_ { self.floating.iter().copied() }

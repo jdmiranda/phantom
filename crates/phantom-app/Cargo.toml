@@ -39,6 +39,7 @@ phantom-profile = []
 
 [dev-dependencies]
 png = "0.17"
+tempfile = "3"
 
 [lints]
 workspace = true
