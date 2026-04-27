@@ -178,6 +178,23 @@ impl App {
                 && matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed)
             {
                 pane.event_emitted = true;
+
+                // Voyager pattern: save completed agent's approach as a reusable skill.
+                if pane.status == crate::agent_pane::AgentPaneStatus::Done {
+                    if let Some(skill) = pane.extract_skill_summary() {
+                        let key = format!("skill:{}", pane.task.chars().take(50).collect::<String>());
+                        if let Some(ref mut mem) = self.memory {
+                            let _ = mem.set(
+                                &key,
+                                &skill,
+                                phantom_memory::MemoryCategory::Context,
+                                phantom_memory::MemorySource::Auto,
+                            );
+                            info!("Saved skill: {key}");
+                        }
+                    }
+                }
+
                 self.coordinator.bus_mut().emit(BusMessage {
                     topic_id: self.topic_agent_event,
                     sender: 0,

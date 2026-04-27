@@ -53,6 +53,14 @@ pub(crate) struct AgentPane {
     current_assistant_text: String,
     /// Permission set for tool execution (default: all).
     permissions: PermissionSet,
+    /// Approximate input tokens consumed.
+    input_tokens: u32,
+    /// Approximate output tokens consumed.
+    output_tokens: u32,
+    /// Number of tool calls executed.
+    tool_call_count: u32,
+    /// Whether this agent has written/edited files (for rollback).
+    has_file_edits: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +143,10 @@ impl AgentPane {
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_call_count: 0,
+            has_file_edits: false,
         }
     }
 
@@ -151,6 +163,7 @@ impl AgentPane {
         loop {
             match handle.try_recv() {
                 Some(ApiEvent::TextDelta(text)) => {
+                    self.output_tokens += (text.len() / 4) as u32;
                     self.output.push_str(&text);
                     self.current_assistant_text.push_str(&text);
                     // Cap output to prevent unbounded memory growth.
@@ -185,10 +198,13 @@ impl AgentPane {
                     }
 
                     if self.pending_tools.is_empty() {
-                        // No tools pending — agent is truly done.
-                        self.output.push_str("\n\n✓ Agent finished.\n");
+                        self.output.push_str(&format!(
+                            "\n\n📊 ~{}in / ~{}out tokens | {} tool calls\n✓ Agent finished.\n",
+                            self.input_tokens, self.output_tokens, self.tool_call_count,
+                        ));
                         self.status = AgentPaneStatus::Done;
                         self.api_handle = None;
+                        self.save_conversation();
                     } else {
                         // Execute pending tools and continue conversation.
                         self.execute_pending_tools();
@@ -200,6 +216,7 @@ impl AgentPane {
                     self.output.push_str(&format!("\n\n✗ Error: {e}\n"));
                     self.status = AgentPaneStatus::Failed;
                     self.api_handle = None;
+                    self.save_conversation();
                     got_content = true;
                     break;
                 }
@@ -232,6 +249,7 @@ impl AgentPane {
         // Execute each tool (with permission check) and append results.
         let working_dir = self.working_dir.clone();
         for (_, call) in self.pending_tools.drain(..) {
+            self.tool_call_count += 1;
             let start = std::time::Instant::now();
             let result = if let Err(denied) = self.permissions.check_tool(&call.tool) {
                 ToolResult { tool: call.tool, success: false, output: denied.to_string() }
@@ -239,6 +257,11 @@ impl AgentPane {
                 execute_tool(call.tool, &call.args, &working_dir)
             };
             let elapsed = start.elapsed();
+
+            // Track file edits for rollback.
+            if result.success && matches!(call.tool, ToolType::WriteFile | ToolType::EditFile) {
+                self.has_file_edits = true;
+            }
 
             // Display in pane.
             let status_char = if result.success { "✓" } else { "✗" };
@@ -291,6 +314,45 @@ impl AgentPane {
         &self.cached_lines
     }
 
+}
+
+    /// Save the agent conversation to disk for debugging and replay.
+    pub(crate) fn save_conversation(&self) {
+        let dir = std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".config/phantom/agents"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/phantom-agents"));
+
+        if std::fs::create_dir_all(&dir).is_err() { return; }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0);
+
+        let sanitized: String = self.task.chars().take(30)
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            .collect();
+
+        let path = dir.join(format!("{timestamp}_{sanitized}.json"));
+        let json = self.agent.to_json();
+        if let Ok(content) = serde_json::to_string_pretty(&json) {
+            let _ = std::fs::write(&path, content);
+            log::info!("Agent conversation saved: {}", path.display());
+        }
+    }
+
+    /// Extract a skill summary from a completed agent (Voyager pattern).
+    pub(crate) fn extract_skill_summary(&self) -> Option<String> {
+        if self.status != AgentPaneStatus::Done { return None; }
+        let text = self.agent.messages.iter().rev()
+            .find_map(|m| if let AgentMessage::Assistant(t) = m { Some(t.clone()) } else { None })?;
+        let cleaned = text.trim_end_matches("Agent finished.").trim();
+        if cleaned.is_empty() { return None; }
+        if cleaned.len() > 500 {
+            Some(format!("...{}", &cleaned[cleaned.len()-500..]))
+        } else {
+            Some(cleaned.to_string())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +483,10 @@ mod tests {
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_call_count: 0,
+            has_file_edits: false,
         };
         (pane, tx)
     }
@@ -497,6 +563,10 @@ mod tests {
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_call_count: 0,
+            has_file_edits: false,
         };
         assert!(!pane.poll());
     }

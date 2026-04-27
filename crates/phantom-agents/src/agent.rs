@@ -147,6 +147,8 @@ impl Agent {
     /// This prompt is sent as the first message when the agent begins work.
     /// It establishes the agent's role, constraints, and expected output format.
     pub fn system_prompt(&self) -> String {
+        let skill_hint = "\n\nCheck project memory for relevant skills before starting.";
+
         match &self.task {
             AgentTask::FixError {
                 error_summary,
@@ -168,7 +170,8 @@ impl Agent {
                      2. Identify the root cause.\n\
                      3. Write the fix.\n\
                      4. Run the build to verify.\n\
-                     5. Report what you changed and why."
+                     5. Report what you changed and why.\
+                     {skill_hint}"
                 )
             }
             AgentTask::RunCommand { command } => {
@@ -176,7 +179,8 @@ impl Agent {
                     "You are a command execution agent in the Phantom terminal.\n\
                      Run the following command, observe the output, and report the results.\n\n\
                      Command: `{command}`\n\n\
-                     If the command fails, analyze the error and suggest a fix."
+                     If the command fails, analyze the error and suggest a fix.\
+                     {skill_hint}"
                 )
             }
             AgentTask::ReviewCode { files, context } => {
@@ -186,14 +190,16 @@ impl Agent {
                      Review the following files for bugs, style issues, and improvements.\n\n\
                      Files: {file_list}\n\
                      Context: {context}\n\n\
-                     For each issue found, state the file, line, severity, and suggested fix."
+                     For each issue found, state the file, line, severity, and suggested fix.\
+                     {skill_hint}"
                 )
             }
             AgentTask::FreeForm { prompt } => {
                 format!(
                     "You are an AI assistant agent in the Phantom terminal.\n\
                      You have access to file and command tools in the project directory.\n\n\
-                     Task: {prompt}"
+                     Task: {prompt}\
+                     {skill_hint}"
                 )
             }
             AgentTask::WatchAndNotify { description } => {
@@ -202,10 +208,55 @@ impl Agent {
                      Watch the following condition and notify when it changes.\n\n\
                      Watch: {description}\n\n\
                      Periodically check the condition using available tools. \
-                     When a change is detected, report it clearly."
+                     When a change is detected, report it clearly.\
+                     {skill_hint}"
                 )
             }
         }
+    }
+
+    /// Serialize the agent's conversation to JSON for persistence.
+    ///
+    /// Used by the agent pane to save completed conversations to disk for
+    /// debugging and replay.
+    pub fn to_json(&self) -> serde_json::Value {
+        let messages: Vec<serde_json::Value> = self
+            .messages
+            .iter()
+            .map(|m| match m {
+                AgentMessage::System(s) => {
+                    serde_json::json!({"role": "system", "content": s})
+                }
+                AgentMessage::User(s) => {
+                    serde_json::json!({"role": "user", "content": s})
+                }
+                AgentMessage::Assistant(s) => {
+                    serde_json::json!({"role": "assistant", "content": s})
+                }
+                AgentMessage::ToolCall(tc) => {
+                    serde_json::json!({
+                        "role": "tool_call",
+                        "tool": tc.tool.api_name(),
+                        "args": tc.args,
+                    })
+                }
+                AgentMessage::ToolResult(tr) => {
+                    serde_json::json!({
+                        "role": "tool_result",
+                        "tool": tr.tool.api_name(),
+                        "success": tr.success,
+                        "output": tr.output,
+                    })
+                }
+            })
+            .collect();
+
+        serde_json::json!({
+            "task": format!("{:?}", self.task),
+            "status": format!("{:?}", self.status),
+            "messages": messages,
+            "created_at": self.created_at.elapsed().as_secs(),
+        })
     }
 
     /// Get a one-line status description for display in the UI.
@@ -468,6 +519,60 @@ mod tests {
         );
         let line = agent.status_line();
         assert!(line.contains("review: 3 file(s)"));
+    }
+
+    #[test]
+    fn to_json_includes_all_message_types() {
+        let mut agent = Agent::new(
+            1,
+            AgentTask::FreeForm {
+                prompt: "test task".into(),
+            },
+        );
+        agent.push_message(AgentMessage::System("system prompt".into()));
+        agent.push_message(AgentMessage::User("user input".into()));
+        agent.push_message(AgentMessage::Assistant("assistant response".into()));
+        agent.push_message(AgentMessage::ToolCall(ToolCall {
+            tool: ToolType::ReadFile,
+            args: serde_json::json!({"path": "test.txt"}),
+        }));
+        agent.push_message(AgentMessage::ToolResult(ToolResult {
+            tool: ToolType::ReadFile,
+            success: true,
+            output: "file contents".into(),
+        }));
+
+        let json = agent.to_json();
+
+        // Verify top-level fields.
+        assert!(json.get("task").is_some());
+        assert!(json.get("status").is_some());
+        assert!(json.get("created_at").is_some());
+
+        let messages = json.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 5);
+
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "system prompt");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[3]["role"], "tool_call");
+        assert_eq!(messages[3]["tool"], "read_file");
+        assert_eq!(messages[4]["role"], "tool_result");
+        assert!(messages[4]["success"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn to_json_empty_messages() {
+        let agent = Agent::new(
+            1,
+            AgentTask::FreeForm {
+                prompt: "empty".into(),
+            },
+        );
+        let json = agent.to_json();
+        let messages = json.get("messages").unwrap().as_array().unwrap();
+        assert!(messages.is_empty());
     }
 
     #[test]
