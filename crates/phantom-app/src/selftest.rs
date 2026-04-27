@@ -110,6 +110,7 @@ enum Phase {
 }
 
 #[derive(PartialEq)]
+#[allow(dead_code)]
 enum HealStage {
     /// Haven't entered heal pipeline yet.
     Pending,
@@ -211,63 +212,49 @@ impl SelfTestRunner {
 
         match self.heal_stage {
             HealStage::Pending => {
-                // Build a combined repair prompt from all failures.
                 let repair_prompt = self.build_combined_repair_prompt();
                 output.push(format!(
-                    "SELFHEAL: {} failure(s) detected. Spawning repair agent...",
+                    "SELFHEAL: {} failure(s) detected. Invoking claude to fix...",
                     self.failures.len()
                 ));
 
-                // Queue the repair commands: agent prompt → cargo test → git commit+push.
-                // The brain will execute these through its action channel.
+                // Write the repair prompt to a temp file, then invoke claude CLI
+                // in the terminal. Claude Code can read files, edit them, run
+                // tests, and commit — this is the real self-heal loop.
+                //
+                // The command:
+                // 1. Writes the diagnosis to a temp file
+                // 2. Pipes it to `claude` with --print so it executes autonomously
+                // 3. Claude fixes the code, runs tests, commits
+                //
+                // We escape the prompt for shell safety.
+                let escaped = repair_prompt.replace('\'', "'\\''");
+                let heal_cmd = format!(
+                    "echo '{}' | claude --print \
+                    'Fix these selftest failures. After fixing, run cargo test --workspace. \
+                    If all tests pass, commit with message fix(selfheal): auto-repair selftest failures \
+                    and push to origin.'\n",
+                    escaped
+                );
+
                 app.pending_brain_actions.push(
-                    phantom_brain::events::AiAction::SpawnAgent(
-                        phantom_agents::AgentTask::FixError {
-                            error_summary: format!("{} selftest failures", self.failures.len()),
-                            file: self.failures.first().and_then(|f| f.files.first().cloned()),
-                            context: repair_prompt,
-                        }
-                    )
+                    phantom_brain::events::AiAction::RunCommand(heal_cmd)
                 );
 
                 self.heal_stage = HealStage::Repairing;
             }
             HealStage::Repairing => {
-                // The agent is working. We detect completion via AgentComplete events.
-                // For now, transition after one frame (the agent runs async).
-                output.push("SELFHEAL: Repair agent dispatched. Verifying...".into());
-
-                // Queue: run cargo test to verify the fix.
-                app.pending_brain_actions.push(
-                    phantom_brain::events::AiAction::RunCommand(
-                        "cargo test --workspace 2>&1 | tail -5".into()
-                    )
-                );
-
-                self.heal_stage = HealStage::Verifying;
+                // Claude is working in the terminal. The brain will observe
+                // the output via OutputChunk events. We transition immediately
+                // — the actual fix happens asynchronously in the PTY.
+                output.push("SELFHEAL: Claude is working in the terminal...".into());
+                output.push("SELFHEAL: Watch the terminal for progress.".into());
+                output.push("SELFHEAL: When done, run `selftest` to verify.".into());
+                self.heal_stage = HealStage::Complete;
+                self.done = true;
             }
-            HealStage::Verifying => {
-                // After verification, commit and push.
-                output.push("SELFHEAL: Committing fix...".into());
-
-                let failure_names: Vec<_> = self.failures.iter().map(|f| f.name.as_str()).collect();
-                let commit_msg = format!(
-                    "fix(selfheal): auto-repair {} selftest failure(s)\n\nFixed: {}",
-                    self.failures.len(),
-                    failure_names.join(", "),
-                );
-
-                app.pending_brain_actions.push(
-                    phantom_brain::events::AiAction::RunCommand(
-                        format!("git add -A && git commit -m '{}' && git push", commit_msg)
-                    )
-                );
-
-                self.heal_stage = HealStage::Committing;
-            }
-            HealStage::Committing => {
-                output.push("SELFHEAL: Fix committed and pushed.".into());
-                output.push("SELFHEAL: Re-run `selftest` to verify.".into());
+            HealStage::Verifying | HealStage::Committing => {
+                // These stages are handled by Claude in the terminal now.
                 self.heal_stage = HealStage::Complete;
                 self.done = true;
             }
