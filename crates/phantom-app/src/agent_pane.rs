@@ -461,30 +461,72 @@ fn format_tool_args(tool: &ToolType, args: &serde_json::Value) -> String {
 impl App {
     /// Spawn a new agent pane as a first-class coordinator adapter.
     ///
-    /// Creates the agent, wraps it in an AgentAdapter, and registers it
-    /// with the coordinator so it gets its own layout pane, scene node,
-    /// and input routing — just like a terminal.
+    /// Splits the focused pane vertically, creates the agent, wraps it in
+    /// an AgentAdapter, and registers it in the new split pane — same as
+    /// Cmd+D for terminals.
     pub(crate) fn spawn_agent_pane(&mut self, task: AgentTask) -> bool {
         let Some(claude_config) = ClaudeConfig::from_env() else {
             warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
             return false;
         };
 
+        // Split the focused pane to make room for the agent.
+        let Some(focused_app_id) = self.coordinator.focused() else {
+            warn!("Cannot spawn agent: no focused adapter");
+            return false;
+        };
+        let Some(current_pane_id) = self.coordinator.pane_id_for(focused_app_id) else {
+            warn!("Cannot spawn agent: focused adapter has no layout pane");
+            return false;
+        };
+
+        let split_result = self.layout.split_vertical(current_pane_id);
+        let (existing_child, new_child) = match split_result {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!("Agent split failed: {e}");
+                return false;
+            }
+        };
+
+        // Resize layout after split.
+        let width = self.gpu.surface_config.width;
+        let height = self.gpu.surface_config.height;
+        let _ = self.layout.resize(width as f32, height as f32);
+
+        // Remap the existing terminal's PaneId.
+        self.coordinator.remap_pane(focused_app_id, current_pane_id, existing_child);
+
+        // Resize the existing terminal to fit its new (smaller) pane.
+        if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
+            let (cols, rows) = crate::pane::pane_cols_rows(self.cell_size, rect);
+            let _ = self.coordinator.send_command(
+                focused_app_id,
+                "resize",
+                &serde_json::json!({"cols": cols, "rows": rows}),
+            );
+        }
+
+        // Create the agent and register in the new split pane.
         let agent_pane = AgentPane::spawn(task, &claude_config);
         let adapter = crate::adapters::agent::AgentAdapter::new(agent_pane);
 
-        let content_node = self.scene_content_node;
-        let _app_id = self.coordinator.register_adapter(
+        let scene_node = self.scene.add_node(
+            self.scene_content_node,
+            phantom_scene::node::NodeKind::Pane,
+        );
+
+        let app_id = self.coordinator.register_adapter_at_pane(
             Box::new(adapter),
-            &mut self.layout,
-            &mut self.scene,
-            content_node,
+            new_child,
+            scene_node,
             phantom_scene::clock::Cadence::unlimited(),
         );
 
-        // Also keep in agent_panes for legacy polling (skill extraction, etc.)
-        // TODO: migrate skill extraction to coordinator event bus and remove agent_panes Vec.
-        info!("Agent adapter registered (AppId {_app_id})");
+        // Focus the new agent pane.
+        self.coordinator.set_focus(app_id);
+
+        info!("Agent adapter registered (AppId {app_id}) in split pane");
         true
     }
 
