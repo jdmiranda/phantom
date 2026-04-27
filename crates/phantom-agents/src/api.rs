@@ -643,7 +643,7 @@ mod tests {
         let tools = available_tools();
         let api_tools = build_tools(&tools);
 
-        assert_eq!(api_tools.len(), 7);
+        assert_eq!(api_tools.len(), 8);
         for tool in &api_tools {
             assert!(tool["name"].is_string());
             assert!(tool["description"].is_string());

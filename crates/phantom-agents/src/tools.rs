@@ -20,6 +20,7 @@ use std::time::Duration;
 pub enum ToolType {
     ReadFile,
     WriteFile,
+    EditFile,
     RunCommand,
     SearchFiles,
     GitStatus,
@@ -33,6 +34,7 @@ impl ToolType {
         match self {
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
+            Self::EditFile => "edit_file",
             Self::RunCommand => "run_command",
             Self::SearchFiles => "search_files",
             Self::GitStatus => "git_status",
@@ -46,6 +48,7 @@ impl ToolType {
         match name {
             "read_file" => Some(Self::ReadFile),
             "write_file" => Some(Self::WriteFile),
+            "edit_file" => Some(Self::EditFile),
             "run_command" => Some(Self::RunCommand),
             "search_files" => Some(Self::SearchFiles),
             "git_status" => Some(Self::GitStatus),
@@ -120,6 +123,28 @@ pub fn available_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["path", "content"]
+            }),
+        },
+        ToolDefinition {
+            name: "edit_file".into(),
+            description: "Replace a specific text string in a file. The old_text must match exactly one location in the file. Use this for surgical edits instead of rewriting entire files.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the file to edit."
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "The exact text to find and replace. Must match exactly one location."
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "The replacement text."
+                    }
+                },
+                "required": ["path", "old_text", "new_text"]
             }),
         },
         ToolDefinition {
@@ -264,6 +289,7 @@ pub fn execute_tool(tool: ToolType, args: &serde_json::Value, working_dir: &str)
     match tool {
         ToolType::ReadFile => execute_read_file(root, args),
         ToolType::WriteFile => execute_write_file(root, args),
+        ToolType::EditFile => execute_edit_file(root, args),
         ToolType::RunCommand => execute_run_command(root, args),
         ToolType::SearchFiles => execute_search_files(root, args),
         ToolType::GitStatus => execute_git_status(root),
@@ -372,6 +398,59 @@ fn execute_write_file(root: &Path, args: &serde_json::Value) -> ToolResult {
         Ok(()) => tool_ok(
             tool,
             format!("wrote {} bytes to {path_str}", content.len()),
+        ),
+        Err(e) => tool_err(tool, format!("cannot write file: {e}")),
+    }
+}
+
+fn execute_edit_file(root: &Path, args: &serde_json::Value) -> ToolResult {
+    let tool = ToolType::EditFile;
+
+    let Some(path_str) = args.get("path").and_then(|v| v.as_str()) else {
+        return tool_err(tool, "missing required parameter: path".into());
+    };
+    let Some(old_text) = args.get("old_text").and_then(|v| v.as_str()) else {
+        return tool_err(tool, "missing required parameter: old_text".into());
+    };
+    let Some(new_text) = args.get("new_text").and_then(|v| v.as_str()) else {
+        return tool_err(tool, "missing required parameter: new_text".into());
+    };
+
+    let resolved = match sandbox_path(root, path_str) {
+        Ok(p) => p,
+        Err(e) => return tool_err(tool, e),
+    };
+
+    let content = match fs::read_to_string(&resolved) {
+        Ok(c) => c,
+        Err(e) => return tool_err(tool, format!("cannot read file: {e}")),
+    };
+
+    let count = content.matches(old_text).count();
+    if count == 0 {
+        return tool_err(
+            tool,
+            format!("old_text not found in {path_str}. The text to replace must match exactly."),
+        );
+    }
+    if count > 1 {
+        return tool_err(
+            tool,
+            format!(
+                "old_text matches {count} locations in {path_str}. Be more specific to match exactly one."
+            ),
+        );
+    }
+
+    let replaced = content.replacen(old_text, new_text, 1);
+    match fs::write(&resolved, &replaced) {
+        Ok(()) => tool_ok(
+            tool,
+            format!(
+                "edited {path_str}: replaced {} bytes with {} bytes",
+                old_text.len(),
+                new_text.len()
+            ),
         ),
         Err(e) => tool_err(tool, format!("cannot write file: {e}")),
     }
@@ -603,6 +682,7 @@ mod tests {
         let types = [
             ToolType::ReadFile,
             ToolType::WriteFile,
+            ToolType::EditFile,
             ToolType::RunCommand,
             ToolType::SearchFiles,
             ToolType::GitStatus,
@@ -825,19 +905,100 @@ mod tests {
     // -- ToolDefinition tests -----------------------------------------------
 
     #[test]
-    fn available_tools_returns_all_seven() {
+    fn available_tools_returns_all_eight() {
         let tools = available_tools();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
         assert!(names.contains(&"run_command"));
         assert!(names.contains(&"search_files"));
         assert!(names.contains(&"git_status"));
         assert!(names.contains(&"git_diff"));
         assert!(names.contains(&"list_files"));
     }
+
+    // -- EditFile tests ------------------------------------------------------
+
+    #[test]
+    fn edit_file_replaces_unique_match() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("test.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+
+        let result = execute_tool(
+            ToolType::EditFile,
+            &serde_json::json!({
+                "path": "test.rs",
+                "old_text": "println!(\"hello\")",
+                "new_text": "println!(\"world\")"
+            }),
+            tmp.path().to_str().unwrap(),
+        );
+        assert!(result.success, "edit failed: {}", result.output);
+
+        let content = fs::read_to_string(tmp.path().join("test.rs")).unwrap();
+        assert!(content.contains("println!(\"world\")"));
+        assert!(!content.contains("println!(\"hello\")"));
+    }
+
+    #[test]
+    fn edit_file_fails_on_no_match() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("test.rs"), "fn main() {}").unwrap();
+
+        let result = execute_tool(
+            ToolType::EditFile,
+            &serde_json::json!({
+                "path": "test.rs",
+                "old_text": "nonexistent text",
+                "new_text": "replacement"
+            }),
+            tmp.path().to_str().unwrap(),
+        );
+        assert!(!result.success);
+        assert!(result.output.contains("not found"));
+    }
+
+    #[test]
+    fn edit_file_fails_on_multiple_matches() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("test.rs"), "aaa\naaa\naaa\n").unwrap();
+
+        let result = execute_tool(
+            ToolType::EditFile,
+            &serde_json::json!({
+                "path": "test.rs",
+                "old_text": "aaa",
+                "new_text": "bbb"
+            }),
+            tmp.path().to_str().unwrap(),
+        );
+        assert!(!result.success);
+        assert!(result.output.contains("matches"));
+    }
+
+    #[test]
+    fn edit_file_rejects_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let result = execute_tool(
+            ToolType::EditFile,
+            &serde_json::json!({
+                "path": "../evil.rs",
+                "old_text": "x",
+                "new_text": "y"
+            }),
+            tmp.path().to_str().unwrap(),
+        );
+        assert!(!result.success);
+    }
+
+    // -- ToolDefinition tests -----------------------------------------------
 
     #[test]
     fn tool_definitions_have_valid_json_schema() {

@@ -120,7 +120,7 @@ impl std::error::Error for PermissionDenied {}
 pub fn required_permission(tool: &ToolType) -> Permission {
     match tool {
         ToolType::ReadFile | ToolType::SearchFiles | ToolType::ListFiles => Permission::ReadFiles,
-        ToolType::WriteFile => Permission::WriteFiles,
+        ToolType::WriteFile | ToolType::EditFile => Permission::WriteFiles,
         ToolType::RunCommand => Permission::RunCommands,
         ToolType::GitStatus | ToolType::GitDiff => Permission::GitAccess,
     }
@@ -209,6 +209,7 @@ mod tests {
         let tools = [
             ToolType::ReadFile,
             ToolType::WriteFile,
+            ToolType::EditFile,
             ToolType::RunCommand,
             ToolType::SearchFiles,
             ToolType::GitStatus,
