@@ -8,7 +8,7 @@ use log::{info, warn};
 
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::agent::{Agent, AgentMessage};
-use phantom_agents::tools::{ToolCall, available_tools};
+use phantom_agents::tools::{ToolCall, ToolType, available_tools};
 use phantom_agents::AgentTask;
 
 use crate::app::App;
@@ -163,11 +163,12 @@ impl AgentPane {
                     got_content = true;
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {
-                    self.output.push_str(&format!(
-                        "\n▶ Tool: {:?} {}\n",
-                        call.tool,
-                        serde_json::to_string(&call.args).unwrap_or_default()
-                    ));
+                    let args_display = format_tool_args(&call.tool, &call.args);
+                    if args_display.is_empty() {
+                        self.output.push_str(&format!("\n▶ {}\n", call.tool.api_name()));
+                    } else {
+                        self.output.push_str(&format!("\n▶ {} {}\n", call.tool.api_name(), args_display));
+                    }
                     self.tool_use_ids.push(id.clone());
                     self.pending_tools.push((id, call));
                     got_content = true;
@@ -283,6 +284,31 @@ impl AgentPane {
         &self.cached_lines
     }
 
+}
+
+// ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
+
+/// Format tool arguments as a compact, human-readable string.
+fn format_tool_args(tool: &ToolType, args: &serde_json::Value) -> String {
+    match tool {
+        ToolType::ReadFile | ToolType::EditFile | ToolType::ListFiles => {
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("?").to_string()
+        }
+        ToolType::WriteFile => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let len = args.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+            format!("{path} ({len} bytes)")
+        }
+        ToolType::RunCommand => {
+            args.get("command").and_then(|v| v.as_str()).unwrap_or("?").to_string()
+        }
+        ToolType::SearchFiles => {
+            args.get("pattern").and_then(|v| v.as_str()).unwrap_or("?").to_string()
+        }
+        ToolType::GitStatus | ToolType::GitDiff => String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +513,7 @@ mod tests {
 
         pane.poll();
         assert_eq!(pane.tool_use_ids, vec!["tool_123"]);
-        assert!(pane.output.contains("Tool:"));
+        assert!(pane.output.contains("▶ read_file"));
         // New: also tracked in pending_tools.
         assert_eq!(pane.pending_tools.len(), 1);
         assert_eq!(pane.pending_tools[0].0, "tool_123");
