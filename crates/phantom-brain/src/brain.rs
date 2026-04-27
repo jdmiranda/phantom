@@ -251,12 +251,83 @@ fn brain_loop(
             action, &event, &context, complexity, &claude_backend, &mut router,
         );
 
+        // INVESTIGATE: for Complex tasks, run tool-augmented investigation.
+        let action = enhance_with_investigation(action, &event, complexity);
+
         if action_tx.send(action).is_err() {
             break; // render thread dropped its receiver
         }
     }
 
     log::info!("AI brain thread exiting");
+}
+
+/// Read source files referenced by errors for richer diagnosis.
+fn diagnose_build_failure(parsed: &phantom_semantic::ParsedOutput) -> Option<String> {
+    let files: Vec<&str> = parsed.errors.iter()
+        .filter_map(|e| e.file.as_deref())
+        .collect();
+    if files.is_empty() { return None; }
+
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let mut out = String::new();
+    for path in files.iter().take(3) {
+        let full = std::path::Path::new(&working_dir).join(path);
+        if let Ok(content) = std::fs::read_to_string(&full) {
+            let truncated: String = content.lines().take(200).collect::<Vec<_>>().join("\n");
+            out.push_str(&format!("\n--- {path} ---\n{truncated}\n"));
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// For Complex tasks, run a tool-augmented investigation instead of text-only.
+fn enhance_with_investigation(
+    current_action: AiAction,
+    event: &AiEvent,
+    complexity: TaskComplexity,
+) -> AiAction {
+    if complexity != TaskComplexity::Complex { return current_action; }
+    if !matches!(current_action, AiAction::ShowSuggestion { .. }) { return current_action; }
+    let AiEvent::CommandComplete(parsed) = event else { return current_action; };
+    if parsed.errors.len() < 3 { return current_action; }
+
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let file_context = diagnose_build_failure(parsed).unwrap_or_default();
+    let prompt = format!(
+        "Investigate this build failure. Read the relevant source files and suggest a fix.\n\
+         Command: {}\nErrors:\n{}\n{file_context}",
+        parsed.command,
+        parsed.errors.iter().take(5).map(|e| format!("- {}", e.message)).collect::<Vec<_>>().join("\n"),
+    );
+
+    match crate::claude::investigate(&prompt, &working_dir, 5) {
+        Ok(text) => {
+            log::info!("Brain investigation complete: {} chars", text.len());
+            let context = text.clone();
+            AiAction::ShowSuggestion {
+                text,
+                options: vec![
+                    crate::events::SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FixError {
+                        error_summary: parsed.errors.first().map(|e| e.message.clone()).unwrap_or_default(),
+                        file: parsed.errors.first().and_then(|e| e.file.clone()),
+                        context,
+                    }))) },
+                    crate::events::SuggestionOption { key: 'd', label: "Dismiss".into(), action: None },
+                ],
+            }
+        }
+        Err(e) => {
+            log::warn!("Brain investigation failed: {e}");
+            current_action
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

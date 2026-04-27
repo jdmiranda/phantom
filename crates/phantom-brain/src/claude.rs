@@ -137,6 +137,73 @@ pub fn build_error_analysis_prompt(
     )
 }
 
+/// Run a tool-augmented investigation on the brain thread.
+///
+/// Blocks until done — the brain thread is dedicated and doesn't share
+/// work with the render loop.
+pub fn investigate(
+    prompt: &str,
+    working_dir: &str,
+    max_rounds: u32,
+) -> Result<String, String> {
+    use phantom_agents::api::{ApiEvent, ClaudeConfig, send_message};
+    use phantom_agents::agent::{Agent, AgentMessage, AgentTask};
+    use phantom_agents::tools::{available_tools, execute_tool};
+
+    let config = ClaudeConfig::from_env()
+        .ok_or("ANTHROPIC_API_KEY not set")?;
+
+    let task = AgentTask::FreeForm { prompt: prompt.to_string() };
+    let mut agent = Agent::new(0, task);
+    let sys = agent.system_prompt();
+    agent.push_message(AgentMessage::System(sys));
+    agent.push_message(AgentMessage::User(prompt.to_string()));
+
+    let tools = available_tools();
+    let mut tool_use_ids: Vec<String> = Vec::new();
+    let mut final_text = String::new();
+
+    for _round in 0..max_rounds {
+        let mut handle = send_message(&config, &agent, &tools, &tool_use_ids);
+        let mut assistant_text = String::new();
+        let mut pending: Vec<(String, phantom_agents::tools::ToolCall)> = Vec::new();
+
+        loop {
+            match handle.try_recv() {
+                Some(ApiEvent::TextDelta(text)) => assistant_text.push_str(&text),
+                Some(ApiEvent::ToolUse { id, call }) => {
+                    tool_use_ids.push(id.clone());
+                    pending.push((id, call));
+                }
+                Some(ApiEvent::Done) => break,
+                Some(ApiEvent::Error(e)) => return Err(e),
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+
+        if !assistant_text.is_empty() {
+            agent.push_message(AgentMessage::Assistant(assistant_text.clone()));
+        }
+        if pending.is_empty() {
+            final_text = assistant_text;
+            break;
+        }
+        for (_, call) in &pending {
+            agent.push_message(AgentMessage::ToolCall(call.clone()));
+        }
+        for (_, call) in pending {
+            let result = execute_tool(call.tool, &call.args, working_dir);
+            agent.push_message(AgentMessage::ToolResult(result));
+        }
+    }
+
+    if final_text.is_empty() {
+        Ok("(investigation completed with tool use, no final text)".into())
+    } else {
+        Ok(final_text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

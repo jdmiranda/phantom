@@ -8,7 +8,8 @@ use log::{info, warn};
 
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::agent::{Agent, AgentMessage};
-use phantom_agents::tools::{ToolCall, ToolType, available_tools};
+use phantom_agents::permissions::PermissionSet;
+use phantom_agents::tools::{ToolCall, ToolResult, ToolType, available_tools, execute_tool};
 use phantom_agents::AgentTask;
 
 use crate::app::App;
@@ -50,6 +51,8 @@ pub(crate) struct AgentPane {
     turn_count: u32,
     /// Accumulator for assistant text within the current API response.
     current_assistant_text: String,
+    /// Permission set for tool execution (default: all).
+    permissions: PermissionSet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +134,7 @@ impl AgentPane {
             claude_config: claude_config.clone(),
             turn_count: 0,
             current_assistant_text: String::new(),
+            permissions: PermissionSet::all(),
         }
     }
 
@@ -225,12 +229,15 @@ impl AgentPane {
                 .push_message(AgentMessage::ToolCall(call.clone()));
         }
 
-        // Execute each tool and append results.
+        // Execute each tool (with permission check) and append results.
         let working_dir = self.working_dir.clone();
         for (_, call) in self.pending_tools.drain(..) {
             let start = std::time::Instant::now();
-            let result =
-                phantom_agents::tools::execute_tool(call.tool, &call.args, &working_dir);
+            let result = if let Err(denied) = self.permissions.check_tool(&call.tool) {
+                ToolResult { tool: call.tool, success: false, output: denied.to_string() }
+            } else {
+                execute_tool(call.tool, &call.args, &working_dir)
+            };
             let elapsed = start.elapsed();
 
             // Display in pane.
@@ -413,6 +420,7 @@ mod tests {
             claude_config: test_config(),
             turn_count: 0,
             current_assistant_text: String::new(),
+            permissions: PermissionSet::all(),
         };
         (pane, tx)
     }
@@ -488,6 +496,7 @@ mod tests {
             claude_config: test_config(),
             turn_count: 0,
             current_assistant_text: String::new(),
+            permissions: PermissionSet::all(),
         };
         assert!(!pane.poll());
     }
