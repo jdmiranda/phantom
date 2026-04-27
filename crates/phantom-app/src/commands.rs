@@ -11,8 +11,6 @@ use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
 use phantom_ui::themes;
 
-use phantom_brain::events::AiEvent;
-
 use crate::app::{App, AppState};
 use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
@@ -208,14 +206,16 @@ impl App {
                 if objective.is_empty() {
                     self.console.error("Usage: goal <objective>");
                 } else {
-                    self.console.system(format!("GOAL SET: {objective}"));
-                    self.console.output("Brain will pursue this autonomously.");
-                    if let Some(ref brain) = self.brain {
-                        let _ = brain.send_event(phantom_brain::events::AiEvent::GoalSet {
-                            objective: objective.clone(),
-                            initial_task: objective,
-                        });
-                    }
+                    self.console.system(format!("GOAL: {objective}"));
+                    self.console.output("Spawning autonomous agent...");
+                    // Spawn an agent directly — the agent has tools, context,
+                    // and the codebase map. Don't route through the brain's
+                    // chat client.
+                    self.pending_brain_actions.push(
+                        phantom_brain::events::AiAction::SpawnAgent(
+                            phantom_agents::AgentTask::FreeForm { prompt: objective }
+                        )
+                    );
                 }
             }
             "goals" => {
@@ -284,7 +284,12 @@ impl App {
                             );
                         }
                         ResolvedAction::SpawnAgent(desc) => {
-                            self.console.system(format!("Agent requested: {desc}"));
+                            self.console.system(format!("Spawning agent: {desc}"));
+                            self.pending_brain_actions.push(
+                                phantom_brain::events::AiAction::SpawnAgent(
+                                    phantom_agents::AgentTask::FreeForm { prompt: desc }
+                                )
+                            );
                         }
                         ResolvedAction::ShowInfo(info_text) => {
                             self.console.output(info_text);
@@ -293,23 +298,29 @@ impl App {
                             self.console.output(format!("Did you mean: {}", options.join(", ")));
                         }
                         ResolvedAction::PassThrough => {
-                            // No NLP match — route to brain as a natural language query.
-                            if let Some(ref brain) = self.brain {
-                                let _ = brain.send_event(AiEvent::Interrupt(input.trim().to_string()));
-                                self.console.system("[routing to brain...]");
-                            } else {
-                                self.console.error(format!("Unknown command: {other}"));
-                            }
+                            // No command matched, no NLP match — spawn an agent.
+                            // The agent has tools, context, and the codebase map.
+                            // Don't use the brain's dumb chat client.
+                            self.console.system(format!("Spawning agent: {other}"));
+                            self.pending_brain_actions.push(
+                                phantom_brain::events::AiAction::SpawnAgent(
+                                    phantom_agents::AgentTask::FreeForm {
+                                        prompt: input.trim().to_string(),
+                                    }
+                                )
+                            );
                         }
                     }
                 } else {
-                    // No context — route to brain directly.
-                    if let Some(ref brain) = self.brain {
-                        let _ = brain.send_event(AiEvent::Interrupt(input.trim().to_string()));
-                        self.console.system("[routing to brain...]");
-                    } else {
-                        self.console.error(format!("Unknown command: {other}"));
-                    }
+                    // No context — spawn agent directly.
+                    self.console.system(format!("Spawning agent: {other}"));
+                    self.pending_brain_actions.push(
+                        phantom_brain::events::AiAction::SpawnAgent(
+                            phantom_agents::AgentTask::FreeForm {
+                                prompt: input.trim().to_string(),
+                            }
+                        )
+                    );
                 }
             }
         }
