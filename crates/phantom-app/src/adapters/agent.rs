@@ -30,6 +30,8 @@ pub struct AgentAdapter {
     outbox: Vec<phantom_adapter::BusMessage>,
     /// Tracks previous status so we can detect transitions.
     prev_status: AgentPaneStatus,
+    /// Input buffer for interactive chat (keystrokes accumulate here).
+    input_buffer: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,7 @@ impl AgentAdapter {
             app_id: 0,
             outbox: Vec::new(),
             prev_status: status,
+            input_buffer: String::new(),
         }
     }
 
@@ -167,12 +170,44 @@ impl Renderable for AgentAdapter {
 }
 
 impl InputHandler for AgentAdapter {
-    fn handle_input(&mut self, _key: &str) -> bool {
-        false
+    fn handle_input(&mut self, key: &str) -> bool {
+        match key {
+            "\r" | "\n" => {
+                // Enter: send the buffer as a follow-up user message.
+                let input = std::mem::take(&mut self.input_buffer);
+                let trimmed = input.trim().to_string();
+                if !trimmed.is_empty() {
+                    self.pane.send_followup(trimmed);
+                }
+                true
+            }
+            "\x7f" | "\x08" => {
+                // Backspace/Delete: remove last char.
+                self.input_buffer.pop();
+                // Update the display prompt.
+                self.pane.output.truncate(self.pane.output.rfind("\n> ").map(|i| i + 1).unwrap_or(self.pane.output.len()));
+                self.pane.output.push_str(&format!("> {}", self.input_buffer));
+                true
+            }
+            s if s.len() == 1 && s.as_bytes()[0] >= 0x20 => {
+                // Printable character: append to buffer.
+                self.input_buffer.push_str(s);
+                // Show the input line in the pane.
+                if !self.pane.output.ends_with("\n> ") && !self.pane.output.ends_with("> ") {
+                    self.pane.output.push_str("\n> ");
+                } else {
+                    // Rewrite the current input line.
+                    self.pane.output.truncate(self.pane.output.rfind("\n> ").map(|i| i + 1).unwrap_or(self.pane.output.len()));
+                    self.pane.output.push_str(&format!("> {}", self.input_buffer));
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn accepts_input(&self) -> bool {
-        false
+        true
     }
 }
 

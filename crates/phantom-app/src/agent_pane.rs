@@ -323,6 +323,30 @@ impl AgentPane {
         &self.cached_lines
     }
 
+    /// Send a follow-up user message and re-invoke Claude.
+    ///
+    /// This is the interactive chat loop — the user types in the agent pane,
+    /// the message gets appended to the conversation, and Claude responds.
+    pub(crate) fn send_followup(&mut self, message: String) {
+        // Display the user message.
+        self.output.push_str(&format!("\n\n> {message}\n\n● Thinking...\n"));
+
+        // Append to conversation.
+        self.agent.push_message(AgentMessage::User(message));
+
+        // Re-invoke Claude with the updated conversation.
+        let tools = available_tools();
+        let handle = send_message(
+            &self.claude_config,
+            &self.agent,
+            &tools,
+            &self.tool_use_ids,
+        );
+        self.api_handle = Some(handle);
+        self.status = AgentPaneStatus::Working;
+        self.current_assistant_text.clear();
+    }
+
     /// Revert file edits on failure (git checkout -- .).
     fn rollback_if_dirty(&mut self) {
         if !self.has_file_edits { return; }
