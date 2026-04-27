@@ -126,6 +126,7 @@ fn brain_loop(
         });
     let mut scorer = UtilityScorer::new();
     let mut router = BrainRouter::new(config.router.unwrap_or_default());
+    let mut goals = crate::goals::GoalPursuit::new();
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -174,6 +175,30 @@ fn brain_loop(
         if matches!(event, AiEvent::Shutdown) {
             log::info!("AI brain shutting down");
             break;
+        }
+
+        // Handle goal-setting: activate goal pursuit mode.
+        if let AiEvent::GoalSet { ref objective, ref initial_task } = event {
+            log::info!("Brain goal set: {objective}");
+            goals.set_objective(objective.clone(), initial_task.clone());
+            let _ = action_tx.send(AiAction::ConsoleReply(format!(
+                "Goal accepted: {objective}. Starting work."
+            )));
+
+            // Execute the first task immediately.
+            if let Some(task) = goals.queue.pop_front() {
+                let prompt = goals.build_execution_prompt(&task);
+                let _ = action_tx.send(AiAction::SpawnAgent(
+                    phantom_agents::AgentTask::FreeForm { prompt }
+                ));
+                // Record as in-progress (result will come via AgentComplete).
+                goals.record_completion(task, crate::goals::TaskResult {
+                    data: "(in progress)".into(),
+                    success: true,
+                    timestamp_secs: 0,
+                });
+            }
+            continue;
         }
 
         // ACCUMULATE: OutputChunk events are batched — don't process each one

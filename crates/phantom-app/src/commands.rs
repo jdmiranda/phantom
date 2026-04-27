@@ -210,6 +210,21 @@ impl App {
                     self.console.error("Failed to start video. Is ffmpeg installed?");
                 }
             }
+            cmd if cmd.starts_with("goal ") => {
+                let objective = cmd.strip_prefix("goal ").unwrap().trim().to_string();
+                if objective.is_empty() {
+                    self.console.error("Usage: goal <objective>");
+                } else {
+                    self.console.system(format!("GOAL SET: {objective}"));
+                    self.console.output("Brain will pursue this autonomously.");
+                    if let Some(ref brain) = self.brain {
+                        let _ = brain.send_event(phantom_brain::events::AiEvent::GoalSet {
+                            objective: objective.clone(),
+                            initial_task: objective,
+                        });
+                    }
+                }
+            }
             "suggestions" => {
                 if self.suggestion_history.is_empty() {
                     self.console.output("No suggestion history.");

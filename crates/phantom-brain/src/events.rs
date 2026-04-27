@@ -67,6 +67,12 @@ pub enum AiEvent {
 
     // -- System --------------------------------------------------------------
 
+    /// User set a goal for the brain to pursue autonomously.
+    GoalSet {
+        objective: String,
+        initial_task: String,
+    },
+
     /// Graceful shutdown request.
     Shutdown,
 }

@@ -19,7 +19,7 @@ pub(crate) enum ConsoleLine {
 /// Known commands for tab completion.
 pub(crate) const COMMANDS: &[&str] = &[
     "agent", "appmon", "boot", "clear", "debug", "exit", "help",
-    "plain", "plugins", "quit", "reload", "selfheal", "selftest", "set", "suggestions", "sysmon", "theme", "video",
+    "goal", "plain", "plugins", "quit", "reload", "selfheal", "selftest", "set", "suggestions", "sysmon", "theme", "video",
 ];
 
 /// Quake-style drop-down console state.

@@ -41,15 +41,26 @@
 
 pub mod brain;
 pub mod claude;
+pub mod curriculum;
+pub mod curves;
 pub mod events;
+pub mod goals;
 pub mod ollama;
+pub mod orchestrator;
+pub mod proactive;
 pub mod router;
 pub mod scoring;
+pub mod skill_store;
 
 pub use brain::*;
+pub use curriculum::*;
+pub use curves::*;
 pub use events::*;
+pub use orchestrator::*;
+pub use proactive::*;
 pub use router::*;
 pub use scoring::*;
+pub use skill_store::*;
 
 // ===========================================================================
 // Tests
