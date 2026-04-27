@@ -6,7 +6,7 @@
 
 use serde_json::json;
 
-use phantom_adapter::adapter::{Rect, RenderOutput, TextData};
+use phantom_adapter::adapter::{QuadData, Rect, RenderOutput, TextData};
 use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
@@ -122,29 +122,77 @@ impl AppCore for AgentAdapter {
     }
 }
 
+/// Height of the input bar at the bottom of the agent pane.
+const INPUT_BAR_HEIGHT: f32 = 28.0;
+/// Input bar background color.
+const INPUT_BAR_BG: [f32; 4] = [0.06, 0.12, 0.08, 1.0];
+/// Input bar separator line color.
+const INPUT_BAR_SEP: [f32; 4] = [0.15, 0.5, 0.25, 0.6];
+/// Input prompt color (brighter green).
+const INPUT_COLOR: [f32; 4] = [0.3, 1.0, 0.5, 1.0];
+/// Output area background.
+const OUTPUT_BG: [f32; 4] = [0.02, 0.04, 0.03, 0.95];
+
 impl Renderable for AgentAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
-        // Calculate how many lines fit in the rect.
-        let max_lines = (rect.height / LINE_HEIGHT).floor().max(1.0) as usize;
+        let mut quads = Vec::new();
+        let mut text_segments = Vec::new();
 
-        // Use cached_lines (updated during poll/update).
+        let pad = 6.0;
+
+        // --- Output area: top of rect to (bottom - INPUT_BAR_HEIGHT) ---
+        let output_height = (rect.height - INPUT_BAR_HEIGHT - pad).max(LINE_HEIGHT);
+        let output_max_lines = (output_height / LINE_HEIGHT).floor().max(1.0) as usize;
+
+        // Output background.
+        quads.push(QuadData {
+            x: rect.x, y: rect.y,
+            w: rect.width, h: output_height + pad,
+            color: OUTPUT_BG,
+        });
+
+        // Render output lines (scrolled to bottom).
         let lines = &self.pane.cached_lines;
-        let start = lines.len().saturating_sub(max_lines);
+        let start = lines.len().saturating_sub(output_max_lines);
         let visible = &lines[start..];
 
-        let text_segments: Vec<TextData> = visible
-            .iter()
-            .enumerate()
-            .map(|(i, line)| TextData {
+        for (i, line) in visible.iter().enumerate() {
+            text_segments.push(TextData {
                 text: line.clone(),
-                x: rect.x + 4.0,
-                y: rect.y + 4.0 + (i as f32) * LINE_HEIGHT,
+                x: rect.x + pad,
+                y: rect.y + pad + (i as f32) * LINE_HEIGHT,
                 color: TEXT_COLOR,
-            })
-            .collect();
+            });
+        }
+
+        // --- Input bar: fixed at the bottom ---
+        let input_y = rect.y + rect.height - INPUT_BAR_HEIGHT;
+
+        // Separator line.
+        quads.push(QuadData {
+            x: rect.x, y: input_y,
+            w: rect.width, h: 1.0,
+            color: INPUT_BAR_SEP,
+        });
+
+        // Input background.
+        quads.push(QuadData {
+            x: rect.x, y: input_y + 1.0,
+            w: rect.width, h: INPUT_BAR_HEIGHT - 1.0,
+            color: INPUT_BAR_BG,
+        });
+
+        // Input prompt + text.
+        let prompt = format!("> {}_", self.input_buffer);
+        text_segments.push(TextData {
+            text: prompt,
+            x: rect.x + pad,
+            y: input_y + 6.0,
+            color: INPUT_COLOR,
+        });
 
         RenderOutput {
-            quads: vec![],
+            quads,
             text_segments,
             grid: None,
             scroll: None,
@@ -173,7 +221,6 @@ impl InputHandler for AgentAdapter {
     fn handle_input(&mut self, key: &str) -> bool {
         match key {
             "\r" | "\n" => {
-                // Enter: send the buffer as a follow-up user message.
                 let input = std::mem::take(&mut self.input_buffer);
                 let trimmed = input.trim().to_string();
                 if !trimmed.is_empty() {
@@ -182,24 +229,11 @@ impl InputHandler for AgentAdapter {
                 true
             }
             "\x7f" | "\x08" => {
-                // Backspace/Delete: remove last char.
                 self.input_buffer.pop();
-                // Update the display prompt.
-                self.pane.output.truncate(self.pane.output.rfind("\n> ").map(|i| i + 1).unwrap_or(self.pane.output.len()));
-                self.pane.output.push_str(&format!("> {}", self.input_buffer));
                 true
             }
             s if s.len() == 1 && s.as_bytes()[0] >= 0x20 => {
-                // Printable character: append to buffer.
                 self.input_buffer.push_str(s);
-                // Show the input line in the pane.
-                if !self.pane.output.ends_with("\n> ") && !self.pane.output.ends_with("> ") {
-                    self.pane.output.push_str("\n> ");
-                } else {
-                    // Rewrite the current input line.
-                    self.pane.output.truncate(self.pane.output.rfind("\n> ").map(|i| i + 1).unwrap_or(self.pane.output.len()));
-                    self.pane.output.push_str(&format!("> {}", self.input_buffer));
-                }
                 true
             }
             _ => false,
