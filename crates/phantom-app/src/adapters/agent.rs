@@ -17,8 +17,8 @@ use crate::agent_pane::{AgentPane, AgentPaneStatus};
 /// Line height in logical pixels used to stack text lines in render output.
 const LINE_HEIGHT: f32 = 18.0;
 
-/// Agent response text: soft cyan (distinct from terminal green).
-const TEXT_COLOR: [f32; 4] = [0.55, 0.85, 0.95, 1.0];
+/// Agent response text: phosphor green, slightly dimmer than terminal.
+const TEXT_COLOR: [f32; 4] = [0.4, 0.8, 0.45, 0.95];
 
 /// An agent pane wrapped in the `AppAdapter` interface.
 ///
@@ -126,10 +126,10 @@ impl AppCore for AgentAdapter {
 const INPUT_BAR_HEIGHT: f32 = 28.0;
 /// Input bar background: slightly lighter than output so it's distinct.
 const INPUT_BAR_BG: [f32; 4] = [0.08, 0.10, 0.12, 1.0];
-/// Input bar separator: cyan accent line.
-const INPUT_BAR_SEP: [f32; 4] = [0.0, 0.6, 0.7, 0.5];
-/// User input text: warm yellow-green (distinct from agent cyan).
-const INPUT_COLOR: [f32; 4] = [0.9, 1.0, 0.4, 1.0];
+/// Input bar separator: bright phosphor green line.
+const INPUT_BAR_SEP: [f32; 4] = [0.2, 0.8, 0.3, 0.6];
+/// User input text: bright phosphor green (Pip-Boy style).
+const INPUT_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
 /// Output area background: near-transparent so it doesn't fight the theme.
 const OUTPUT_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
