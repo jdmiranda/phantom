@@ -214,6 +214,7 @@ impl AgentPane {
                 }
                 Some(ApiEvent::Error(e)) => {
                     self.output.push_str(&format!("\n\n✗ Error: {e}\n"));
+                    self.rollback_if_dirty();
                     self.status = AgentPaneStatus::Failed;
                     self.api_handle = None;
                     self.save_conversation();
@@ -234,8 +235,10 @@ impl AgentPane {
             self.output.push_str(&format!(
                 "\n\n✗ Agent hit iteration limit ({MAX_TOOL_ROUNDS} tool rounds).\n"
             ));
+            self.rollback_if_dirty();
             self.status = AgentPaneStatus::Failed;
             self.api_handle = None;
+            self.save_conversation();
             return;
         }
         self.turn_count += 1;
@@ -314,7 +317,27 @@ impl AgentPane {
         &self.cached_lines
     }
 
-}
+    /// Revert file edits on failure (git checkout -- .).
+    fn rollback_if_dirty(&mut self) {
+        if !self.has_file_edits { return; }
+        self.output.push_str("\n⚠ Agent failed with uncommitted edits. Reverting...\n");
+        let result = std::process::Command::new("git")
+            .args(["checkout", "--", "."])
+            .current_dir(&self.working_dir)
+            .output();
+        match result {
+            Ok(out) if out.status.success() => {
+                self.output.push_str("  ← Reverted to clean state.\n");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                self.output.push_str(&format!("  ← Revert failed: {stderr}\n"));
+            }
+            Err(e) => {
+                self.output.push_str(&format!("  ← Revert failed: {e}\n"));
+            }
+        }
+    }
 
     /// Save the agent conversation to disk for debugging and replay.
     pub(crate) fn save_conversation(&self) {
