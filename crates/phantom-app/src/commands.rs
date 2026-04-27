@@ -225,6 +225,17 @@ impl App {
                     }
                 }
             }
+            "goals" => {
+                self.console.system("Queued goals for the brain:");
+                self.console.output("Paste these one at a time to set autonomous work:");
+                self.console.output("");
+                self.console.output("  goal wire proactive.rs into the brain OODA loop — replace the hardcoded quiet_threshold with ProactiveBrain.should_act()");
+                self.console.output("  goal wire curves.rs into scoring — replace hardcoded fix_score 0.9 and explain_score 0.7 with configurable ResponseCurve evaluations");
+                self.console.output("  goal wire skill_store.rs into agent prompts — when spawning an agent, query SkillStore for relevant skills and inject into the system prompt");
+                self.console.output("  goal wire curriculum.rs into the brain idle handler — when UserIdle > 60s and no goal active, call CurriculumGenerator to propose a task");
+                self.console.output("  goal wire orchestrator.rs TaskLedger into GoalPursuit — when a goal has multiple tasks, use the ledger to track progress and re-plan on failure");
+                self.console.output("  goal add CLAUDE.md to the project root with build instructions, architecture overview, and deny(warnings) requirement");
+            }
             "suggestions" => {
                 if self.suggestion_history.is_empty() {
                     self.console.output("No suggestion history.");

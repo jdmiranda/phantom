@@ -93,6 +93,12 @@ impl AgentPane {
         let sys_prompt = agent.system_prompt();
         agent.push_message(AgentMessage::System(sys_prompt));
 
+        // Inject codebase context so the agent knows where it lives.
+        let codebase_context = build_codebase_context();
+        if !codebase_context.is_empty() {
+            agent.push_message(AgentMessage::System(codebase_context));
+        }
+
         // Claude API requires at least one user message. Push the task
         // description as the initial user turn.
         let user_prompt = match &task {
@@ -376,6 +382,51 @@ impl AgentPane {
             Some(cleaned.to_string())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Codebase context injection
+// ---------------------------------------------------------------------------
+
+/// Build project context for agent system prompts.
+/// Reads CLAUDE.md if it exists, and provides a crate map.
+fn build_codebase_context() -> String {
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into());
+
+    let mut ctx = String::from(
+        "CODEBASE CONTEXT:\n\
+         You are an agent inside Phantom, an AI-native terminal emulator.\n\
+         Written in Rust. 19 crates. ~100K lines. deny(warnings) is enforced.\n\
+         Always run `cargo check --workspace` after edits.\n\n\
+         Key crates:\n\
+         - phantom (binary entry point)\n\
+         - phantom-app (GUI: render, input, mouse, coordinator, agent_pane)\n\
+         - phantom-brain (OODA loop, scoring, goals, proactive, orchestrator)\n\
+         - phantom-agents (tools, API client, permissions, agent lifecycle)\n\
+         - phantom-adapter (AppAdapter trait, spatial preferences, event bus)\n\
+         - phantom-ui (layout engine, arbiter, themes, keybinds)\n\
+         - phantom-terminal (PTY, VTE, SGR mouse encoding)\n\
+         - phantom-scene (scene graph, z-order, dirty flags, render layers)\n\
+         - phantom-semantic (output parsing, error detection)\n\
+         - phantom-context (project detection, git state)\n\
+         - phantom-memory (persistent key-value store)\n\
+         - phantom-mcp (MCP protocol, Unix socket server/client)\n\n"
+    );
+
+    // Try to read CLAUDE.md for project-specific instructions.
+    let claude_md = std::path::Path::new(&working_dir).join("CLAUDE.md");
+    if let Ok(content) = std::fs::read_to_string(&claude_md) {
+        let truncated = if content.len() > 2000 {
+            format!("{}...(truncated)", &content[..2000])
+        } else {
+            content
+        };
+        ctx.push_str(&format!("CLAUDE.md:\n{truncated}\n\n"));
+    }
+
+    ctx
 }
 
 // ---------------------------------------------------------------------------
