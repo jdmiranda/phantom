@@ -223,7 +223,11 @@ impl App {
             }
             "selftest" => {
                 self.console.system("SELFTEST: brain exercising its own features...");
-                self.selftest = Some(crate::selftest::SelfTestRunner::new());
+                self.selftest = Some(crate::selftest::SelfTestRunner::new(false));
+            }
+            "selfheal" => {
+                self.console.system("SELFHEAL: test → diagnose → fix → verify → commit → push");
+                self.selftest = Some(crate::selftest::SelfTestRunner::new(true));
             }
             "clear" => {
                 self.console.history.clear();
@@ -244,6 +248,7 @@ impl App {
                 self.console.output("  video <path>        Play video through CRT shader");
                 self.console.output("  suggestions         List dismissed/expired suggestion history");
                 self.console.output("  selftest            Brain exercises its own features");
+                self.console.output("  selfheal            selftest + auto-fix + commit + push");
                 self.console.output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");
             }
