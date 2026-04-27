@@ -367,40 +367,28 @@ pub fn send_message(
     let api_key = config.api_key.clone();
 
     std::thread::spawn(move || {
-        let client = reqwest::blocking::Client::new();
+        // Use ureq instead of reqwest — reqwest::blocking has TLS issues
+        // on macOS that cause "error sending request" failures. ureq works
+        // reliably (the brain's claude.rs uses it successfully).
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(std::time::Duration::from_secs(120)))
+                .build()
+        );
 
-        let result = client
+        let body_str = serde_json::to_string(&request_body).unwrap_or_default();
+
+        let result = agent
             .post(API_URL)
             .header("x-api-key", &api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
-            .json(&request_body)
-            .send();
+            .send(body_str.as_bytes());
 
         match result {
-            Ok(response) => {
-                let status = response.status();
-                match response.text() {
+            Ok(mut response) => {
+                match response.body_mut().read_to_string() {
                     Ok(text) => {
-                        if !status.is_success() {
-                            // Try to extract error message from JSON body.
-                            if let Ok(json) = serde_json::from_str::<Value>(&text) {
-                                let msg = json
-                                    .get("error")
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or(&text);
-                                let _ = tx.send(ApiEvent::Error(format!(
-                                    "HTTP {status}: {msg}"
-                                )));
-                            } else {
-                                let _ = tx.send(ApiEvent::Error(format!(
-                                    "HTTP {status}: {text}"
-                                )));
-                            }
-                            return;
-                        }
-
                         match serde_json::from_str::<Value>(&text) {
                             Ok(json) => parse_response(&json, &tx),
                             Err(e) => {
@@ -418,6 +406,7 @@ pub fn send_message(
                 }
             }
             Err(e) => {
+                // ureq returns HTTP errors (4xx, 5xx) as Err variants.
                 let _ = tx.send(ApiEvent::Error(format!("request failed: {e}")));
             }
         }
