@@ -215,7 +215,7 @@ impl Commandable for AgentAdapter {
     fn accept_command(
         &mut self,
         cmd: &str,
-        _args: &serde_json::Value,
+        args: &serde_json::Value,
     ) -> anyhow::Result<String> {
         match cmd {
             "dismiss" => {
@@ -223,6 +223,28 @@ impl Commandable for AgentAdapter {
                 Ok("dismissed".into())
             }
             "status" => Ok(format!("{:?}", self.pane.status)),
+            "write" => {
+                // Text input from the keyboard (same as terminal "write" command).
+                if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+                    for ch in text.chars() {
+                        self.handle_input(&ch.to_string());
+                    }
+                }
+                Ok("ok".into())
+            }
+            "write_bytes" => {
+                // Raw bytes from route_bytes — decode as UTF-8 and feed to handle_input.
+                if let Some(bytes) = args.get("bytes").and_then(|v| v.as_array()) {
+                    let raw: Vec<u8> = bytes.iter()
+                        .filter_map(|b| b.as_u64().map(|n| n as u8))
+                        .collect();
+                    let text = String::from_utf8_lossy(&raw);
+                    for ch in text.chars() {
+                        self.handle_input(&ch.to_string());
+                    }
+                }
+                Ok("ok".into())
+            }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
     }
