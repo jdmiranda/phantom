@@ -20,6 +20,9 @@
 //!   built from the dispatch context's registry / event log.
 //! - `spawn_subagent`, `wait_for_agent`, `request_critique`, `event_log_query`
 //!   → [`crate::composer_tools`] handlers, with the appropriate sub-context.
+//! - `challenge_agent` → [`crate::defender_tools`] handler, with a
+//!   [`crate::defender_tools::DefenderToolContext`]. Sec.5 — the Defender's
+//!   single offensive route, gated on `Coordinate`.
 //! - Anything else → a [`ToolResult`] with `success: false` and
 //!   `output: "unknown tool: <name>"` so the model sees the refusal in its
 //!   next turn.
@@ -30,7 +33,8 @@
 //! class is taken from:
 //! - [`class_for`] for file/git tools (a local Sense/Act mapping),
 //! - [`ChatTool::class`] for chat tools,
-//! - [`ComposerTool::class`] for composer tools.
+//! - [`ComposerTool::class`] for composer tools,
+//! - [`DefenderTool::class`] for defender tools.
 //!
 //! On denial, a [`ToolResult`] with the canonical
 //! `"capability denied: <Class> not in <Role> manifest"` body is returned.
@@ -54,6 +58,7 @@ use crate::composer_tools::{
     ComposerTool, SpawnSubagentRequest, event_log_query, request_critique, spawn_subagent,
     wait_for_agent,
 };
+use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
 use crate::inbox::AgentRegistry;
 use crate::role::{AgentRef, AgentRole, CapabilityClass};
 use crate::tools::{ToolResult, ToolType, execute_tool};
@@ -293,6 +298,24 @@ pub fn dispatch_tool(
                     Err(e) => result(PLACEHOLDER_TOOL, false, e),
                 }
             }
+        };
+    }
+
+    // ---- Defender tools ----------------------------------------------------
+    if let Some(defender_tool) = DefenderTool::from_api_name(name) {
+        if let Err(msg) = check_capability(ctx.role, defender_tool.class()) {
+            return result(PLACEHOLDER_TOOL, false, msg);
+        }
+        let defender_ctx = DefenderToolContext {
+            self_ref: ctx.self_ref.clone(),
+            registry: ctx.registry.clone(),
+            event_log: ctx.event_log.clone(),
+        };
+        return match defender_tool {
+            DefenderTool::ChallengeAgent => match challenge_agent(args, &defender_ctx) {
+                Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+            },
         };
     }
 

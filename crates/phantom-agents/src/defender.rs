@@ -3,10 +3,8 @@
 //! When the Layer-2 dispatch gate refuses a tool call and emits
 //! [`crate::spawn_rules::EventKind::CapabilityDenied`], the substrate
 //! auto-spawns a short-lived [`AgentRole::Defender`] whose job is to observe
-//! the denial, gather the source chain, and prepare to challenge the
-//! offending agent. The challenge tool itself lands in a separate wave
-//! (Sec.5); for now the Defender is a passive Sense-only observer that
-//! proves the spawn-on-denial wiring is end-to-end.
+//! the denial, gather the source chain, and confront the offending agent
+//! via the [`crate::defender_tools::challenge_agent`] tool (Sec.5).
 //!
 //! ## Lifecycle
 //!
@@ -17,8 +15,8 @@
 //!    attempted_tool, source_chain }`.
 //! 3. The spawn-rule registry, holding [`defender_spawn_rule`], fires
 //!    [`SpawnAction::SpawnIfNotRunning`] for [`AgentRole::Defender`].
-//! 4. The Defender records the denial, follows the source chain, and (in
-//!    the next wave) challenges A.
+//! 4. The Defender records the denial, follows the source chain, and
+//!    challenges A by posting a question into A's inbox (Sec.5).
 //!
 //! ## Why `SpawnIfNotRunning`?
 //!
@@ -77,24 +75,25 @@ mod tests {
     }
 
     #[test]
-    fn defender_role_manifest_has_only_sense_capability() {
-        // Load-bearing security property: at this stage a Defender can only
-        // observe. The challenge tool (and any matching capability class)
-        // lands in Sec.5; until then the Defender must not be able to act,
-        // compute, reflect, or coordinate. If this test starts failing it
-        // means someone widened the manifest without going through the
-        // Sec.5 review.
+    fn defender_role_manifest_is_sense_plus_coordinate() {
+        // Load-bearing security property (Sec.5): a Defender holds exactly
+        // Sense (for source-chain inspection) and Coordinate (for the
+        // `challenge_agent` tool). It must NOT hold Act, Compute, or
+        // Reflect — the Defender does not run the LLM, mutate the user's
+        // world, or write to memory. If this test starts failing because
+        // anything else got added, that change must go through a Sec.X
+        // review.
         let manifest = AgentRole::Defender.manifest();
         assert_eq!(
             manifest.classes,
-            &[CapabilityClass::Sense],
-            "Defender must be Sense-only until Sec.5 lands the challenge tool"
+            &[CapabilityClass::Sense, CapabilityClass::Coordinate],
+            "Defender manifest must be exactly [Sense, Coordinate] post-Sec.5"
         );
         assert!(AgentRole::Defender.has(CapabilityClass::Sense));
+        assert!(AgentRole::Defender.has(CapabilityClass::Coordinate));
         assert!(!AgentRole::Defender.has(CapabilityClass::Act));
         assert!(!AgentRole::Defender.has(CapabilityClass::Compute));
         assert!(!AgentRole::Defender.has(CapabilityClass::Reflect));
-        assert!(!AgentRole::Defender.has(CapabilityClass::Coordinate));
     }
 
     #[test]

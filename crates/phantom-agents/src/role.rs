@@ -69,11 +69,11 @@ pub enum AgentRole {
     Fixer,
     /// Short-lived security observer. Spawned when the Layer-2 dispatch gate
     /// emits [`crate::spawn_rules::EventKind::CapabilityDenied`] for another
-    /// agent. Observes the denial, gathers the source chain, and prepares to
-    /// challenge the offending agent. Sense-only at this stage — the
-    /// challenge tool (Sec.5) is added in a separate wave; until then the
-    /// Defender is a passive observer that proves the spawn-on-denial wiring
-    /// works end-to-end.
+    /// agent. Observes the denial, gathers the source chain, and confronts
+    /// the offending agent via the
+    /// [`crate::defender_tools::DefenderTool::ChallengeAgent`] tool. Holds
+    /// `Sense` for source-chain inspection and `Coordinate` for the
+    /// challenge route — and nothing else.
     Defender,
 }
 
@@ -169,16 +169,17 @@ impl AgentRole {
             },
             Self::Defender => RoleManifest {
                 role: *self,
-                // Sense-only at this stage. Sec.5 will add the challenge tool
-                // and the supporting capability class when the reflexive-
-                // challenge wave lands; until then a Defender can only
-                // observe denials, not respond to them.
-                classes: &[CapabilityClass::Sense],
+                // Sec.5: Defender now holds Coordinate so it can call the
+                // `challenge_agent` tool that posts a question into the
+                // offender's inbox. Sense remains for source-chain
+                // inspection. No Act / Compute / Reflect — the Defender
+                // does not run the LLM, mutate the user's world, or write
+                // to memory.
+                classes: &[CapabilityClass::Sense, CapabilityClass::Coordinate],
                 description: "Short-lived security observer. Spawned on a CapabilityDenied event \
-                              for another agent. Observes the denial and the source chain in \
-                              preparation for challenging the offending agent. Cannot act, \
-                              compute, reflect, or coordinate yet — challenge tooling lands \
-                              in Sec.5.",
+                              for another agent. Observes the denial / source chain (Sense) and \
+                              confronts the offending agent via the `challenge_agent` tool \
+                              (Coordinate). Cannot act, compute, or reflect.",
             },
         }
     }

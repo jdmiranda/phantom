@@ -16,6 +16,7 @@ pub mod chat_tools;
 pub mod cli;
 pub mod composer_tools;
 pub mod defender;
+pub mod defender_tools;
 pub mod dispatch;
 pub mod fixer;
 pub mod inbox;
