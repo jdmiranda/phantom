@@ -67,6 +67,14 @@ pub enum AgentRole {
     /// Cannot mutate the user's world directly — the original blocked agent
     /// (or an Actor) applies the fix after consent.
     Fixer,
+    /// Short-lived security observer. Spawned when the Layer-2 dispatch gate
+    /// emits [`crate::spawn_rules::EventKind::CapabilityDenied`] for another
+    /// agent. Observes the denial, gathers the source chain, and prepares to
+    /// challenge the offending agent. Sense-only at this stage — the
+    /// challenge tool (Sec.5) is added in a separate wave; until then the
+    /// Defender is a passive observer that proves the spawn-on-denial wiring
+    /// works end-to-end.
+    Defender,
 }
 
 impl AgentRole {
@@ -82,6 +90,7 @@ impl AgentRole {
             Self::Actor => "Actor",
             Self::Composer => "Composer",
             Self::Fixer => "Fixer",
+            Self::Defender => "Defender",
         }
     }
 
@@ -157,6 +166,19 @@ impl AgentRole {
                               Reads the blockage context, proposes a fix, writes a memory note, \
                               dies. Cannot mutate the user's world directly — the original \
                               blocked agent (or an Actor) applies the fix after consent.",
+            },
+            Self::Defender => RoleManifest {
+                role: *self,
+                // Sense-only at this stage. Sec.5 will add the challenge tool
+                // and the supporting capability class when the reflexive-
+                // challenge wave lands; until then a Defender can only
+                // observe denials, not respond to them.
+                classes: &[CapabilityClass::Sense],
+                description: "Short-lived security observer. Spawned on a CapabilityDenied event \
+                              for another agent. Observes the denial and the source chain in \
+                              preparation for challenging the offending agent. Cannot act, \
+                              compute, reflect, or coordinate yet — challenge tooling lands \
+                              in Sec.5.",
             },
         }
     }
@@ -272,6 +294,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
+            AgentRole::Defender,
         ] {
             assert!(
                 !role.manifest().classes.is_empty(),
@@ -307,6 +330,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
+            AgentRole::Defender,
         ]
         .into_iter()
         .filter(|r| r.has(CapabilityClass::Act))
@@ -321,6 +345,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
+            AgentRole::Defender,
         ] {
             assert!(seen.insert(role.label()), "duplicate label for {role:?}");
         }
@@ -332,6 +357,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
+            AgentRole::Defender,
         ] {
             let classes = role.manifest().classes;
             let unique: std::collections::HashSet<_> = classes.iter().collect();

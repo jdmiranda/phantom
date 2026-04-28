@@ -378,6 +378,13 @@ fn default_seed_rules() -> Vec<SpawnRule> {
         // queued action is observable via [`AgentRuntime::last_actions`] and
         // is what closes the producer→consumer loop in tests.
         phantom_agents::fixer::fixer_spawn_rule(),
+        // Defender-on-denial (Sec.4): when the Layer-2 dispatch gate emits
+        // `EventKind::CapabilityDenied` for any agent, queue a
+        // `SpawnIfNotRunning(Defender)` action. The Defender's challenge
+        // tool lands in Sec.5; today the queued action proves the
+        // spawn-on-denial wiring is end-to-end and is observable via
+        // [`AgentRuntime::last_actions`].
+        phantom_agents::defender::defender_spawn_rule(),
     ]
 }
 

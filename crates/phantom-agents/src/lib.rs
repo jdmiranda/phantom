@@ -15,6 +15,7 @@ pub mod chat;
 pub mod chat_tools;
 pub mod cli;
 pub mod composer_tools;
+pub mod defender;
 pub mod dispatch;
 pub mod fixer;
 pub mod inbox;
@@ -30,6 +31,7 @@ pub mod spawn_rules;
 pub mod suggest;
 pub mod supervisor;
 pub mod system_prompt;
+pub mod taint;
 pub mod tools;
 
 pub use agent::*;
@@ -37,8 +39,10 @@ pub use chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
     OpenAiChatBackend, build_backend,
 };
+pub use defender::defender_spawn_rule;
 pub use manager::*;
 pub use role::{
     AgentId as RoleAgentId, AgentRef, AgentRole, CapabilityClass, RoleManifest, SpawnSource,
 };
+pub use taint::TaintLevel;
 pub use tools::*;
