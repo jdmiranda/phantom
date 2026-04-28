@@ -122,6 +122,35 @@ impl Agent {
         self.messages.push(msg);
     }
 
+    /// Walk back through the message history and collect the
+    /// `source_event_id` of the most-recent `depth` `ToolResult` messages.
+    ///
+    /// The vec is ordered most-recent-first, so callers can read it as the
+    /// "input chain" for a decision: `[id_n, id_(n-1), …]`. Only `ToolResult`
+    /// messages contribute; `User`, `Assistant`, `System`, and `ToolCall`
+    /// messages are skipped. `ToolResult`s with `source_event_id == None`
+    /// are skipped as well — they don't contribute a substrate event id.
+    ///
+    /// This is what Sec.1's `EventKind::CapabilityDenied { source_chain, .. }`
+    /// will populate at dispatch time. Today the field defaults to an empty
+    /// `Vec<u64>` because tool results carried no provenance; Sec.2 fills it
+    /// in by calling `agent.source_chain_for_last_call(3)`.
+    #[must_use]
+    pub fn source_chain_for_last_call(&self, depth: usize) -> Vec<u64> {
+        let mut chain = Vec::with_capacity(depth);
+        for msg in self.messages.iter().rev() {
+            if chain.len() >= depth {
+                break;
+            }
+            if let AgentMessage::ToolResult(tr) = msg {
+                if let Some(id) = tr.source_event_id {
+                    chain.push(id);
+                }
+            }
+        }
+        chain
+    }
+
     /// Append visible output text (shown in the agent pane).
     pub fn log(&mut self, text: &str) {
         self.output_log.push(text.to_owned());
@@ -306,6 +335,61 @@ fn truncate(s: &str, max_len: usize) -> String {
         format!("{}...", &s[..max_len])
     } else {
         s.to_owned()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AgentSpawnOpts
+// ---------------------------------------------------------------------------
+
+/// Options the GUI passes when constructing an agent pane.
+///
+/// Decoupled from the `AgentTask` itself so callers can layer additional
+/// metadata (target chat backend, role override, parent agent id, label)
+/// without bloating every `AgentTask` variant.
+///
+/// The minimal Phase-2 surface only carries `task` + `chat_model`; later
+/// phases extend the struct with role / label / parent-id without breaking
+/// existing call sites because all-but-`task` is `Option<…>` and `new` defaults
+/// them to `None`.
+#[derive(Debug, Clone)]
+pub struct AgentSpawnOpts {
+    /// What the agent is being spawned to do.
+    pub task: AgentTask,
+    /// Optional chat-model override. `None` falls through to the env-var
+    /// resolver (`PHANTOM_AGENT_MODEL`), and ultimately to default Claude.
+    pub chat_model: Option<crate::chat::ChatModel>,
+}
+
+impl AgentSpawnOpts {
+    /// Build a new options bundle for `task`. Chat model defaults to `None`
+    /// (env-var or default Claude path).
+    #[must_use]
+    pub fn new(task: AgentTask) -> Self {
+        Self {
+            task,
+            chat_model: None,
+        }
+    }
+
+    /// Resolve the effective chat model for this spawn.
+    ///
+    /// Resolution order:
+    /// 1. The explicit `chat_model` field if `Some(_)`.
+    /// 2. The `PHANTOM_AGENT_MODEL` environment variable, parsed via
+    ///    [`crate::chat::ChatModel::from_env_str`].
+    /// 3. Default to [`crate::chat::ChatModel::default`] (Claude).
+    #[must_use]
+    pub fn resolve_model(&self) -> crate::chat::ChatModel {
+        if let Some(ref m) = self.chat_model {
+            return m.clone();
+        }
+        if let Ok(s) = std::env::var("PHANTOM_AGENT_MODEL") {
+            if let Some(m) = crate::chat::ChatModel::from_env_str(&s) {
+                return m;
+            }
+        }
+        crate::chat::ChatModel::default()
     }
 }
 
@@ -540,6 +624,7 @@ mod tests {
             tool: ToolType::ReadFile,
             success: true,
             output: "file contents".into(),
+            ..Default::default()
         }));
 
         let json = agent.to_json();
@@ -584,5 +669,136 @@ mod tests {
         let msg = AgentMessage::ToolCall(call);
         let json = serde_json::to_string(&msg).unwrap();
         let _deser: AgentMessage = serde_json::from_str(&json).unwrap();
+    }
+
+    // -- Sec.2 provenance tests ---------------------------------------------
+
+    /// Helper: build a ToolResult tagged with a source event id.
+    fn tool_result_with_event(id: u64) -> ToolResult {
+        ToolResult {
+            tool: ToolType::ReadFile,
+            success: true,
+            output: "ok".into(),
+            tool_name: "read_file".into(),
+            args_hash: "abcdef0123456789".into(),
+            source_event_id: Some(id),
+        }
+    }
+
+    #[test]
+    fn agent_message_tool_result_includes_provenance() {
+        // Pushing a ToolResult onto the agent's history must preserve the
+        // provenance fields. This is the substrate's promise that every
+        // entry in agent.messages can be walked back to the substrate event
+        // that triggered the tool call.
+        let mut agent = Agent::new(
+            1,
+            AgentTask::FreeForm {
+                prompt: "test".into(),
+            },
+        );
+        agent.push_message(AgentMessage::ToolResult(tool_result_with_event(99)));
+
+        let last = agent.messages.last().expect("a message was pushed");
+        match last {
+            AgentMessage::ToolResult(tr) => {
+                assert_eq!(tr.tool_name, "read_file");
+                assert_eq!(tr.args_hash, "abcdef0123456789");
+                assert_eq!(tr.source_event_id, Some(99));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_chain_for_last_call_walks_back_n_results() {
+        // Five ToolResults with event ids [10, 20, 30, 40, 50] in
+        // chronological order. Calling source_chain_for_last_call(3) returns
+        // the three most-recent ones, ordered most-recent-first: [50, 40, 30].
+        let mut agent = Agent::new(
+            1,
+            AgentTask::FreeForm {
+                prompt: "test".into(),
+            },
+        );
+        for id in [10u64, 20, 30, 40, 50] {
+            agent.push_message(AgentMessage::ToolResult(tool_result_with_event(id)));
+        }
+
+        let chain = agent.source_chain_for_last_call(3);
+        assert_eq!(
+            chain,
+            vec![50, 40, 30],
+            "chain must be most-recent-first; got {chain:?}",
+        );
+    }
+
+    #[test]
+    fn source_chain_excludes_user_and_assistant_messages() {
+        // Only ToolResult messages contribute event ids to the chain. User,
+        // Assistant, System, and ToolCall messages are skipped — they don't
+        // carry a source_event_id and aren't in the input chain.
+        let mut agent = Agent::new(
+            1,
+            AgentTask::FreeForm {
+                prompt: "test".into(),
+            },
+        );
+        agent.push_message(AgentMessage::User("hi".into()));
+        agent.push_message(AgentMessage::ToolResult(tool_result_with_event(11)));
+        agent.push_message(AgentMessage::Assistant("response".into()));
+        agent.push_message(AgentMessage::ToolCall(ToolCall {
+            tool: ToolType::ReadFile,
+            args: serde_json::json!({"path": "x"}),
+        }));
+        agent.push_message(AgentMessage::ToolResult(tool_result_with_event(22)));
+        agent.push_message(AgentMessage::User("more".into()));
+        agent.push_message(AgentMessage::System("sys".into()));
+
+        let chain = agent.source_chain_for_last_call(5);
+        assert_eq!(
+            chain,
+            vec![22, 11],
+            "only ToolResults should contribute; got {chain:?}",
+        );
+    }
+
+    #[test]
+    fn source_chain_for_last_call_skips_results_without_event_id() {
+        // ToolResults with `source_event_id == None` (legacy / test paths
+        // that didn't populate provenance) are skipped — they don't break
+        // the chain, they just don't contribute an id.
+        let mut agent = Agent::new(
+            1,
+            AgentTask::FreeForm {
+                prompt: "test".into(),
+            },
+        );
+        agent.push_message(AgentMessage::ToolResult(tool_result_with_event(1)));
+        agent.push_message(AgentMessage::ToolResult(ToolResult {
+            tool: ToolType::ReadFile,
+            success: true,
+            output: "no provenance".into(),
+            ..Default::default()
+        }));
+        agent.push_message(AgentMessage::ToolResult(tool_result_with_event(3)));
+
+        let chain = agent.source_chain_for_last_call(5);
+        assert_eq!(chain, vec![3, 1]);
+    }
+
+    #[test]
+    fn source_chain_for_last_call_zero_depth_returns_empty() {
+        // depth = 0 short-circuits to an empty Vec without scanning history.
+        let mut agent = Agent::new(
+            1,
+            AgentTask::FreeForm {
+                prompt: "test".into(),
+            },
+        );
+        agent.push_message(AgentMessage::ToolResult(tool_result_with_event(1)));
+
+        let chain = agent.source_chain_for_last_call(0);
+        assert!(chain.is_empty());
     }
 }

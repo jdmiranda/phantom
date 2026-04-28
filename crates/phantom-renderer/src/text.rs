@@ -1,5 +1,18 @@
 // cosmic-text integration: shaping, rasterization, atlas upload
 
+// === GlyphClipRect parallel buffer pipeline (Phase 0.D — DO NOT DROP) ===
+//
+// `GlyphClipRect` lives in `crate::glyph_clip` (its own file) so that
+// concurrent rewrites of this larger module cannot accidentally drop it.
+// We re-export it here so external code keeps importing it as
+// `phantom_renderer::text::GlyphClipRect`.
+//
+// If you remove this re-export, the integration test at
+// `tests/clip_rect.rs` will fail to compile AND the type may be silently
+// dropped on the next concurrent edit. See
+// `crates/phantom-renderer/src/glyph_clip.rs` for the canonical home.
+pub use crate::glyph_clip::GlyphClipRect;
+
 use crate::atlas::{GlyphAtlas, GlyphEntry};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, Family, FontSystem, LayoutGlyph, Metrics, Shaping, SwashCache,

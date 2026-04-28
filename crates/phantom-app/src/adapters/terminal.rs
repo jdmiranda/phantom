@@ -528,6 +528,7 @@ mod tests {
             y: 20.0,
             width: 800.0,
             height: 600.0,
+            ..Default::default()
         };
         // Test render output structure without needing a full terminal.
         let output = RenderOutput {

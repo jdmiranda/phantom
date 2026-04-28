@@ -1,0 +1,31 @@
+[package]
+name = "phantom-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Tier-2 macOS backend built on Apple's ScreenCaptureKit. Only meaningful on
+# macOS 13+; gated off by default so non-macOS workspace builds stay clean.
+macos-sck = ["dep:screencapturekit", "dep:tokio-stream"]
+
+[dependencies]
+tokio = { version = "1", features = ["sync", "rt"] }
+async-trait = "0.1"
+futures-core = "0.3"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+# Feature-gated: pulled in only when `macos-sck` is enabled (and only useful
+# on macOS — the crate itself has macOS-only FFI).
+screencapturekit = { version = "1.5", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+serde_json = "1"
+futures-util = "0.3"
+
+[lints]
+workspace = true

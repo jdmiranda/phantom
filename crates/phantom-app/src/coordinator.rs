@@ -330,7 +330,34 @@ impl AppCoordinator {
     ///
     /// Returns an owned `Vec` so the caller can use `&mut` GPU resources
     /// after the call without borrow conflicts.
-    pub fn render_all(&self, layout: &LayoutEngine) -> Vec<(AppId, Rect, RenderOutput)> {
+    ///
+    /// The rect handed to each adapter is the **inner content rect** —
+    /// chrome insets (container margin + title strip + bottom padding)
+    /// are subtracted **before** the rect ever reaches the adapter, when
+    /// chrome will be drawn (i.e. when there are 2+ visual adapters).
+    /// This makes overlap with the chrome's title strip mathematically
+    /// impossible: the adapter never sees the outer rect at all.
+    ///
+    /// `cell_size` is required because chrome insets are expressed in
+    /// multiples of cell metrics (see [`crate::pane::pane_inner_rect`]).
+    pub fn render_all(
+        &self,
+        layout: &LayoutEngine,
+        cell_size: (f32, f32),
+    ) -> Vec<(AppId, Rect, RenderOutput)> {
+        // Count visual adapters first; chrome is suppressed when there is
+        // only one tiled pane (see render.rs `tiled_count <= 1`). When
+        // chrome is suppressed, the adapter should occupy the full layout
+        // rect — there is no title strip to avoid.
+        let visual_count = self
+            .registry
+            .all_running()
+            .into_iter()
+            .filter_map(|id| self.registry.get(id))
+            .filter(|e| e.visual)
+            .count();
+        let chrome_active = visual_count > 1;
+
         let mut outputs = Vec::new();
 
         for id in self.registry.all_running() {
@@ -343,15 +370,30 @@ impl AppCoordinator {
             let Some(pane_id) = self.app_pane_map.get(&id) else {
                 continue;
             };
-            let rect = match layout.get_pane_rect(*pane_id) {
-                Ok(r) => Rect {
-                    x: r.x,
-                    y: r.y,
-                    width: r.width,
-                    height: r.height,
-                },
+            let layout_rect = match layout.get_pane_rect(*pane_id) {
+                Ok(r) => r,
                 Err(_) => continue,
             };
+
+            // Apply the same chrome math the renderer uses: outer margin
+            // (`container_rect`) then chrome insets (`pane_inner_rect`).
+            // When chrome is suppressed the adapter sees the raw layout
+            // rect so single-pane mode does not lose ~1.5 cells of height.
+            let adapter_rect_ui = if chrome_active {
+                let outer = crate::pane::container_rect(layout_rect, cell_size);
+                crate::pane::pane_inner_rect(cell_size, outer)
+            } else {
+                layout_rect
+            };
+
+            let rect = Rect {
+                x: adapter_rect_ui.x,
+                y: adapter_rect_ui.y,
+                width: adapter_rect_ui.width,
+                height: adapter_rect_ui.height,
+                cell_size,
+            };
+
             let Some(adapter) = self.registry.get_adapter(id) else {
                 continue;
             };
@@ -387,7 +429,7 @@ impl AppCoordinator {
         for id in self.registry.all_running() {
             if let Some(pane_id) = self.app_pane_map.get(&id) {
                 if let Ok(r) = layout.get_pane_rect(*pane_id) {
-                    allocations.insert(id, Rect { x: r.x, y: r.y, width: r.width, height: r.height });
+                    allocations.insert(id, Rect { x: r.x, y: r.y, width: r.width, height: r.height, ..Default::default() });
                 }
             }
         }
@@ -405,7 +447,7 @@ impl AppCoordinator {
             let Some(&node_id) = self.scene_map.get(&id) else { continue };
             let Some(node) = scene.get(node_id) else { continue };
             let wt = node.world_transform;
-            let rect = Rect { x: wt.x, y: wt.y, width: wt.width, height: wt.height };
+            let rect = Rect { x: wt.x, y: wt.y, width: wt.width, height: wt.height, ..Default::default() };
             let Some(adapter) = self.registry.get_adapter(id) else { continue };
             let output = adapter.render(&rect);
             outputs.push((id, rect, output));
@@ -433,8 +475,13 @@ impl AppCoordinator {
 
     /// Collect render outputs partitioned by RenderLayer.
     #[allow(dead_code)]
-    pub fn render_all_layered(&self, layout: &LayoutEngine, scene: &SceneTree) -> LayeredRenderOutputs {
-        let all = self.render_all(layout);
+    pub fn render_all_layered(
+        &self,
+        layout: &LayoutEngine,
+        scene: &SceneTree,
+        cell_size: (f32, f32),
+    ) -> LayeredRenderOutputs {
+        let all = self.render_all(layout, cell_size);
         let mut result = LayeredRenderOutputs { scene: Vec::new(), overlay: Vec::new() };
         for item in all {
             let (app_id, _, _) = &item;
@@ -450,8 +497,8 @@ impl AppCoordinator {
     pub fn detach_to_float(&mut self, app_id: AppId, layout: &mut LayoutEngine, scene: &mut SceneTree) {
         let rect = self.app_pane_map.get(&app_id)
             .and_then(|pid| layout.get_pane_rect(*pid).ok())
-            .map(|r| Rect { x: r.x, y: r.y, width: r.width, height: r.height })
-            .unwrap_or(Rect { x: 100.0, y: 100.0, width: 600.0, height: 400.0 });
+            .map(|r| Rect { x: r.x, y: r.y, width: r.width, height: r.height, ..Default::default() })
+            .unwrap_or(Rect { x: 100.0, y: 100.0, width: 600.0, height: 400.0, ..Default::default() });
 
         if let Some(pane_id) = self.app_pane_map.remove(&app_id) {
             self.pane_map.remove(&pane_id);
@@ -954,7 +1001,7 @@ mod tests {
         // Must compute layout before querying rects.
         layout.resize(800.0, 600.0).unwrap();
 
-        let outputs = coord.render_all(&layout);
+        let outputs = coord.render_all(&layout, (8.0, 16.0));
 
         // Only the visual adapter should produce output.
         assert_eq!(outputs.len(), 1);
@@ -1237,7 +1284,7 @@ mod tests {
         );
 
         layout.resize(800.0, 600.0).unwrap();
-        let outputs = coord.render_all(&layout);
+        let outputs = coord.render_all(&layout, (8.0, 16.0));
 
         // Only the visual adapter should produce output.
         assert_eq!(outputs.len(), 1);
@@ -1260,12 +1307,178 @@ mod tests {
 
         // Render.
         layout.resize(800.0, 600.0).unwrap();
-        let outputs = coord.render_all(&layout);
+        let outputs = coord.render_all(&layout, (8.0, 16.0));
         assert_eq!(outputs.len(), 1);
 
         // Remove.
         coord.remove_adapter(id, &mut layout, &mut scene);
         assert_eq!(coord.registry().get(id).unwrap().state, AppState::Dead);
         assert_eq!(coord.focused(), None);
+    }
+
+    // ── Chrome-overlap regression: pane_inner_rect transformation ────────
+    //
+    // The chrome's title strip occupies (pane_rect.x, pane_rect.y,
+    // pane_rect.width, title_h). Adapters must never see the outer rect;
+    // the coordinator transforms it via `pane_inner_rect` before calling
+    // `render()`, making overlap mathematically impossible.
+
+    /// When chrome is active (2+ visual adapters), `render_all` must hand
+    /// each adapter the inner rect — the outer layout rect minus container
+    /// margins, title strip, and bottom padding.
+    #[test]
+    fn coordinator_passes_inner_rect_to_adapter() {
+        use crate::pane::{container_rect, pane_inner_rect};
+
+        let cell_size = (8.0_f32, 16.0_f32);
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Two visual adapters → chrome is active.
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "a");
+        let _id_b = register_mock(&mut coord, &mut layout, &mut scene, content, "b");
+
+        layout.resize(800.0, 600.0).unwrap();
+        let outputs = coord.render_all(&layout, cell_size);
+
+        // MockAdapter::render emits a quad at (rect.x, rect.y, rect.w, rect.h).
+        // We use that quad to inspect what rect the adapter received.
+        let (_, rect_a, ro_a) = outputs.iter().find(|(id, _, _)| *id == id_a).unwrap();
+        let q = ro_a.quads.first().expect("mock emits a rect-sized quad");
+
+        // The rect passed to the adapter must equal the inner rect derived
+        // from the layout rect via the same chrome math used in render.rs.
+        let pane_id = coord.pane_id_for(id_a).unwrap();
+        let layout_rect = layout.get_pane_rect(pane_id).unwrap();
+        let expected = pane_inner_rect(cell_size, container_rect(layout_rect, cell_size));
+
+        assert!((rect_a.x - expected.x).abs() < 0.01, "x: got {} expected {}", rect_a.x, expected.x);
+        assert!((rect_a.y - expected.y).abs() < 0.01, "y: got {} expected {}", rect_a.y, expected.y);
+        assert!((rect_a.width - expected.width).abs() < 0.01, "w: got {} expected {}", rect_a.width, expected.width);
+        assert!((rect_a.height - expected.height).abs() < 0.01, "h: got {} expected {}", rect_a.height, expected.height);
+
+        // And the quad the adapter emitted is at that same rect (sanity).
+        assert!((q.x - expected.x).abs() < 0.01);
+        assert!((q.y - expected.y).abs() < 0.01);
+    }
+
+    /// The adapter's first text segment must start at a Y >= the title
+    /// strip's bottom edge. The title strip occupies the top of the
+    /// **container** rect (post-margin), so the bound is
+    /// `container_rect.y + title_h`.
+    #[test]
+    fn adapter_render_y_starts_below_title_strip() {
+        use crate::pane::{
+            CONTAINER_TITLE_H_CELLS, container_rect,
+        };
+
+        let cell_size = (8.0_f32, 16.0_f32);
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "a");
+        let _id_b = register_mock(&mut coord, &mut layout, &mut scene, content, "b");
+
+        layout.resize(800.0, 600.0).unwrap();
+        let outputs = coord.render_all(&layout, cell_size);
+
+        let (_, _rect_a, ro_a) = outputs.iter().find(|(id, _, _)| *id == id_a).unwrap();
+        let first_text = ro_a
+            .text_segments
+            .first()
+            .expect("mock emits at least one text segment");
+
+        let pane_id = coord.pane_id_for(id_a).unwrap();
+        let layout_rect = layout.get_pane_rect(pane_id).unwrap();
+        let outer = container_rect(layout_rect, cell_size);
+        let title_strip_bottom = outer.y + cell_size.1 * CONTAINER_TITLE_H_CELLS;
+
+        assert!(
+            first_text.y >= title_strip_bottom - 0.01,
+            "adapter text Y {} must be at or below title strip bottom {}",
+            first_text.y,
+            title_strip_bottom,
+        );
+    }
+
+    /// The adapter's last possible text Y + line_height must not exceed
+    /// the body's bottom (container_rect minus title strip and bottom pad).
+    /// Combined with the previous test, this proves the adapter cannot
+    /// paint outside the chrome's body region.
+    #[test]
+    fn adapter_render_height_excludes_title_strip() {
+        use crate::pane::{
+            CONTAINER_PAD_B_CELLS, CONTAINER_TITLE_H_CELLS, container_rect,
+        };
+
+        let cell_size = (8.0_f32, 16.0_f32);
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "a");
+        let _id_b = register_mock(&mut coord, &mut layout, &mut scene, content, "b");
+
+        layout.resize(800.0, 600.0).unwrap();
+        let outputs = coord.render_all(&layout, cell_size);
+
+        let (_, rect_a, _ro_a) = outputs.iter().find(|(id, _, _)| *id == id_a).unwrap();
+
+        let pane_id = coord.pane_id_for(id_a).unwrap();
+        let layout_rect = layout.get_pane_rect(pane_id).unwrap();
+        let outer = container_rect(layout_rect, cell_size);
+        let title_h = cell_size.1 * CONTAINER_TITLE_H_CELLS;
+        let pad_b = cell_size.1 * CONTAINER_PAD_B_CELLS;
+        let body_bottom = outer.y + outer.height - pad_b;
+
+        // The adapter's rect bottom must fit within the chrome body.
+        let adapter_bottom = rect_a.y + rect_a.height;
+        assert!(
+            adapter_bottom <= body_bottom + 0.01,
+            "adapter bottom {} must not exceed body bottom {}",
+            adapter_bottom,
+            body_bottom,
+        );
+
+        // And the rect must start at the title strip's bottom.
+        let title_bottom = outer.y + title_h;
+        assert!(
+            rect_a.y >= title_bottom - 0.01,
+            "adapter rect.y {} must start at or below title strip bottom {}",
+            rect_a.y,
+            title_bottom,
+        );
+    }
+
+    /// Single-pane mode skips chrome, so the adapter receives the raw
+    /// layout rect (no insets). This guards against an over-eager fix
+    /// that would always inset and waste height in single-pane mode.
+    #[test]
+    fn single_pane_skips_chrome_insets() {
+        let cell_size = (8.0_f32, 16.0_f32);
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "solo");
+
+        layout.resize(800.0, 600.0).unwrap();
+        let outputs = coord.render_all(&layout, cell_size);
+
+        let (_, rect_a, _) = outputs.iter().find(|(id, _, _)| *id == id_a).unwrap();
+        let pane_id = coord.pane_id_for(id_a).unwrap();
+        let layout_rect = layout.get_pane_rect(pane_id).unwrap();
+
+        // Single pane → adapter sees the raw layout rect.
+        assert!((rect_a.x - layout_rect.x).abs() < 0.01);
+        assert!((rect_a.y - layout_rect.y).abs() < 0.01);
+        assert!((rect_a.width - layout_rect.width).abs() < 0.01);
+        assert!((rect_a.height - layout_rect.height).abs() < 0.01);
     }
 }

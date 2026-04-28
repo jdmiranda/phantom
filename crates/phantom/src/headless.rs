@@ -382,7 +382,12 @@ fn run_agent_loop(
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {
                     println!("\n[AGENT #{}]: using tool {:?}", agent_id, call.tool);
-                    let result = execute_tool(call.tool, &call.args, working_dir);
+                    let result = execute_tool(
+                        call.tool,
+                        &call.args,
+                        working_dir,
+                        &phantom_agents::role::AgentRole::Conversational,
+                    );
                     let success_label = if result.success { "ok" } else { "failed" };
                     println!("[TOOL]: {success_label}");
 
@@ -641,6 +646,7 @@ fn run_chat(
                     tool: phantom_agents::ToolType::ReadFile, // placeholder type
                     success: true,
                     output: agent_output.clone(),
+                    ..Default::default()
                 }));
 
                 println!("[AGENT RESULT]: {}", &agent_output[..agent_output.len().min(500)]);

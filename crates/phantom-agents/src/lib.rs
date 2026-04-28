@@ -10,13 +10,35 @@
 
 pub mod agent;
 pub mod api;
+pub mod audit;
+pub mod chat;
+pub mod chat_tools;
 pub mod cli;
+pub mod composer_tools;
+pub mod dispatch;
+pub mod fixer;
+pub mod inbox;
+pub mod inspector;
 pub mod manager;
+pub mod mcp_tools;
 pub mod permissions;
 pub mod render;
+pub mod role;
+pub mod router;
+pub mod speech;
+pub mod spawn_rules;
 pub mod suggest;
+pub mod supervisor;
+pub mod system_prompt;
 pub mod tools;
 
 pub use agent::*;
+pub use chat::{
+    ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
+    OpenAiChatBackend, build_backend,
+};
 pub use manager::*;
+pub use role::{
+    AgentId as RoleAgentId, AgentRef, AgentRole, CapabilityClass, RoleManifest, SpawnSource,
+};
 pub use tools::*;

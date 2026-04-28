@@ -9,9 +9,13 @@ log.workspace = true
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros"] }
+dashmap = "6"
+thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
 
 [lints]
 workspace = true

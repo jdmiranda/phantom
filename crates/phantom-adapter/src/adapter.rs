@@ -232,10 +232,17 @@ pub struct TextData {
 }
 
 /// Axis-aligned rectangle used for layout allocation.
-#[derive(Debug, Clone)]
+///
+/// `cell_size` carries the (cell_w, cell_h) the renderer derived for this
+/// frame. Adapters that need to translate between pixel-space rects and
+/// cell-space rects (e.g. inspector lists, terminal grids) read it instead
+/// of guessing. `(0.0, 0.0)` is the default and signals "unknown / not
+/// computed" — adapters should fall back to a sensible constant.
+#[derive(Debug, Clone, Default)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    pub cell_size: (f32, f32),
 }

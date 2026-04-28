@@ -116,6 +116,99 @@ pub fn capture_frame(
     Ok(pixels)
 }
 
+/// Capture a sub-rect of a wgpu texture into CPU-readable RGBA pixels.
+///
+/// Like [`capture_frame`], but reads only the rectangle whose top-left is
+/// `origin` and whose size is `extent`. The rect is clamped to the texture
+/// bounds; if the clamped rect is empty, returns `Ok(vec![])`.
+///
+/// The returned `Vec<u8>` has length `extent.0 * extent.1 * 4` (RGBA), or
+/// is empty when the requested rect lies entirely outside the texture.
+pub fn capture_frame_sub(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    origin: (u32, u32),
+    extent: (u32, u32),
+) -> anyhow::Result<Vec<u8>> {
+    let tex_w = texture.width();
+    let tex_h = texture.height();
+    let (ox, oy) = origin;
+    let (mut ew, mut eh) = extent;
+    if ox >= tex_w || oy >= tex_h || ew == 0 || eh == 0 {
+        return Ok(Vec::new());
+    }
+    if ox + ew > tex_w {
+        ew = tex_w - ox;
+    }
+    if oy + eh > tex_h {
+        eh = tex_h - oy;
+    }
+
+    let bytes_per_pixel = 4u32;
+    let unpadded_bytes_per_row = ew * bytes_per_pixel;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+    let buffer_size = (padded_bytes_per_row * eh) as u64;
+
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("screenshot-sub-staging"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("screenshot-sub-encoder"),
+    });
+
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: ew,
+            height: eh,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let buffer_slice = staging_buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::Wait);
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("GPU buffer map channel disconnected"))?
+        .map_err(|e| anyhow::anyhow!("GPU buffer mapping failed: {e}"))?;
+
+    let mapped = buffer_slice.get_mapped_range();
+    let mut pixels = Vec::with_capacity((ew * eh * bytes_per_pixel) as usize);
+    for row in 0..eh {
+        let start = (row * padded_bytes_per_row) as usize;
+        let end = start + unpadded_bytes_per_row as usize;
+        pixels.extend_from_slice(&mapped[start..end]);
+    }
+    drop(mapped);
+    staging_buffer.unmap();
+
+    Ok(pixels)
+}
+
 // ---------------------------------------------------------------------------
 // PNG encoding
 // ---------------------------------------------------------------------------

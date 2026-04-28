@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod inspector;
 pub mod monitor;
 pub mod terminal;
 pub mod video;

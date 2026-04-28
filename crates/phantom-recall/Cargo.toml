@@ -1,0 +1,18 @@
+[package]
+name = "phantom-recall"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+phantom-bundles = { path = "../phantom-bundles" }
+serde = { version = "1", features = ["derive"] }
+async-trait = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+serde_json = "1"
+
+[lints]
+workspace = true

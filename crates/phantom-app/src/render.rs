@@ -325,7 +325,7 @@ impl App {
         // -- Fullscreen mode: render only the fullscreen adapter at full size --
         if let Some(fs_app_id) = self.fullscreen_pane {
             // Get render output from the fullscreen adapter.
-            let coordinator_outputs = self.coordinator.render_all(&self.layout);
+            let coordinator_outputs = self.coordinator.render_all(&self.layout, self.cell_size);
             if let Some((_id, _rect, ro)) = coordinator_outputs.iter().find(|(id, _, _)| *id == fs_app_id) {
                 if let Some(ref grid) = ro.grid {
                     let margin = 12.0;
@@ -366,7 +366,7 @@ impl App {
         }
 
         // -- Coordinator two-phase render: collect outputs from all registered adapters --
-        let coordinator_outputs = self.coordinator.render_all(&self.layout);
+        let coordinator_outputs = self.coordinator.render_all(&self.layout, self.cell_size);
         let focused_app = self.coordinator.focused();
         let mut coord_titles: Vec<(String, f32, f32, [f32; 4])> = Vec::new();
 

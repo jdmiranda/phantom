@@ -22,6 +22,8 @@ pub struct PhantomConfig {
     pub shader_overrides: ShaderOverrides,
     /// Skip the boot sequence and go straight to terminal.
     pub skip_boot: bool,
+    /// Demo mode: auto-skip boot, spawn an example agent on first frame.
+    pub demo_mode: bool,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -42,6 +44,7 @@ impl Default for PhantomConfig {
             font_size: 14.0,
             shader_overrides: ShaderOverrides::default(),
             skip_boot: false,
+            demo_mode: false,
         }
     }
 }

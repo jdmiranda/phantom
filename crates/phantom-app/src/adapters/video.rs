@@ -208,6 +208,7 @@ mod tests {
             y: 0.0,
             width: 640.0,
             height: 480.0,
+            ..Default::default()
         };
         let output = RenderOutput::default();
         // Adapter render produces an empty output — GPU upload is external.

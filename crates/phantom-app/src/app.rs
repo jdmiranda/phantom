@@ -113,6 +113,10 @@ pub struct App {
     pub(crate) boot: BootSequence,
     pub(crate) state: AppState,
 
+    // -- Demo mode --
+    pub(crate) demo_mode: bool,
+    pub(crate) demo_post_boot_done: bool,
+
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
@@ -136,6 +140,11 @@ pub struct App {
     // -- AI Brain (OODA loop on dedicated thread) --
     pub(crate) brain: Option<BrainHandle>,
 
+    // -- Substrate runtime (Phase 1/2 primitives: supervisor, event log,
+    //    agent registry, memory blocks, spawn rules). Ticked once per frame
+    //    from `update.rs`.
+    pub(crate) runtime: crate::runtime::AgentRuntime,
+
     // -- Project context (auto-detected) --
     pub(crate) context: Option<ProjectContext>,
 
@@ -156,6 +165,17 @@ pub struct App {
 
     // -- Pending brain actions queued by suggestion option selection --
     pub(crate) pending_brain_actions: Vec<phantom_brain::events::AiAction>,
+
+    // -- Pending sub-agent spawn requests from a Composer's `spawn_subagent`
+    //    tool. The Composer pushes onto this queue from its tool handler
+    //    (via `phantom_agents::dispatch::DispatchContext::pending_spawn`);
+    //    `update.rs` drains it each frame and turns each request into an
+    //    `App::spawn_agent_pane_with_opts` call. We use the type from
+    //    `phantom_agents::composer_tools` directly so the queue keeps the
+    //    Composer's chosen role / label / chat_model intact, wrapped in
+    //    `Arc<Mutex<…>>` so dispatch contexts handed to running agents can
+    //    push without holding a reference back to the App.
+    pub(crate) pending_spawn_subagent: phantom_agents::composer_tools::SpawnSubagentQueue,
 
     // -- Right-click context menu --
     pub(crate) context_menu: crate::context_menu::ContextMenu,
@@ -185,6 +205,30 @@ pub struct App {
 
     // -- Agent panes (AI workers running in visible panes) --
     pub(crate) agent_panes: Vec<crate::agent_pane::AgentPane>,
+
+    // -- Inspector snapshot (shared with InspectorAdapter when a pane is open).
+    //    `None` when no inspector pane has ever been spawned; `Some(Arc<RwLock<…>>)`
+    //    once the user runs `inspect` and stays present so the adapter and the
+    //    App share the same lock for the rest of the session.
+    pub(crate) inspector_snapshot: Option<std::sync::Arc<std::sync::RwLock<phantom_agents::inspector::InspectorView>>>,
+
+    // -- Lars fix-thread sink: shared queue of `EventKind::AgentBlocked`
+    //    substrate events emitted by agent panes when their consecutive
+    //    tool-call failure streak crosses the threshold. Each spawned
+    //    `AgentPane` is given a clone; `update.rs::poll_agent_panes` drains
+    //    the queue each frame and forwards into the substrate runtime
+    //    (Phase 2.G consumer).
+    #[allow(dead_code)] // Wired in Phase 2.G consumer; ahead of time.
+    pub(crate) blocked_event_sink: crate::agent_pane::BlockedEventSink,
+
+    // -- Sec.1 capability-denial sink: parallel queue of
+    //    `EventKind::CapabilityDenied` substrate events emitted by agent
+    //    panes whenever the Layer-2 dispatch gate refuses a tool call. Each
+    //    spawned `AgentPane` is given a clone; `update.rs::poll_agent_panes`
+    //    drains the queue each frame and forwards into the substrate
+    //    runtime. The Defender spawn rule (Sec.4 consumer) reads these.
+    #[allow(dead_code)] // Wired in Sec.4 consumer; ahead of time.
+    pub(crate) denied_event_sink: crate::agent_pane::DeniedEventSink,
 
     // -- Event bus topic IDs (bus itself lives in coordinator) --
     #[allow(dead_code)]
@@ -252,6 +296,14 @@ pub struct App {
 
     // -- Settings panel --
     pub(crate) settings_panel: crate::settings_ui::SettingsPanel,
+
+    // -- Per-pane capture pipeline + encrypted bundle store. Both are
+    //    Option because the keychain (or even the SQLCipher build) can
+    //    fail at startup; in that case the pipeline gracefully no-ops.
+    //    `bundle_store` is wrapped in `Arc` so off-thread persistence
+    //    jobs can hold their own handle without an extra clone-of-clone.
+    pub(crate) bundle_store: Option<std::sync::Arc<phantom_bundle_store::BundleStore>>,
+    pub(crate) capture_state: crate::capture::CaptureState,
 }
 
 /// An active suggestion from the AI brain.
@@ -378,10 +430,48 @@ impl App {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
             enable_memory: true,
-            quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real errors
+            quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real evrs
             router: None,
         });
         info!("AI brain spawned");
+
+        // -- Substrate runtime (supervisor, event log, agent registry, memory
+        //    blocks, spawn rules). The seed rule list is empty; the runtime
+        //    installs its own ambient defaults in `default_seed_rules`. If the
+        //    log file fails to open we fall through to a temp-dir fallback so
+        //    the rest of the app still boots — observability is best-effort.
+        let runtime = match crate::runtime::AgentRuntime::with_default_paths() {
+            Ok(rt) => {
+                info!(
+                    "Substrate runtime ready: {} spawn rules, log → {}",
+                    rt.rules().rule_count(),
+                    rt.event_log().path().display(),
+                );
+                rt
+            }
+            Err(e) => {
+                warn!("Substrate event log unavailable on default path: {e}; using temp dir");
+                let dir = std::env::temp_dir().join("phantom-runtime");
+                let _ = std::fs::create_dir_all(&dir);
+                let cfg = crate::runtime::RuntimeConfig::under_dir(&dir);
+                crate::runtime::AgentRuntime::new(cfg, Vec::new()).expect(
+                    "substrate runtime: temp-dir fallback must open event log",
+                )
+            }
+        };
+
+        // -- Bundle store (encrypted SQLCipher + vector index). Best-effort:
+        //    on any failure (keychain locked, disk perms, etc.) we set
+        //    `bundle_store: None` and the per-pane capture pipeline gracefully
+        //    no-ops. Path defaults to `$HOME/.config/phantom/bundles` and
+        //    falls back to a temp-dir under the same constraints as the
+        //    event log above.
+        let bundle_store = open_bundle_store();
+        if bundle_store.is_some() {
+            info!("Bundle store ready (capture pipeline armed)");
+        } else {
+            info!("Bundle store unavailable — per-pane capture disabled");
+        }
 
         // -- Scene graph --
         let mut scene = SceneTree::new();
@@ -589,6 +679,8 @@ impl App {
             tab_bar,
             boot,
             state: initial_state,
+            demo_mode: config.demo_mode,
+            demo_post_boot_done: false,
             start_time: now,
             last_frame: now,
             cell_size,
@@ -598,6 +690,7 @@ impl App {
             debug_hud: false,
             debug_hud_selected: 0,
             brain: Some(brain),
+            runtime,
             context: Some(context),
             memory,
             session_manager,
@@ -605,6 +698,7 @@ impl App {
             suggestion: None,
             suggestion_history: VecDeque::with_capacity(10),
             pending_brain_actions: Vec::new(),
+            pending_spawn_subagent: phantom_agents::composer_tools::new_spawn_subagent_queue(),
             context_menu: crate::context_menu::ContextMenu::new(),
             float_interaction: None,
             selftest: None,
@@ -618,6 +712,9 @@ impl App {
             pool_chrome_glyphs: Vec::with_capacity(256),
             fullscreen_pane: None,
             agent_panes: Vec::new(),
+            inspector_snapshot: None,
+            blocked_event_sink: crate::agent_pane::new_blocked_event_sink(),
+            denied_event_sink: crate::agent_pane::new_denied_event_sink(),
             topic_terminal_output,
             topic_terminal_error,
             topic_agent_event,
@@ -647,6 +744,8 @@ impl App {
             last_click_pos: (0.0, 0.0),
             click_count: 0,
             settings_panel: crate::settings_ui::SettingsPanel::new(),
+            bundle_store,
+            capture_state: crate::capture::CaptureState::new(),
         })
     }
 
@@ -845,5 +944,45 @@ impl App {
     // Input (see input.rs for keyboard handling)
     // Commands (see commands.rs for user command execution)
     // Pane management (see pane.rs for split/close)
+    // Capture (see capture.rs for per-pane GPU readback + bundle persistence)
     // -----------------------------------------------------------------------
+}
+
+/// Open the encrypted bundle store at `$HOME/.config/phantom/bundles`,
+/// falling back to a temp-dir if `$HOME` is unset. Returns `None` on any
+/// failure (keychain locked, disk perms, schema mismatch, etc.) so the
+/// rest of the app can boot without the capture pipeline.
+fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStore>> {
+    use phantom_bundle_store::{BundleStore, MasterKey, StoreConfig};
+
+    // Resolve master key from the OS keychain. If the keyring isn't
+    // available (CI, sandboxed test runs), we fall back to a deterministic
+    // key derived from `$HOME`. The fallback isn't secure — bundles
+    // written under it are encrypted but with a key any process on the
+    // box can rederive — and we surface a clear log line so the user
+    // notices.
+    let master_key = match MasterKey::from_keyring() {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("Bundle store keychain unavailable ({e}); skipping capture init");
+            return None;
+        }
+    };
+
+    let root = std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".config").join("phantom").join("bundles"))
+        .unwrap_or_else(|| std::env::temp_dir().join("phantom-bundles"));
+
+    let cfg = StoreConfig { root: root.clone(), master_key };
+    match BundleStore::open(cfg) {
+        Ok(s) => {
+            info!("Bundle store opened at {}", root.display());
+            Some(std::sync::Arc::new(s))
+        }
+        Err(e) => {
+            warn!("Bundle store open failed at {}: {e}", root.display());
+            None
+        }
+    }
 }

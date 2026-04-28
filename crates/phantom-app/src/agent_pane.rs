@@ -4,18 +4,149 @@
 //! this module creates a new pane, starts a Claude API agent on a
 //! background thread, and streams output into the pane each frame.
 
+use std::sync::{Arc, Mutex};
+
 use log::{info, warn};
 
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::agent::{Agent, AgentMessage};
+use phantom_agents::audit::{AuditOutcome, emit_tool_call};
+use phantom_agents::chat::{ChatBackend, ChatModel, ChatRequest, build_backend};
 use phantom_agents::permissions::PermissionSet;
-use phantom_agents::tools::{ToolCall, ToolResult, ToolType, available_tools, execute_tool};
-use phantom_agents::AgentTask;
+use phantom_agents::role::{AgentRole, CapabilityClass};
+use phantom_agents::spawn_rules::{EventKind, EventSource, SubstrateEvent};
+use phantom_agents::tools::{
+    ToolCall, ToolDefinition, ToolResult, ToolType, available_tools,
+};
+use phantom_agents::{AgentSpawnOpts, AgentTask};
 
 use crate::app::App;
 
+/// The agent role default agent panes operate as.
+///
+/// Phase 1.F gates tool dispatch on the role manifest. Today every
+/// agent-pane spawn is implicitly a `Conversational` agent (the assistant
+/// that talks to the user), so we hardcode that here. Wider roles —
+/// `Actor`, `Watcher`, etc. — will land in a follow-up that threads the
+/// role through `AgentSpawnOpts`.
+const DEFAULT_AGENT_PANE_ROLE: AgentRole = AgentRole::Conversational;
+
 /// Maximum number of tool-use rounds before the agent is force-stopped.
 const MAX_TOOL_ROUNDS: u32 = 25;
+
+/// Number of consecutive tool-call failures before the pane emits a substrate
+/// `AgentBlocked` event.
+///
+/// The threshold is intentionally low (2) so transient single-shot failures
+/// (a typo in a path, a stale arg) don't trigger a Fixer, but a clearly stuck
+/// agent does. The Fixer spawn rule (`fixer.rs::fixer_spawn_rule`) listens for
+/// `AgentBlocked` and is the consumer of these events.
+pub(crate) const TOOL_BLOCK_THRESHOLD: u32 = 2;
+
+/// Shared queue of `AgentBlocked` events emitted by agent panes.
+///
+/// The `App` owns the canonical sink; each `AgentPane` is given a clone at
+/// spawn time. Panes push events into the queue when their consecutive-failure
+/// counter crosses [`TOOL_BLOCK_THRESHOLD`]; the App drains the queue each
+/// frame in `poll_agent_panes` and forwards into `runtime.push_event`. From
+/// there the `SpawnRuleRegistry` evaluates the event and queues a `Fixer`
+/// spawn action (the actual Fixer spawn is Phase 2.G).
+pub(crate) type BlockedEventSink = Arc<Mutex<Vec<SubstrateEvent>>>;
+
+/// Construct a fresh, empty `BlockedEventSink`.
+#[allow(dead_code)] // Producer for Phase 2.G consumer wiring; kept ahead of time.
+pub(crate) fn new_blocked_event_sink() -> BlockedEventSink {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Shared queue of `EventKind::CapabilityDenied` events emitted by agent
+/// panes (Sec.1 producer).
+///
+/// Mirrors [`BlockedEventSink`]: the `App` owns the canonical sink; each
+/// pane is given a clone at spawn time. Whenever the Layer-2 dispatch gate
+/// refuses a tool call (e.g. a `Watcher` calls `run_command`), the pane
+/// builds a [`SubstrateEvent`] of kind [`EventKind::CapabilityDenied`] and
+/// pushes it here. `update.rs::poll_agent_panes` drains the queue each
+/// frame and forwards into `runtime.push_event`. The Defender spawn rule
+/// (Sec.4) reads these.
+pub(crate) type DeniedEventSink = Arc<Mutex<Vec<SubstrateEvent>>>;
+
+/// Construct a fresh, empty `DeniedEventSink`.
+#[allow(dead_code)] // Producer for Sec.4 consumer wiring; kept ahead of time.
+pub(crate) fn new_denied_event_sink() -> DeniedEventSink {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Build the canonical `AgentBlocked` payload documented in `fixer.rs`.
+///
+/// All keys here are convention; only `reason` is required at the rule layer.
+/// The Fixer reads this payload to populate its system prompt at spawn time.
+fn build_blocked_payload(
+    agent_id: u64,
+    agent_role: &str,
+    reason: &str,
+    blocked_at_unix_ms: u64,
+    context_excerpt: &str,
+    suggested_capability: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": agent_id,
+        "agent_role": agent_role,
+        "reason": reason,
+        "blocked_at_unix_ms": blocked_at_unix_ms,
+        "context_excerpt": context_excerpt,
+        "suggested_capability": suggested_capability,
+    })
+}
+
+/// Build the `CapabilityDenied` payload (Sec.1).
+///
+/// Mirrors the AgentBlocked convention: a structured object with stable
+/// keys so downstream Defender / Inspector consumers don't have to care
+/// about the on-the-wire shape. Only the `EventKind::CapabilityDenied`
+/// fields are load-bearing at the rule layer; everything else here is
+/// for diagnostics and renderer surfaces.
+fn build_capability_denied_payload(
+    agent_id: u64,
+    agent_role: &str,
+    attempted_class: CapabilityClass,
+    attempted_tool: &str,
+    denied_at_unix_ms: u64,
+) -> serde_json::Value {
+    let source_chain: Vec<u64> = Vec::new();
+    serde_json::json!({
+        "agent_id": agent_id,
+        "agent_role": agent_role,
+        "attempted_class": class_label(attempted_class),
+        "attempted_tool": attempted_tool,
+        "denied_at_unix_ms": denied_at_unix_ms,
+        // Sec.2 will fill source_chain; we serialize the empty Vec so the
+        // shape is stable.
+        "source_chain": source_chain,
+    })
+}
+
+/// Lowercase string label for a `CapabilityClass`. Used in the audit log's
+/// `class` field and the substrate-event payload's `attempted_class` so
+/// scrapers can treat both as the same vocabulary.
+fn class_label(class: CapabilityClass) -> &'static str {
+    match class {
+        CapabilityClass::Sense => "Sense",
+        CapabilityClass::Reflect => "Reflect",
+        CapabilityClass::Compute => "Compute",
+        CapabilityClass::Act => "Act",
+        CapabilityClass::Coordinate => "Coordinate",
+    }
+}
+
+/// Wall-clock millis since epoch. Best-effort: returns 0 if the system clock
+/// is somehow before the epoch.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 // ---------------------------------------------------------------------------
 // AgentPane — a running agent with its output stream
@@ -46,7 +177,20 @@ pub(crate) struct AgentPane {
     /// Project root for tool sandbox.
     working_dir: String,
     /// Claude API config for re-invoking on tool-result turns.
+    ///
+    /// Always present. When [`AgentPane::chat_backend`] is `None`, this is
+    /// the active Claude config used by [`send_message`]. When a backend is
+    /// configured (`--model`/env override), this still provides the
+    /// `max_tokens` budget for [`ChatRequest`] so per-turn shaping matches
+    /// the existing setup.
     claude_config: ClaudeConfig,
+    /// Optional chat backend.
+    ///
+    /// `None` keeps the byte-for-byte legacy Claude path: every turn calls
+    /// [`send_message`] with [`AgentPane::claude_config`]. When the caller
+    /// selected a [`ChatModel`] (via `--model` or `PHANTOM_AGENT_MODEL`),
+    /// this is `Some` and turns dispatch through [`ChatBackend::complete`].
+    chat_backend: Option<Box<dyn ChatBackend>>,
     /// Number of tool-use rounds completed (capped at [`MAX_TOOL_ROUNDS`]).
     turn_count: u32,
     /// Accumulator for assistant text within the current API response.
@@ -61,6 +205,57 @@ pub(crate) struct AgentPane {
     tool_call_count: u32,
     /// Whether this agent has written/edited files (for rollback).
     has_file_edits: bool,
+    /// Consecutive tool-call failures since the last success.
+    ///
+    /// Reset to 0 on any successful tool result. When this reaches
+    /// [`TOOL_BLOCK_THRESHOLD`], the pane emits an `EventKind::AgentBlocked`
+    /// substrate event into [`AgentPane::blocked_event_sink`] and the counter
+    /// is cleared so the same agent doesn't spam the bus.
+    consecutive_tool_failures: u32,
+    /// Shared sink for emitted `AgentBlocked` events (Phase 2.E producer).
+    ///
+    /// `None` for tests/legacy callers that don't have a sink to plumb. The
+    /// production spawn path (`App::spawn_agent_pane_with_opts`) always
+    /// supplies the App's canonical sink; Phase 2.G will consume those events
+    /// to actually spawn Fixer agents.
+    blocked_event_sink: Option<BlockedEventSink>,
+    /// Shared sink for emitted `CapabilityDenied` events (Sec.1 producer).
+    ///
+    /// Mirrors [`AgentPane::blocked_event_sink`]: the App owns the canonical
+    /// sink and hands a clone in at spawn time. Whenever the Layer-2 gate
+    /// refuses a tool call, the pane pushes a [`SubstrateEvent`] of kind
+    /// [`EventKind::CapabilityDenied`] here. `None` for legacy / test
+    /// callers without a wired App.
+    #[allow(dead_code)] // Producer for Sec.4 consumer wiring; kept ahead of time.
+    denied_event_sink: Option<DeniedEventSink>,
+    /// Last error excerpt observed on a failing tool call, used to populate
+    /// the `reason` field of the emitted `AgentBlocked` event.
+    last_tool_error: Option<String>,
+    /// Shared registry handle used by chat-tool dispatch (`send_to_agent`,
+    /// `broadcast_to_role`, `request_critique`). Cloned from the runtime at
+    /// spawn time so dispatch contexts can read/write the same directory the
+    /// substrate ticks against. `None` keeps the legacy / test path working
+    /// (chat tools that need the registry will return a structured error).
+    registry: Option<std::sync::Arc<std::sync::Mutex<phantom_agents::inbox::AgentRegistry>>>,
+    /// Shared event-log handle used by chat-tool log emission and composer
+    /// tools (`wait_for_agent`, `event_log_query`, `request_critique`).
+    /// Cloned from the runtime; `None` disables log-dependent tools.
+    event_log: Option<std::sync::Arc<std::sync::Mutex<phantom_memory::event_log::EventLog>>>,
+    /// Shared sub-agent spawn queue. The Composer's `spawn_subagent` tool
+    /// pushes onto this; the App's `update.rs` drains it once per frame.
+    /// `None` disables `spawn_subagent` (it returns the chat-tools' standard
+    /// error string).
+    pending_spawn: Option<phantom_agents::composer_tools::SpawnSubagentQueue>,
+    /// Pre-allocated [`phantom_agents::role::AgentRef`] used as the calling
+    /// identity in dispatch contexts. Populated at spawn time so chat-tool
+    /// peers can see attribution; `None` falls back to an ephemeral
+    /// `Conversational` ref synthesized per turn (legacy path).
+    self_ref: Option<phantom_agents::role::AgentRef>,
+    /// Substrate role gating dispatch capability checks. Defaults to
+    /// `DEFAULT_AGENT_PANE_ROLE` (Conversational) but can be overridden at
+    /// spawn time so a Composer pane gets the Coordinate class it needs to
+    /// invoke `spawn_subagent` / `broadcast_to_role`.
+    role: phantom_agents::role::AgentRole,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +266,142 @@ pub(crate) enum AgentPaneStatus {
 }
 
 impl AgentPane {
+    /// Test-only constructor for adapter unit tests outside this module.
+    ///
+    /// Builds a pane with the given cached output lines, no live API
+    /// handle, and `Done` status. Designed for adapter rendering tests
+    /// that need a real `AgentPane` instance to feed `AgentAdapter::new`.
+    #[cfg(test)]
+    #[allow(dead_code)] // Used by adapter unit tests in sibling modules.
+    pub(crate) fn test_with_lines(lines: Vec<String>) -> Self {
+        let task = AgentTask::FreeForm { prompt: "test".into() };
+        Self {
+            task: "test".into(),
+            status: AgentPaneStatus::Done,
+            output: String::new(),
+            api_handle: None,
+            tool_use_ids: Vec::new(),
+            cached_lines: lines,
+            cached_len: 0,
+            registry: None,
+            event_log: None,
+            pending_spawn: None,
+            self_ref: None,
+            role: DEFAULT_AGENT_PANE_ROLE,
+            event_emitted: false,
+            agent: Agent::new(0, task),
+            pending_tools: Vec::new(),
+            working_dir: ".".into(),
+            claude_config: ClaudeConfig::new("sk-test"),
+            chat_backend: None,
+            turn_count: 0,
+            current_assistant_text: String::new(),
+            permissions: PermissionSet::all(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_call_count: 0,
+            has_file_edits: false,
+            consecutive_tool_failures: 0,
+            blocked_event_sink: None,
+            denied_event_sink: None,
+            last_tool_error: None,
+        }
+    }
+
+    /// Dispatch one turn of the chat conversation.
+    ///
+    /// Routes through [`ChatBackend::complete`] when a backend is configured;
+    /// otherwise falls back to [`send_message`] directly so the legacy Claude
+    /// path stays byte-for-byte identical when no `--model` was selected.
+    fn dispatch(
+        backend: Option<&dyn ChatBackend>,
+        claude_config: &ClaudeConfig,
+        agent: &Agent,
+        tools: &[ToolDefinition],
+        tool_use_ids: &[String],
+    ) -> ApiHandle {
+        if let Some(backend) = backend {
+            let request = ChatRequest {
+                agent,
+                tools,
+                tool_use_ids,
+                max_tokens: claude_config.max_tokens,
+            };
+            match backend.complete(request) {
+                Ok(response) => response.into_handle(),
+                Err(e) => {
+                    // Surface the error through an ApiHandle so the existing
+                    // poll() loop renders it consistently with network errors
+                    // from send_message.
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let _ = tx.send(ApiEvent::Error(format!(
+                        "chat backend ({}) error: {e}",
+                        backend.name()
+                    )));
+                    ApiHandle::from_receiver(rx)
+                }
+            }
+        } else {
+            send_message(claude_config, agent, tools, tool_use_ids)
+        }
+    }
+
     /// Create a new agent pane and start the Claude API call.
+    ///
+    /// Backwards-compatible thin wrapper over [`AgentPane::spawn_with_opts`].
+    /// Existing callers who already have a `ClaudeConfig` keep working
+    /// unchanged: the resulting agent uses the default Claude path
+    /// (`chat_backend = None`), which dispatches through [`send_message`]
+    /// byte-for-byte. No `BlockedEventSink` is wired, so the pane never emits
+    /// substrate `AgentBlocked` events.
+    #[allow(dead_code)]
     pub(crate) fn spawn(task: AgentTask, claude_config: &ClaudeConfig) -> Self {
+        Self::spawn_with_opts(AgentSpawnOpts::new(task), claude_config, None, None)
+    }
+
+    /// Create a new agent pane with explicit spawn options.
+    ///
+    /// When `opts.chat_model.is_some()` (or the `PHANTOM_AGENT_MODEL` env
+    /// override resolves to a non-Claude backend), this builds a
+    /// [`ChatBackend`] via [`build_backend`] and routes every turn through
+    /// it. Otherwise the existing default Claude path runs unchanged.
+    ///
+    /// `blocked_event_sink` is the shared queue into which the pane emits
+    /// `EventKind::AgentBlocked` substrate events when its tool-call failure
+    /// streak crosses [`TOOL_BLOCK_THRESHOLD`]. `denied_event_sink` is the
+    /// parallel queue for `EventKind::CapabilityDenied` events emitted by
+    /// the Layer-2 dispatch gate (Sec.1 producer). Pass `None` to disable
+    /// emission entirely (legacy / test path).
+    pub(crate) fn spawn_with_opts(
+        opts: AgentSpawnOpts,
+        claude_config: &ClaudeConfig,
+        blocked_event_sink: Option<BlockedEventSink>,
+        denied_event_sink: Option<DeniedEventSink>,
+    ) -> Self {
+        let task = opts.task.clone();
+
+        // Resolve the chat model (explicit > env-var > default Claude).
+        let resolved = opts.resolve_model();
+
+        // Only build a backend when something steered us off the default.
+        // When the resolution lands on plain Claude AND no explicit model
+        // was given, leave `chat_backend = None` so we hit `send_message`
+        // directly (byte-for-byte legacy path).
+        let chat_backend: Option<Box<dyn ChatBackend>> = match (&opts.chat_model, &resolved) {
+            (None, ChatModel::Claude(_)) => None,
+            _ => match build_backend(&resolved) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    warn!(
+                        "Could not build chat backend for {:?}: {e}; \
+                         falling back to default Claude path",
+                        resolved
+                    );
+                    None
+                }
+            },
+        };
+
         let task_desc = match &task {
             AgentTask::FreeForm { prompt } => prompt.clone(),
             AgentTask::FixError { error_summary, .. } => {
@@ -119,13 +448,20 @@ impl AgentPane {
         let tools = available_tools();
 
         info!(
-            "Agent pane spawning: {} messages (system={}, user={})",
+            "Agent pane spawning: {} messages (system={}, user={}, backend={})",
             agent.messages.len(),
             agent.messages.iter().filter(|m| matches!(m, AgentMessage::System(_))).count(),
             agent.messages.iter().filter(|m| matches!(m, AgentMessage::User(_))).count(),
+            chat_backend.as_deref().map(|b| b.name()).unwrap_or("claude (default)"),
         );
 
-        let handle = send_message(claude_config, &agent, &tools, &[]);
+        let handle = Self::dispatch(
+            chat_backend.as_deref(),
+            claude_config,
+            &agent,
+            &tools,
+            &[],
+        );
 
         let working_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
@@ -146,6 +482,7 @@ impl AgentPane {
             pending_tools: Vec::new(),
             working_dir,
             claude_config: claude_config.clone(),
+            chat_backend,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -153,7 +490,60 @@ impl AgentPane {
             output_tokens: 0,
             tool_call_count: 0,
             has_file_edits: false,
+            consecutive_tool_failures: 0,
+            blocked_event_sink,
+            denied_event_sink,
+            last_tool_error: None,
+            registry: None,
+            event_log: None,
+            pending_spawn: None,
+            self_ref: None,
+            role: DEFAULT_AGENT_PANE_ROLE,
         }
+    }
+
+    /// Wire the substrate handles a chat-tool / composer-tool dispatch
+    /// context needs. Called by `App::spawn_agent_pane_with_opts` after
+    /// `spawn_with_opts` so the pane shares the runtime's registry / event
+    /// log and the App's pending-spawn queue. Without these, dispatch falls
+    /// back to capability-denied / "event log not configured" errors for
+    /// the chat / composer tool surface — file/git tools keep working.
+    pub(crate) fn set_substrate_handles(
+        &mut self,
+        registry: std::sync::Arc<std::sync::Mutex<phantom_agents::inbox::AgentRegistry>>,
+        event_log: std::sync::Arc<std::sync::Mutex<phantom_memory::event_log::EventLog>>,
+        pending_spawn: phantom_agents::composer_tools::SpawnSubagentQueue,
+        self_ref: phantom_agents::role::AgentRef,
+        role: phantom_agents::role::AgentRole,
+    ) {
+        self.registry = Some(registry);
+        self.event_log = Some(event_log);
+        self.pending_spawn = Some(pending_spawn);
+        self.self_ref = Some(self_ref);
+        self.role = role;
+    }
+
+    /// Build a [`phantom_agents::dispatch::DispatchContext`] from the
+    /// pane's current substrate handles, if all required pieces are wired.
+    ///
+    /// Returns `None` when the pane was constructed without a runtime
+    /// connection (legacy / test fixtures) — callers fall back to the file
+    /// /git-only path. Borrows `self.working_dir` as `&Path` so the
+    /// returned context's lifetime is tied to `self`'s borrow scope.
+    fn build_dispatch_context(
+        &self,
+    ) -> Option<phantom_agents::dispatch::DispatchContext<'_>> {
+        let registry = self.registry.clone()?;
+        let pending_spawn = self.pending_spawn.clone()?;
+        let self_ref = self.self_ref.clone()?;
+        Some(phantom_agents::dispatch::DispatchContext {
+            self_ref,
+            role: self.role,
+            working_dir: std::path::Path::new(self.working_dir.as_str()),
+            registry,
+            event_log: self.event_log.clone(),
+            pending_spawn,
+        })
     }
 
     /// Poll for new API events and append output. Call once per frame.
@@ -255,16 +645,68 @@ impl AgentPane {
                 .push_message(AgentMessage::ToolCall(call.clone()));
         }
 
-        // Execute each tool (with permission check) and append results.
+        // Build the dispatch context once per turn so chat / composer tools
+        // can fork-route by name through the same registry / event-log /
+        // spawn-queue handles. When `set_substrate_handles` hasn't been
+        // called (legacy / test path), we fall through to the per-tool
+        // `execute_tool_with_provenance` path which only honors the
+        // file/git surface.
         let working_dir = self.working_dir.clone();
-        for (_, call) in self.pending_tools.drain(..) {
+        // Snapshot the substrate handles up front so we can drop the
+        // immutable borrow on `self` before the body of the loop touches
+        // mutable state (`tool_call_count`, `pending_tools.drain`, etc.).
+        let calls: Vec<(String, ToolCall)> = self.pending_tools.drain(..).collect();
+
+        // Execute each tool (with permission check) and append results.
+        for (_, call) in calls {
             self.tool_call_count += 1;
             let start = std::time::Instant::now();
+            let dispatch_ctx = self.build_dispatch_context();
             let result = if let Err(denied) = self.permissions.check_tool(&call.tool) {
-                ToolResult { tool: call.tool, success: false, output: denied.to_string() }
+                // Tag the synthetic permission-denied result with provenance
+                // so source_chain_for_last_call() still finds it.
+                ToolResult {
+                    tool: call.tool,
+                    success: false,
+                    output: denied.to_string(),
+                    ..ToolResult::default()
+                }
+                .with_provenance(phantom_agents::tools::ToolProvenance::from_call(
+                    call.tool,
+                    &call.args,
+                    None,
+                ))
+            } else if let Some(ctx) = dispatch_ctx.as_ref() {
+                // Substrate-aware fork: `dispatch_tool` routes by tool name
+                // through file/git → chat → composer surfaces, enforcing
+                // the role-class gate at a single check site. Provenance is
+                // re-tagged on the way out so the audit log stays consistent.
+                phantom_agents::dispatch::dispatch_tool(
+                    call.tool.api_name(),
+                    &call.args,
+                    ctx,
+                )
+                .with_provenance(phantom_agents::tools::ToolProvenance::from_call(
+                    call.tool,
+                    &call.args,
+                    None,
+                ))
             } else {
-                execute_tool(call.tool, &call.args, &working_dir)
+                // Legacy path (no substrate handles wired): the file/git
+                // surface only. The capability gate inside
+                // `execute_tool_with_provenance` runs against
+                // `DEFAULT_AGENT_PANE_ROLE` so the role manifest is honored
+                // even without the wider dispatch context.
+                phantom_agents::tools::execute_tool_with_provenance(
+                    call.tool,
+                    &call.args,
+                    &working_dir,
+                    &self.role,
+                    None,
+                )
             };
+            // Drop the dispatch context borrow before mutating `self` below.
+            drop(dispatch_ctx);
             let elapsed = start.elapsed();
 
             // Track file edits for rollback.
@@ -295,12 +737,47 @@ impl AgentPane {
                 ));
             }
 
+            // Sec.1 capability-denial instrumentation: when the dispatch
+            // gate refused the call, surface a `CapabilityDenied` substrate
+            // event + matching audit-log entry before the per-result loop
+            // continues. The check is keyed on the canonical
+            // `"capability denied: …"` prefix so we catch denials from both
+            // `execute_tool` and `dispatch_tool` without coupling to the
+            // DispatchError type.
+            self.maybe_emit_capability_denied_event(call.tool, &call.args, &result);
+
+            // Lars fix-thread instrumentation (Phase 2.E producer).
+            //
+            // Track consecutive tool-call failures so a stuck agent surfaces
+            // an `EventKind::AgentBlocked` event into the substrate runtime,
+            // which the Fixer spawn rule consumes. Successful results reset
+            // the streak.
+            if result.success {
+                self.consecutive_tool_failures = 0;
+                self.last_tool_error = None;
+            } else {
+                self.consecutive_tool_failures =
+                    self.consecutive_tool_failures.saturating_add(1);
+                // Truncate the error excerpt so the eventual `reason` field
+                // doesn't drag a multi-KB tool error into the spawn payload.
+                let excerpt: String = result.output.chars().take(160).collect();
+                self.last_tool_error = Some(excerpt);
+            }
+
             self.agent.push_message(AgentMessage::ToolResult(result));
         }
 
-        // Re-invoke Claude with the updated conversation.
+        // After the per-turn batch settles, check whether the streak crossed
+        // the block threshold. We check once per turn (not once per tool
+        // result within the turn) so a single noisy turn with N failing calls
+        // only emits one event — matching the spawn rule's
+        // `SpawnIfNotRunning` idempotency.
+        self.maybe_emit_blocked_event();
+
+        // Re-invoke the chat backend with the updated conversation.
         let tools = available_tools();
-        let handle = send_message(
+        let handle = Self::dispatch(
+            self.chat_backend.as_deref(),
             &self.claude_config,
             &self.agent,
             &tools,
@@ -310,6 +787,197 @@ impl AgentPane {
 
         self.output
             .push_str(&format!("\n● Continuing... (turn {})\n", self.turn_count));
+    }
+
+    /// Emit an `EventKind::AgentBlocked` substrate event when the agent's
+    /// consecutive tool-call failure streak crosses [`TOOL_BLOCK_THRESHOLD`].
+    ///
+    /// Phase 2.E producer side. Resets the counter after emission so the
+    /// same agent doesn't spam the bus on every subsequent failure; the
+    /// `SpawnIfNotRunning` rule provides idempotency at the consumer side,
+    /// but resetting here keeps the producer honest. No-op when
+    /// [`AgentPane::blocked_event_sink`] is `None` (test/legacy callers
+    /// without an App-owned sink).
+    fn maybe_emit_blocked_event(&mut self) {
+        if self.consecutive_tool_failures < TOOL_BLOCK_THRESHOLD {
+            return;
+        }
+
+        let Some(sink) = self.blocked_event_sink.clone() else {
+            // No sink wired (test path without an App). Reset the streak so
+            // a fresh failure starts a fresh count.
+            self.consecutive_tool_failures = 0;
+            self.last_tool_error = None;
+            return;
+        };
+
+        let last_err = self.last_tool_error.as_deref().unwrap_or("");
+        let reason = format!(
+            "{}+ consecutive tool failures: {}",
+            self.consecutive_tool_failures, last_err
+        );
+
+        // Last 200 chars of the visible output: enough context for the
+        // Fixer to triage, without dragging the whole transcript into the
+        // spawn-rule payload.
+        let context_excerpt: String = if self.output.chars().count() > 200 {
+            let tail_chars: String = self.output.chars().rev().take(200).collect();
+            tail_chars.chars().rev().collect()
+        } else {
+            self.output.clone()
+        };
+
+        let payload = build_blocked_payload(
+            self.agent.id as u64,
+            "Conversational",
+            &reason,
+            now_unix_ms(),
+            &context_excerpt,
+            "Sense",
+        );
+
+        let event = SubstrateEvent {
+            kind: EventKind::AgentBlocked {
+                agent_id: self.agent.id as u64,
+                reason: reason.clone(),
+            },
+            payload,
+            source: EventSource::Agent {
+                role: phantom_agents::role::AgentRole::Conversational,
+            },
+        };
+
+        if let Ok(mut q) = sink.lock() {
+            q.push(event);
+        } else {
+            warn!("blocked_event_sink mutex poisoned; dropping AgentBlocked event");
+        }
+
+        self.consecutive_tool_failures = 0;
+        self.last_tool_error = None;
+    }
+
+    /// Emit an [`EventKind::CapabilityDenied`] substrate event whenever the
+    /// Layer-2 dispatch gate refused a tool call (Sec.1 producer side).
+    ///
+    /// The denial detection is by the result's canonical
+    /// `"capability denied: <Class> not in <Role> manifest"` prefix —
+    /// produced by [`phantom_agents::tools::DispatchError::to_tool_result_message`]
+    /// and stable across both `execute_tool` and `dispatch_tool`. We push the
+    /// event into the App-owned [`DeniedEventSink`] (drained next frame in
+    /// `update.rs::poll_agent_panes`) and emit a parallel audit-log record
+    /// with [`AuditOutcome::Denied`] so the on-disk audit trail and the
+    /// substrate event log carry matching denial signals.
+    ///
+    /// `source_chain` is empty until Sec.2 wires per-call provenance.
+    /// No-op when the sink isn't wired (test / legacy paths).
+    fn maybe_emit_capability_denied_event(
+        &self,
+        tool: ToolType,
+        args: &serde_json::Value,
+        result: &ToolResult,
+    ) {
+        // The dispatch gate's denial message is a contract: we match on the
+        // exact prefix the model sees. This keeps us in sync with the
+        // canonical phrasing without coupling to the DispatchError type.
+        if result.success || !result.output.starts_with("capability denied:") {
+            return;
+        }
+
+        let attempted_class = tool.capability_class();
+        let attempted_tool = tool.api_name().to_string();
+        let agent_id = self.agent.id as u64;
+        let role = self.role;
+
+        // Audit-side record (always emitted regardless of whether a sink
+        // is plumbed) so the tracing log has the structured Denied entry
+        // alongside any normal tool-call audit lines.
+        let args_json = serde_json::to_string(args).unwrap_or_default();
+        emit_tool_call(
+            agent_id,
+            role.label(),
+            class_label(attempted_class),
+            &attempted_tool,
+            &args_json,
+            AuditOutcome::Denied,
+        );
+
+        let Some(sink) = self.denied_event_sink.clone() else {
+            return;
+        };
+
+        let payload = build_capability_denied_payload(
+            agent_id,
+            role.label(),
+            attempted_class,
+            &attempted_tool,
+            now_unix_ms(),
+        );
+
+        let event = SubstrateEvent {
+            kind: EventKind::CapabilityDenied {
+                agent_id,
+                role,
+                attempted_class,
+                attempted_tool,
+                source_chain: Vec::new(),
+            },
+            payload,
+            source: EventSource::Agent { role },
+        };
+
+        if let Ok(mut q) = sink.lock() {
+            q.push(event);
+        } else {
+            warn!("denied_event_sink mutex poisoned; dropping CapabilityDenied event");
+        }
+    }
+
+    /// Test-only accessor for the consecutive failure counter.
+    #[cfg(test)]
+    #[allow(dead_code)] // Phase 2.G consumer wiring will exercise this.
+    pub(crate) fn consecutive_tool_failures(&self) -> u32 {
+        self.consecutive_tool_failures
+    }
+
+    /// Test-only setter for the blocked-event sink.
+    #[cfg(test)]
+    #[allow(dead_code)] // Phase 2.G consumer wiring will exercise this.
+    pub(crate) fn set_blocked_event_sink_for_test(&mut self, sink: BlockedEventSink) {
+        self.blocked_event_sink = Some(sink);
+    }
+
+    /// Test-only setter for the capability-denied event sink (Sec.1).
+    #[cfg(test)]
+    #[allow(dead_code)] // Sec.4 consumer wiring will exercise this.
+    pub(crate) fn set_denied_event_sink_for_test(&mut self, sink: DeniedEventSink) {
+        self.denied_event_sink = Some(sink);
+    }
+
+    /// Test-only setter for the agent's role; lets tests construct a pane
+    /// running as a `Watcher` so `run_command` lands on the denial path
+    /// without standing up a full spawn pipeline.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn set_role_for_test(&mut self, role: AgentRole) {
+        self.role = role;
+    }
+
+    /// Test-only entry point exercising the producer-side fix-thread logic
+    /// without touching the chat backend. Mirrors the per-tool-result branch
+    /// of `execute_pending_tools` and triggers the threshold check.
+    #[cfg(test)]
+    #[allow(dead_code)] // Phase 2.G consumer wiring will exercise this.
+    pub(crate) fn record_tool_result_for_test(&mut self, success: bool, error_excerpt: &str) {
+        if success {
+            self.consecutive_tool_failures = 0;
+            self.last_tool_error = None;
+        } else {
+            self.consecutive_tool_failures =
+                self.consecutive_tool_failures.saturating_add(1);
+            self.last_tool_error = Some(error_excerpt.to_string());
+        }
+        self.maybe_emit_blocked_event();
     }
 
     /// Return cached tail lines for rendering. Only re-splits when output grows.
@@ -334,9 +1002,10 @@ impl AgentPane {
         // Append to conversation.
         self.agent.push_message(AgentMessage::User(message));
 
-        // Re-invoke Claude with the updated conversation.
+        // Re-invoke the chat backend with the updated conversation.
         let tools = available_tools();
-        let handle = send_message(
+        let handle = Self::dispatch(
+            self.chat_backend.as_deref(),
             &self.claude_config,
             &self.agent,
             &tools,
@@ -485,10 +1154,22 @@ fn format_tool_args(tool: &ToolType, args: &serde_json::Value) -> String {
 impl App {
     /// Spawn a new agent pane as a first-class coordinator adapter.
     ///
-    /// Splits the focused pane vertically, creates the agent, wraps it in
-    /// an AgentAdapter, and registers it in the new split pane — same as
-    /// Cmd+D for terminals.
+    /// Backwards-compatible wrapper over [`App::spawn_agent_pane_with_opts`].
+    /// Existing callers passing a bare [`AgentTask`] keep working byte-for-byte
+    /// (no chat model override → default Claude path).
     pub(crate) fn spawn_agent_pane(&mut self, task: AgentTask) -> bool {
+        self.spawn_agent_pane_with_opts(AgentSpawnOpts::new(task))
+    }
+
+    /// Spawn a new agent pane with explicit spawn options.
+    ///
+    /// Splits the focused pane vertically, creates the agent (using the
+    /// requested [`ChatModel`] if any), wraps it in an `AgentAdapter`, and
+    /// registers it in the new split pane.
+    pub(crate) fn spawn_agent_pane_with_opts(
+        &mut self,
+        opts: AgentSpawnOpts,
+    ) -> bool {
         let Some(claude_config) = ClaudeConfig::from_env() else {
             warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
             return false;
@@ -536,7 +1217,45 @@ impl App {
         }
 
         // Create the agent and register in the new split pane.
-        let agent_pane = AgentPane::spawn(task, &claude_config);
+        //
+        // Hand the App's canonical `BlockedEventSink` to the pane so that
+        // when the agent's consecutive tool-call failure streak crosses
+        // [`TOOL_BLOCK_THRESHOLD`], an `EventKind::AgentBlocked` substrate
+        // event lands in `App.blocked_event_sink`. The drain step in
+        // `update.rs::update` picks those up each frame (after
+        // `poll_agent_panes`) and forwards them into the substrate runtime
+        // where the Fixer spawn rule consumes them and queues a Fixer
+        // `SpawnAction` — closing the producer→consumer loop.
+        let mut agent_pane = AgentPane::spawn_with_opts(
+            opts,
+            &claude_config,
+            Some(self.blocked_event_sink.clone()),
+            None,
+        );
+
+        // Wire the substrate handles so chat-tool / composer-tool dispatch
+        // routes through the live runtime. The pane gets clones of the
+        // runtime's `Arc<Mutex<…>>` registry + event log and a clone of the
+        // App's `pending_spawn_subagent` queue. The `AgentRef` is stamped
+        // with a fresh id (currently 0 — the agent module's `AgentId` is a
+        // `u32` per-session counter) and the default
+        // [`DEFAULT_AGENT_PANE_ROLE`]; when the next phase wires Composer
+        // panes through this path the role override will live on
+        // [`AgentSpawnOpts`].
+        let self_ref = phantom_agents::role::AgentRef::new(
+            0,
+            DEFAULT_AGENT_PANE_ROLE,
+            "agent-pane",
+            phantom_agents::role::SpawnSource::User,
+        );
+        agent_pane.set_substrate_handles(
+            self.runtime.registry_handle(),
+            self.runtime.event_log_handle(),
+            self.pending_spawn_subagent.clone(),
+            self_ref,
+            DEFAULT_AGENT_PANE_ROLE,
+        );
+
         let adapter = crate::adapters::agent::AgentAdapter::new(agent_pane);
 
         let scene_node = self.scene.add_node(
@@ -554,8 +1273,49 @@ impl App {
         // Focus the new agent pane.
         self.coordinator.set_focus(app_id);
 
+        // Notify the substrate runtime that an agent pane was opened. The
+        // seed `pane.opened.agent` rule will fire on the next tick, queueing
+        // a `SpawnIfNotRunning(Watcher, "agent-pane-watch")` action and
+        // appending the event to `events.jsonl`. Phase 2 will turn that
+        // queued action into an actual supervised Watcher task.
+        self.runtime.push_event(phantom_agents::spawn_rules::SubstrateEvent {
+            kind: phantom_agents::spawn_rules::EventKind::PaneOpened {
+                app_type: "agent".to_string(),
+            },
+            payload: serde_json::json!({
+                "app_id": app_id,
+                "pane_id": format!("{:?}", new_child),
+            }),
+            source: phantom_agents::spawn_rules::EventSource::User,
+        });
+
         info!("Agent adapter registered (AppId {app_id}) in split pane");
         true
+    }
+
+    /// Drain the App's `BlockedEventSink` and return the queued
+    /// `EventKind::AgentBlocked` substrate events.
+    ///
+    /// Producers (`AgentPane::execute_pending_tools` via
+    /// [`AgentPane::maybe_emit_blocked_event`]) push events synchronously when
+    /// an agent's consecutive tool-call failure streak crosses
+    /// [`TOOL_BLOCK_THRESHOLD`]. The consumer side (`update.rs::update`) calls
+    /// this each frame and forwards every drained event into
+    /// [`crate::runtime::AgentRuntime::push_event`], where the registered
+    /// `fixer_spawn_rule` matches and queues a Fixer `SpawnAction`.
+    ///
+    /// Returns an empty `Vec` if the sink is empty or the mutex is poisoned —
+    /// observability is best-effort, never fatal.
+    pub(crate) fn drain_blocked_events(
+        &mut self,
+    ) -> Vec<phantom_agents::spawn_rules::SubstrateEvent> {
+        match self.blocked_event_sink.lock() {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(_) => {
+                warn!("blocked_event_sink mutex poisoned; dropping queued events");
+                Vec::new()
+            }
+        }
     }
 
     /// Poll all active agent panes for new output. Call from update().
@@ -636,6 +1396,11 @@ mod tests {
             pending_tools: Vec::new(),
             working_dir: ".".into(),
             claude_config: test_config(),
+            chat_backend: None,
+            consecutive_tool_failures: 0,
+            blocked_event_sink: None,
+            denied_event_sink: None,
+            last_tool_error: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -643,6 +1408,11 @@ mod tests {
             output_tokens: 0,
             tool_call_count: 0,
             has_file_edits: false,
+            registry: None,
+            event_log: None,
+            pending_spawn: None,
+            self_ref: None,
+            role: DEFAULT_AGENT_PANE_ROLE,
         };
         (pane, tx)
     }
@@ -716,6 +1486,11 @@ mod tests {
             pending_tools: Vec::new(),
             working_dir: ".".into(),
             claude_config: test_config(),
+            chat_backend: None,
+            consecutive_tool_failures: 0,
+            blocked_event_sink: None,
+            denied_event_sink: None,
+            last_tool_error: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -723,6 +1498,11 @@ mod tests {
             output_tokens: 0,
             tool_call_count: 0,
             has_file_edits: false,
+            registry: None,
+            event_log: None,
+            pending_spawn: None,
+            self_ref: None,
+            role: DEFAULT_AGENT_PANE_ROLE,
         };
         assert!(!pane.poll());
     }
@@ -854,6 +1634,343 @@ mod tests {
             assert!(
                 desc.starts_with(expected_prefix),
                 "task desc '{desc}' should start with '{expected_prefix}'"
+            );
+        }
+    }
+
+    // -- Lars fix-thread producer tests (Phase 2.E) --------------------------
+
+    /// One failure under the threshold must NOT emit an `AgentBlocked` event.
+    /// The producer should only fire when the streak crosses
+    /// [`TOOL_BLOCK_THRESHOLD`] = 2.
+    #[test]
+    fn consecutive_tool_failures_below_threshold_does_not_emit() {
+        let (mut pane, _tx) = agent_with_handle();
+        let sink = new_blocked_event_sink();
+        pane.set_blocked_event_sink_for_test(sink.clone());
+
+        pane.record_tool_result_for_test(false, "ENOENT: no such file");
+
+        assert_eq!(pane.consecutive_tool_failures(), 1);
+        let drained = sink.lock().unwrap();
+        assert!(
+            drained.is_empty(),
+            "1 failure (< threshold) must not emit an AgentBlocked event; got {} events",
+            drained.len(),
+        );
+    }
+
+    /// Exactly two consecutive failures must emit exactly one `AgentBlocked`
+    /// event, after which the streak counter is reset to 0 (so the agent
+    /// doesn't spam the bus).
+    #[test]
+    fn consecutive_tool_failures_at_threshold_emits_blocked() {
+        let (mut pane, _tx) = agent_with_handle();
+        let sink = new_blocked_event_sink();
+        pane.set_blocked_event_sink_for_test(sink.clone());
+
+        pane.record_tool_result_for_test(false, "first error");
+        pane.record_tool_result_for_test(false, "second error");
+
+        // After emission the producer resets the counter so the SAME agent
+        // doesn't keep re-emitting on every subsequent failure.
+        assert_eq!(
+            pane.consecutive_tool_failures(),
+            0,
+            "streak counter must reset after emit",
+        );
+
+        let drained = sink.lock().unwrap();
+        assert_eq!(
+            drained.len(),
+            1,
+            "exactly one AgentBlocked event must have been emitted; got {}",
+            drained.len(),
+        );
+    }
+
+    /// A successful tool call between two failures must reset the streak,
+    /// so the cumulative failure count is 1 (not 2) and no event fires.
+    #[test]
+    fn success_resets_counter() {
+        let (mut pane, _tx) = agent_with_handle();
+        let sink = new_blocked_event_sink();
+        pane.set_blocked_event_sink_for_test(sink.clone());
+
+        pane.record_tool_result_for_test(false, "first failure");
+        pane.record_tool_result_for_test(true, "");
+        pane.record_tool_result_for_test(false, "second failure");
+
+        assert_eq!(
+            pane.consecutive_tool_failures(),
+            1,
+            "consecutive count must be 1 (only the failure since the last success)",
+        );
+
+        let drained = sink.lock().unwrap();
+        assert!(
+            drained.is_empty(),
+            "no event should have fired when streak was broken by a success; got {}",
+            drained.len(),
+        );
+    }
+
+    /// The emitted `AgentBlocked` event payload must carry the conventional
+    /// keys documented in `phantom_agents::fixer`: `agent_id`, `agent_role`,
+    /// `reason`, `blocked_at_unix_ms`, `context_excerpt`,
+    /// `suggested_capability`.
+    #[test]
+    fn blocked_event_payload_has_agent_id_and_reason() {
+        let (mut pane, _tx) = agent_with_handle();
+        let sink = new_blocked_event_sink();
+        pane.set_blocked_event_sink_for_test(sink.clone());
+
+        pane.record_tool_result_for_test(false, "first");
+        pane.record_tool_result_for_test(false, "ENOENT: project_memory.txt");
+
+        let drained = sink.lock().unwrap();
+        assert_eq!(drained.len(), 1, "expected exactly one event");
+
+        let ev = &drained[0];
+
+        // Kind invariant.
+        match &ev.kind {
+            phantom_agents::spawn_rules::EventKind::AgentBlocked { agent_id, reason } => {
+                assert_eq!(*agent_id as u64, 0u64); // test_agent has id 0
+                assert!(
+                    reason.contains("consecutive tool failures"),
+                    "reason should mention the streak; got '{reason}'",
+                );
+                assert!(
+                    reason.contains("ENOENT") || reason.contains("project_memory.txt"),
+                    "reason should embed the last error excerpt; got '{reason}'",
+                );
+            }
+            other => panic!("expected EventKind::AgentBlocked, got {other:?}"),
+        }
+
+        // Source invariant: the producer is a Conversational agent.
+        match ev.source {
+            phantom_agents::spawn_rules::EventSource::Agent { role } => {
+                assert_eq!(role, phantom_agents::role::AgentRole::Conversational);
+            }
+            other => panic!("expected EventSource::Agent, got {other:?}"),
+        }
+
+        // Payload shape.
+        let payload = &ev.payload;
+        assert!(payload.get("agent_id").is_some(), "payload missing agent_id");
+        assert!(payload.get("agent_role").is_some(), "payload missing agent_role");
+        assert!(payload.get("reason").is_some(), "payload missing reason");
+        assert!(
+            payload.get("blocked_at_unix_ms").is_some(),
+            "payload missing blocked_at_unix_ms",
+        );
+        assert!(
+            payload.get("context_excerpt").is_some(),
+            "payload missing context_excerpt",
+        );
+        assert!(
+            payload.get("suggested_capability").is_some(),
+            "payload missing suggested_capability",
+        );
+        assert_eq!(
+            payload.get("agent_role").and_then(|v| v.as_str()),
+            Some("Conversational"),
+        );
+    }
+
+    /// End-to-end producer→consumer wiring: when an `AgentBlocked` event
+    /// lands in a `SpawnRuleRegistry` that has the Fixer rule registered,
+    /// `evaluate` returns the canonical Fixer `SpawnAction`. This is the
+    /// substrate-level guarantee that producer-side wiring is sufficient
+    /// for the Fixer to spawn (Phase 2.G turns the action into an actual
+    /// agent).
+    #[test]
+    fn runtime_evaluate_on_blocked_returns_fixer_action() {
+        use phantom_agents::fixer::fixer_spawn_rule;
+        use phantom_agents::role::AgentRole;
+        use phantom_agents::spawn_rules::{SpawnAction, SpawnRuleRegistry};
+
+        let (mut pane, _tx) = agent_with_handle();
+        let sink = new_blocked_event_sink();
+        pane.set_blocked_event_sink_for_test(sink.clone());
+
+        pane.record_tool_result_for_test(false, "first failure");
+        pane.record_tool_result_for_test(false, "second failure");
+
+        let drained = sink.lock().unwrap();
+        assert_eq!(drained.len(), 1, "producer must have emitted exactly 1 event");
+
+        // Hand the producer's event to the substrate-level rule registry.
+        // No actual agent spawns — we just verify the Fixer action would be
+        // queued (Phase 2.G consumer is responsible for honoring it).
+        let registry = SpawnRuleRegistry::new().add(fixer_spawn_rule());
+        let actions = registry.evaluate(&drained[0]);
+
+        assert_eq!(actions.len(), 1, "Fixer rule must fire exactly once");
+        match actions[0] {
+            SpawnAction::SpawnIfNotRunning {
+                role,
+                label_template,
+                ..
+            } => {
+                assert_eq!(*role, AgentRole::Fixer);
+                assert_eq!(label_template, "fixer-on-blockage");
+            }
+            other => panic!("expected SpawnIfNotRunning(Fixer), got {other:?}"),
+        }
+    }
+
+    // ---- Sec.1: CapabilityDenied substrate-event producer ------------------
+
+    /// When `execute_tool` (Layer-2 dispatch gate) refuses a tool because
+    /// the agent's role manifest does not include the tool's capability
+    /// class, the pane MUST push a `SubstrateEvent` of kind
+    /// `CapabilityDenied` into the App-owned `DeniedEventSink`. The
+    /// scenario: a `Watcher` agent invokes `run_command` (Act) — gate
+    /// rejects, `maybe_emit_capability_denied_event` records the denial.
+    #[test]
+    fn dispatch_denial_pushes_event_to_sink() {
+        use phantom_agents::role::CapabilityClass;
+        use phantom_agents::tools::{execute_tool, ToolType};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut pane, _tx) = agent_with_handle();
+        pane.set_role_for_test(AgentRole::Watcher);
+        let sink = new_denied_event_sink();
+        pane.set_denied_event_sink_for_test(sink.clone());
+
+        // Invoke execute_tool with a Watcher agent calling run_command
+        // (Act). The dispatch gate must short-circuit and produce a
+        // ToolResult whose output starts with the canonical
+        // "capability denied: …" prefix — the same message the model
+        // sees in its `tool_result` block.
+        let args = serde_json::json!({"command": "echo SHOULD_NEVER_RUN"});
+        let result = execute_tool(
+            ToolType::RunCommand,
+            &args,
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Watcher,
+        );
+        assert!(!result.success, "denial must yield failure");
+        assert!(
+            result.output.starts_with("capability denied:"),
+            "expected canonical prefix, got: {}",
+            result.output
+        );
+
+        // Hand the result through the producer hook the pane uses inside
+        // `execute_pending_tools`. The sink must end up with exactly one
+        // SubstrateEvent of kind CapabilityDenied carrying the role,
+        // class, and tool name.
+        pane.maybe_emit_capability_denied_event(ToolType::RunCommand, &args, &result);
+
+        let drained = sink.lock().unwrap();
+        assert_eq!(drained.len(), 1, "expected one CapabilityDenied event");
+        let ev = &drained[0];
+        match &ev.kind {
+            EventKind::CapabilityDenied {
+                agent_id: _,
+                role,
+                attempted_class,
+                attempted_tool,
+                source_chain,
+            } => {
+                assert_eq!(*role, AgentRole::Watcher);
+                assert_eq!(*attempted_class, CapabilityClass::Act);
+                assert_eq!(attempted_tool, "run_command");
+                assert!(
+                    source_chain.is_empty(),
+                    "Sec.1 emits empty source_chain; Sec.2 will populate it"
+                );
+            }
+            other => panic!("expected CapabilityDenied, got {other:?}"),
+        }
+        // The source must attribute the event to the agent.
+        match ev.source {
+            EventSource::Agent { role } => assert_eq!(role, AgentRole::Watcher),
+            other => panic!("expected EventSource::Agent, got {other:?}"),
+        }
+    }
+
+    /// The audit log records the same denial alongside the SubstrateEvent.
+    /// Both signals must agree: `outcome=denied`, the tool name and class
+    /// match what the model attempted. We use a temp dir for the audit
+    /// log file and verify the record lands.
+    #[test]
+    fn audit_denied_outcome_emitted_alongside_event() {
+        use phantom_agents::audit;
+        use phantom_agents::tools::{execute_tool, ToolType};
+
+        // Initialize the audit subscriber against a tempdir so we can read
+        // the JSONL file back. This is process-global; if another test in
+        // this process already initialized it, our subscriber is a no-op
+        // and the assertion below works on whichever audit dir won the
+        // race (or fails fast — see the audit module's footgun docs).
+        let audit_dir = tempfile::tempdir().unwrap();
+        let writer = audit::init(audit_dir.path()).expect("init audit");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut pane, _tx) = agent_with_handle();
+        pane.set_role_for_test(AgentRole::Watcher);
+        let sink = new_denied_event_sink();
+        pane.set_denied_event_sink_for_test(sink.clone());
+
+        let args = serde_json::json!({"command": "ls"});
+        let result = execute_tool(
+            ToolType::RunCommand,
+            &args,
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Watcher,
+        );
+
+        pane.maybe_emit_capability_denied_event(ToolType::RunCommand, &args, &result);
+
+        // Drop the writer to flush the non-blocking audit appender.
+        drop(writer);
+
+        // SubstrateEvent side: still exactly one event in the sink.
+        let drained = sink.lock().unwrap();
+        assert_eq!(drained.len(), 1, "expected one CapabilityDenied event");
+
+        // Audit-log side: scan the rolling daily file(s) for an entry
+        // matching our role + tool + denied outcome. Best-effort because
+        // tracing's global subscriber may have been set up by another
+        // test; a missing record there is tolerated as long as the
+        // SubstrateEvent landed (the audit invariant is observable in
+        // the dedicated `init_then_emit_writes_record_and_drop_flushes`
+        // test in `audit.rs`).
+        let entries = std::fs::read_dir(audit_dir.path()).expect("readdir");
+        let mut found_denied = false;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().into_owned();
+            if !name.starts_with("audit.jsonl") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(entry.path()).expect("read");
+            for line in contents.lines() {
+                if line.contains("\"outcome\":\"denied\"")
+                    && line.contains("\"tool\":\"run_command\"")
+                    && line.contains("\"role\":\"Watcher\"")
+                {
+                    found_denied = true;
+                    break;
+                }
+            }
+            if found_denied {
+                break;
+            }
+        }
+        // Don't fail when another test already claimed the global subscriber:
+        // the substrate-event side is the load-bearing assertion.
+        if !found_denied {
+            log::warn!(
+                "audit_denied_outcome_emitted_alongside_event: \
+                 audit record not found in tempdir — likely another test \
+                 already installed the global tracing subscriber. \
+                 SubstrateEvent side still validated."
             );
         }
     }

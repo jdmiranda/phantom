@@ -11,13 +11,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use crate::role::{AgentRole, CapabilityClass};
+
 // ---------------------------------------------------------------------------
 // ToolType
 // ---------------------------------------------------------------------------
 
 /// Tools available to agents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ToolType {
+    /// Default sentinel — see `dispatch.rs::PLACEHOLDER_TOOL`. The real
+    /// dispatch surface always overwrites this; the `Default` impl exists
+    /// purely so `ToolResult: Default` is a valid derive.
+    #[default]
     ReadFile,
     WriteFile,
     EditFile,
@@ -57,6 +63,96 @@ impl ToolType {
             _ => None,
         }
     }
+
+    /// The capability class this tool belongs to.
+    ///
+    /// Read-only observations (file reads, directory listings, git
+    /// inspection) are [`CapabilityClass::Sense`]. Mutations of the user's
+    /// world (writing files, editing files, running shell commands) are
+    /// [`CapabilityClass::Act`]. The value is consumed by [`execute_tool`]
+    /// and [`crate::dispatch::dispatch_tool`] to gate dispatch against the
+    /// calling agent's role manifest.
+    pub fn capability_class(&self) -> CapabilityClass {
+        match self {
+            Self::ReadFile
+            | Self::SearchFiles
+            | Self::ListFiles
+            | Self::GitStatus
+            | Self::GitDiff => CapabilityClass::Sense,
+            Self::WriteFile | Self::EditFile | Self::RunCommand => CapabilityClass::Act,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DispatchError
+// ---------------------------------------------------------------------------
+
+/// Why a tool dispatch was refused.
+///
+/// Returned from the dispatch entry-points when the call cannot proceed
+/// for reasons orthogonal to the tool's own logic. The agent runtime
+/// converts this into a `tool_result` block with `is_error: true` so the
+/// model sees the refusal in its next turn and can adjust.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchError {
+    /// The agent's role manifest does not include the tool's capability
+    /// class. A `Watcher` (Sense + Reflect + Compute) calling `run_command`
+    /// (Act) lands here.
+    CapabilityDenied {
+        role: AgentRole,
+        tool_class: CapabilityClass,
+    },
+    /// The dispatched name does not correspond to any known tool. Covers
+    /// LLM hallucinations and stale tool names from older API responses.
+    UnknownTool { name: String },
+}
+
+impl DispatchError {
+    /// Render the error as the `output` of a failing [`ToolResult`].
+    ///
+    /// Uses the exact phrasing the agent runtime surfaces to the model
+    /// (e.g. `"capability denied: Act not in Watcher manifest"`). The
+    /// model uses this to self-correct on its next turn.
+    pub fn to_tool_result_message(&self) -> String {
+        match self {
+            Self::CapabilityDenied { role, tool_class } => {
+                format!("capability denied: {tool_class:?} not in {role:?} manifest")
+            }
+            Self::UnknownTool { name } => {
+                format!("unknown tool: {name}")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_tool_result_message())
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
+/// Default-deny capability check.
+///
+/// Returns `Ok(())` iff `role`'s manifest declares `tool_class`. Otherwise
+/// returns [`DispatchError::CapabilityDenied`]. Used by [`execute_tool`]
+/// and the MCP dispatch path to gate every dispatch against the role
+/// manifest, regardless of whether the tool happened to be in the role's
+/// *advertised* tool list.
+pub fn check_capability(
+    role: &AgentRole,
+    tool_class: CapabilityClass,
+) -> Result<(), DispatchError> {
+    if role.has(tool_class) {
+        Ok(())
+    } else {
+        Err(DispatchError::CapabilityDenied {
+            role: *role,
+            tool_class,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -70,12 +166,104 @@ pub struct ToolCall {
     pub args: serde_json::Value,
 }
 
+/// Provenance tag attached to a tool call/result.
+///
+/// Records the `(tool_name, args_hash, source_event_id)` triple for every
+/// tool invocation so the runtime can later walk back through the input
+/// chain that led to a particular decision.
+///
+/// `args_hash` is the first 16 hex chars of a blake3 digest over the JSON
+/// args (matching `phantom_agents::audit::emit_tool_call`).
+/// `source_event_id` references the
+/// `phantom_memory::event_log::EventEnvelope::id` of the substrate event
+/// that triggered the call — `None` when no event log is wired
+/// (test/legacy paths).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolProvenance {
+    /// Wire name of the tool (matches [`ToolType::api_name`]).
+    pub tool_name: String,
+    /// First 16 hex chars of `blake3(args_json)`. Empty when unknown.
+    pub args_hash: String,
+    /// Id of the `phantom_memory::event_log::EventEnvelope` that
+    /// triggered this tool call. `None` when no event log is wired.
+    pub source_event_id: Option<u64>,
+}
+
+impl ToolProvenance {
+    /// Build provenance from a tool, JSON args, and an optional source event id.
+    ///
+    /// Hashes the args with the same algorithm as
+    /// `phantom_agents::audit::emit_tool_call` so the audit log and the
+    /// in-memory provenance stay consistent.
+    #[must_use]
+    pub fn from_call(
+        tool: ToolType,
+        args: &serde_json::Value,
+        source_event_id: Option<u64>,
+    ) -> Self {
+        let args_json = serde_json::to_string(args).unwrap_or_default();
+        Self {
+            tool_name: tool.api_name().to_owned(),
+            args_hash: hash_args_for_provenance(&args_json),
+            source_event_id,
+        }
+    }
+}
+
+/// Hash `args_json` with blake3, return the first 16 hex chars.
+///
+/// Mirrors `phantom_agents::audit::hash_args`; kept here so
+/// [`ToolProvenance`] doesn't have to reach into the audit module.
+fn hash_args_for_provenance(args_json: &str) -> String {
+    let mut hex = blake3::hash(args_json.as_bytes()).to_hex().to_string();
+    hex.truncate(16);
+    hex
+}
+
 /// Result of a tool execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Carries provenance for the call (tool name, args hash, optional source
+/// event id) so the runtime can later reconstruct the chain of substrate
+/// events that produced any given agent decision. The provenance fields
+/// are purely additive — pre-Sec.2 code that constructs a `ToolResult` with
+/// only `tool`/`success`/`output` keeps compiling via `..Default::default()`,
+/// leaving the new fields at their defaults (empty strings, `None`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool: ToolType,
     pub success: bool,
     pub output: String,
+    /// Wire name of the tool. Empty when not populated by the caller.
+    #[serde(default)]
+    pub tool_name: String,
+    /// First 16 hex chars of `blake3(args_json)`. Empty when not set.
+    #[serde(default)]
+    pub args_hash: String,
+    /// Id of the `phantom_memory::event_log::EventEnvelope` that
+    /// triggered this tool call.
+    #[serde(default)]
+    pub source_event_id: Option<u64>,
+}
+
+impl ToolResult {
+    /// Build the [`ToolProvenance`] view of this result.
+    #[must_use]
+    pub fn provenance(&self) -> ToolProvenance {
+        ToolProvenance {
+            tool_name: self.tool_name.clone(),
+            args_hash: self.args_hash.clone(),
+            source_event_id: self.source_event_id,
+        }
+    }
+
+    /// Attach provenance to an existing result.
+    #[must_use]
+    pub fn with_provenance(mut self, prov: ToolProvenance) -> Self {
+        self.tool_name = prov.tool_name;
+        self.args_hash = prov.args_hash;
+        self.source_event_id = prov.source_event_id;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -282,11 +470,54 @@ fn sandbox_path(working_dir: &Path, relative: &str) -> Result<PathBuf, String> {
 
 /// Execute a tool call and return the result.
 ///
+/// `role` is the calling agent's role; the tool's [`CapabilityClass`] is
+/// checked against the role's manifest *before* any side-effects run. A
+/// denied call returns a [`ToolResult`] with `success: false` and the
+/// canonical `"capability denied: <Class> not in <Role> manifest"` message
+/// — that's what the LLM sees in its next turn.
+///
 /// `working_dir` is the project root; all file operations are sandboxed to it.
-pub fn execute_tool(tool: ToolType, args: &serde_json::Value, working_dir: &str) -> ToolResult {
+///
+/// The returned [`ToolResult`] is tagged with provenance computed from the
+/// tool name and JSON args. Callers that have a substrate event id should
+/// use [`execute_tool_with_provenance`] instead so the chain is complete.
+pub fn execute_tool(
+    tool: ToolType,
+    args: &serde_json::Value,
+    working_dir: &str,
+    role: &AgentRole,
+) -> ToolResult {
+    execute_tool_with_provenance(tool, args, working_dir, role, None)
+}
+
+/// Like [`execute_tool`], but tags the resulting [`ToolResult`] with
+/// `(tool_name, args_hash, source_event_id)` so the runtime can later
+/// reconstruct the chain of inputs that led to the call.
+///
+/// The dispatch path through `agent_pane::execute_pending_tools` populates
+/// `source_event_id` with the current `phantom_memory::event_log` id (or
+/// `None` if no event log is wired). The audit-style `args_hash` is the
+/// first 16 hex chars of `blake3(args_json)` — same algorithm the audit
+/// log uses, so the in-memory chain and the on-disk audit record refer to
+/// identical hashes.
+pub fn execute_tool_with_provenance(
+    tool: ToolType,
+    args: &serde_json::Value,
+    working_dir: &str,
+    role: &AgentRole,
+    source_event_id: Option<u64>,
+) -> ToolResult {
+    // Default-deny at dispatch time. The role's manifest is the single
+    // source of truth — we do NOT trust that the caller already filtered
+    // the model's tool list.
+    if let Err(err) = check_capability(role, tool.capability_class()) {
+        return tool_err(tool, err.to_tool_result_message())
+            .with_provenance(ToolProvenance::from_call(tool, args, source_event_id));
+    }
+
     let root = Path::new(working_dir);
 
-    match tool {
+    let result = match tool {
         ToolType::ReadFile => execute_read_file(root, args),
         ToolType::WriteFile => execute_write_file(root, args),
         ToolType::EditFile => execute_edit_file(root, args),
@@ -295,7 +526,9 @@ pub fn execute_tool(tool: ToolType, args: &serde_json::Value, working_dir: &str)
         ToolType::GitStatus => execute_git_status(root),
         ToolType::GitDiff => execute_git_diff(root),
         ToolType::ListFiles => execute_list_files(root, args),
-    }
+    };
+
+    result.with_provenance(ToolProvenance::from_call(tool, args, source_event_id))
 }
 
 fn tool_err(tool: ToolType, msg: String) -> ToolResult {
@@ -303,6 +536,9 @@ fn tool_err(tool: ToolType, msg: String) -> ToolResult {
         tool,
         success: false,
         output: msg,
+        tool_name: tool.api_name().to_owned(),
+        args_hash: String::new(),
+        source_event_id: None,
     }
 }
 
@@ -311,6 +547,9 @@ fn tool_ok(tool: ToolType, output: String) -> ToolResult {
         tool,
         success: true,
         output,
+        tool_name: tool.api_name().to_owned(),
+        args_hash: String::new(),
+        source_event_id: None,
     }
 }
 
@@ -756,6 +995,7 @@ mod tests {
             ToolType::ReadFile,
             &serde_json::json!({ "path": "test.txt" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(result.success);
         assert_eq!(result.output, "hello phantom");
@@ -768,6 +1008,7 @@ mod tests {
             ToolType::ReadFile,
             &serde_json::json!({ "path": "../secret.txt" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
         assert!(result.output.contains("path traversal"));
@@ -780,6 +1021,7 @@ mod tests {
             ToolType::ReadFile,
             &serde_json::json!({}),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
         assert!(result.output.contains("missing"));
@@ -794,6 +1036,7 @@ mod tests {
             ToolType::WriteFile,
             &serde_json::json!({ "path": "out.txt", "content": "written" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(result.success, "write failed: {}", result.output);
 
@@ -808,6 +1051,7 @@ mod tests {
             ToolType::WriteFile,
             &serde_json::json!({ "path": "sub/dir/file.txt", "content": "nested" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(result.success, "write failed: {}", result.output);
 
@@ -822,6 +1066,7 @@ mod tests {
             ToolType::WriteFile,
             &serde_json::json!({ "path": "../evil.txt", "content": "pwned" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
     }
@@ -835,6 +1080,7 @@ mod tests {
             ToolType::RunCommand,
             &serde_json::json!({ "command": "echo hello" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(result.success);
         assert!(result.output.contains("hello"));
@@ -847,6 +1093,7 @@ mod tests {
             ToolType::RunCommand,
             &serde_json::json!({ "command": "false" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
     }
@@ -864,6 +1111,7 @@ mod tests {
             ToolType::SearchFiles,
             &serde_json::json!({ "pattern": "*.rs" }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(result.success);
         assert!(result.output.contains("a.rs"));
@@ -883,6 +1131,7 @@ mod tests {
             ToolType::ListFiles,
             &serde_json::json!({ "path": "." }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(result.success);
         assert!(result.output.contains("alpha.txt"));
@@ -898,6 +1147,7 @@ mod tests {
             ToolType::GitStatus,
             &serde_json::json!({}),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
     }
@@ -939,6 +1189,7 @@ mod tests {
                 "new_text": "println!(\"world\")"
             }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(result.success, "edit failed: {}", result.output);
 
@@ -960,6 +1211,7 @@ mod tests {
                 "new_text": "replacement"
             }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
         assert!(result.output.contains("not found"));
@@ -978,6 +1230,7 @@ mod tests {
                 "new_text": "bbb"
             }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
         assert!(result.output.contains("matches"));
@@ -994,6 +1247,7 @@ mod tests {
                 "new_text": "y"
             }),
             tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
         );
         assert!(!result.success);
     }
@@ -1014,5 +1268,106 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    // -- Sec.2 provenance tests ---------------------------------------------
+
+    #[test]
+    fn tool_result_carries_tool_name_and_args_hash() {
+        // execute_tool returns a ToolResult tagged with the tool's api_name
+        // and a 16-char hex args_hash. This is the substrate's promise that
+        // every tool result lands in agent history with provenance baked in.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("hello.txt"), "world").unwrap();
+
+        let result = execute_tool(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": "hello.txt" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+
+        assert_eq!(result.tool_name, "read_file");
+        assert_eq!(
+            result.args_hash.len(),
+            16,
+            "args_hash must be exactly 16 hex chars; got '{}'",
+            result.args_hash,
+        );
+        // 16 hex chars: each char in [0-9a-f].
+        assert!(
+            result.args_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "args_hash must be hex-only; got '{}'",
+            result.args_hash,
+        );
+    }
+
+    #[test]
+    fn args_hash_deterministic() {
+        // Same args → same hash. This is the property the runtime relies on
+        // when it cross-references provenance against the audit log.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), "first").unwrap();
+
+        let r1 = execute_tool(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": "a.txt" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        let r2 = execute_tool(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": "a.txt" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        let r3 = execute_tool(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": "different.txt" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+
+        assert_eq!(
+            r1.args_hash, r2.args_hash,
+            "identical args must produce identical hashes",
+        );
+        assert_ne!(
+            r1.args_hash, r3.args_hash,
+            "different args must produce different hashes",
+        );
+    }
+
+    #[test]
+    fn execute_tool_with_provenance_records_source_event_id() {
+        // When the dispatch path knows the substrate event id, it threads it
+        // into the result so source_chain_for_last_call can recover it.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("hello.txt"), "world").unwrap();
+
+        let result = execute_tool_with_provenance(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": "hello.txt" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+            Some(42),
+        );
+
+        assert_eq!(result.source_event_id, Some(42));
+        assert_eq!(result.tool_name, "read_file");
+    }
+
+    #[test]
+    fn tool_provenance_from_call_is_deterministic() {
+        // Direct test of the provenance helper used by callers that build a
+        // ToolResult outside execute_tool (the permission-denied branch in
+        // agent_pane::execute_pending_tools, for example).
+        let args = serde_json::json!({ "path": "/etc/passwd" });
+        let p1 = ToolProvenance::from_call(ToolType::ReadFile, &args, Some(7));
+        let p2 = ToolProvenance::from_call(ToolType::ReadFile, &args, Some(7));
+        assert_eq!(p1, p2);
+        assert_eq!(p1.tool_name, "read_file");
+        assert_eq!(p1.args_hash.len(), 16);
+        assert_eq!(p1.source_event_id, Some(7));
     }
 }

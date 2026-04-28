@@ -333,6 +333,7 @@ mod tests {
             y: 20.0,
             width: 400.0,
             height: 300.0,
+            ..Default::default()
         };
 
         // Verify render output structure.

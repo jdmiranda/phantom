@@ -572,6 +572,7 @@ mod tests {
             y: 0.0,
             width: 100.0,
             height: 50.0,
+            ..Default::default()
         };
         let output = app.render(&rect);
         assert_eq!(output.quads.len(), 1);
@@ -728,6 +729,7 @@ mod tests {
             y: 0.0,
             width: 80.0,
             height: 24.0,
+            ..Default::default()
         };
         let _ = app.render(&rect);
         assert!(app.is_visual());

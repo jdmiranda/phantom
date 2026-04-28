@@ -35,8 +35,26 @@ impl App {
         // Coordinator: tick all registered adapters and deliver bus messages.
         self.coordinator.update_all(dt_duration);
 
+        // Substrate runtime: reap dead supervisor children, drain pending
+        // substrate events into the on-disk log, and evaluate spawn rules.
+        // Cheap when nothing is pending; bounded by events pushed since the
+        // last tick.
+        self.runtime.tick();
+
+        // Inspector pane (if open): push a fresh InspectorView into the
+        // shared Arc<RwLock<…>> so the adapter sees up-to-date counts and
+        // events on the next render. No-op when no inspector pane is open.
+        self.refresh_inspector_snapshot();
+
         // Bridge: drain bus events for the brain observer and forward as AiEvents.
-        Self::drain_bus_to_brain(self.coordinator.bus_mut(), &self.brain);
+        // Now an instance method so command-boundary events can also flow into
+        // the per-pane capture pipeline (sealing open bundles on
+        // `Event::CommandComplete`). We can't keep the static helper signature
+        // because both sides — `App::brain` (for AI events) and
+        // `App::capture_state` / `App::bundle_store` (for bundle sealing) —
+        // need to be reachable, and routing through `&mut App` is the
+        // simplest way to do that without a tangle of disjoint borrows.
+        self.drain_bus_to_brain();
 
         // Reap dead adapters (PTY exited).
         let dead_adapters: Vec<_> = self.coordinator.all_app_ids()
@@ -60,10 +78,26 @@ impl App {
         // Boot state machine.
         if self.state == AppState::Boot {
             self.boot.update(dt);
+            // Demo mode: auto-skip the cinematic at 2s so iteration runs
+            // never need a key-press to dismiss the boot screen.
+            if self.demo_mode && self.boot.elapsed() >= 2.0 && !self.boot.is_done() {
+                self.boot.skip_immediate();
+            }
             if self.boot.is_done() {
                 info!("Boot sequence complete, transitioning to terminal");
                 self.state = AppState::Terminal;
             }
+        }
+
+        // Demo mode: spawn one example agent pane the first time we land in
+        // Terminal, so each run has visible substrate content.
+        if self.demo_mode && self.state == AppState::Terminal && !self.demo_post_boot_done {
+            self.demo_post_boot_done = true;
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+                prompt: "Demo mode: introduce yourself in one sentence and \
+                    list a few tasks I can hand to you in this terminal."
+                    .to_owned(),
+            });
         }
 
         // Supervisor command polling (drain all pending; heartbeats are on a dedicated thread).
@@ -101,6 +135,33 @@ impl App {
 
         // Spawn agent panes (deferred from brain action loop to avoid borrow conflict).
         for task in tasks_to_spawn {
+            let _ = self.spawn_agent_pane(task);
+        }
+
+        // Drain Composer-side `spawn_subagent` requests. The Composer's tool
+        // handler pushes onto `pending_spawn_subagent` synchronously when the
+        // model invokes `spawn_subagent`; we honor each request here so the
+        // actual `App::spawn_agent_pane_with_opts` call (which needs the
+        // coordinator + scene + layout) runs on the App's owning thread.
+        // The queue is `Arc<Mutex<VecDeque<…>>>` so dispatch contexts can
+        // push without holding a reference back to the App; lock briefly to
+        // drain the snapshot into a local Vec.
+        let pending_subagents: Vec<_> = match self.pending_spawn_subagent.lock() {
+            Ok(mut q) => q.drain(..).collect(),
+            Err(_) => Vec::new(),
+        };
+        for req in pending_subagents {
+            let task = phantom_agents::AgentTask::FreeForm { prompt: req.task.clone() };
+            // The current `spawn_agent_pane` doesn't take role / label / chat_model
+            // because the underlying `AgentPane::spawn` predates the role+chat_model
+            // fields wired into `composer_tools::SpawnSubagentRequest`. We dispatch
+            // the spawn through the existing path; the role/label/chat_model
+            // metadata is preserved on the queue entry for the next phase wiring.
+            let _ = req.role; // silence unused-field warnings until full wiring lands
+            let _ = req.label;
+            let _ = req.chat_model;
+            let _ = req.parent;
+            let _ = req.assigned_id;
             let _ = self.spawn_agent_pane(task);
         }
 
@@ -173,6 +234,20 @@ impl App {
 
         // Poll agent panes for streaming output and emit bus events on completion.
         self.poll_agent_panes();
+
+        // Lars fix-thread consumer (Phase 2.G): drain any `EventKind::AgentBlocked`
+        // substrate events that agent panes pushed into `App.blocked_event_sink`
+        // during this frame's tool-result processing, and forward each into the
+        // runtime's pending queue. The runtime's `tick()` (called above, before
+        // `poll_agent_panes`) has already drained the previous frame's pending,
+        // so these events will be evaluated by spawn rules on the *next* tick —
+        // which is exactly when `last_actions()` will surface the queued Fixer
+        // `SpawnAction`.
+        let blocked = self.drain_blocked_events();
+        for event in blocked {
+            self.runtime.push_event(event);
+        }
+
         for pane in &mut self.agent_panes {
             if !pane.event_emitted
                 && matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed)
@@ -260,6 +335,15 @@ impl App {
         let now_wall = chrono_time_string();
         self.status_bar.set_time(&now_wall);
 
+        // Per-pane capture pipeline: read sub-rects of the (previous frame's)
+        // scene texture, dedup via dhash, accumulate frames into open bundles,
+        // and submit sealed bundles to the job pool for off-thread encryption
+        // + persistence. Best-effort: any failure logs and continues.
+        // No-op when `bundle_store` is None.
+        if self.state == AppState::Terminal {
+            self.capture_panes();
+        }
+
         // Watchdog: log a heartbeat every ~10 seconds for crash forensics.
         self.watchdog_frame += 1;
         if now.duration_since(self.watchdog_last).as_secs() >= 10 {
@@ -279,56 +363,83 @@ impl App {
     // Bus → Brain bridge
     // -----------------------------------------------------------------------
 
-    /// Drain bus events for the brain observer (ID 0xFFFF_FFFE) and convert
-    /// them to AiEvents. Static method to avoid borrow conflicts.
-    fn drain_bus_to_brain(
-        bus: &mut phantom_adapter::EventBus,
-        brain: &Option<phantom_brain::brain::BrainHandle>,
-    ) {
-        // Skip the drain entirely if no brain is running (avoids Vec alloc).
-        if brain.is_none() {
+    /// Drain bus events for the brain observer (ID 0xFFFF_FFFE), forward
+    /// them as `AiEvent`s, and route command-boundary events into the
+    /// per-pane capture pipeline.
+    ///
+    /// Bus draining returns an owned `Vec<BusMessage>` so the
+    /// `&mut self.coordinator` borrow is released before we touch
+    /// `self.brain` (via `send_event`) or `self.capture_state` /
+    /// `self.bundle_store` (via `seal_pane_bundle`). That keeps the borrow
+    /// checker happy without threading a closure through a static helper.
+    fn drain_bus_to_brain(&mut self) {
+        const BRAIN_OBSERVER_ID: u32 = 0xFFFF_FFFE;
+
+        // Cheap skip: nothing to do if neither the brain nor the capture
+        // pipeline cares. Still drain to keep the queue from growing.
+        let brain_active = self.brain.is_some();
+        let capture_active = self.bundle_store.is_some();
+        if !brain_active && !capture_active {
+            let _ = self.coordinator.bus_mut().drain_for(BRAIN_OBSERVER_ID);
             return;
         }
-        const BRAIN_OBSERVER_ID: u32 = 0xFFFF_FFFE;
-        let msgs = bus.drain_for(BRAIN_OBSERVER_ID);
+
+        let msgs = self.coordinator.bus_mut().drain_for(BRAIN_OBSERVER_ID);
         if msgs.is_empty() {
             return;
         }
-        let Some(brain) = brain else { return };
 
         for msg in msgs {
-            let ai_event = match msg.event {
-                Event::TerminalOutput { bytes, .. } => {
-                    Some(AiEvent::OutputChunk(format!("[{bytes} bytes]")))
+            // 1) Forward into the brain (if running) as an AiEvent.
+            if let Some(ref brain) = self.brain {
+                let ai_event = match &msg.event {
+                    Event::TerminalOutput { bytes, .. } => {
+                        Some(AiEvent::OutputChunk(format!("[{bytes} bytes]")))
+                    }
+                    Event::CommandComplete { exit_code, .. } => {
+                        Some(AiEvent::CommandComplete(
+                            phantom_semantic::ParsedOutput {
+                                command: String::new(),
+                                command_type: phantom_semantic::CommandType::Unknown,
+                                exit_code: Some(*exit_code),
+                                content_type: phantom_semantic::ContentType::PlainText,
+                                errors: vec![],
+                                warnings: vec![],
+                                duration_ms: None,
+                                raw_output: String::new(),
+                            },
+                        ))
+                    }
+                    Event::AgentTaskComplete { agent_id, success, summary } => {
+                        Some(AiEvent::AgentComplete {
+                            id: *agent_id,
+                            success: *success,
+                            summary: summary.clone(),
+                        })
+                    }
+                    Event::AgentError { agent_id, error } => {
+                        Some(AiEvent::AgentComplete {
+                            id: *agent_id,
+                            success: false,
+                            summary: error.clone(),
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(event) = ai_event {
+                    let _ = brain.send_event(event);
                 }
-                Event::CommandComplete { exit_code, .. } => {
-                    Some(AiEvent::CommandComplete(
-                        phantom_semantic::ParsedOutput {
-                            command: String::new(),
-                            command_type: phantom_semantic::CommandType::Unknown,
-                            exit_code: Some(exit_code),
-                            content_type: phantom_semantic::ContentType::PlainText,
-                            errors: vec![],
-                            warnings: vec![],
-                            duration_ms: None,
-                            raw_output: String::new(),
-                        },
-                    ))
-                }
-                Event::AgentTaskComplete { agent_id, success, summary } => {
-                    Some(AiEvent::AgentComplete { id: agent_id, success, summary })
-                }
-                Event::AgentError { agent_id, error } => {
-                    Some(AiEvent::AgentComplete {
-                        id: agent_id,
-                        success: false,
-                        summary: error,
-                    })
-                }
-                _ => None,
-            };
-            if let Some(event) = ai_event {
-                let _ = brain.send_event(event);
+            }
+
+            // 2) Route command-boundary events into the capture pipeline.
+            //    `app_id` on the event is the pane that completed a
+            //    command — it maps 1:1 to the `AppId` keyed in the capture
+            //    state map. No transcript text is carried on the bus event
+            //    itself, so `intent` is `None` here; future PTY-side
+            //    wiring (shell prompt detection) can route the actual
+            //    command text through `App::on_command_boundary`.
+            if let Event::CommandComplete { app_id, .. } = &msg.event {
+                let _ = self.on_command_boundary(*app_id, None);
             }
         }
     }
@@ -584,5 +695,173 @@ impl App {
             "focused_adapter": self.coordinator.focused(),
             "theme": self.theme.name,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Lars fix-thread consumer wiring (Phase 2.G)
+// ---------------------------------------------------------------------------
+//
+// We can't construct a full `App` here without a GPU, so the tests exercise
+// the substrate slice the consumer actually depends on:
+// `BlockedEventSink` → drain → `AgentRuntime::push_event` → `tick()` →
+// `last_actions()` returning a Fixer `SpawnAction`. The drain+forward step
+// mirrors the real one-liner spliced into `App::update` after
+// `poll_agent_panes`, so a green test here is a green producer→consumer
+// loop in production.
+#[cfg(test)]
+mod tests {
+    use phantom_agents::role::AgentRole;
+    use phantom_agents::spawn_rules::{
+        EventKind, EventSource as SubstrateEventSource, SpawnAction, SubstrateEvent,
+    };
+
+    use crate::agent_pane::{BlockedEventSink, new_blocked_event_sink};
+    use crate::runtime::{AgentRuntime, RuntimeConfig};
+
+    /// Build an `EventKind::AgentBlocked` event with the canonical payload
+    /// shape documented in `phantom_agents::fixer`.
+    fn blocked_event(agent_id: u64, reason: &str) -> SubstrateEvent {
+        SubstrateEvent {
+            kind: EventKind::AgentBlocked {
+                agent_id,
+                reason: reason.to_string(),
+            },
+            payload: serde_json::json!({
+                "agent_id": agent_id,
+                "agent_role": "Conversational",
+                "reason": reason,
+                "blocked_at_unix_ms": 0,
+                "context_excerpt": "",
+                "suggested_capability": "Sense",
+            }),
+            source: SubstrateEventSource::Agent {
+                role: AgentRole::Conversational,
+            },
+        }
+    }
+
+    /// Build a fresh runtime under a temp dir so the on-disk event log
+    /// doesn't pollute `~/.config/phantom`.
+    fn make_runtime() -> (AgentRuntime, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = RuntimeConfig::under_dir(dir.path());
+        let rt = AgentRuntime::new(cfg, Vec::new()).expect("runtime open");
+        (rt, dir)
+    }
+
+    /// Mirror of the consumer one-liner in `App::update`: drain the sink and
+    /// forward each event into the runtime's pending queue.
+    fn drain_into(sink: &BlockedEventSink, rt: &AgentRuntime) {
+        let drained: Vec<SubstrateEvent> = match sink.lock() {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(_) => Vec::new(),
+        };
+        for ev in drained {
+            rt.push_event(ev);
+        }
+    }
+
+    /// Producer pushes one `AgentBlocked` event into the sink, the consumer
+    /// drains it into the runtime, the next tick fires the registered
+    /// `fixer_spawn_rule`, and `last_actions()` surfaces the Fixer
+    /// `SpawnAction`. This is the end-to-end producer→consumer guarantee.
+    #[test]
+    fn blocked_events_drained_from_sink_into_runtime() {
+        let (mut rt, _dir) = make_runtime();
+        let sink = new_blocked_event_sink();
+
+        // Producer: an agent crossed `TOOL_BLOCK_THRESHOLD` and pushed.
+        sink.lock()
+            .expect("sink lock")
+            .push(blocked_event(7, "2+ consecutive tool failures: ENOENT"));
+
+        // Consumer (the one-liner): drain → forward → tick.
+        drain_into(&sink, &rt);
+        rt.tick();
+
+        // Sink must be empty post-drain.
+        assert!(
+            sink.lock().expect("sink lock").is_empty(),
+            "sink must be drained after forward"
+        );
+
+        // Fixer spawn rule must have fired exactly once.
+        let actions = rt.last_actions();
+        assert_eq!(
+            actions.len(),
+            1,
+            "Fixer spawn rule must fire exactly once for a single AgentBlocked event"
+        );
+        match &actions[0].action {
+            SpawnAction::SpawnIfNotRunning {
+                role,
+                label_template,
+                ..
+            } => {
+                assert_eq!(*role, AgentRole::Fixer);
+                assert_eq!(label_template, "fixer-on-blockage");
+            }
+            other => panic!("expected SpawnIfNotRunning(Fixer), got {other:?}"),
+        }
+    }
+
+    /// Empty sink → no actions queued. The consumer must be a no-op when
+    /// no producer has pushed.
+    #[test]
+    fn empty_sink_no_op() {
+        let (mut rt, _dir) = make_runtime();
+        let sink = new_blocked_event_sink();
+
+        drain_into(&sink, &rt);
+        rt.tick();
+
+        assert!(
+            rt.last_actions().is_empty(),
+            "empty sink must yield zero queued actions"
+        );
+    }
+
+    /// Three blocked events pushed (e.g. three different stuck agents) all
+    /// land in the runtime, all match the Fixer rule, and `last_actions()`
+    /// surfaces three queued Fixer `SpawnAction`s.
+    #[test]
+    fn multiple_blocked_events_all_drained() {
+        let (mut rt, _dir) = make_runtime();
+        let sink = new_blocked_event_sink();
+
+        // Producer: three distinct agents got stuck this frame.
+        {
+            let mut q = sink.lock().expect("sink lock");
+            q.push(blocked_event(1, "missing tool"));
+            q.push(blocked_event(2, "permission denied"));
+            q.push(blocked_event(3, "command not found"));
+        }
+
+        drain_into(&sink, &rt);
+        rt.tick();
+
+        // Sink fully drained.
+        assert!(
+            sink.lock().expect("sink lock").is_empty(),
+            "sink must be empty after the consumer pass"
+        );
+
+        // All three events triggered the Fixer rule.
+        let actions = rt.last_actions();
+        assert_eq!(
+            actions.len(),
+            3,
+            "all 3 AgentBlocked events must each queue a Fixer action; got {}",
+            actions.len(),
+        );
+        for queued in actions {
+            match &queued.action {
+                SpawnAction::SpawnIfNotRunning { role, .. } => {
+                    assert_eq!(*role, AgentRole::Fixer);
+                }
+                other => panic!("expected SpawnIfNotRunning(Fixer), got {other:?}"),
+            }
+        }
     }
 }

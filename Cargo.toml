@@ -19,6 +19,11 @@ members = [
     "crates/phantom-scene",
     "crates/phantom-brain",
     "crates/phantom-adapter",
+    # Capture / bundle pipeline (Phase 2.G).
+    "crates/phantom-vision",
+    "crates/phantom-bundles",
+    "crates/phantom-bundle-store",
+    "crates/phantom-embeddings",
 ]
 resolver = "2"
 

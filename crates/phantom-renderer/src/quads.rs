@@ -15,6 +15,19 @@ use wgpu::{
     VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
+// === ClipRect parallel buffer pipeline (Phase 0.D — DO NOT DROP) ===
+//
+// The `ClipRect` newtype lives in `crate::clip` (its own file) so that
+// concurrent rewrites of this larger module cannot accidentally drop it.
+// We re-export it here so external code can keep importing it as
+// `phantom_renderer::quads::ClipRect`.
+//
+// If you remove this re-export or move ClipRect back into this file,
+// the integration test at `tests/clip_rect.rs` will fail to compile
+// AND the type may be silently dropped on the next concurrent edit.
+// See `crates/phantom-renderer/src/clip.rs` for the canonical home.
+pub use crate::clip::ClipRect;
+
 // ---------------------------------------------------------------------------
 // WGSL shaders
 // ---------------------------------------------------------------------------
@@ -33,6 +46,9 @@ struct QuadInstance {
     @location(1) size: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) border_radius: f32,
+    // Phase 0.D — per-instance scissor rect [x, y, w, h] in pixels.
+    // w<=0 || h<=0 means "no clipping" (the ClipRect::NONE sentinel).
+    @location(4) clip_rect: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -41,6 +57,8 @@ struct VertexOutput {
     @location(1) local_uv: vec2<f32>,   // 0..1 within the quad
     @location(2) size_px: vec2<f32>,     // quad size in pixels
     @location(3) border_radius: f32,
+    @location(4) frag_pos: vec2<f32>,   // pixel position of this fragment
+    @location(5) clip_rect: vec4<f32>,  // forwarded clip rect
 };
 
 // Unit quad: two triangles covering (0,0) to (1,1).
@@ -78,6 +96,8 @@ fn vs_main(
     out.local_uv = uv;
     out.size_px = instance.size;
     out.border_radius = instance.border_radius;
+    out.frag_pos = pixel_pos;
+    out.clip_rect = instance.clip_rect;
     return out;
 }
 
@@ -91,6 +111,17 @@ fn sdf_rounded_rect(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Phase 0.D — per-instance clipping. clip_rect.zw > 0 enables the
+    // test; w<=0 || h<=0 is the ClipRect::NONE sentinel (no clipping).
+    if in.clip_rect.z > 0.0 && in.clip_rect.w > 0.0 {
+        let cmin = in.clip_rect.xy;
+        let cmax = in.clip_rect.xy + in.clip_rect.zw;
+        if in.frag_pos.x < cmin.x || in.frag_pos.x > cmax.x ||
+           in.frag_pos.y < cmin.y || in.frag_pos.y > cmax.y {
+            discard;
+        }
+    }
+
     // Early out: no border radius means a plain rectangle — skip SDF math.
     if in.border_radius <= 0.0 {
         return in.color;
@@ -182,16 +213,30 @@ struct Uniforms {
 // ---------------------------------------------------------------------------
 
 /// Instanced quad renderer. Draws all quads in a single draw call.
+///
+/// === ClipRect parallel buffer pipeline (Phase 0.D — DO NOT DROP) ===
+/// `clip_buf` is uploaded in lockstep with `instance_buf` (one ClipRect per
+/// QuadInstance). The shader reads the clip-rect attribute at
+/// `@location(4)` and discards fragments outside the rect when w>0 && h>0.
+/// `prepare()` synthesizes a `vec![ClipRect::NONE; quads.len()]` so all
+/// existing call sites keep working unchanged.
 #[allow(dead_code)]
 pub struct QuadRenderer {
     pipeline: RenderPipeline,
     instance_buf: Buffer,
+    /// Phase 0.D — parallel buffer of `ClipRect` instances, same length
+    /// as `instance_buf`. See module-level `// === ClipRect parallel buffer
+    /// pipeline ===` comment block.
+    clip_buf: Buffer,
     uniform_buf: Buffer,
     bind_group: BindGroup,
     bind_group_layout: BindGroupLayout,
     instance_count: u32,
     /// Capacity of the instance buffer in number of quads.
     instance_capacity: u32,
+    /// Capacity of the clip buffer in number of clip rects.
+    /// Kept in lockstep with `instance_capacity` after every grow.
+    clip_capacity: u32,
 }
 
 /// Initial instance buffer capacity (number of quads).
@@ -236,7 +281,9 @@ impl QuadRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[QuadInstance::layout()],
+                // Phase 0.D — second vertex buffer is the parallel ClipRect
+                // stream at shader_location 4. DO NOT DROP this entry.
+                buffers: &[QuadInstance::layout(), ClipRect::buffer_layout()],
             },
             fragment: Some(FragmentState {
                 module: &shader,
@@ -277,6 +324,15 @@ impl QuadRenderer {
             mapped_at_creation: false,
         });
 
+        // -- Phase 0.D parallel clip buffer (pre-allocated) --
+        // Same capacity as instance_buf; uploaded in lockstep.
+        let clip_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quad-clip-buf"),
+            size: (INITIAL_CAPACITY as u64) * (std::mem::size_of::<ClipRect>() as u64),
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // -- Bind group --
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("quad-bind-group"),
@@ -290,19 +346,22 @@ impl QuadRenderer {
         Self {
             pipeline,
             instance_buf,
+            clip_buf,
             uniform_buf,
             bind_group,
             bind_group_layout,
             instance_count: 0,
             instance_capacity: INITIAL_CAPACITY,
+            clip_capacity: INITIAL_CAPACITY,
         }
     }
 
     /// Upload quad instances and screen-size uniform for the current frame.
     ///
-    /// Call this once per frame before `render`. If the instance buffer is too
-    /// small it will be reallocated (and the bind group remains valid since the
-    /// instance buffer is not bound via a bind group).
+    /// Thin wrapper around `prepare_with_clips`: synthesizes a slice of
+    /// `ClipRect::NONE` so existing call sites (50+ across the workspace)
+    /// keep compiling unchanged. New code that needs per-instance clipping
+    /// should call `prepare_with_clips` directly.
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -310,6 +369,37 @@ impl QuadRenderer {
         quads: &[QuadInstance],
         screen_size: [f32; 2],
     ) {
+        // === ClipRect parallel buffer pipeline (Phase 0.D — DO NOT DROP) ===
+        // We MUST upload the clip buffer alongside quads, even when no
+        // clipping is requested, because the pipeline expects two vertex
+        // buffers. Synthesizing the NONE sentinel preserves the legacy API.
+        let clips = vec![ClipRect::NONE; quads.len()];
+        self.prepare_with_clips(device, queue, quads, &clips, screen_size);
+    }
+
+    /// Upload quad instances paired with per-instance clip rects.
+    ///
+    /// === ClipRect parallel buffer pipeline (Phase 0.D — DO NOT DROP) ===
+    /// `quads` and `clips` must be the same length; this is asserted.
+    /// The buffers are uploaded in lockstep and read in lockstep by the
+    /// pipeline (location 0..3 from `instance_buf`, location 4 from
+    /// `clip_buf`). Use `ClipRect::NONE` for instances that should not
+    /// be clipped.
+    pub fn prepare_with_clips(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        quads: &[QuadInstance],
+        clips: &[ClipRect],
+        screen_size: [f32; 2],
+    ) {
+        assert_eq!(
+            quads.len(),
+            clips.len(),
+            "quads and clips slices must have the same length \
+             (parallel-buffer invariant)"
+        );
+
         // -- Update uniforms --
         let uniforms = Uniforms {
             screen_size,
@@ -322,10 +412,12 @@ impl QuadRenderer {
             return;
         }
 
-        let required_bytes =
+        let quad_required_bytes =
             (quads.len() as u64) * (std::mem::size_of::<QuadInstance>() as u64);
+        let clip_required_bytes =
+            (clips.len() as u64) * (std::mem::size_of::<ClipRect>() as u64);
 
-        // Grow buffer if needed (double until large enough).
+        // Grow instance buffer if needed (double until large enough).
         if quads.len() as u32 > self.instance_capacity {
             let mut new_cap = self.instance_capacity;
             while new_cap < quads.len() as u32 {
@@ -341,10 +433,31 @@ impl QuadRenderer {
             log::debug!("quad instance buffer grown to {new_cap} quads");
         }
 
+        // Grow clip buffer in lockstep with the instance buffer.
+        if clips.len() as u32 > self.clip_capacity {
+            let mut new_cap = self.clip_capacity;
+            while new_cap < clips.len() as u32 {
+                new_cap *= 2;
+            }
+            self.clip_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("quad-clip-buf"),
+                size: (new_cap as u64) * (std::mem::size_of::<ClipRect>() as u64),
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.clip_capacity = new_cap;
+            log::debug!("quad clip buffer grown to {new_cap} clips");
+        }
+
         queue.write_buffer(
             &self.instance_buf,
             0,
-            &bytemuck::cast_slice(quads)[..required_bytes as usize],
+            &bytemuck::cast_slice(quads)[..quad_required_bytes as usize],
+        );
+        queue.write_buffer(
+            &self.clip_buf,
+            0,
+            &bytemuck::cast_slice(clips)[..clip_required_bytes as usize],
         );
     }
 
@@ -359,6 +472,9 @@ impl QuadRenderer {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instance_buf.slice(..));
+        // === ClipRect parallel buffer pipeline (Phase 0.D — DO NOT DROP) ===
+        // Slot 1 is the parallel ClipRect stream consumed at @location(4).
+        render_pass.set_vertex_buffer(1, self.clip_buf.slice(..));
         // 6 vertices per quad (two triangles), N instances.
         render_pass.draw(0..6, 0..self.instance_count);
     }

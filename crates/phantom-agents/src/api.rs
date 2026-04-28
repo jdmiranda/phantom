@@ -548,6 +548,7 @@ mod tests {
             tool: ToolType::ReadFile,
             success: true,
             output: "127.0.0.1 localhost".into(),
+            ..Default::default()
         })];
         let ids = vec!["toolu_abc123".to_owned()];
         let result = build_messages_with_ids(&messages, &ids);
@@ -569,6 +570,7 @@ mod tests {
             tool: ToolType::ReadFile,
             success: false,
             output: "permission denied".into(),
+            ..Default::default()
         })];
         let result = build_messages(&messages);
         let content = result[0]["content"].as_array().unwrap();
@@ -582,11 +584,13 @@ mod tests {
                 tool: ToolType::ReadFile,
                 success: true,
                 output: "ok".into(),
+            ..Default::default()
             }),
             AgentMessage::ToolResult(ToolResult {
                 tool: ToolType::ListFiles,
                 success: true,
                 output: "also ok".into(),
+            ..Default::default()
             }),
         ];
         let result = build_messages(&messages);
@@ -607,6 +611,7 @@ mod tests {
                 tool: ToolType::ReadFile,
                 success: true,
                 output: "[server]\nport = 8080".into(),
+            ..Default::default()
             }),
             AgentMessage::Assistant("The config file sets the server port to 8080.".into()),
         ];

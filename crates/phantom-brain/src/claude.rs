@@ -148,6 +148,7 @@ pub fn investigate(
 ) -> Result<String, String> {
     use phantom_agents::api::{ApiEvent, ClaudeConfig, send_message};
     use phantom_agents::agent::{Agent, AgentMessage, AgentTask};
+    use phantom_agents::role::AgentRole;
     use phantom_agents::tools::{available_tools, execute_tool};
 
     let config = ClaudeConfig::from_env()
@@ -192,7 +193,15 @@ pub fn investigate(
             agent.push_message(AgentMessage::ToolCall(call.clone()));
         }
         for (_, call) in pending {
-            let result = execute_tool(call.tool, &call.args, working_dir);
+            // The brain's claude path runs as a Conversational agent (matches
+            // `agent_pane`'s default). The capability gate inside
+            // `execute_tool` rejects Act-class tools without this hint.
+            let result = execute_tool(
+                call.tool,
+                &call.args,
+                working_dir,
+                &AgentRole::Conversational,
+            );
             agent.push_message(AgentMessage::ToolResult(result));
         }
     }
