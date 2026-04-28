@@ -33,6 +33,29 @@ pub enum AgentStatus {
     Done,
     /// Completed with an error.
     Failed,
+    /// Terminal failure requiring manual retry. Reason stored in Agent::flatline_reason.
+    Flatline,
+}
+
+impl AgentStatus {
+    /// Returns true iff transitioning from `self` to `next` is a valid
+    /// lifecycle move. Invalid transitions indicate a bug in the caller.
+    pub fn can_transition_to(self, next: AgentStatus) -> bool {
+        use AgentStatus::*;
+        matches!(
+            (self, next),
+            (Queued, Working)
+                | (Working, WaitingForTool)
+                | (Working, Done)
+                | (Working, Failed)
+                | (Working, Flatline)
+                | (WaitingForTool, Working)
+                | (WaitingForTool, Failed)
+                | (WaitingForTool, Flatline)
+                | (Failed, Queued)    // retry
+                | (Flatline, Queued)  // manual retry
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +124,8 @@ pub struct Agent {
     pub created_at: Instant,
     /// When this agent finished (if it has).
     pub completed_at: Option<Instant>,
+    /// Reason for entering Flatline state. Set by `flatline()`.
+    pub flatline_reason: Option<String>,
 }
 
 impl Agent {
@@ -114,6 +139,7 @@ impl Agent {
             output_log: Vec::new(),
             created_at: Instant::now(),
             completed_at: None,
+            flatline_reason: None,
         }
     }
 
@@ -164,6 +190,24 @@ impl Agent {
             AgentStatus::Failed
         };
         self.completed_at = Some(Instant::now());
+    }
+
+    /// Transition to Flatline — terminal failure requiring manual retry.
+    ///
+    /// Flatline is intentionally terminal: unlike Failed, it does not
+    /// auto-retry. The user must explicitly call `retry()` to re-queue.
+    pub fn flatline(&mut self, reason: impl Into<String>) {
+        self.status = AgentStatus::Flatline;
+        self.flatline_reason = Some(reason.into());
+        self.completed_at = Some(Instant::now());
+    }
+
+    /// Reset a flatlined agent back to Queued for manual retry.
+    pub fn retry(&mut self) {
+        debug_assert_eq!(self.status, AgentStatus::Flatline, "retry() called on non-flatlined agent");
+        self.status = AgentStatus::Queued;
+        self.flatline_reason = None;
+        self.completed_at = None;
     }
 
     /// Duration since creation.
@@ -318,6 +362,7 @@ impl Agent {
             AgentStatus::WaitingForTool => "WAITING",
             AgentStatus::Done => "DONE",
             AgentStatus::Failed => "FAILED",
+            AgentStatus::Flatline => "FLATLINE",
         };
 
         let elapsed = self.elapsed();

@@ -439,6 +439,7 @@ fn run_agent_loop(
     let status_tag = match agent.status {
         AgentStatus::Done => "DONE",
         AgentStatus::Failed => "FAILED",
+        AgentStatus::Flatline => "FLATLINE",
         _ => "ACTIVE",
     };
     println!("[AGENT #{}]: {status_tag}", agent_id);
@@ -467,6 +468,9 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             }
             AiAction::DismissAdapter { app_id } => {
                 println!("[BRAIN]: dismiss adapter {app_id}");
+            }
+            AiAction::AgentFlatlined { id, reason } => {
+                println!("[BRAIN]: agent {id} flatlined: {reason}");
             }
             AiAction::DoNothing => {}
         }

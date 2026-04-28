@@ -48,6 +48,7 @@ pub mod goals;
 pub mod ollama;
 pub mod orchestrator;
 pub mod proactive;
+pub mod reconciler;
 pub mod router;
 pub mod scoring;
 pub mod skill_store;

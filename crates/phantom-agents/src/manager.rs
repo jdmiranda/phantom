@@ -67,7 +67,7 @@ impl AgentManager {
     /// Remove completed/failed agents older than `max_age`.
     pub fn cleanup(&mut self, max_age: Duration) {
         self.agents.retain(|agent| {
-            let dominated = matches!(agent.status, AgentStatus::Done | AgentStatus::Failed);
+            let dominated = matches!(agent.status, AgentStatus::Done | AgentStatus::Failed | AgentStatus::Flatline);
             if !dominated {
                 return true; // keep active agents
             }

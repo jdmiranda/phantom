@@ -123,6 +123,11 @@ pub enum AiAction {
     /// Dismiss (remove) an adapter by its AppId.
     DismissAdapter { app_id: u32 },
 
+    /// An agent hit its retry limit or an unrecoverable error.
+    /// The reconciler emits this when a TaskLedger step exhausts max_attempts
+    /// or a stall timeout fires. Requires manual retry to clear.
+    AgentFlatlined { id: AgentId, reason: String },
+
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,
 }

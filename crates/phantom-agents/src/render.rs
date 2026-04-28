@@ -36,7 +36,7 @@ impl AgentPaneStyle {
             AgentStatus::Working | AgentStatus::WaitingForTool => Self::working(),
             AgentStatus::Queued => Self::queued(),
             AgentStatus::Done => Self::done(),
-            AgentStatus::Failed => Self::failed(),
+            AgentStatus::Failed | AgentStatus::Flatline => Self::failed(),
         }
     }
 
@@ -141,6 +141,7 @@ pub fn agent_header(agent: &Agent) -> String {
         AgentStatus::WaitingForTool => "TOOL CALL".to_string(),
         AgentStatus::Done => format!("DONE {:.1}s", agent.elapsed().as_secs_f32()),
         AgentStatus::Failed => "FAILED".to_string(),
+        AgentStatus::Flatline => "FLATLINE".to_string(),
     };
 
     format!("\u{25a0} AGENT #{} \u{2014} {} [{}]", agent.id, task_desc, status)

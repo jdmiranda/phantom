@@ -126,7 +126,8 @@ fn brain_loop(
         });
     let mut scorer = UtilityScorer::new();
     let mut router = BrainRouter::new(config.router.unwrap_or_default());
-    let mut goals = crate::goals::GoalPursuit::new();
+    let mut active_ledger: Option<crate::orchestrator::TaskLedger> = None;
+    let mut reconciler = crate::reconciler::ReconcilerState::new();
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -166,6 +167,14 @@ fn brain_loop(
                         }
                     }
                 }
+                // Drive the autonomous task ledger forward on every tick.
+                let mut terminal = false;
+                if let Some(ref mut l) = active_ledger {
+                    terminal = !reconciler.tick(l, &action_tx);
+                }
+                if terminal {
+                    active_ledger = None;
+                }
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -180,25 +189,35 @@ fn brain_loop(
         // Handle goal-setting: activate goal pursuit mode.
         if let AiEvent::GoalSet { ref objective, ref initial_task } = event {
             log::info!("Brain goal set: {objective}");
-            goals.set_objective(objective.clone(), initial_task.clone());
             let _ = action_tx.send(AiAction::ConsoleReply(format!(
                 "Goal accepted: {objective}. Starting work."
             )));
 
-            // Execute the first task immediately.
-            if let Some(task) = goals.queue.pop_front() {
-                let prompt = goals.build_execution_prompt(&task);
-                let _ = action_tx.send(AiAction::SpawnAgent(
-                    phantom_agents::AgentTask::FreeForm { prompt }
-                ));
-                // Record as in-progress (result will come via AgentComplete).
-                goals.record_completion(task, crate::goals::TaskResult {
-                    data: "(in progress)".into(),
-                    success: true,
-                    timestamp_secs: 0,
-                });
+            // Wire the autonomous reconciler for multi-step goal execution.
+            let mut ledger = crate::orchestrator::TaskLedger::new(objective);
+            ledger.set_plan(vec![crate::orchestrator::PlanStep::new(
+                initial_task,
+                phantom_agents::AgentTask::FreeForm { prompt: initial_task.clone() },
+            )]);
+            active_ledger = Some(ledger);
+            reconciler.reset();
+            // Kick the first dispatch immediately — don't wait for the 3s timeout.
+            let mut terminal = false;
+            if let Some(ref mut l) = active_ledger {
+                terminal = !reconciler.tick(l, &action_tx);
+            }
+            if terminal {
+                active_ledger = None;
             }
             continue;
+        }
+
+        // Forward AgentComplete to the reconciler to advance the task ledger.
+        if let AiEvent::AgentComplete { id, success, ref summary } = event {
+            if let Some(ref mut l) = active_ledger {
+                reconciler.on_agent_complete(l, id, success, summary);
+            }
+            // Fall through to OODA scoring — notification_score handles this event.
         }
 
         // ACCUMULATE: OutputChunk events are batched — don't process each one
@@ -680,6 +699,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::RunCommand(_) => "run_command",
         AiAction::ConsoleReply(_) => "console_reply",
         AiAction::DismissAdapter { .. } => "dismiss_adapter",
+        AiAction::AgentFlatlined { .. } => "flatline",
         AiAction::DoNothing => "quiet",
     }
 }

@@ -323,6 +323,7 @@ fn status_tag(status: AgentStatus) -> &'static str {
         AgentStatus::WaitingForTool => "WAITING",
         AgentStatus::Done => "DONE",
         AgentStatus::Failed => "FAILED",
+        AgentStatus::Flatline => "FLATLINE",
     }
 }
 

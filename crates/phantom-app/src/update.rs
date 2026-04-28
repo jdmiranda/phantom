@@ -543,6 +543,9 @@ impl App {
                 info!("[PHANTOM]: Dismissing adapter {app_id}");
                 coordinator.remove_adapter(app_id, layout, scene);
             }
+            AiAction::AgentFlatlined { id, reason } => {
+                info!("[PHANTOM]: Agent {id} flatlined: {reason}");
+            }
             AiAction::DoNothing => {}
         }
     }
