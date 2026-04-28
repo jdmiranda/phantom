@@ -12,6 +12,14 @@
 use crate::layout::Rect;
 use phantom_renderer::quads::QuadInstance;
 
+// Sec.8 — top-of-screen banner that surfaces capability-denial patterns.
+// Re-exported so the App can reference `phantom_ui::widgets::Notification
+// Banner` alongside `StatusBar` / `TabBar`.
+pub mod notification_banner;
+pub use notification_banner::{
+    BannerSeverity, NotificationBanner, NOTIFICATION_BANNER_HEIGHT,
+};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------

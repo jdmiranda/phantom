@@ -565,6 +565,71 @@ impl App {
 
             // Command overlay moved to system overlay pass (post-CRT).
         }
+
+        // -- Sec.8 notification banner (top-of-screen, post-CRT overlay) --
+        // The `NotificationCenter` (in `update.rs`) decides whether a banner
+        // is active; we just translate `current_banner()` → widget output
+        // and emit it onto the chrome (overlay) buffers so the message is
+        // crisp / unaffected by CRT post-FX. Hidden state is a no-op: the
+        // widget's `render_quads` / `render_text` return empty `Vec`s.
+        self.build_notification_banner_overlay(
+            screen_size,
+            chrome_quads,
+            chrome_glyphs,
+        );
+    }
+
+    /// Build the top-of-screen notification banner onto the overlay buffers.
+    ///
+    /// Reads the highest-severity active banner from
+    /// `App::notifications` and feeds it into a transient
+    /// `NotificationBanner` widget. Pinned to the top of the window across
+    /// the full width with a fixed height
+    /// (`NOTIFICATION_BANNER_HEIGHT`); hidden when there is no active
+    /// banner.
+    fn build_notification_banner_overlay(
+        &mut self,
+        screen_size: [f32; 2],
+        chrome_quads: &mut Vec<QI>,
+        chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        use phantom_ui::widgets::{
+            BannerSeverity, NotificationBanner, NOTIFICATION_BANNER_HEIGHT,
+        };
+
+        let Some(banner_data) = self.notifications.current_banner() else {
+            return;
+        };
+
+        // Map the app-side `Severity` enum onto the widget's
+        // `BannerSeverity` (decoupled so phantom-ui doesn't depend on
+        // phantom-app's notification module).
+        let severity = match banner_data.severity {
+            crate::notifications::Severity::Info => BannerSeverity::Info,
+            crate::notifications::Severity::Warn => BannerSeverity::Warn,
+            crate::notifications::Severity::Danger => BannerSeverity::Danger,
+        };
+        let message = banner_data.message.clone();
+
+        // Stateless per frame: instantiate, fill, render, drop.
+        let mut banner = NotificationBanner::new();
+        banner.set_render_ctx(phantom_ui::RenderCtx::new(self.cell_size, 1.0));
+        banner.set_message(message, severity);
+
+        let banner_rect = phantom_ui::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: screen_size[0],
+            height: NOTIFICATION_BANNER_HEIGHT,
+        };
+
+        use phantom_ui::widgets::Widget;
+        let banner_quads = banner.render_quads(&banner_rect);
+        for q in banner_quads {
+            chrome_quads.push(q);
+        }
+        let banner_texts = banner.render_text(&banner_rect);
+        self.render_text_segments(&banner_texts, chrome_glyphs);
     }
 
     /// Push selection highlight quads for the given selection range.

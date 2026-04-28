@@ -11,6 +11,7 @@ pub mod coordinator;
 mod console;
 pub mod context_menu;
 mod inspector;
+pub mod notifications;
 pub mod runtime;
 mod selftest;
 mod video;

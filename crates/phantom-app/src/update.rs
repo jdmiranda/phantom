@@ -248,6 +248,59 @@ impl App {
             self.runtime.push_event(event);
         }
 
+        // Sec.4 / Sec.8 capability-denial consumer: drain `EventKind::Capability
+        // Denied` substrate events that the Layer-2 dispatch gate pushed into
+        // `App.denied_event_sink` this frame. Each event takes two trips:
+        //
+        //   1. Forwarded into the substrate runtime so the Defender spawn rule
+        //      (registered as `defender_spawn_rule`) can match and queue a
+        //      `SpawnIfNotRunning(Defender)` action on the next `runtime.tick()`.
+        //   2. Recorded into `App.notifications` (Sec.8) so the per-agent
+        //      pattern detector can surface a top-of-screen Danger banner if
+        //      the same agent crosses the denial threshold inside the sliding
+        //      window. The banner widget reads `current_banner()` next frame.
+        //
+        // Best-effort on the lock: a poisoned mutex logs a warning and the
+        // events for that frame are dropped — observability never aborts the
+        // update loop.
+        let denied: Vec<phantom_agents::spawn_rules::SubstrateEvent> = match self
+            .denied_event_sink
+            .lock()
+        {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(_) => {
+                warn!("denied_event_sink mutex poisoned; dropping queued events");
+                Vec::new()
+            }
+        };
+        if !denied.is_empty() {
+            // Wall-clock millis — same domain `NotificationCenter` expects.
+            // Compute once per frame and reuse for every drained event so the
+            // sliding-window math sees a single coherent timestamp.
+            let now_ms: u64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            for event in denied {
+                if let phantom_agents::spawn_rules::EventKind::CapabilityDenied {
+                    agent_id, ..
+                } = event.kind
+                {
+                    self.notifications.record_denial(agent_id, now_ms);
+                }
+                self.runtime.push_event(event);
+            }
+        }
+
+        // Tick the notification center every frame so banners expire on time
+        // even when no new denials arrive. Cheap (linear in the active banner
+        // count, which is tiny by construction).
+        let now_ms_tick: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.notifications.tick(now_ms_tick);
+
         for pane in &mut self.agent_panes {
             if !pane.event_emitted
                 && matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed)

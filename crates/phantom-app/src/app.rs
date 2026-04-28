@@ -230,6 +230,15 @@ pub struct App {
     #[allow(dead_code)] // Wired in Sec.4 consumer; ahead of time.
     pub(crate) denied_event_sink: crate::agent_pane::DeniedEventSink,
 
+    // -- Sec.8 user-visible notification center. Watches denial timestamps
+    //    per agent and pushes a top-of-screen `Severity::Danger` banner
+    //    whenever the same agent crosses the pattern threshold inside the
+    //    sliding window (default: 3 denials in 60s). `update.rs` feeds
+    //    drained `EventKind::CapabilityDenied` events into `record_denial`
+    //    and ticks expiry every frame; `notification_banner.rs` reads
+    //    `current_banner` to draw the chrome at the top of the screen.
+    pub(crate) notifications: crate::notifications::NotificationCenter,
+
     // -- Event bus topic IDs (bus itself lives in coordinator) --
     #[allow(dead_code)]
     pub(crate) topic_terminal_output: TopicId,
@@ -715,6 +724,7 @@ impl App {
             inspector_snapshot: None,
             blocked_event_sink: crate::agent_pane::new_blocked_event_sink(),
             denied_event_sink: crate::agent_pane::new_denied_event_sink(),
+            notifications: crate::notifications::NotificationCenter::new(),
             topic_terminal_output,
             topic_terminal_error,
             topic_agent_event,
