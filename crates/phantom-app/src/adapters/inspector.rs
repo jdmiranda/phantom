@@ -46,10 +46,26 @@ const EVENT_COLOR: [f32; 4] = [0.5, 0.75, 0.55, 0.85];
 const STAMP_COLOR: [f32; 4] = [0.35, 0.55, 0.4, 0.6];
 /// Inspector pane background — near-transparent.
 const PANE_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+/// Denials section header — a strong red drawn from `Tokens::status_danger`
+/// (`crates/phantom-ui/src/tokens.rs`). Mirrored as a literal here because
+/// the inspector adapter doesn't yet receive a `Tokens` handle through its
+/// constructor; pinning the rgba pulls the visual into line without changing
+/// the wider RenderCtx contract.
+const DENIAL_HEADER_COLOR: [f32; 4] = [1.00, 0.30, 0.25, 1.00];
+/// Denial row body — use the same red but slightly desaturated so the row
+/// reads as a continuation of the section header.
+const DENIAL_ROW_COLOR: [f32; 4] = [0.95, 0.45, 0.40, 0.95];
+/// Source-chain sub-row color — dimmer red-grey so the chain reads as
+/// secondary metadata under each denial.
+const DENIAL_CHAIN_COLOR: [f32; 4] = [0.75, 0.55, 0.55, 0.80];
 
 /// Number of events shown at the bottom of the pane (fixed cap, separate from
 /// the snapshot's `recent_events` cap).
 const VISIBLE_EVENT_ROWS: usize = 20;
+/// Number of denials shown in the Denials section. The snapshot is already
+/// capped at `MAX_RECENT_DENIALS = 20`; this fixed cap is independent so the
+/// renderer can stop laying out rows once the pane runs out of vertical room.
+const VISIBLE_DENIAL_ROWS: usize = 20;
 
 // ---------------------------------------------------------------------------
 // Adapter
@@ -112,6 +128,7 @@ impl AppCore for InspectorAdapter {
             "spawned_total": view.spawned_total,
             "running_count": view.running_count,
             "recent_events": view.recent_events.len(),
+            "denials": view.denials.len(),
         })
     }
 }
@@ -267,6 +284,71 @@ impl Renderable for InspectorAdapter {
                 y: cursor_y,
                 color: EVENT_COLOR,
             });
+            cursor_y += cell_h;
+        }
+
+        // ── Denials section (Sec.3) ───────────────────────────────────
+        // Surface `EventKind::CapabilityDenied` events the runtime has
+        // recorded since the inspector pane was opened. This is the
+        // user-facing window into the substrate's security boundary:
+        // the rows show *which* agent tried *which* tool under *which*
+        // capability class, with the source chain underneath as
+        // provenance.
+        cursor_y += cell_h * 0.5;
+        text_segments.push(TextData {
+            text: "DENIALS".to_string(),
+            x: rect.x + pad_x,
+            y: cursor_y,
+            color: DENIAL_HEADER_COLOR,
+        });
+        cursor_y += cell_h * 1.2;
+
+        if view.denials.is_empty() {
+            text_segments.push(TextData {
+                text: "  (no denials)".to_string(),
+                x: rect.x + pad_x * 2.0,
+                y: cursor_y,
+                color: EVENT_COLOR,
+            });
+        } else {
+            // Newest-on-top: snapshot pushes oldest-first, so iterate
+            // in reverse and clamp to VISIBLE_DENIAL_ROWS.
+            let total = view.denials.len();
+            let take = total.min(VISIBLE_DENIAL_ROWS);
+            for entry in view.denials.iter().rev().take(take) {
+                // Stop laying out denial rows when we run out of vertical
+                // pane room. Each entry consumes two cell-height rows
+                // (primary + chain), so reserve at least 2 cells.
+                if cursor_y > rect.y + rect.height - cell_h * 2.0 {
+                    break;
+                }
+
+                let primary = format!(
+                    "{role} \u{2192} {tool} ({class})",
+                    role = entry.role,
+                    tool = entry.attempted_tool,
+                    class = entry.attempted_class,
+                );
+                text_segments.push(TextData {
+                    text: primary,
+                    x: rect.x + pad_x * 2.0,
+                    y: cursor_y,
+                    color: DENIAL_ROW_COLOR,
+                });
+                cursor_y += cell_h;
+
+                // Source chain sub-row. When the chain is empty (Sec.2
+                // hasn't filled it yet), we still render the prefix so
+                // the user knows the chain field exists.
+                let chain_text = format_source_chain(&entry.source_chain);
+                text_segments.push(TextData {
+                    text: chain_text,
+                    x: rect.x + pad_x * 3.0, // double-indent under the primary row
+                    y: cursor_y,
+                    color: DENIAL_CHAIN_COLOR,
+                });
+                cursor_y += cell_h;
+            }
         }
 
         RenderOutput {
@@ -345,6 +427,22 @@ fn truncate_label(label: &str, max_chars: usize) -> String {
     }
     let cut: String = label.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{cut}…")
+}
+
+/// Render a source chain as the spec'd `chain: 123\u{2192}456\u{2192}here`
+/// string. An empty chain renders as `chain: (empty)` so the user can tell
+/// the chain field exists but provenance hasn't been wired yet (Sec.2).
+fn format_source_chain(chain: &[u64]) -> String {
+    if chain.is_empty() {
+        return "chain: (empty)".to_string();
+    }
+    let mut s = String::from("chain: ");
+    for id in chain {
+        s.push_str(&id.to_string());
+        s.push('\u{2192}'); // unicode RIGHTWARDS ARROW
+    }
+    s.push_str("here");
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -552,5 +650,102 @@ mod tests {
         let s = truncate_label("a-really-long-agent-label", 8);
         assert_eq!(s.chars().count(), 8);
         assert!(s.ends_with('…'));
+    }
+
+    // ---- Sec.3: Denials section ------------------------------------------
+
+    #[test]
+    fn format_source_chain_empty_renders_marker() {
+        assert_eq!(format_source_chain(&[]), "chain: (empty)");
+    }
+
+    #[test]
+    fn format_source_chain_renders_arrow_separated_with_here_terminator() {
+        // Spec: `chain: 123\u{2192}456\u{2192}here`
+        let s = format_source_chain(&[123, 456]);
+        assert_eq!(s, "chain: 123\u{2192}456\u{2192}here");
+    }
+
+    #[test]
+    fn inspector_adapter_renders_no_denials_hint_when_empty() {
+        let adapter = InspectorAdapter::with_view(InspectorView::empty());
+        let output = adapter.render(&make_rect(8.0));
+        assert!(
+            output.text_segments.iter().any(|t| t.text == "DENIALS"),
+            "DENIALS section header must render",
+        );
+        assert!(
+            output
+                .text_segments
+                .iter()
+                .any(|t| t.text.contains("no denials")),
+            "empty denials list must surface a hint",
+        );
+    }
+
+    #[test]
+    fn inspector_adapter_renders_denial_row_with_role_tool_class() {
+        use phantom_agents::inspector::DenialEntry;
+        let view = phantom_agents::inspector::InspectorBuilder::new()
+            .with_denial(DenialEntry {
+                role: "Watcher".to_string(),
+                attempted_tool: "run_command".to_string(),
+                attempted_class: "Act".to_string(),
+                source_chain: vec![123, 456],
+                timestamp_ms: 1_700_000_000_000,
+            })
+            .build();
+        let adapter = InspectorAdapter::with_view(view);
+        let output = adapter.render(&make_rect(8.0));
+
+        // Primary row carries `role -> tool (class)`.
+        let primary = output
+            .text_segments
+            .iter()
+            .find(|t| t.text.starts_with("Watcher"))
+            .expect("denial primary row must be present");
+        assert!(primary.text.contains("run_command"));
+        assert!(primary.text.contains("(Act)"));
+        assert!(primary.text.contains('\u{2192}'));
+
+        // Source-chain sub-row: `chain: 123→456→here`.
+        let chain = output
+            .text_segments
+            .iter()
+            .find(|t| t.text.starts_with("chain:") && t.text.contains("here"))
+            .expect("source-chain sub-row must be present");
+        assert!(chain.text.contains("123"));
+        assert!(chain.text.contains("456"));
+
+        // Header color must match the danger token (status_danger rgba).
+        let header = output
+            .text_segments
+            .iter()
+            .find(|t| t.text == "DENIALS")
+            .expect("DENIALS header must render");
+        assert_eq!(header.color, DENIAL_HEADER_COLOR);
+    }
+
+    #[test]
+    fn inspector_adapter_renders_empty_chain_marker_when_provenance_missing() {
+        // Sec.2 hasn't filled source_chain on every dispatch yet; the row
+        // must still render with a `(empty)` marker so the chain field is
+        // visible to the user.
+        use phantom_agents::inspector::DenialEntry;
+        let view = phantom_agents::inspector::InspectorBuilder::new()
+            .with_denial(DenialEntry {
+                role: "Actor".to_string(),
+                attempted_tool: "phantom.spawn_agent".to_string(),
+                attempted_class: "Coordinate".to_string(),
+                source_chain: Vec::new(),
+                timestamp_ms: 0,
+            })
+            .build();
+        let adapter = InspectorAdapter::with_view(view);
+        let output = adapter.render(&make_rect(8.0));
+        assert!(output
+            .text_segments
+            .iter()
+            .any(|t| t.text == "chain: (empty)"));
     }
 }

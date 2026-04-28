@@ -161,6 +161,45 @@ pub struct EventRow {
 }
 
 // ---------------------------------------------------------------------------
+// DenialEntry
+// ---------------------------------------------------------------------------
+
+/// Hard cap on `InspectorView::denials`. Mirrors the bounded-tail discipline
+/// used elsewhere on the snapshot: the view shows the most recent denials,
+/// older ones live in the on-disk log.
+pub const MAX_RECENT_DENIALS: usize = 20;
+
+/// One row in the "DENIALS" section.
+///
+/// A denial is the substrate's record of a `CapabilityDenied` event:
+/// the Layer-2 dispatch gate refused a tool call because the calling agent's
+/// role manifest lacked the tool's capability class. The Inspector surfaces
+/// these so the user can see, at a glance, which agents are bumping against
+/// the security boundary and which capability axis they tried.
+///
+/// Fields mirror the `EventKind::CapabilityDenied` payload one-for-one (with
+/// the source chain split out for renderer convenience). Stringly-typed
+/// `role` and `attempted_class` so the renderer (and downstream consumers
+/// like a future export-to-JSON) don't need to import the agent crate's
+/// enums.
+#[derive(Debug, Clone, Serialize)]
+pub struct DenialEntry {
+    /// Human-readable role label of the denied agent (e.g. `"Watcher"`).
+    pub role: String,
+    /// Wire name of the tool the agent attempted to invoke
+    /// (e.g. `"run_command"`).
+    pub attempted_tool: String,
+    /// String form of the [`crate::role::CapabilityClass`] the gate refused
+    /// (e.g. `"Act"`). One of `Sense | Reflect | Compute | Act | Coordinate`.
+    pub attempted_class: String,
+    /// Provenance trail: substrate event ids that led to this dispatch. May
+    /// be empty until Sec.2 wires provenance through every dispatch.
+    pub source_chain: Vec<u64>,
+    /// Wall-clock millis since epoch when the denial was recorded.
+    pub timestamp_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
 // InspectorView
 // ---------------------------------------------------------------------------
 
@@ -183,6 +222,10 @@ pub struct InspectorView {
     /// Subset of `spawned_total` still in `Spawning | Idle | Working |
     /// EmittingSpeech`. Drives the "live: N" counter.
     pub running_count: u32,
+    /// Most-recent-first tail of `EventKind::CapabilityDenied` events.
+    /// Capped at [`MAX_RECENT_DENIALS`]. Empty when no agent has hit the
+    /// dispatch gate.
+    pub denials: Vec<DenialEntry>,
 }
 
 impl InspectorView {
@@ -194,6 +237,7 @@ impl InspectorView {
             recent_events: Vec::new(),
             spawned_total: 0,
             running_count: 0,
+            denials: Vec::new(),
         }
     }
 }
@@ -217,6 +261,7 @@ impl InspectorView {
 pub struct InspectorBuilder {
     agents: Vec<AgentRow>,
     events: Vec<EventRow>,
+    denials: Vec<DenialEntry>,
     spawned_total_override: Option<u32>,
     running_count_override: Option<u32>,
 }
@@ -239,6 +284,15 @@ impl InspectorBuilder {
     /// **oldest** (front of the vec) are dropped at build time.
     pub fn with_event(mut self, row: EventRow) -> Self {
         self.events.push(row);
+        self
+    }
+
+    /// Append a denial entry. Insertion order **is** preserved; producers
+    /// should push most-recent-first if they want the renderer to display
+    /// newest-on-top. When more than [`MAX_RECENT_DENIALS`] are pushed the
+    /// **oldest** (front of the vec) are dropped at build time.
+    pub fn with_denial(mut self, entry: DenialEntry) -> Self {
+        self.denials.push(entry);
         self
     }
 
@@ -270,6 +324,13 @@ impl InspectorBuilder {
             self.events.drain(0..drop);
         }
 
+        // Same cap policy for denials: front-drop so the most recent (back)
+        // are kept.
+        if self.denials.len() > MAX_RECENT_DENIALS {
+            let drop = self.denials.len() - MAX_RECENT_DENIALS;
+            self.denials.drain(0..drop);
+        }
+
         let spawned_total = self
             .spawned_total_override
             .unwrap_or(self.agents.len() as u32);
@@ -285,6 +346,7 @@ impl InspectorBuilder {
             recent_events: self.events,
             spawned_total,
             running_count,
+            denials: self.denials,
         }
     }
 }
@@ -674,6 +736,69 @@ mod tests {
         assert!(v.recent_events.is_empty());
         assert_eq!(v.spawned_total, 0);
         assert_eq!(v.running_count, 0);
+        assert!(v.denials.is_empty());
+    }
+
+    // ---- Sec.3: DenialEntry / builder ------------------------------------
+
+    #[test]
+    fn builder_preserves_denial_insertion_order() {
+        let view = InspectorBuilder::new()
+            .with_denial(DenialEntry {
+                role: "Watcher".into(),
+                attempted_tool: "a".into(),
+                attempted_class: "Sense".into(),
+                source_chain: Vec::new(),
+                timestamp_ms: 1,
+            })
+            .with_denial(DenialEntry {
+                role: "Actor".into(),
+                attempted_tool: "b".into(),
+                attempted_class: "Act".into(),
+                source_chain: vec![7, 8],
+                timestamp_ms: 2,
+            })
+            .build();
+        assert_eq!(view.denials.len(), 2);
+        assert_eq!(view.denials[0].role, "Watcher");
+        assert_eq!(view.denials[1].role, "Actor");
+        assert_eq!(view.denials[1].source_chain, vec![7, 8]);
+    }
+
+    #[test]
+    fn builder_caps_denials_dropping_oldest() {
+        let mut b = InspectorBuilder::new();
+        for i in 0..(MAX_RECENT_DENIALS + 5) as u64 {
+            b = b.with_denial(DenialEntry {
+                role: format!("r-{i}"),
+                attempted_tool: "t".into(),
+                attempted_class: "Sense".into(),
+                source_chain: Vec::new(),
+                timestamp_ms: i,
+            });
+        }
+        let view = b.build();
+        assert_eq!(view.denials.len(), MAX_RECENT_DENIALS);
+        // Oldest dropped: first 5 (roles "r-0".."r-4") gone, "r-5" survives.
+        assert_eq!(view.denials.first().unwrap().role, "r-5");
+    }
+
+    #[test]
+    fn denial_entry_serializes_with_expected_fields() {
+        let entry = DenialEntry {
+            role: "Watcher".into(),
+            attempted_tool: "run_command".into(),
+            attempted_class: "Act".into(),
+            source_chain: vec![123, 456],
+            timestamp_ms: 999,
+        };
+        let v = serde_json::to_value(&entry).expect("denial serializes");
+        assert_eq!(v["role"], "Watcher");
+        assert_eq!(v["attempted_tool"], "run_command");
+        assert_eq!(v["attempted_class"], "Act");
+        assert_eq!(v["source_chain"][0], 123);
+        assert_eq!(v["source_chain"][1], 456);
+        assert_eq!(v["timestamp_ms"], 999);
     }
 
     #[test]
