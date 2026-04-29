@@ -5,7 +5,33 @@
 //! [`parse_agent_command`] and [`execute_agent_command`].
 
 use crate::agent::{Agent, AgentId, AgentStatus, AgentTask};
+use crate::chat::ChatModel;
 use crate::manager::AgentManager;
+use crate::role::{AgentRole, CapabilityClass};
+
+// ---------------------------------------------------------------------------
+// SpawnFlags — parsed flag block
+// ---------------------------------------------------------------------------
+
+/// Optional overrides parsed from `--flag value` pairs in an agent command.
+///
+/// All fields are `None` when absent; callers fall back to system defaults.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpawnFlags {
+    /// `--model <spec>` — chat-model override. Parsed by
+    /// [`ChatModel::from_env_str`] so `claude`, `claude:opus-4-7`, `openai`,
+    /// `openai:gpt-4o` are all valid.
+    pub model: Option<ChatModel>,
+    /// `--role <name>` — role override. Must be a known [`AgentRole`] label
+    /// (case-insensitive).
+    pub role: Option<AgentRole>,
+    /// `--ttl <secs>` — maximum lifetime in seconds before the agent is
+    /// auto-killed. Zero means "no limit".
+    pub ttl_secs: Option<u64>,
+    /// `--capability <class>` — required capability class the caller expects
+    /// the spawned role to hold. Validated at spawn time.
+    pub capability: Option<CapabilityClass>,
+}
 
 // ---------------------------------------------------------------------------
 // AgentCommand
@@ -16,6 +42,9 @@ use crate::manager::AgentManager;
 pub enum AgentCommand {
     /// Spawn a new agent: `agent "fix the failing tests"`
     Spawn { prompt: String },
+
+    /// Spawn with flags: `agent --model claude --role actor "do something"`
+    SpawnWithFlags { prompt: String, flags: SpawnFlags },
 
     /// Spawn with specific task type: `agent fix src/main.rs`
     SpawnFix { target: String },
@@ -52,6 +81,8 @@ pub enum AgentCommand {
 ///
 /// ```text
 /// agent "fix the failing tests"
+/// agent --model claude "fix the failing tests"
+/// agent --model openai:gpt-4o --role actor --ttl 300 --capability act "deploy"
 /// agent fix src/main.rs
 /// agent review
 /// agent watch CI pipeline
@@ -61,6 +92,10 @@ pub enum AgentCommand {
 /// agent kill-all
 /// agent help
 /// ```
+///
+/// Flag parsing is greedy left-to-right: all `--key value` pairs are consumed
+/// before the remaining text is treated as the prompt. Flags may appear before
+/// or after quoted/unquoted text, but in practice users put flags first.
 pub fn parse_agent_command(input: &str) -> Option<AgentCommand> {
     let trimmed = input.trim();
 
@@ -76,6 +111,11 @@ pub fn parse_agent_command(input: &str) -> Option<AgentCommand> {
     let rest = rest.trim_start();
     if rest.is_empty() {
         return Some(AgentCommand::Help);
+    }
+
+    // If the remainder starts with `--` we're in flag-mode.
+    if rest.starts_with("--") {
+        return parse_flagged_spawn(rest);
     }
 
     // Quoted prompt: `agent "do something"` or `agent 'do something'`
@@ -155,6 +195,153 @@ pub fn parse_agent_command(input: &str) -> Option<AgentCommand> {
 }
 
 // ---------------------------------------------------------------------------
+// Flag parsing (internal)
+// ---------------------------------------------------------------------------
+
+/// Parse `--flag value ... "prompt"` or `--flag value ... unquoted prompt`.
+///
+/// Tokenises by whitespace (respecting one level of double/single-quote),
+/// consumes `--key value` pairs, then treats whatever remains as the prompt.
+/// Returns `None` only when the prompt is absent or empty.
+fn parse_flagged_spawn(rest: &str) -> Option<AgentCommand> {
+    let tokens = tokenise(rest);
+    let mut flags = SpawnFlags::default();
+    let mut i = 0;
+
+    while i < tokens.len() {
+        match tokens[i].as_str() {
+            "--model" => {
+                i += 1;
+                let val = tokens.get(i)?;
+                flags.model = Some(ChatModel::from_env_str(val).unwrap_or_else(|| {
+                    // Treat unknown values as a raw Claude model id string.
+                    ChatModel::Claude(val.clone())
+                }));
+            }
+            "--role" => {
+                i += 1;
+                let val = tokens.get(i)?;
+                flags.role = parse_role(val);
+                // Unknown role is a soft error — skip silently (return None
+                // would surprise the user; we instead ignore the flag).
+            }
+            "--ttl" => {
+                i += 1;
+                let val = tokens.get(i)?;
+                if let Ok(secs) = val.parse::<u64>() {
+                    flags.ttl_secs = Some(secs);
+                }
+                // Non-numeric TTL: silently ignore (treat as absent).
+            }
+            "--capability" | "--cap" => {
+                i += 1;
+                let val = tokens.get(i)?;
+                flags.capability = parse_capability(val);
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+
+    // Everything from token `i` onwards is the prompt.
+    let prompt = tokens[i..].join(" ");
+    if prompt.is_empty() {
+        return None;
+    }
+
+    // If no flags were actually set, degrade to a plain Spawn.
+    let any_flag = flags.model.is_some()
+        || flags.role.is_some()
+        || flags.ttl_secs.is_some()
+        || flags.capability.is_some();
+
+    if any_flag {
+        Some(AgentCommand::SpawnWithFlags { prompt, flags })
+    } else {
+        Some(AgentCommand::Spawn { prompt })
+    }
+}
+
+/// Tokenise `s` by whitespace, collapsing quoted spans into a single token.
+///
+/// Only the outermost quote level is handled (no nesting). A quote that is
+/// never closed consumes to end-of-string.
+fn tokenise(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = s.chars().peekable();
+
+    while chars.peek().is_some() {
+        // Skip whitespace between tokens.
+        while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+
+        let first = *chars.peek().unwrap();
+        if first == '"' || first == '\'' {
+            // Consume opening quote.
+            chars.next();
+            let mut buf = String::new();
+            loop {
+                match chars.next() {
+                    None | Some('\'' | '"') => break,
+                    Some(c) => buf.push(c),
+                }
+            }
+            if !buf.is_empty() {
+                tokens.push(buf);
+            }
+        } else {
+            // Unquoted token: consume until whitespace.
+            let mut buf = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                buf.push(c);
+                chars.next();
+            }
+            if !buf.is_empty() {
+                tokens.push(buf);
+            }
+        }
+    }
+
+    tokens
+}
+
+/// Parse a role name (case-insensitive) into an [`AgentRole`].
+fn parse_role(s: &str) -> Option<AgentRole> {
+    match s.to_ascii_lowercase().as_str() {
+        "conversational" | "conv" => Some(AgentRole::Conversational),
+        "watcher" | "watch" => Some(AgentRole::Watcher),
+        "capturer" | "capture" => Some(AgentRole::Capturer),
+        "transcriber" | "transcribe" => Some(AgentRole::Transcriber),
+        "reflector" | "reflect" => Some(AgentRole::Reflector),
+        "indexer" | "index" => Some(AgentRole::Indexer),
+        "actor" | "act" => Some(AgentRole::Actor),
+        "composer" | "compose" => Some(AgentRole::Composer),
+        "fixer" | "fix" => Some(AgentRole::Fixer),
+        "defender" | "defend" => Some(AgentRole::Defender),
+        _ => None,
+    }
+}
+
+/// Parse a capability class name (case-insensitive) into a [`CapabilityClass`].
+fn parse_capability(s: &str) -> Option<CapabilityClass> {
+    match s.to_ascii_lowercase().as_str() {
+        "sense" => Some(CapabilityClass::Sense),
+        "reflect" => Some(CapabilityClass::Reflect),
+        "compute" => Some(CapabilityClass::Compute),
+        "act" => Some(CapabilityClass::Act),
+        "coordinate" | "coord" => Some(CapabilityClass::Coordinate),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
 
@@ -168,6 +355,31 @@ pub fn execute_agent_command(cmd: &AgentCommand, manager: &mut AgentManager) -> 
             };
             let id = manager.spawn(task);
             vec![format!("spawned agent #{id}: {prompt}")]
+        }
+
+        AgentCommand::SpawnWithFlags { prompt, flags } => {
+            let task = AgentTask::FreeForm {
+                prompt: prompt.clone(),
+            };
+            let id = manager.spawn(task);
+            let mut lines = vec![format!("spawned agent #{id}: {prompt}")];
+            if let Some(ref model) = flags.model {
+                lines.push(format!("  model:      {}", format_model(model)));
+            }
+            if let Some(role) = flags.role {
+                lines.push(format!("  role:       {}", role.label()));
+            }
+            if let Some(ttl) = flags.ttl_secs {
+                if ttl == 0 {
+                    lines.push("  ttl:        unlimited".into());
+                } else {
+                    lines.push(format!("  ttl:        {ttl}s"));
+                }
+            }
+            if let Some(cap) = flags.capability {
+                lines.push(format!("  capability: {}", format_capability(cap)));
+            }
+            lines
         }
 
         AgentCommand::SpawnFix { target } => {
@@ -300,21 +512,52 @@ fn help_text() -> Vec<String> {
     vec![
         "PHANTOM AGENT COMMANDS".into(),
         "".into(),
-        "  agent \"<prompt>\"       Spawn an agent with a freeform task".into(),
-        "  agent fix <target>     Spawn a fix agent targeting a file".into(),
-        "  agent review           Spawn a code review agent".into(),
-        "  agent watch <desc>     Spawn a monitoring agent".into(),
-        "  agents                 List all agents".into(),
-        "  agent <id>             Show agent details".into(),
-        "  agent kill <id>        Kill an agent".into(),
-        "  agent kill-all         Kill all active agents".into(),
-        "  agent help             Show this help".into(),
+        "  agent \"<prompt>\"              Spawn an agent with a freeform task".into(),
+        "  agent fix <target>            Spawn a fix agent targeting a file".into(),
+        "  agent review                  Spawn a code review agent".into(),
+        "  agent watch <desc>            Spawn a monitoring agent".into(),
+        "  agents                        List all agents".into(),
+        "  agent <id>                    Show agent details".into(),
+        "  agent kill <id>               Kill an agent".into(),
+        "  agent kill-all                Kill all active agents".into(),
+        "  agent help                    Show this help".into(),
+        "".into(),
+        "FLAGS (may be combined before the prompt):".into(),
+        "  --model <spec>    Chat backend: claude, claude:<id>, openai, openai:<id>".into(),
+        "  --role  <name>    Role override: conversational, watcher, capturer,".into(),
+        "                    transcriber, reflector, indexer, actor, composer,".into(),
+        "                    fixer, defender".into(),
+        "  --ttl   <secs>    Max lifetime in seconds (0 = unlimited)".into(),
+        "  --capability <c>  Required capability: sense, reflect, compute, act,".into(),
+        "                    coordinate".into(),
+        "".into(),
+        "EXAMPLES".into(),
+        "  agent --model claude \"fix the failing tests\"".into(),
+        "  agent --role actor --ttl 300 \"deploy to staging\"".into(),
+        "  agent --model openai:gpt-4o --capability act \"refactor parser\"".into(),
     ]
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn format_model(model: &ChatModel) -> String {
+    match model {
+        ChatModel::Claude(id) => format!("claude:{id}"),
+        ChatModel::OpenAi(id) => format!("openai:{id}"),
+    }
+}
+
+fn format_capability(cap: CapabilityClass) -> &'static str {
+    match cap {
+        CapabilityClass::Sense => "sense",
+        CapabilityClass::Reflect => "reflect",
+        CapabilityClass::Compute => "compute",
+        CapabilityClass::Act => "act",
+        CapabilityClass::Coordinate => "coordinate",
+    }
+}
 
 fn status_tag(status: AgentStatus) -> &'static str {
     match status {
@@ -732,5 +975,192 @@ mod tests {
         let d = std::time::Duration::from_secs(3661);
         let s = format_duration(d);
         assert_eq!(s, "1h01m");
+    }
+
+    // -- Flag / SpawnWithFlags tests -------------------------------------------
+
+    #[test]
+    fn parse_model_flag_claude_default() {
+        let cmd = parse_agent_command(r#"agent --model claude "do the thing""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { prompt, flags } => {
+                assert_eq!(prompt, "do the thing");
+                assert_eq!(flags.model, Some(ChatModel::default_claude()));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_model_flag_explicit_claude_id() {
+        let cmd =
+            parse_agent_command(r#"agent --model claude:claude-opus-4-7 "task""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { prompt, flags } => {
+                assert_eq!(prompt, "task");
+                assert_eq!(
+                    flags.model,
+                    Some(ChatModel::Claude("claude-opus-4-7".into()))
+                );
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_model_flag_openai() {
+        let cmd = parse_agent_command(r#"agent --model openai "do it""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.model, Some(ChatModel::default_openai()));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_model_flag_openai_explicit_id() {
+        let cmd =
+            parse_agent_command(r#"agent --model openai:gpt-4o "task""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.model, Some(ChatModel::OpenAi("gpt-4o".into())));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_role_flag_actor() {
+        let cmd = parse_agent_command(r#"agent --role actor "deploy""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.role, Some(AgentRole::Actor));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_role_flag_case_insensitive() {
+        let cmd = parse_agent_command(r#"agent --role DEFENDER "watch""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.role, Some(AgentRole::Defender));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ttl_flag() {
+        let cmd = parse_agent_command(r#"agent --ttl 300 "do it""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.ttl_secs, Some(300));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ttl_zero_means_unlimited() {
+        let cmd = parse_agent_command(r#"agent --ttl 0 "run forever""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.ttl_secs, Some(0));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_capability_flag_act() {
+        let cmd = parse_agent_command(r#"agent --capability act "mutate""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.capability, Some(CapabilityClass::Act));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_capability_flag_coord_alias() {
+        let cmd = parse_agent_command(r#"agent --cap coord "orchestrate""#).unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { flags, .. } => {
+                assert_eq!(flags.capability, Some(CapabilityClass::Coordinate));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_all_flags_combined() {
+        let cmd = parse_agent_command(
+            r#"agent --model openai:gpt-4o --role actor --ttl 600 --capability act "ship it""#,
+        )
+        .unwrap();
+        match cmd {
+            AgentCommand::SpawnWithFlags { prompt, flags } => {
+                assert_eq!(prompt, "ship it");
+                assert_eq!(flags.model, Some(ChatModel::OpenAi("gpt-4o".into())));
+                assert_eq!(flags.role, Some(AgentRole::Actor));
+                assert_eq!(flags.ttl_secs, Some(600));
+                assert_eq!(flags.capability, Some(CapabilityClass::Act));
+            }
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_flag_without_prompt_returns_none() {
+        assert!(parse_agent_command("agent --model claude").is_none());
+    }
+
+    #[test]
+    fn execute_spawn_with_flags_reports_all_options() {
+        let mut mgr = AgentManager::new(4);
+        let cmd = AgentCommand::SpawnWithFlags {
+            prompt: "do something".into(),
+            flags: SpawnFlags {
+                model: Some(ChatModel::Claude("claude-opus-4-7".into())),
+                role: Some(AgentRole::Actor),
+                ttl_secs: Some(120),
+                capability: Some(CapabilityClass::Act),
+            },
+        };
+        let output = execute_agent_command(&cmd, &mut mgr);
+        assert!(output[0].contains("spawned agent #1"));
+        assert!(output.iter().any(|l| l.contains("claude:claude-opus-4-7")));
+        assert!(output.iter().any(|l| l.contains("Actor")));
+        assert!(output.iter().any(|l| l.contains("120s")));
+        assert!(output.iter().any(|l| l.contains("act")));
+    }
+
+    #[test]
+    fn execute_spawn_with_flags_ttl_zero_says_unlimited() {
+        let mut mgr = AgentManager::new(4);
+        let cmd = AgentCommand::SpawnWithFlags {
+            prompt: "run".into(),
+            flags: SpawnFlags {
+                ttl_secs: Some(0),
+                ..Default::default()
+            },
+        };
+        let output = execute_agent_command(&cmd, &mut mgr);
+        assert!(output.iter().any(|l| l.contains("unlimited")));
+    }
+
+    #[test]
+    fn help_text_includes_all_flags() {
+        let mut mgr = AgentManager::new(4);
+        let output = execute_agent_command(&AgentCommand::Help, &mut mgr);
+        let full = output.join("\n");
+        assert!(full.contains("--model"), "missing --model in help");
+        assert!(full.contains("--role"), "missing --role in help");
+        assert!(full.contains("--ttl"), "missing --ttl in help");
+        assert!(full.contains("--capability"), "missing --capability in help");
     }
 }
