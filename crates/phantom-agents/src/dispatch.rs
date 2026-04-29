@@ -1390,4 +1390,143 @@ mod tests {
         assert_eq!(res_a.output, "file-a");
         assert_eq!(res_b.output, "file-b");
     }
+
+    // ---- Issue #163: taint escalation from denied-capability source chain ----
+    //
+    // Security property: when a CapabilityDenied event is in the source chain,
+    // the caller's result must NOT stay Clean.  taint_from_source_chain walks
+    // the upstream event log and merges Suspect onto any result whose
+    // source_event_id traces back through a "capability.denied" event.
+
+    /// A CapabilityDenied event in the source chain propagates Suspect taint.
+    ///
+    /// Issue #163 — when a tool call is denied due to a capability check and
+    /// that denial is recorded in the event log, any subsequent result whose
+    /// `source_event_id` points back to that `"capability.denied"` event must
+    /// carry at least `TaintLevel::Suspect`.  Taint must not drop to `Clean`.
+    #[test]
+    fn capability_denied_source_chain_propagates_taint() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("data.txt"), "safe").unwrap();
+
+        let log = open_event_log(tmp.path());
+
+        // Append a CapabilityDenied event — simulates what the dispatch gate
+        // writes when an agent calls a tool outside its manifest.
+        let denied_event_id = {
+            let mut g = log.lock().unwrap();
+            g.append(
+                LogEventSource::Substrate,
+                KIND_CAPABILITY_DENIED,
+                json!({
+                    "agent_id": 5,
+                    "attempted_tool": "run_command",
+                    "role": "Watcher",
+                }),
+            )
+            .unwrap()
+            .id
+        };
+
+        // A subsequent dispatch whose source_event_id points at the denied
+        // event.  Even though *this* call is a valid read, the upstream denial
+        // must surface as at least Suspect taint.
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(5, AgentRole::Conversational, "agent-5", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: Some(log),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: Some(denied_event_id),
+            quarantine: None,
+            correlation_id: None,
+        };
+
+        let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
+
+        assert!(res.success, "dispatch should succeed: {}", res.output);
+
+        // Taint must NOT be Clean — the chain contains a CapabilityDenied event.
+        assert!(
+            res.taint != TaintLevel::Clean,
+            "issue #163: taint must not remain Clean when source chain contains \
+             a CapabilityDenied event; got {:?}",
+            res.taint,
+        );
+        assert_eq!(
+            res.taint,
+            TaintLevel::Suspect,
+            "issue #163: CapabilityDenied in source chain must yield exactly Suspect; \
+             got {:?}",
+            res.taint,
+        );
+    }
+
+    // ---- Issue #166: Watcher role blocked from RunCommand --------------------
+    //
+    // Security property: a Watcher agent (Sense+Reflect+Compute, no Act)
+    // must never be able to execute a shell command through dispatch_tool.
+    // The dispatch gate must deny before any shell process starts.
+
+    /// Watcher role must receive CapabilityDenied when attempting run_command.
+    ///
+    /// Issue #166 — capability boundary: an agent with `AgentRole::Watcher`
+    /// manifest (Sense+Reflect+Compute, no Act) that calls `run_command`
+    /// (Act-class) must receive a denial with the canonical
+    /// `"capability denied: Act not in Watcher manifest"` message.
+    /// The shell command must never execute.
+    #[test]
+    fn watcher_role_blocked_from_run_command() {
+        let tmp = TempDir::new().unwrap();
+
+        // Watcher manifest has Sense+Reflect+Compute, but NOT Act.
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(20, AgentRole::Watcher, "watcher-agent", SpawnSource::User),
+            role: AgentRole::Watcher,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: None,
+        };
+
+        // Attempt to invoke run_command — Act-class tool.
+        let res = dispatch_tool(
+            "run_command",
+            &json!({ "command": "echo WATCHER_BREACH" }),
+            &ctx,
+        );
+
+        // Must be denied with success=false.
+        assert!(
+            !res.success,
+            "issue #166: Watcher must be denied run_command; got success=true with: {}",
+            res.output,
+        );
+        // Must carry canonical capability denied wording.
+        assert!(
+            res.output.starts_with("capability denied:"),
+            "issue #166: denial must start with 'capability denied:'; got: {}",
+            res.output,
+        );
+        assert!(
+            res.output.contains("Act"),
+            "issue #166: denial must name the missing class 'Act'; got: {}",
+            res.output,
+        );
+        assert!(
+            res.output.contains("Watcher"),
+            "issue #166: denial must name the role 'Watcher'; got: {}",
+            res.output,
+        );
+        // The shell command must never have run.
+        assert!(
+            !res.output.contains("WATCHER_BREACH"),
+            "issue #166: shell command must not have run — sentinel in output: {}",
+            res.output,
+        );
+    }
 }
