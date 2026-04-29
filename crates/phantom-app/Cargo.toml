@@ -58,6 +58,7 @@ png = "0.17"
 tempfile = "3"
 phantom-ui = { path = "../phantom-ui", features = ["test-utils"] }
 phantom-bundle-store = { path = "../phantom-bundle-store", features = ["testing"] }
+phantom-stt = { path = "../phantom-stt", features = ["test-utils"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]
