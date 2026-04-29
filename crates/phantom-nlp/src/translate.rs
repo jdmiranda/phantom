@@ -304,16 +304,18 @@ impl LlmBackend for ClaudeLlmBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockLlmBackend — for tests
+// MockLlmBackend — for tests only
 // ---------------------------------------------------------------------------
 
 /// A scripted [`LlmBackend`] that returns a predetermined reply.
 ///
 /// Used in unit tests so they never hit the network.
+#[cfg(test)]
 pub struct MockLlmBackend {
     reply: String,
 }
 
+#[cfg(test)]
 impl MockLlmBackend {
     /// Construct a mock that always returns `reply`.
     pub fn new(reply: impl Into<String>) -> Self {
@@ -323,6 +325,7 @@ impl MockLlmBackend {
     }
 }
 
+#[cfg(test)]
 impl LlmBackend for MockLlmBackend {
     fn name(&self) -> &'static str {
         "mock"
