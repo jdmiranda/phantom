@@ -262,6 +262,12 @@ pub(crate) struct AgentPane {
     /// absent). When `None`, the three Dispatcher tools return the canonical
     /// `"ticket dispatcher not configured"` error so the model self-corrects.
     ticket_dispatcher: Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>>,
+    /// Per-agent structured lifecycle journal (JSONL on disk).
+    ///
+    /// `None` when the journal file could not be opened (e.g., permission
+    /// error or test environment without a real filesystem path). All journal
+    /// writes are best-effort — a failure never aborts an agent spawn.
+    journal: Option<phantom_memory::journal::AgentJournal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +317,7 @@ impl AgentPane {
             denied_event_sink: None,
             last_tool_error: None,
             ticket_dispatcher: None,
+            journal: None,
         }
     }
 
@@ -475,6 +482,14 @@ impl AgentPane {
 
         info!("Agent pane spawned: {task_desc}");
 
+        let agent_id_u64 = agent.id as u64;
+        let mut journal = open_agent_journal(agent_id_u64);
+        if let Some(ref mut j) = journal {
+            if let Err(e) = j.record_spawn(agent_id_u64, &task_desc) {
+                warn!("AgentJournal::record_spawn failed: {e}");
+            }
+        }
+
         Self {
             task: task_desc,
             status: AgentPaneStatus::Working,
@@ -505,6 +520,7 @@ impl AgentPane {
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
+            journal,
         }
     }
 
@@ -600,6 +616,14 @@ impl AgentPane {
                     self.output_tokens += (text.len() / 4) as u32;
                     self.output.push_str(&text);
                     self.current_assistant_text.push_str(&text);
+                    if let Some(ref mut j) = self.journal {
+                        let first_line = text.lines().next().unwrap_or("").to_string();
+                        if !first_line.is_empty() {
+                            if let Err(e) = j.record_output(self.agent.id as u64, first_line) {
+                                warn!("AgentJournal::record_output failed: {e}");
+                            }
+                        }
+                    }
                     // Cap output to prevent unbounded memory growth.
                     if self.output.len() > 65536 {
                         let mut trim = self.output.len() - 65536;
@@ -615,6 +639,11 @@ impl AgentPane {
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
+                    if let Some(ref mut j) = self.journal {
+                        if let Err(e) = j.record_tool_call(self.agent.id as u64, call.tool.api_name(), &args_display) {
+                            warn!("AgentJournal::record_tool_call failed: {e}");
+                        }
+                    }
                     if args_display.is_empty() {
                         self.output.push_str(&format!("\n▶ {}\n", call.tool.api_name()));
                     } else {
@@ -632,6 +661,15 @@ impl AgentPane {
                     }
 
                     if self.pending_tools.is_empty() {
+                        if let Some(ref mut j) = self.journal {
+                            let summary = format!(
+                                "~{}in/~{}out tokens, {} tool calls",
+                                self.input_tokens, self.output_tokens, self.tool_call_count
+                            );
+                            if let Err(e) = j.record_completion(self.agent.id as u64, true, summary) {
+                                warn!("AgentJournal::record_completion failed: {e}");
+                            }
+                        }
                         self.output.push_str(&format!(
                             "\n\n📊 ~{}in / ~{}out tokens | {} tool calls\n✓ Agent finished.\n",
                             self.input_tokens, self.output_tokens, self.tool_call_count,
@@ -648,6 +686,11 @@ impl AgentPane {
                 }
                 Some(ApiEvent::Error(e)) => {
                     self.output.push_str(&format!("\n\n✗ Error: {e}\n"));
+                    if let Some(ref mut j) = self.journal {
+                        if let Err(je) = j.record_flatline(self.agent.id as u64, &e) {
+                            warn!("AgentJournal::record_flatline failed: {je}");
+                        }
+                    }
                     self.rollback_if_dirty();
                     self.status = AgentPaneStatus::Failed;
                     self.api_handle = None;
@@ -666,6 +709,14 @@ impl AgentPane {
     /// and re-invoke the Claude API for the next turn.
     fn execute_pending_tools(&mut self) {
         if self.turn_count >= MAX_TOOL_ROUNDS {
+            if let Some(ref mut j) = self.journal {
+                if let Err(e) = j.record_flatline(
+                    self.agent.id as u64,
+                    format!("iteration limit reached ({MAX_TOOL_ROUNDS} tool rounds)"),
+                ) {
+                    warn!("AgentJournal::record_flatline (limit) failed: {e}");
+                }
+            }
             self.output.push_str(&format!(
                 "\n\n✗ Agent hit iteration limit ({MAX_TOOL_ROUNDS} tool rounds).\n"
             ));
@@ -1207,6 +1258,36 @@ fn format_tool_args(tool: &ToolType, args: &serde_json::Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Journal helpers
+// ---------------------------------------------------------------------------
+
+/// Open (or create) the per-agent JSONL journal file.
+///
+/// Returns `None` on any I/O error; callers treat the journal as best-effort
+/// observability and never abort an agent spawn on journal failure.
+fn open_agent_journal(agent_id: u64) -> Option<phantom_memory::journal::AgentJournal> {
+    let dir = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".config/phantom/agents/journals"))
+        .unwrap_or_else(|| std::env::temp_dir().join("phantom-agents/journals"));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!(
+            "AgentJournal: could not create journal dir {}: {e}",
+            dir.display()
+        );
+        return None;
+    }
+    let path = dir.join(format!("{agent_id}.jsonl"));
+    match phantom_memory::journal::AgentJournal::open(&path) {
+        Ok(j) => Some(j),
+        Err(e) => {
+            warn!("AgentJournal: could not open {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App integration
 // ---------------------------------------------------------------------------
 
@@ -1447,6 +1528,7 @@ mod tests {
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
+            journal: None,
         };
         (pane, tx)
     }
@@ -1537,6 +1619,7 @@ mod tests {
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
+            journal: None,
         };
         assert!(!pane.poll());
     }
