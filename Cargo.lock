@@ -5366,6 +5366,7 @@ name = "phantom-bundles"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "log",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

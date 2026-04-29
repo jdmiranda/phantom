@@ -1,0 +1,31 @@
+{
+  "id": "00000000-0000-0000-0000-000000000002",
+  "t_start_ns": 1000000000,
+  "t_wall_unix_ms": 1700000000000,
+  "source_pane_id": 7,
+  "frames": [
+    {
+      "t_offset_ns": 0,
+      "sha": "a1b2c3d4e5f6a1b2",
+      "blob_path": "frames/00000000-0000-0000-0000-000000000002-0.png",
+      "dhash": 12345678901234,
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "t_offset_ns": 33333333,
+      "sha": "b2c3d4e5f6a1b2c3",
+      "blob_path": "frames/00000000-0000-0000-0000-000000000002-1.png",
+      "dhash": 98765432109876,
+      "width": 1920,
+      "height": 1080
+    }
+  ],
+  "audio_chunks": [],
+  "transcript_words": [],
+  "intent": null,
+  "tags": ["auto"],
+  "importance": 0.3,
+  "sealed": true,
+  "schema_version": 1
+}

@@ -1,0 +1,29 @@
+{
+  "id": "00000000-0000-0000-0000-000000000004",
+  "t_start_ns": 0,
+  "t_wall_unix_ms": 1700000002000,
+  "source_pane_id": 9,
+  "frames": [],
+  "audio_chunks": [],
+  "transcript_words": [
+    {
+      "t_offset_ns": 0,
+      "t_end_ns": 300000000,
+      "text": "hello",
+      "speaker": null,
+      "confidence": 0.89
+    },
+    {
+      "t_offset_ns": 350000000,
+      "t_end_ns": 700000000,
+      "text": "world",
+      "speaker": null,
+      "confidence": 0.91
+    }
+  ],
+  "intent": "speech-demo",
+  "tags": ["stt"],
+  "importance": 0.5,
+  "sealed": true,
+  "schema_version": 1
+}
