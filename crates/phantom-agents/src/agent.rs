@@ -328,6 +328,12 @@ impl Agent {
         self.parent_id
     }
 
+    /// Return the spawn-intent classification for this agent.
+    #[must_use]
+    pub fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
     /// Push a `ParsedOutput` from a `RunCommand` tool result into the
     /// agent's semantic ring-buffer.
     ///
