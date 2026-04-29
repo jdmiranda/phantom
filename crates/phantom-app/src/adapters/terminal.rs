@@ -6,6 +6,7 @@
 
 use log::warn;
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 use phantom_adapter::adapter::QuadData;
@@ -66,6 +67,9 @@ pub struct TerminalAdapter {
     app_id: u32,
     /// Pending outbound bus messages, drained by coordinator each frame.
     outbox: Vec<phantom_adapter::BusMessage>,
+    /// Shared render snapshot written each frame when alt-screen is active.
+    /// Set by `attach_alt_screen_snapshot`; cleared by `detach_alt_screen_snapshot`.
+    alt_screen_snapshot: Option<Arc<Mutex<Option<RenderOutput>>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +96,7 @@ impl TerminalAdapter {
             pty_dead: false,
             app_id: 0,
             outbox: Vec::new(),
+            alt_screen_snapshot: None,
         }
     }
 
@@ -143,6 +148,56 @@ impl TerminalAdapter {
     /// Set the error-notified flag.
     pub fn set_error_notified(&mut self, val: bool) {
         self.error_notified = val;
+    }
+
+    /// Extract a `RenderOutput` from the alt-screen (used for snapshot writes
+    /// in `update()` so the secondary view adapter always has fresh data).
+    ///
+    /// The `_rect` parameter is ignored — we produce a full snapshot; the view
+    /// adapter re-anchors the origin to its own rect during render.
+    fn render_alt_screen(&self, _rect: &phantom_adapter::adapter::Rect) -> RenderOutput {
+        use phantom_adapter::adapter::{GridData, ScrollState};
+        use phantom_terminal::output;
+
+        let (render_cells, cols, rows, cursor_state) =
+            output::extract_grid_themed(self.terminal.term(), &self.theme_colors);
+
+        let cells: Vec<AdapterCell> = render_cells
+            .iter()
+            .map(|rc| AdapterCell {
+                ch: rc.ch,
+                fg: rc.fg,
+                bg: rc.bg,
+            })
+            .collect();
+
+        let cursor = if cursor_state.visible {
+            Some(convert_cursor(&cursor_state))
+        } else {
+            None
+        };
+
+        let grid = GridData {
+            cells,
+            cols,
+            rows,
+            origin: (0.0, 0.0),
+            cursor,
+        };
+
+        let scroll = Some(ScrollState {
+            display_offset: self.terminal.display_offset(),
+            history_size: self.terminal.history_size(),
+            visible_rows: self.terminal.size().rows as usize,
+        });
+
+        RenderOutput {
+            quads: vec![],
+            text_segments: vec![],
+            grid: Some(grid),
+            scroll,
+            selection: None,
+        }
     }
 }
 
@@ -211,6 +266,37 @@ impl AppCore for TerminalAdapter {
         }
 
         self.was_alt_screen = is_alt;
+
+        // When alt-screen is active and a secondary pane has been wired in,
+        // push a fresh render snapshot so the view adapter always has the
+        // latest grid data.  We use a dummy full-screen rect here; the view
+        // adapter re-anchors to its own rect in render().
+        if self.is_detached {
+            if let Some(ref snapshot) = self.alt_screen_snapshot {
+                let dummy_rect = phantom_adapter::adapter::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 9999.0,
+                    height: 9999.0,
+                    ..Default::default()
+                };
+                let render_out = self.render_alt_screen(&dummy_rect);
+                if let Ok(mut guard) = snapshot.lock() {
+                    *guard = Some(render_out);
+                }
+            }
+        }
+    }
+
+    fn attach_alt_screen_snapshot(
+        &mut self,
+        snapshot: std::sync::Arc<std::sync::Mutex<Option<phantom_adapter::adapter::RenderOutput>>>,
+    ) {
+        self.alt_screen_snapshot = Some(snapshot);
+    }
+
+    fn detach_alt_screen_snapshot(&mut self) {
+        self.alt_screen_snapshot = None;
     }
 
     fn get_state(&self) -> serde_json::Value {
@@ -437,7 +523,7 @@ impl Commandable for TerminalAdapter {
             "select_all" => {
                 // Select from the top of scrollback history to the last cell
                 // of the visible screen.
-                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                use phantom_terminal::selection::{Column, Line, Point, SelectionType, Side};
                 let size = self.terminal.size();
                 let history = self.terminal.history_size() as i32;
                 // Scrollback lines are at negative Line indices.
@@ -446,7 +532,8 @@ impl Commandable for TerminalAdapter {
                     Line((size.rows as i32).saturating_sub(1)),
                     Column(size.cols.saturating_sub(1) as usize),
                 );
-                self.terminal.start_selection(SelectionType::Simple, start, Side::Left);
+                self.terminal
+                    .start_selection(SelectionType::Simple, start, Side::Left);
                 self.terminal.update_selection(end, Side::Right);
                 Ok("all selected".into())
             }

@@ -9,7 +9,7 @@ use phantom_agents::cli::{AgentCommand, parse_agent_command};
 use phantom_agents::{AgentSpawnOpts, AgentTask};
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
-use phantom_nlp::{translate, Intent};
+use phantom_nlp::{Intent, translate};
 use phantom_protocol::{AppMessage, SupervisorCommand};
 use phantom_ui::themes;
 
@@ -373,9 +373,7 @@ impl App {
                 }
             }
             cmd if cmd == "history" || cmd.starts_with("history ") => {
-                let limit: usize = parts.get(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(20);
+                let limit: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
                 match self.history {
                     None => self.console.output("History store not available."),
                     Some(ref store) => {
@@ -391,7 +389,8 @@ impl App {
                             Ok(entries) => {
                                 let start_num = total.saturating_sub(entries.len());
                                 for (i, e) in entries.iter().enumerate() {
-                                    let code = e.exit_code()
+                                    let code = e
+                                        .exit_code()
                                         .map(|c| format!(" [exit {c}]"))
                                         .unwrap_or_default();
                                     self.console.output(format!(
@@ -429,16 +428,26 @@ impl App {
                 self.console
                     .output("  appmon              Toggle app diagnostics");
                 self.console.output("  plugins             List plugins");
-                self.console.output("  plain               Disable all CRT effects");
-                self.console.output("  debug               Toggle shader debug HUD");
-                self.console.output("  reload              Reload config from disk");
-                self.console.output("  boot                Replay boot sequence");
-                self.console.output("  video <path>        Play video through CRT shader");
-                self.console.output("  history [N]         Show last N commands (default 20)");
-                self.console.output("  suggestions         List dismissed/expired suggestion history");
-                self.console.output("  selftest            Brain exercises its own features");
-                self.console.output("  selfheal            selftest + auto-fix + commit + push");
-                self.console.output("  clear               Clear console history");
+                self.console
+                    .output("  plain               Disable all CRT effects");
+                self.console
+                    .output("  debug               Toggle shader debug HUD");
+                self.console
+                    .output("  reload              Reload config from disk");
+                self.console
+                    .output("  boot                Replay boot sequence");
+                self.console
+                    .output("  video <path>        Play video through CRT shader");
+                self.console
+                    .output("  history [N]         Show last N commands (default 20)");
+                self.console
+                    .output("  suggestions         List dismissed/expired suggestion history");
+                self.console
+                    .output("  selftest            Brain exercises its own features");
+                self.console
+                    .output("  selfheal            selftest + auto-fix + commit + push");
+                self.console
+                    .output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");
             }
             _other => {
@@ -596,9 +605,8 @@ impl App {
                     let ctx_ref: &phantom_context::ProjectContext = match ctx {
                         Some(ref c) => c,
                         None => {
-                            detected = phantom_context::ProjectContext::detect(
-                                std::path::Path::new("."),
-                            );
+                            detected =
+                                phantom_context::ProjectContext::detect(std::path::Path::new("."));
                             &detected
                         }
                     };
@@ -628,30 +636,30 @@ impl App {
                 Err(e) => {
                     warn!("Failed to spawn nlp-translate thread: {e}");
                     // Thread spawn failed — fall back to direct agent spawn.
-                    self.console.system(format!("Spawning agent: {input_owned}"));
-                    self.pending_brain_actions.push(
-                        phantom_brain::events::AiAction::SpawnAgent {
+                    self.console
+                        .system(format!("Spawning agent: {input_owned}"));
+                    self.pending_brain_actions
+                        .push(phantom_brain::events::AiAction::SpawnAgent {
                             task: phantom_agents::AgentTask::FreeForm {
                                 prompt: input_owned,
                             },
                             spawn_tag: None,
                             disposition: phantom_agents::dispatch::Disposition::Chat,
-                        }
-                    );
+                        });
                 }
             }
         } else {
             // No LLM backend — spawn agent directly.
-            self.console.system(format!("Spawning agent: {input_owned}"));
-            self.pending_brain_actions.push(
-                phantom_brain::events::AiAction::SpawnAgent {
+            self.console
+                .system(format!("Spawning agent: {input_owned}"));
+            self.pending_brain_actions
+                .push(phantom_brain::events::AiAction::SpawnAgent {
                     task: phantom_agents::AgentTask::FreeForm {
                         prompt: input_owned,
                     },
                     spawn_tag: None,
                     disposition: phantom_agents::dispatch::Disposition::Chat,
-                }
-            );
+                });
         }
     }
 }

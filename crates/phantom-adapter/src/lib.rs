@@ -17,15 +17,15 @@ pub use adapter::{
     AppAdapter, AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned,
     Renderable,
 };
-pub use adapter::{AppId, CursorData, CursorShape, GridData, QuadData, Rect, RenderOutput, TerminalCell, TextData};
-pub use bus::{BusMessage, DataType, EventBus, Topic, TopicDeclaration, TopicId};
-pub use phantom_protocol::Event;
-pub use lifecycle::AppState;
-pub use protocol::{AdapterId, AdapterEvent, AdapterIdGen, EventStream};
-pub use registry::{AppRegistry, RegisteredApp};
-pub use spatial::{
-    Direction, InternalLayout, NegotiationResult, ResizeResult, SpatialPreference,
+pub use adapter::{
+    AppId, CursorData, CursorShape, GridData, QuadData, Rect, RenderOutput, TerminalCell, TextData,
 };
+pub use bus::{BusMessage, DataType, EventBus, Topic, TopicDeclaration, TopicId};
+pub use lifecycle::AppState;
+pub use phantom_protocol::Event;
+pub use protocol::{AdapterEvent, AdapterId, AdapterIdGen, EventStream};
+pub use registry::{AppRegistry, RegisteredApp};
+pub use spatial::{Direction, InternalLayout, NegotiationResult, ResizeResult, SpatialPreference};
 
 #[cfg(test)]
 mod tests {
@@ -388,7 +388,10 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 1,
-            event: Event::Custom { kind: "test".into(), data: "value".into() },
+            event: Event::Custom {
+                kind: "test".into(),
+                data: "value".into(),
+            },
             frame: 0,
             timestamp: 100,
         });
@@ -412,14 +415,20 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: t1,
             sender: 1,
-            event: Event::Custom { kind: "audio".into(), data: "audio_data".into() },
+            event: Event::Custom {
+                kind: "audio".into(),
+                data: "audio_data".into(),
+            },
             frame: 0,
             timestamp: 1,
         });
         bus.emit(BusMessage {
             topic_id: t2,
             sender: 1,
-            event: Event::Custom { kind: "text".into(), data: "text_data".into() },
+            event: Event::Custom {
+                kind: "text".into(),
+                data: "text_data".into(),
+            },
             frame: 0,
             timestamp: 2,
         });
@@ -442,7 +451,10 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 1,
-            event: Event::Custom { kind: "test".into(), data: "hello".into() },
+            event: Event::Custom {
+                kind: "test".into(),
+                data: "hello".into(),
+            },
             frame: 0,
             timestamp: 1,
         });
@@ -506,7 +518,10 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 1,
-            event: Event::Custom { kind: "test".into(), data: "will be removed".into() },
+            event: Event::Custom {
+                kind: "test".into(),
+                data: "will be removed".into(),
+            },
             frame: 0,
             timestamp: 1,
         });
@@ -613,8 +628,16 @@ mod tests {
     fn grid_data_with_cells() {
         let grid = GridData {
             cells: vec![
-                TerminalCell { ch: 'H', fg: [1.0, 1.0, 1.0, 1.0], bg: [0.0, 0.0, 0.0, 1.0] },
-                TerminalCell { ch: 'i', fg: [0.0, 1.0, 0.0, 1.0], bg: [0.0, 0.0, 0.0, 1.0] },
+                TerminalCell {
+                    ch: 'H',
+                    fg: [1.0, 1.0, 1.0, 1.0],
+                    bg: [0.0, 0.0, 0.0, 1.0],
+                },
+                TerminalCell {
+                    ch: 'i',
+                    fg: [0.0, 1.0, 0.0, 1.0],
+                    bg: [0.0, 0.0, 0.0, 1.0],
+                },
             ],
             cols: 2,
             rows: 1,
@@ -816,8 +839,8 @@ mod tests {
     #[test]
     fn adapter_id_is_copy_at_registration_boundary() {
         let id = AdapterId::new(7);
-        let stored = id;     // copy #1 — coordinator stores this
-        let returned = id;   // copy #2 — adapter returns from adapter_id()
+        let stored = id; // copy #1 — coordinator stores this
+        let returned = id; // copy #2 — adapter returns from adapter_id()
         assert_eq!(stored, returned);
     }
 

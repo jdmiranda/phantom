@@ -155,7 +155,10 @@ impl AppCore for AgentAdapter {
         //   total_lines.saturating_sub(output_max_lines)
         // Using cached_output_max_lines keeps this consistent so that
         // mouse.rs click-jump math doesn't overshoot by up to output_max_lines.
-        let history_size = self.pane.cached_lines().len()
+        let history_size = self
+            .pane
+            .cached_lines()
+            .len()
             .saturating_sub(self.cached_output_max_lines.get());
         json!({
             "type": "agent",
@@ -375,9 +378,7 @@ impl Commandable for AgentAdapter {
                 // Scrollbar click-jump: {"offset": N}
                 // Clamp to max_offset so an oversized click-jump cannot leave the
                 // thumb stuck past the end of the history.
-                let offset = args.get("offset")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let total_lines = self.pane.cached_lines().len();
                 let max_offset = total_lines.saturating_sub(self.cached_output_max_lines.get());
                 self.scroll_offset = offset.min(max_offset);

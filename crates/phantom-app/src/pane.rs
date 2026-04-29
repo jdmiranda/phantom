@@ -258,6 +258,135 @@ impl App {
         }
     }
 
+    /// Split a terminal pane in two for alt-screen mode (issue #323).
+    ///
+    /// The primary pane keeps the normal-screen history; a new sibling pane is
+    /// created to display the alt-screen program.  Both share an
+    /// `AltScreenSnapshot` Arc: the primary writes each frame, the view adapter
+    /// reads.
+    ///
+    /// Returns `Some(secondary_app_id)` on success, `None` on any failure.
+    pub(crate) fn split_for_alt_screen(
+        &mut self,
+        primary_app_id: phantom_adapter::AppId,
+        label: String,
+    ) -> Option<phantom_adapter::AppId> {
+        use crate::adapters::alt_screen_view::{AltScreenViewAdapter, new_snapshot};
+        use phantom_scene::clock::Cadence;
+
+        let current_pane_id = self.coordinator.pane_id_for(primary_app_id)?;
+
+        // Split horizontally: primary on the left, new view on the right.
+        let (existing_child, new_child) = match self.layout.split_horizontal(current_pane_id) {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!("split_for_alt_screen: layout split failed: {e}");
+                return None;
+            }
+        };
+
+        let width = self.gpu.surface_config.width;
+        let height = self.gpu.surface_config.height;
+        let _ = self.layout.resize(width as f32, height as f32);
+
+        // Remap primary adapter to the left child pane.
+        self.coordinator
+            .remap_pane(primary_app_id, current_pane_id, existing_child);
+
+        // Resize the primary terminal to fit the now-smaller left pane.
+        if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
+            let (cols, rows) = pane_cols_rows(self.cell_size, rect);
+            let _ = self.coordinator.send_command(
+                primary_app_id,
+                "resize",
+                &serde_json::json!({"cols": cols, "rows": rows}),
+            );
+        }
+
+        // Create the shared snapshot Arc.
+        let snapshot = new_snapshot();
+
+        // Wire the snapshot into the primary adapter so it writes each frame.
+        if let Some(primary) = self
+            .coordinator
+            .registry_mut()
+            .get_adapter_mut(primary_app_id)
+        {
+            primary.attach_alt_screen_snapshot(std::sync::Arc::clone(&snapshot));
+        }
+
+        // Create the view adapter backed by the same snapshot.
+        let view_adapter = AltScreenViewAdapter::new(snapshot, label.clone());
+
+        let scene_node = self
+            .scene
+            .add_node(self.scene_content_node, phantom_scene::node::NodeKind::Pane);
+
+        let secondary_app_id = self.coordinator.register_adapter_at_pane(
+            Box::new(view_adapter),
+            new_child,
+            scene_node,
+            Cadence::unlimited(),
+            &mut self.layout,
+        );
+
+        // Record the mapping so update.rs can manage the fade/collapse lifecycle.
+        self.alt_screen_secondaries
+            .insert(primary_app_id, secondary_app_id);
+
+        info!(
+            "Alt-screen split: primary={primary_app_id} secondary={secondary_app_id} label={label:?}"
+        );
+        Some(secondary_app_id)
+    }
+
+    /// Collapse the secondary alt-screen pane after the fade animation completes.
+    ///
+    /// Called by `tick_alt_screen_fade` once the 300 ms transition is done.
+    pub(crate) fn collapse_alt_screen_pane(
+        &mut self,
+        primary_app_id: phantom_adapter::AppId,
+        secondary_app_id: phantom_adapter::AppId,
+    ) {
+        // Detach the snapshot from the primary adapter.
+        if let Some(primary) = self
+            .coordinator
+            .registry_mut()
+            .get_adapter_mut(primary_app_id)
+        {
+            primary.detach_alt_screen_snapshot();
+        }
+
+        // Remove the view adapter, its layout pane, and scene node.
+        self.coordinator
+            .remove_adapter(secondary_app_id, &mut self.layout, &mut self.scene);
+
+        // Reclaim layout space.
+        let width = self.gpu.surface_config.width;
+        let height = self.gpu.surface_config.height;
+        let _ = self.layout.resize(width as f32, height as f32);
+
+        // Resize remaining adapters to fill the reclaimed space.
+        for app_id in self.coordinator.all_app_ids() {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
+                if let Ok(rect) = self.layout.get_pane_rect(pane_id) {
+                    let (cols, rows) = pane_cols_rows(self.cell_size, rect);
+                    let _ = self.coordinator.send_command(
+                        app_id,
+                        "resize",
+                        &serde_json::json!({"cols": cols, "rows": rows}),
+                    );
+                }
+            }
+        }
+
+        // Remove tracking entries.
+        self.alt_screen_secondaries.remove(&primary_app_id);
+        self.alt_screen_fade.remove(&secondary_app_id);
+
+        info!("Alt-screen collapsed: primary={primary_app_id} secondary={secondary_app_id}");
+    }
+
     /// Close the focused pane and its terminal.
     pub(crate) fn close_focused_pane(&mut self) {
         let Some(focused_app_id) = self.coordinator.focused() else {
@@ -459,7 +588,12 @@ mod scroll_position_tests {
     const VIEWPORT: usize = 40;
 
     fn track() -> Rect {
-        Rect { x: 494.0, y: 50.0, width: 6.0, height: 400.0 }
+        Rect {
+            x: 494.0,
+            y: 50.0,
+            width: 6.0,
+            height: 400.0,
+        }
     }
 
     // scrollbar_y_to_offset maps a click y position to a display_offset.

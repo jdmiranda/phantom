@@ -1314,7 +1314,11 @@ mod tests {
         seq.dismiss();
         seq.update(0.6); // through transition (0.5 s)
         assert!(seq.is_done(), "boot should be Done ~0.5 s after dismiss");
-        assert!(seq.elapsed() < 8.0, "elapsed {} exceeds 8 s budget", seq.elapsed());
+        assert!(
+            seq.elapsed() < 8.0,
+            "elapsed {} exceeds 8 s budget",
+            seq.elapsed()
+        );
     }
 
     /// Shell responsiveness stub: after Done, visible_text is empty and
