@@ -468,6 +468,9 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             AiAction::AgentFlatlined { id, reason } => {
                 println!("[BRAIN]: agent {id} flatlined: {reason}");
             }
+            AiAction::Suggest { action, rationale, confidence } => {
+                println!("[BRAIN]: proactive suggestion ({confidence:.2}): {action} — {rationale}");
+            }
             AiAction::DoNothing => {}
         }
     }

@@ -12,6 +12,7 @@ use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 
 use crate::events::{AiAction, AiEvent};
+use crate::proactive::ProactiveSuggester;
 use crate::router::{BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier, TaskComplexity};
 use crate::scoring::UtilityScorer;
 
@@ -277,6 +278,7 @@ fn brain_loop(
                 .expect("failed to create fallback memory store")
         });
     let mut scorer = UtilityScorer::new();
+    let mut proactive = ProactiveSuggester::default_triggers();
     let mut router = BrainRouter::new(config.router.unwrap_or_default());
     let mut active_ledger: Option<crate::orchestrator::TaskLedger> = None;
     let mut reconciler = crate::reconciler::ReconcilerState::new();
@@ -433,6 +435,21 @@ fn brain_loop(
 
         // ORIENT: update world model.
         orient(&event, &mut scorer);
+
+        // PROACTIVE: run the trigger-based suggester on every event.
+        // Emits AiAction::Suggest when a pattern is observed and the
+        // per-kind cooldown has elapsed. Short-circuits the utility loop so
+        // the proactive and utility-AI signals don't double-fire on the same
+        // event.
+        if config.enable_suggestions {
+            if let Some(proactive_action) = proactive.observe(&event) {
+                log::debug!("AI brain: proactive trigger fired — {}", action_name(&proactive_action));
+                if action_tx.send(proactive_action).is_err() {
+                    break;
+                }
+                continue;
+            }
+        }
 
         // CLASSIFY: determine task complexity and select backend cascade.
         let complexity = TaskClassifier::classify(&event);
@@ -877,6 +894,7 @@ fn handle_console_query(
 pub(crate) fn action_name(action: &AiAction) -> &str {
     match action {
         AiAction::ShowSuggestion { .. } => "suggest",
+        AiAction::Suggest { .. } => "proactive_suggest",
         AiAction::SpawnAgent { .. } => "spawn_agent",
         AiAction::UpdateMemory { .. } => "update_memory",
         AiAction::ShowNotification(_) => "notify",
@@ -907,6 +925,14 @@ mod tests {
                 options: vec![]
             }),
             "suggest"
+        );
+        assert_eq!(
+            action_name(&AiAction::Suggest {
+                action: "fix it".into(),
+                rationale: "build failed".into(),
+                confidence: 0.8,
+            }),
+            "proactive_suggest"
         );
         assert_eq!(
             action_name(&AiAction::SpawnAgent {

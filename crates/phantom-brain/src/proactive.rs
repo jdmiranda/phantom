@@ -26,10 +26,12 @@
 //! It maintains a rolling window of signals and computes a principled
 //! `should_act()` score that replaces the scattered ad-hoc checks.
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::curves::{LogisticCurve, UtilityCurve};
+use crate::events::{AiAction, AiEvent};
 
 // ---------------------------------------------------------------------------
 // Signal taxonomy (paper's E_t, A_t, S_t decomposition)
@@ -690,6 +692,279 @@ struct NeedEstimate {
     reason: String,
 }
 
+// ===========================================================================
+// ProactiveSuggester
+// ===========================================================================
+//
+// Structured trigger-based suggester that maps AiEvent inputs to
+// AiAction::Suggest outputs. Each trigger kind maintains its own per-kind
+// cooldown so that no single trigger kind can spam the user.
+//
+// The four canonical triggers from issue #37:
+//   - TestFailed      — emitted when `cargo test` / test runner exits non-zero.
+//   - BuildError      — emitted when a build command exits non-zero.
+//   - IdleAfterQuestion — emitted when the user is idle after asking a question.
+//   - ContextChange   — emitted when git branch or cwd changes.
+
+// ---------------------------------------------------------------------------
+// TriggerKind
+// ---------------------------------------------------------------------------
+
+/// The category of pattern that the suggester observed.
+///
+/// Each variant is tracked separately for cooldown purposes so that, for
+/// example, a `BuildError` cannot be suppressed by an unrelated
+/// `ContextChange` that fired moments before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriggerKind {
+    /// A test run exited with a non-zero status code.
+    TestFailed,
+    /// A build command exited with a non-zero status code.
+    BuildError,
+    /// The user asked a question and is now idle (may need follow-up).
+    IdleAfterQuestion,
+    /// The git branch or working directory changed.
+    ContextChange,
+}
+
+// ---------------------------------------------------------------------------
+// Trigger
+// ---------------------------------------------------------------------------
+
+/// A single trigger rule: maps a pattern to a suggested action + rationale.
+///
+/// When the pattern fires and the per-kind cooldown has elapsed, the
+/// [`ProactiveSuggester`] emits an [`AiAction::Suggest`] with the trigger's
+/// canned `action` and `rationale` strings and a `confidence` value.
+pub struct Trigger {
+    /// Which trigger category this rule belongs to (used for cooldown tracking).
+    pub(crate) kind: TriggerKind,
+    /// Short description of the next action to propose to the user.
+    pub(crate) action: String,
+    /// One-sentence explanation of why this action is being suggested.
+    pub(crate) rationale: String,
+    /// Confidence score in `[0.0, 1.0]`.
+    pub(crate) confidence: f32,
+}
+
+impl Trigger {
+    /// Create a new trigger rule.
+    pub fn new(
+        kind: TriggerKind,
+        action: impl Into<String>,
+        rationale: impl Into<String>,
+        confidence: f32,
+    ) -> Self {
+        Self {
+            kind,
+            action: action.into(),
+            rationale: rationale.into(),
+            confidence: confidence.clamp(0.0, 1.0),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProactiveSuggester
+// ---------------------------------------------------------------------------
+
+/// Trigger-based proactive suggestion engine (issue #37).
+///
+/// Observes [`AiEvent`]s and emits an [`AiAction::Suggest`] when a registered
+/// [`Trigger`] fires and the per-kind cooldown has elapsed.
+///
+/// # Cooldown semantics
+///
+/// Each [`TriggerKind`] has its own independent cooldown clock. Firing one
+/// trigger does **not** reset the cooldown for other kinds.  The global
+/// `cooldown_ms` is the default; individual triggers share the same value
+/// (per-kind, not per-rule — a single kind may have at most one registered
+/// rule in the default configuration).
+pub struct ProactiveSuggester {
+    /// Registered trigger rules.
+    triggers: Vec<Trigger>,
+    /// Cooldown in milliseconds per trigger kind (shared default).
+    cooldown_ms: u64,
+    /// When each trigger kind last fired (for cooldown enforcement).
+    last_fired: HashMap<TriggerKind, Instant>,
+    /// Whether a question was recently asked (for IdleAfterQuestion tracking).
+    pending_question: bool,
+}
+
+impl ProactiveSuggester {
+    /// Create a new suggester with the given triggers and per-kind cooldown.
+    ///
+    /// `cooldown_ms` is the minimum number of milliseconds that must elapse
+    /// between two suggestions of the same [`TriggerKind`].  The default
+    /// recommended value is `60_000` (60 seconds).
+    pub fn new(triggers: Vec<Trigger>, cooldown_ms: u64) -> Self {
+        Self {
+            triggers,
+            cooldown_ms,
+            last_fired: HashMap::new(),
+            pending_question: false,
+        }
+    }
+
+    /// Build a [`ProactiveSuggester`] with the canonical set of triggers for
+    /// Phantom (issue #37 defaults).
+    pub fn default_triggers() -> Self {
+        Self::new(
+            vec![
+                Trigger::new(
+                    TriggerKind::TestFailed,
+                    "Re-run failing tests with --nocapture for more output",
+                    "Tests just failed — capturing output may reveal the root cause",
+                    0.80,
+                ),
+                Trigger::new(
+                    TriggerKind::BuildError,
+                    "Run cargo fix or inspect the error with cargo check",
+                    "Build failed — a quick diagnosis could unblock you",
+                    0.85,
+                ),
+                Trigger::new(
+                    TriggerKind::IdleAfterQuestion,
+                    "Ask the brain for help with this error",
+                    "You asked a question and seem to still be thinking — need more info?",
+                    0.65,
+                ),
+                Trigger::new(
+                    TriggerKind::ContextChange,
+                    "Review recent changes on this branch",
+                    "Context changed — git log or git diff may be useful",
+                    0.55,
+                ),
+            ],
+            60_000,
+        )
+    }
+
+    /// Observe an [`AiEvent`] and optionally emit an [`AiAction::Suggest`].
+    ///
+    /// Returns `Some(AiAction::Suggest { .. })` if a trigger fires and its
+    /// cooldown has elapsed, otherwise `None`.
+    pub fn observe(&mut self, event: &AiEvent) -> Option<AiAction> {
+        let kind = self.classify(event)?;
+        self.maybe_emit(kind)
+    }
+
+    /// Classify an event into a [`TriggerKind`], or return `None` if the
+    /// event does not match any registered trigger.
+    fn classify(&mut self, event: &AiEvent) -> Option<TriggerKind> {
+        match event {
+            AiEvent::CommandComplete(parsed) => {
+                let has_errors = !parsed.errors.is_empty();
+                let exit_failed = parsed.exit_code.map_or(false, |c| c != 0);
+
+                if !has_errors && !exit_failed {
+                    return None;
+                }
+
+                // Distinguish test failures from generic build errors by
+                // inspecting the command text.  This mirrors the issue spec's
+                // TestFailed / BuildError split.
+                let cmd = parsed.command.trim();
+                let is_test = is_test_command(cmd);
+                let is_build = !is_test && is_build_command(cmd);
+
+                if is_test {
+                    Some(TriggerKind::TestFailed)
+                } else if is_build {
+                    Some(TriggerKind::BuildError)
+                } else if has_errors {
+                    // Generic command that produced structured errors →
+                    // treat as a build-class failure.
+                    Some(TriggerKind::BuildError)
+                } else {
+                    None
+                }
+            }
+
+            // IdleAfterQuestion: user asked something and then went idle.
+            AiEvent::Interrupt(query) if !query.is_empty() => {
+                self.pending_question = true;
+                None // Don't emit immediately — wait for an idle event.
+            }
+            AiEvent::UserIdle { seconds } if self.pending_question && *seconds >= 10.0 => {
+                Some(TriggerKind::IdleAfterQuestion)
+            }
+
+            // ContextChange: branch switch or cwd change.
+            AiEvent::GitStateChanged => Some(TriggerKind::ContextChange),
+
+            _ => None,
+        }
+    }
+
+    /// Emit a `Suggest` action for `kind` if the cooldown has elapsed.
+    ///
+    /// Updates the per-kind last-fired timestamp on success.
+    fn maybe_emit(&mut self, kind: TriggerKind) -> Option<AiAction> {
+        // Cooldown check.
+        if let Some(last) = self.last_fired.get(&kind) {
+            let elapsed_ms = last.elapsed().as_millis() as u64;
+            if elapsed_ms < self.cooldown_ms {
+                return None;
+            }
+        }
+
+        // Find the first trigger rule that matches this kind.
+        let trigger = self.triggers.iter().find(|t| t.kind == kind)?;
+
+        let action_str = trigger.action.clone();
+        let rationale = trigger.rationale.clone();
+        let confidence = trigger.confidence;
+
+        // Record the fire time before returning.
+        self.last_fired.insert(kind, Instant::now());
+
+        // Reset pending-question state once we've emitted for it.
+        if kind == TriggerKind::IdleAfterQuestion {
+            self.pending_question = false;
+        }
+
+        Some(AiAction::Suggest {
+            action: action_str,
+            rationale,
+            confidence,
+        })
+    }
+
+    /// Return the elapsed time since `kind` last fired, or `None` if it
+    /// has never fired.  Useful for testing and diagnostics.
+    pub fn elapsed_since_fired(&self, kind: TriggerKind) -> Option<std::time::Duration> {
+        self.last_fired.get(&kind).map(|t| t.elapsed())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command-classification helpers (private)
+// ---------------------------------------------------------------------------
+
+/// Return `true` if the command string looks like a test runner invocation.
+fn is_test_command(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    // Primary: first token is a well-known test runner.
+    let known_runners = ["cargo", "pytest", "jest", "mocha", "go", "rspec", "vitest", "npm", "yarn"];
+    if !known_runners.iter().any(|r| first.ends_with(r)) {
+        return false;
+    }
+    // Secondary: subcommand or flags mention "test".
+    cmd.contains(" test") || cmd.contains(" spec") || cmd.contains("--test")
+}
+
+/// Return `true` if the command string looks like a build invocation.
+fn is_build_command(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    let known_builders = ["cargo", "make", "cmake", "gradle", "mvn", "bazel", "buck", "npm", "yarn"];
+    if !known_builders.iter().any(|r| first.ends_with(r)) {
+        return false;
+    }
+    cmd.contains(" build") || cmd.contains(" compile") || cmd.contains(" check")
+        || cmd.contains(" install") || cmd.contains("--build")
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -983,6 +1258,310 @@ mod tests {
              high={:?}, low={:?}",
             dec_high,
             dec_low
+        );
+    }
+
+    // =======================================================================
+    // ProactiveSuggester tests (issue #37)
+    // =======================================================================
+
+    use super::{ProactiveSuggester, Trigger, TriggerKind};
+    use phantom_semantic::{
+        CargoCommand, CommandType, ContentType, DetectedError, ErrorType, ParsedOutput, Severity,
+    };
+
+    /// Build a minimal ParsedOutput with one error and a non-zero exit code.
+    fn failed_output(command: &str) -> ParsedOutput {
+        ParsedOutput {
+            command: command.into(),
+            command_type: CommandType::Cargo(CargoCommand::Build),
+            exit_code: Some(1),
+            content_type: ContentType::CompilerOutput,
+            errors: vec![DetectedError {
+                message: "mismatched types".into(),
+                error_type: ErrorType::Compiler,
+                file: Some("src/main.rs".into()),
+                line: Some(10),
+                column: Some(1),
+                code: Some("E0308".into()),
+                severity: Severity::Error,
+                raw_line: "error[E0308]: mismatched types".into(),
+                suggestion: None,
+            }],
+            warnings: vec![],
+            duration_ms: Some(800),
+            raw_output: "error[E0308]: mismatched types".into(),
+        }
+    }
+
+    /// Build a minimal ParsedOutput with no errors and exit code 0.
+    fn success_output(command: &str) -> ParsedOutput {
+        ParsedOutput {
+            command: command.into(),
+            command_type: CommandType::Cargo(CargoCommand::Build),
+            exit_code: Some(0),
+            content_type: ContentType::PlainText,
+            errors: vec![],
+            warnings: vec![],
+            duration_ms: Some(400),
+            raw_output: "Finished".into(),
+        }
+    }
+
+    /// Create a fresh suggester using `default_triggers()`.
+    fn default_suggester() -> ProactiveSuggester {
+        ProactiveSuggester::default_triggers()
+    }
+
+    // -----------------------------------------------------------------------
+    // TriggerKind::BuildError
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_error_fires_on_cargo_build_failure() {
+        let mut s = default_suggester();
+        let event = AiEvent::CommandComplete(failed_output("cargo build"));
+        let result = s.observe(&event);
+        assert!(result.is_some(), "expected Suggest for cargo build failure");
+        if let Some(AiAction::Suggest { confidence, .. }) = result {
+            assert!(confidence > 0.0);
+        } else {
+            panic!("expected AiAction::Suggest");
+        }
+    }
+
+    #[test]
+    fn build_error_does_not_fire_on_success() {
+        let mut s = default_suggester();
+        let event = AiEvent::CommandComplete(success_output("cargo build"));
+        let result = s.observe(&event);
+        assert!(result.is_none(), "should not suggest when build succeeds");
+    }
+
+    #[test]
+    fn build_error_suggest_contains_action_and_rationale() {
+        let mut s = default_suggester();
+        let event = AiEvent::CommandComplete(failed_output("cargo build"));
+        let result = s.observe(&event);
+        if let Some(AiAction::Suggest { action, rationale, confidence }) = result {
+            assert!(!action.is_empty(), "action must not be empty");
+            assert!(!rationale.is_empty(), "rationale must not be empty");
+            assert!((0.0..=1.0).contains(&confidence), "confidence must be in [0,1]");
+        } else {
+            panic!("expected AiAction::Suggest");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TriggerKind::TestFailed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_failed_fires_on_cargo_test_failure() {
+        let mut s = default_suggester();
+        let event = AiEvent::CommandComplete(failed_output("cargo test"));
+        let result = s.observe(&event);
+        assert!(result.is_some(), "expected Suggest for cargo test failure");
+    }
+
+    #[test]
+    fn test_failed_does_not_fire_on_success() {
+        let mut s = default_suggester();
+        let event = AiEvent::CommandComplete(success_output("cargo test"));
+        let result = s.observe(&event);
+        assert!(result.is_none(), "should not suggest when tests pass");
+    }
+
+    #[test]
+    fn test_failed_is_distinct_from_build_error() {
+        // Each TriggerKind has its own cooldown; firing TestFailed should not
+        // consume BuildError's cooldown.
+        let mut s = default_suggester();
+
+        // Fire TestFailed.
+        let test_event = AiEvent::CommandComplete(failed_output("cargo test"));
+        let r1 = s.observe(&test_event);
+        assert!(r1.is_some(), "TestFailed should fire first time");
+
+        // BuildError is a separate kind — its cooldown is untouched.
+        let build_event = AiEvent::CommandComplete(failed_output("cargo build"));
+        let r2 = s.observe(&build_event);
+        assert!(r2.is_some(), "BuildError should fire independently of TestFailed cooldown");
+    }
+
+    // -----------------------------------------------------------------------
+    // TriggerKind::IdleAfterQuestion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn idle_after_question_fires_when_question_then_idle() {
+        let mut s = default_suggester();
+
+        // Step 1: user asks a question.
+        let q = AiEvent::Interrupt("how do I fix this borrow error?".into());
+        let r1 = s.observe(&q);
+        assert!(r1.is_none(), "question alone should not emit immediately");
+
+        // Step 2: user goes idle for > 10 s.
+        let idle = AiEvent::UserIdle { seconds: 15.0 };
+        let r2 = s.observe(&idle);
+        assert!(r2.is_some(), "should suggest after question + idle");
+    }
+
+    #[test]
+    fn idle_after_question_does_not_fire_without_prior_question() {
+        let mut s = default_suggester();
+
+        // Idle without a prior question.
+        let idle = AiEvent::UserIdle { seconds: 30.0 };
+        let result = s.observe(&idle);
+        assert!(result.is_none(), "idle without a question should not trigger");
+    }
+
+    #[test]
+    fn idle_after_question_does_not_fire_if_idle_too_short() {
+        let mut s = default_suggester();
+
+        let q = AiEvent::Interrupt("how do I fix this?".into());
+        s.observe(&q);
+
+        // Idle for only 5 s — below the 10 s threshold.
+        let idle = AiEvent::UserIdle { seconds: 5.0 };
+        let result = s.observe(&idle);
+        assert!(result.is_none(), "idle < 10 s should not trigger IdleAfterQuestion");
+    }
+
+    // -----------------------------------------------------------------------
+    // TriggerKind::ContextChange
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn context_change_fires_on_git_state_changed() {
+        let mut s = default_suggester();
+        let event = AiEvent::GitStateChanged;
+        let result = s.observe(&event);
+        assert!(result.is_some(), "ContextChange should fire on GitStateChanged");
+    }
+
+    #[test]
+    fn context_change_does_not_fire_on_file_changed() {
+        // FileChanged is not a ContextChange in the current classifier, so
+        // this test verifies it returns None (keeps trigger taxonomy clean).
+        let mut s = default_suggester();
+        let event = AiEvent::FileChanged("src/main.rs".into());
+        let result = s.observe(&event);
+        // FileChanged is not mapped to ContextChange in the issue spec.
+        // This is intentional — GitStateChanged is the ContextChange signal.
+        assert!(result.is_none(), "FileChanged alone should not trigger ContextChange");
+    }
+
+    // -----------------------------------------------------------------------
+    // Cooldown enforcement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cooldown_suppresses_rapid_refires_of_same_kind() {
+        let mut s = default_suggester();
+
+        let event = AiEvent::CommandComplete(failed_output("cargo build"));
+
+        // First fire: should succeed.
+        let r1 = s.observe(&event);
+        assert!(r1.is_some(), "first BuildError should fire");
+
+        // Immediate second fire: cooldown should suppress.
+        let r2 = s.observe(&event);
+        assert!(r2.is_none(), "second immediate BuildError should be suppressed by cooldown");
+    }
+
+    #[test]
+    fn cooldown_expires_after_configured_ms() {
+        // Use a very short cooldown so the test does not have to sleep 60 s.
+        let mut s = ProactiveSuggester::new(
+            vec![Trigger::new(
+                TriggerKind::BuildError,
+                "run cargo fix",
+                "build failed",
+                0.8,
+            )],
+            1, // 1 ms cooldown
+        );
+
+        let event = AiEvent::CommandComplete(failed_output("cargo build"));
+
+        // Fire once.
+        let r1 = s.observe(&event);
+        assert!(r1.is_some(), "first fire should succeed");
+
+        // Spin long enough for 1 ms to elapse.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Fire again — cooldown should have expired.
+        let r2 = s.observe(&event);
+        assert!(r2.is_some(), "should fire again after cooldown expires");
+    }
+
+    #[test]
+    fn different_kinds_have_independent_cooldowns() {
+        // A short cooldown for both kinds.
+        let mut s = ProactiveSuggester::new(
+            vec![
+                Trigger::new(TriggerKind::BuildError, "fix build", "build failed", 0.8),
+                Trigger::new(TriggerKind::ContextChange, "review changes", "context changed", 0.6),
+            ],
+            60_000, // 60 s
+        );
+
+        // Fire BuildError.
+        let build_event = AiEvent::CommandComplete(failed_output("cargo build"));
+        let r1 = s.observe(&build_event);
+        assert!(r1.is_some(), "BuildError first fire");
+
+        // ContextChange has an independent cooldown — should still fire.
+        let ctx_event = AiEvent::GitStateChanged;
+        let r2 = s.observe(&ctx_event);
+        assert!(r2.is_some(), "ContextChange should fire independently of BuildError cooldown");
+
+        // BuildError again immediately — should be suppressed.
+        let r3 = s.observe(&build_event);
+        assert!(r3.is_none(), "BuildError should be on cooldown");
+    }
+
+    // -----------------------------------------------------------------------
+    // Confidence bounds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn confidence_is_clamped_to_unit_range() {
+        // Clamp > 1.0.
+        let t = Trigger::new(TriggerKind::BuildError, "a", "b", 2.5);
+        assert!((t.confidence - 1.0).abs() < f32::EPSILON, "confidence should clamp to 1.0");
+
+        // Clamp < 0.0.
+        let t = Trigger::new(TriggerKind::TestFailed, "a", "b", -0.5);
+        assert!(t.confidence.abs() < f32::EPSILON, "confidence should clamp to 0.0");
+    }
+
+    // -----------------------------------------------------------------------
+    // elapsed_since_fired helper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn elapsed_since_fired_returns_none_before_first_fire() {
+        let s = default_suggester();
+        assert!(
+            s.elapsed_since_fired(TriggerKind::BuildError).is_none(),
+            "elapsed_since_fired should be None before the trigger fires"
+        );
+    }
+
+    #[test]
+    fn elapsed_since_fired_returns_some_after_fire() {
+        let mut s = default_suggester();
+        s.observe(&AiEvent::CommandComplete(failed_output("cargo build")));
+        assert!(
+            s.elapsed_since_fired(TriggerKind::BuildError).is_some(),
+            "elapsed_since_fired should return Some after the trigger fires"
         );
     }
 }

@@ -179,6 +179,20 @@ pub enum AiAction {
         denial_count: usize,
     },
 
+    /// Proactive suggestion emitted by [`ProactiveSuggester`].
+    ///
+    /// Unlike `ShowSuggestion`, which is driven by the utility scorer,
+    /// `Suggest` carries a machine-generated rationale and a confidence
+    /// score so the renderer can decide how prominently to surface it.
+    Suggest {
+        /// Short description of the suggested next action.
+        action: String,
+        /// One-sentence explanation of why the brain is suggesting this.
+        rationale: String,
+        /// Confidence in the suggestion, in the range `[0.0, 1.0]`.
+        confidence: f32,
+    },
+
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,
 }
