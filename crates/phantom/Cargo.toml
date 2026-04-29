@@ -28,10 +28,10 @@ winit.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
+uuid.workspace = true
 dotenvy = "0.15"
 serde_json = "1"
 libc = "0.2"
-uuid.workspace = true
 
 [lints]
 workspace = true

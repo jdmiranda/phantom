@@ -172,21 +172,21 @@ pub enum AgentMessage {
 #[derive(Debug)]
 pub struct Agent {
     /// Unique identifier.
-    pub id: AgentId,
+    id: AgentId,
     /// The task this agent was spawned to perform.
-    pub task: AgentTask,
+    task: AgentTask,
     /// Current lifecycle status.
-    pub status: AgentStatus,
+    status: AgentStatus,
     /// Full conversation history (system + user + assistant + tools).
-    pub messages: Vec<AgentMessage>,
+    messages: Vec<AgentMessage>,
     /// Visible output lines shown in the agent pane.
-    pub output_log: Vec<String>,
+    output_log: Vec<String>,
     /// When this agent was created.
-    pub created_at: Instant,
+    created_at: Instant,
     /// When this agent finished (if it has).
-    pub completed_at: Option<Instant>,
+    completed_at: Option<Instant>,
     /// Reason for entering Flatline state. Set by `flatline()`.
-    pub flatline_reason: Option<String>,
+    flatline_reason: Option<String>,
     /// Causality token linking this agent to the pipeline run that spawned it.
     ///
     /// All agents in the same pipeline share a single [`CorrelationId`] so that
@@ -195,13 +195,13 @@ pub struct Agent {
     ///
     /// `None` for agents spawned outside a tracked pipeline (e.g. direct
     /// user-initiated spawns that pre-date the tracing infrastructure).
-    pub correlation_id: Option<CorrelationId>,
+    correlation_id: Option<CorrelationId>,
     /// The [`AgentId`] of the agent that directly spawned this one, if any.
     ///
     /// `None` for top-level agents spawned by the user or the substrate.
     /// Set by the Composer when it calls `spawn_subagent` so the parent–child
     /// relationship is recoverable at query time.
-    pub parent_id: Option<AgentId>,
+    parent_id: Option<AgentId>,
     /// Ring-buffer of structured outputs from recent `RunCommand` tool calls.
     ///
     /// After every `RunCommand` result, the caller is expected to push the
@@ -251,6 +251,59 @@ impl Agent {
             parent_id,
             ..Self::new(id, task)
         }
+    }
+
+    /// Return the unique identifier for this agent.
+    #[must_use]
+    pub fn id(&self) -> AgentId {
+        self.id
+    }
+
+    /// Return the task this agent was spawned to perform.
+    #[must_use]
+    pub fn task(&self) -> &AgentTask {
+        &self.task
+    }
+
+    /// Return the current lifecycle status.
+    #[must_use]
+    pub fn status(&self) -> AgentStatus {
+        self.status
+    }
+
+    /// Set the lifecycle status directly, bypassing FSM guards.
+    ///
+    /// Prefer the FSM transition helpers ([`Agent::approve_plan`],
+    /// [`Agent::complete`], etc.) for well-guarded transitions.
+    /// This escape hatch exists only for internal infrastructure code
+    /// (manager promotion, render-loop bookkeeping) that needs to force a
+    /// specific state without going through the full FSM.
+    pub(crate) fn set_status(&mut self, status: AgentStatus) {
+        self.status = status;
+    }
+
+    /// Return the full conversation history.
+    #[must_use]
+    pub fn messages(&self) -> &[AgentMessage] {
+        &self.messages
+    }
+
+    /// Return the visible output lines shown in the agent pane.
+    #[must_use]
+    pub fn output_log(&self) -> &[String] {
+        &self.output_log
+    }
+
+    /// Return the time at which this agent completed, if it has.
+    #[must_use]
+    pub fn completed_at(&self) -> Option<Instant> {
+        self.completed_at
+    }
+
+    /// Return the reason for entering Flatline state, if set.
+    #[must_use]
+    pub fn flatline_reason(&self) -> Option<&str> {
+        self.flatline_reason.as_deref()
     }
 
     /// Return the correlation id for this agent, if set.
@@ -711,11 +764,11 @@ mod tests {
                 prompt: "hello".into(),
             },
         );
-        assert_eq!(agent.id, 1);
-        assert_eq!(agent.status, AgentStatus::Queued);
-        assert!(agent.messages.is_empty());
-        assert!(agent.output_log.is_empty());
-        assert!(agent.completed_at.is_none());
+        assert_eq!(agent.id(), 1);
+        assert_eq!(agent.status(), AgentStatus::Queued);
+        assert!(agent.messages().is_empty());
+        assert!(agent.output_log().is_empty());
+        assert!(agent.completed_at().is_none());
     }
 
     #[test]
@@ -728,7 +781,7 @@ mod tests {
         );
         agent.push_message(AgentMessage::User("hello".into()));
         agent.push_message(AgentMessage::Assistant("hi".into()));
-        assert_eq!(agent.messages.len(), 2);
+        assert_eq!(agent.messages().len(), 2);
     }
 
     #[test]
@@ -741,7 +794,7 @@ mod tests {
         );
         agent.log("line 1");
         agent.log("line 2");
-        assert_eq!(agent.output_log, vec!["line 1", "line 2"]);
+        assert_eq!(agent.output_log(), vec!["line 1", "line 2"]);
     }
 
     #[test]
@@ -753,8 +806,8 @@ mod tests {
             },
         );
         agent.complete(true);
-        assert_eq!(agent.status, AgentStatus::Done);
-        assert!(agent.completed_at.is_some());
+        assert_eq!(agent.status(), AgentStatus::Done);
+        assert!(agent.completed_at().is_some());
     }
 
     #[test]
@@ -766,8 +819,8 @@ mod tests {
             },
         );
         agent.complete(false);
-        assert_eq!(agent.status, AgentStatus::Failed);
-        assert!(agent.completed_at.is_some());
+        assert_eq!(agent.status(), AgentStatus::Failed);
+        assert!(agent.completed_at().is_some());
     }
 
     #[test]
@@ -991,7 +1044,7 @@ mod tests {
     fn agent_message_tool_result_includes_provenance() {
         // Pushing a ToolResult onto the agent's history must preserve the
         // provenance fields. This is the substrate's promise that every
-        // entry in agent.messages can be walked back to the substrate event
+        // entry in agent.messages() can be walked back to the substrate event
         // that triggered the tool call.
         let mut agent = Agent::new(
             1,
@@ -1001,7 +1054,7 @@ mod tests {
         );
         agent.push_message(AgentMessage::ToolResult(tool_result_with_event(99)));
 
-        let last = agent.messages.last().expect("a message was pushed");
+        let last = agent.messages().last().expect("a message was pushed");
         match last {
             AgentMessage::ToolResult(tr) => {
                 assert_eq!(tr.tool_name, "read_file");
@@ -1159,16 +1212,16 @@ mod tests {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         let ok = agent.begin_planning();
         assert!(ok, "begin_planning() must succeed from Queued");
-        assert_eq!(agent.status, AgentStatus::Planning);
+        assert_eq!(agent.status(), AgentStatus::Planning);
     }
 
     #[test]
     fn begin_planning_fails_from_working() {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
-        agent.status = AgentStatus::Working;
+        agent.set_status(AgentStatus::Working);
         let ok = agent.begin_planning();
         assert!(!ok, "begin_planning() must fail from Working");
-        assert_eq!(agent.status, AgentStatus::Working, "status must not change");
+        assert_eq!(agent.status(), AgentStatus::Working, "status must not change");
     }
 
     #[test]
@@ -1177,7 +1230,7 @@ mod tests {
         agent.begin_planning();
         let ok = agent.submit_plan_for_approval();
         assert!(ok, "submit_plan_for_approval() must succeed from Planning");
-        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+        assert_eq!(agent.status(), AgentStatus::AwaitingApproval);
     }
 
     #[test]
@@ -1185,7 +1238,7 @@ mod tests {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         let ok = agent.submit_plan_for_approval();
         assert!(!ok, "submit_plan_for_approval() must fail from Queued");
-        assert_eq!(agent.status, AgentStatus::Queued);
+        assert_eq!(agent.status(), AgentStatus::Queued);
     }
 
     #[test]
@@ -1195,7 +1248,7 @@ mod tests {
         agent.submit_plan_for_approval();
         let ok = agent.approve_plan();
         assert!(ok, "approve_plan() must succeed from AwaitingApproval");
-        assert_eq!(agent.status, AgentStatus::Working);
+        assert_eq!(agent.status(), AgentStatus::Working);
     }
 
     #[test]
@@ -1205,7 +1258,7 @@ mod tests {
         agent.begin_planning();
         let ok = agent.approve_plan();
         assert!(ok, "approve_plan() must succeed from Planning (auto-approve)");
-        assert_eq!(agent.status, AgentStatus::Working);
+        assert_eq!(agent.status(), AgentStatus::Working);
     }
 
     #[test]
@@ -1216,7 +1269,7 @@ mod tests {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         let ok = agent.approve_plan();
         assert!(ok, "approve_plan() must succeed from Queued via the fast path");
-        assert_eq!(agent.status, AgentStatus::Working);
+        assert_eq!(agent.status(), AgentStatus::Working);
     }
 
     #[test]
@@ -1226,7 +1279,7 @@ mod tests {
         agent.complete(true); // → Done
         let ok = agent.approve_plan();
         assert!(!ok, "approve_plan() must fail from Done");
-        assert_eq!(agent.status, AgentStatus::Done, "status must not change");
+        assert_eq!(agent.status(), AgentStatus::Done, "status must not change");
     }
 
     #[test]
@@ -1236,31 +1289,31 @@ mod tests {
         agent.submit_plan_for_approval();
         let ok = agent.request_revision();
         assert!(ok, "request_revision() must succeed from AwaitingApproval");
-        assert_eq!(agent.status, AgentStatus::Planning);
+        assert_eq!(agent.status(), AgentStatus::Planning);
     }
 
     #[test]
     fn request_revision_fails_from_working() {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
-        agent.status = AgentStatus::Working;
+        agent.set_status(AgentStatus::Working);
         let ok = agent.request_revision();
         assert!(!ok, "request_revision() must fail from Working");
-        assert_eq!(agent.status, AgentStatus::Working);
+        assert_eq!(agent.status(), AgentStatus::Working);
     }
 
     #[test]
     fn full_plan_gate_happy_path() {
         // Queued → Planning → AwaitingApproval → Working → Done
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
-        assert_eq!(agent.status, AgentStatus::Queued);
+        assert_eq!(agent.status(), AgentStatus::Queued);
         assert!(agent.begin_planning());
-        assert_eq!(agent.status, AgentStatus::Planning);
+        assert_eq!(agent.status(), AgentStatus::Planning);
         assert!(agent.submit_plan_for_approval());
-        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+        assert_eq!(agent.status(), AgentStatus::AwaitingApproval);
         assert!(agent.approve_plan());
-        assert_eq!(agent.status, AgentStatus::Working);
+        assert_eq!(agent.status(), AgentStatus::Working);
         agent.complete(true);
-        assert_eq!(agent.status, AgentStatus::Done);
+        assert_eq!(agent.status(), AgentStatus::Done);
     }
 
     #[test]
@@ -1269,16 +1322,16 @@ mod tests {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         agent.begin_planning();
         agent.submit_plan_for_approval();
-        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+        assert_eq!(agent.status(), AgentStatus::AwaitingApproval);
         // User rejects, requests revision.
         assert!(agent.request_revision());
-        assert_eq!(agent.status, AgentStatus::Planning);
+        assert_eq!(agent.status(), AgentStatus::Planning);
         // Agent replans, resubmits.
         assert!(agent.submit_plan_for_approval());
-        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+        assert_eq!(agent.status(), AgentStatus::AwaitingApproval);
         // User approves.
         assert!(agent.approve_plan());
-        assert_eq!(agent.status, AgentStatus::Working);
+        assert_eq!(agent.status(), AgentStatus::Working);
     }
 
     #[test]
@@ -1386,7 +1439,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            agent.status,
+            agent.status(),
             AgentStatus::Queued,
             "with_correlation must start in Queued status",
         );

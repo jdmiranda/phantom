@@ -490,9 +490,9 @@ impl AgentPane {
 
         info!(
             "Agent pane spawning: {} messages (system={}, user={}, backend={})",
-            agent.messages.len(),
-            agent.messages.iter().filter(|m| matches!(m, AgentMessage::System(_))).count(),
-            agent.messages.iter().filter(|m| matches!(m, AgentMessage::User(_))).count(),
+            agent.messages().len(),
+            agent.messages().iter().filter(|m| matches!(m, AgentMessage::System(_))).count(),
+            agent.messages().iter().filter(|m| matches!(m, AgentMessage::User(_))).count(),
             chat_backend.as_deref().map(|b| b.name()).unwrap_or("claude (default)"),
         );
 
@@ -510,7 +510,7 @@ impl AgentPane {
 
         info!("Agent pane spawned: {task_desc}");
 
-        let agent_id_u64 = agent.id as u64;
+        let agent_id_u64 = agent.id() as u64;
         let mut journal = open_agent_journal(agent_id_u64);
         if let Some(ref mut j) = journal {
             if let Err(e) = j.record_spawn(agent_id_u64, &task_desc) {
@@ -548,7 +548,7 @@ impl AgentPane {
             event_log: None,
             pending_spawn: None,
             self_ref: None,
-            role: DEFAULT_AGENT_PANE_ROLE,
+            role: initial_role,
             ticket_dispatcher: None,
             journal,
         }
@@ -673,7 +673,7 @@ impl AgentPane {
                     if let Some(ref mut j) = self.journal {
                         let first_line = text.lines().next().unwrap_or("").to_string();
                         if !first_line.is_empty() {
-                            if let Err(e) = j.record_output(self.agent.id as u64, first_line) {
+                            if let Err(e) = j.record_output(self.agent.id() as u64, first_line) {
                                 warn!("AgentJournal::record_output failed: {e}");
                             }
                         }
@@ -694,7 +694,7 @@ impl AgentPane {
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
                     if let Some(ref mut j) = self.journal {
-                        if let Err(e) = j.record_tool_call(self.agent.id as u64, call.tool.api_name(), &args_display) {
+                        if let Err(e) = j.record_tool_call(self.agent.id() as u64, call.tool.api_name(), &args_display) {
                             warn!("AgentJournal::record_tool_call failed: {e}");
                         }
                     }
@@ -720,7 +720,7 @@ impl AgentPane {
                                 "~{}in/~{}out tokens, {} tool calls",
                                 self.input_tokens, self.output_tokens, self.tool_call_count
                             );
-                            if let Err(e) = j.record_completion(self.agent.id as u64, true, summary) {
+                            if let Err(e) = j.record_completion(self.agent.id() as u64, true, summary) {
                                 warn!("AgentJournal::record_completion failed: {e}");
                             }
                         }
@@ -742,7 +742,7 @@ impl AgentPane {
                 Some(ApiEvent::Error(e)) => {
                     self.output.push_str(&format!("\n\n✗ Error: {e}\n"));
                     if let Some(ref mut j) = self.journal {
-                        if let Err(je) = j.record_flatline(self.agent.id as u64, &e) {
+                        if let Err(je) = j.record_flatline(self.agent.id() as u64, &e) {
                             warn!("AgentJournal::record_flatline failed: {je}");
                         }
                     }
@@ -767,7 +767,7 @@ impl AgentPane {
         if self.turn_count >= MAX_TOOL_ROUNDS {
             if let Some(ref mut j) = self.journal {
                 if let Err(e) = j.record_flatline(
-                    self.agent.id as u64,
+                    self.agent.id() as u64,
                     format!("iteration limit reached ({MAX_TOOL_ROUNDS} tool rounds)"),
                 ) {
                     warn!("AgentJournal::record_flatline (limit) failed: {e}");
@@ -993,7 +993,7 @@ impl AgentPane {
             .unwrap_or("Sense");
 
         let payload = build_blocked_payload(
-            self.agent.id as u64,
+            self.agent.id() as u64,
             role_label,
             &reason,
             now_unix_ms(),
@@ -1004,7 +1004,7 @@ impl AgentPane {
         let role = self.role;
         let event = SubstrateEvent {
             kind: EventKind::AgentBlocked {
-                agent_id: self.agent.id as u64,
+                agent_id: self.agent.id() as u64,
                 reason: reason.clone(),
             },
             payload,
@@ -1052,7 +1052,7 @@ impl AgentPane {
 
         let attempted_class = tool.capability_class();
         let attempted_tool = tool.api_name().to_string();
-        let agent_id = self.agent.id as u64;
+        let agent_id = self.agent.id() as u64;
         let role = self.role;
 
         // Audit-side record (always emitted regardless of whether a sink
@@ -1766,7 +1766,7 @@ mod tests {
         assert!(pane.api_handle.is_none());
         // Assistant text should have been flushed to agent messages.
         assert!(pane.current_assistant_text.is_empty());
-        assert!(pane.agent.messages.iter().any(|m| matches!(m, AgentMessage::Assistant(t) if t == "result")));
+        assert!(pane.agent.messages().iter().any(|m| matches!(m, AgentMessage::Assistant(t) if t == "result")));
     }
 
     #[test]
@@ -1794,8 +1794,8 @@ mod tests {
         // turn_count should have incremented.
         assert_eq!(pane.turn_count, 1);
         // Agent messages should include ToolCall and ToolResult.
-        let has_tool_call = pane.agent.messages.iter().any(|m| matches!(m, AgentMessage::ToolCall(_)));
-        let has_tool_result = pane.agent.messages.iter().any(|m| matches!(m, AgentMessage::ToolResult(_)));
+        let has_tool_call = pane.agent.messages().iter().any(|m| matches!(m, AgentMessage::ToolCall(_)));
+        let has_tool_result = pane.agent.messages().iter().any(|m| matches!(m, AgentMessage::ToolResult(_)));
         assert!(has_tool_call, "agent should have a ToolCall message");
         assert!(has_tool_result, "agent should have a ToolResult message");
         // Output should show the continuation.

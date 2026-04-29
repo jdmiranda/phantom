@@ -69,7 +69,7 @@ pub struct ChatRequest<'a> {
     /// Tool definitions exposed to the assistant for this round.
     pub tools: &'a [ToolDefinition],
     /// API-assigned IDs for prior tool calls (positionally aligned with
-    /// `AgentMessage::ToolCall` entries in `agent.messages`).
+    /// `AgentMessage::ToolCall` entries in `agent.messages()`).
     pub tool_use_ids: &'a [String],
     /// Maximum tokens to generate (vendor-specific clamping may apply).
     pub max_tokens: u32,
@@ -477,8 +477,8 @@ fn build_openai_messages(agent: &Agent, tool_use_ids: &[String]) -> Vec<Value> {
     let mut tool_idx: usize = 0;
     let mut result_idx: usize = 0;
     let mut i = 0;
-    while i < agent.messages.len() {
-        match &agent.messages[i] {
+    while i < agent.messages().len() {
+        match &agent.messages()[i] {
             AgentMessage::System(_) => {
                 // Already handled at the head.
                 i += 1;
@@ -501,8 +501,8 @@ fn build_openai_messages(agent: &Agent, tool_use_ids: &[String]) -> Vec<Value> {
                 // Group consecutive tool calls into a single assistant message
                 // with multiple tool_calls entries.
                 let mut tool_calls = Vec::new();
-                while i < agent.messages.len() {
-                    if let AgentMessage::ToolCall(tc) = &agent.messages[i] {
+                while i < agent.messages().len() {
+                    if let AgentMessage::ToolCall(tc) = &agent.messages()[i] {
                         let id = tool_use_ids
                             .get(tool_idx)
                             .cloned()

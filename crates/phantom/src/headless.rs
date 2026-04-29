@@ -291,13 +291,19 @@ fn run_shell_command(
             }
 
             // Append to history.
-            let entry = HistoryEntry::builder(
-                cmd,
+            let mut builder = HistoryEntry::builder(
+                &parsed.command,
                 project_dir,
                 Uuid::new_v4(),
             )
-            .exit_code(out.status.code().unwrap_or(-1))
-            .build();
+            .semantic_type(parsed.command_type.clone());
+            if let Some(code) = parsed.exit_code {
+                builder = builder.exit_code(code);
+            }
+            if let Some(ms) = parsed.duration_ms {
+                builder = builder.duration_ms(ms);
+            }
+            let entry = builder.build();
             if let Err(e) = history.append(&entry) {
                 log::warn!("failed to append history: {e}");
             }
@@ -325,16 +331,16 @@ fn run_agent_loop(
     let Some(agent) = working.last() else {
         return;
     };
-    let agent_id = agent.id;
+    let agent_id = agent.id();
 
     // Ensure the agent has a system prompt and initial user message.
     {
         let Some(agent) = agents.get_mut(agent_id) else { return };
-        if agent.messages.is_empty() {
+        if agent.messages().is_empty() {
             let sys = agent.system_prompt();
             agent.push_message(AgentMessage::System(sys));
 
-            let task_prompt = match &agent.task {
+            let task_prompt = match agent.task() {
                 phantom_agents::AgentTask::FreeForm { prompt } => prompt.clone(),
                 phantom_agents::AgentTask::FixError {
                     error_summary,
@@ -355,7 +361,7 @@ fn run_agent_loop(
 
     loop {
         let Some(agent) = agents.get(agent_id) else { break };
-        if agent.status != AgentStatus::Working && agent.status != AgentStatus::WaitingForTool {
+        if agent.status() != AgentStatus::Working && agent.status() != AgentStatus::WaitingForTool {
             break;
         }
 
@@ -402,7 +408,7 @@ fn run_agent_loop(
                     let Some(agent) = agents.get_mut(agent_id) else { break };
                     agent.push_message(AgentMessage::ToolCall(call));
                     agent.push_message(AgentMessage::ToolResult(result));
-                    agent.status = AgentStatus::Working;
+                    // Agent remains Working — no status change needed here.
                     got_tool_use = true;
                 }
                 Some(ApiEvent::Done) => {
@@ -425,14 +431,14 @@ fn run_agent_loop(
 
         // If the agent completed or failed, stop looping.
         let Some(agent) = agents.get(agent_id) else { break };
-        if agent.status != AgentStatus::Working {
+        if agent.status() != AgentStatus::Working {
             break;
         }
         // Otherwise the agent made a tool call -- loop back for the next turn.
     }
 
     let Some(agent) = agents.get(agent_id) else { return };
-    let status_tag = match agent.status {
+    let status_tag = match agent.status() {
         AgentStatus::Done => "DONE",
         AgentStatus::Failed => "FAILED",
         AgentStatus::Flatline => "FLATLINE",
@@ -470,6 +476,12 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             }
             AiAction::Suggest { action, rationale, confidence } => {
                 println!("[BRAIN]: proactive suggestion ({confidence:.2}): {action} — {rationale}");
+            }
+            AiAction::QuarantineAgent { agent_id, denial_count } => {
+                println!("[BRAIN]: quarantine agent {agent_id} after {denial_count} denials");
+            }
+            AiAction::AgentQuarantined { agent_id, denial_count } => {
+                println!("[BRAIN]: agent {agent_id} quarantined after {denial_count} denials");
             }
             AiAction::DoNothing => {}
         }
@@ -623,12 +635,12 @@ fn run_chat(
 
                 // Collect agent output.
                 if let Some(agent) = agents.get(agent_id) {
-                    for line in &agent.output_log {
+                    for line in agent.output_log() {
                         agent_output.push_str(line);
                         agent_output.push('\n');
                     }
                     // Also get the last assistant message.
-                    for msg in agent.messages.iter().rev() {
+                    for msg in agent.messages().iter().rev() {
                         if let AgentMessage::Assistant(text) = msg {
                             if agent_output.is_empty() {
                                 agent_output = text.clone();
