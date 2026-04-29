@@ -34,6 +34,7 @@ use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::{OodaConfig, OodaLoop};
 use phantom_context::ProjectContext;
+use phantom_history::{AgentOutputCapture, HistoryStore};
 use phantom_memory::MemoryStore;
 use phantom_plugins::PluginRegistry;
 use phantom_scene::node::{NodeKind, RenderLayer};
@@ -374,6 +375,26 @@ pub struct App {
     // -- Live shader reloader (debug + `live-reload` feature only).
     //    No-op stub in release builds; zero overhead on the hot path.
     pub(crate) shader_reloader: phantom_renderer::shader_loader::ShaderReloader,
+
+    // -- Command history store (JSONL, one entry per completed command). --
+    //    `None` on open failure; production paths never `.unwrap()`.
+    //    File: `~/.local/share/phantom/history/<session_uuid>.jsonl`.
+    pub(crate) history: Option<HistoryStore>,
+
+    // -- Agent output capture sidecar (JSONL, one record per agent run). --
+    //    `None` on open failure. Each spawned `AgentPane` receives a clone.
+    //    File: `~/.local/share/phantom/history/<session_uuid>-agents.jsonl`.
+    pub(crate) agent_capture: Option<AgentOutputCapture>,
+
+    // -- Session UUID shared by the history store and agent capture sidecar.
+    //    Generated once at startup; stable for the process lifetime.
+    pub(crate) session_uuid: uuid::Uuid,
+
+    // -- Per-pane pending command text.
+    //    Populated from `Event::CommandStarted` so that the subsequent
+    //    `Event::CommandComplete` handler in `drain_bus_to_brain` can write
+    //    a `HistoryEntry` with the actual command string and exit code.
+    pub(crate) pending_command_text: std::collections::HashMap<phantom_adapter::AppId, String>,
 }
 
 /// An active suggestion from the AI brain.
@@ -517,6 +538,31 @@ impl App {
             }
             Err(e) => {
                 warn!("Failed to open notification store: {e}");
+                None
+            }
+        };
+
+        // -- History store + agent capture sidecar --
+        // Both live under `~/.local/share/phantom/history/<session_uuid>[...].jsonl`.
+        // Best-effort: on failure we set `None` and the rest of the app boots normally.
+        let session_uuid = uuid::Uuid::new_v4();
+        let history = match HistoryStore::open(session_uuid) {
+            Ok(h) => {
+                info!("History store ready → {}", h.path().display());
+                Some(h)
+            }
+            Err(e) => {
+                warn!("Failed to open history store: {e}");
+                None
+            }
+        };
+        let agent_capture = match AgentOutputCapture::open(session_uuid) {
+            Ok(c) => {
+                info!("Agent capture sidecar ready → {}", c.path().display());
+                Some(c)
+            }
+            Err(e) => {
+                warn!("Failed to open agent capture sidecar: {e}");
                 None
             }
         };
@@ -940,6 +986,10 @@ impl App {
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
             shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),
+            history,
+            agent_capture,
+            session_uuid,
+            pending_command_text: std::collections::HashMap::new(),
         })
     }
 

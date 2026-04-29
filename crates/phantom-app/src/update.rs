@@ -12,6 +12,7 @@ use phantom_brain::events::{AiAction, AiEvent};
 use phantom_brain::ooda::WorldState;
 use phantom_protocol::Event;
 use phantom_context::ProjectContext;
+use phantom_history::HistoryEntry;
 use phantom_mcp::{AppCommand, ScreenshotReply};
 use crate::app::{App, AppState, SuggestionOverlay};
 use crate::input::chrono_time_string;
@@ -504,10 +505,33 @@ impl App {
         }
 
         for msg in msgs {
-            // Track the last command text per pane so CommandComplete can
-            // populate ParsedOutput::command with a real value (issue #226).
-            if let Event::CommandStarted { app_id, command } = &msg.event {
-                self.pane_last_command.insert(*app_id, command.clone());
+            // 0) Command-boundary tracking for both the history store and
+            //    the brain's ParsedOutput (issue #226).
+            //    `CommandStarted` records the command text in both maps;
+            //    `CommandComplete` consumes pending_command_text for history.
+            match &msg.event {
+                Event::CommandStarted { app_id, command } => {
+                    self.pending_command_text.insert(*app_id, command.clone());
+                    self.pane_last_command.insert(*app_id, command.clone());
+                }
+                Event::CommandComplete { app_id, exit_code } => {
+                    let command_text = self
+                        .pending_command_text
+                        .remove(app_id)
+                        .unwrap_or_default();
+                    if let Some(ref mut store) = self.history {
+                        let cwd = self.context.as_ref()
+                            .map(|c| std::path::PathBuf::from(&c.root))
+                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let entry = HistoryEntry::builder(&command_text, cwd, self.session_uuid)
+                            .exit_code(*exit_code)
+                            .build();
+                        if let Err(e) = store.append(&entry) {
+                            warn!("history append failed: {e}");
+                        }
+                    }
+                }
+                _ => {}
             }
 
             // 1) Forward into the brain (if running) as an AiEvent.

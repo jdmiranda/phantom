@@ -98,6 +98,12 @@ struct AgentRecord {
 ///
 /// All public methods return [`anyhow::Result`] — no `.unwrap()` in
 /// production paths.
+///
+/// `Clone` is derived so callers can hand a copy to each spawned
+/// `AgentPane` at launch time — the underlying `PathBuf` is cheap to clone
+/// and all writes go through `OpenOptions::append(true)` so concurrent
+/// clones are safe at the OS level.
+#[derive(Clone)]
 pub struct AgentOutputCapture {
     path: PathBuf,
 }
