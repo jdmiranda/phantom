@@ -130,8 +130,9 @@ pub struct AgentSnapshot {
     id: u32,
     task: AgentTask,
     /// `Queued`, `Done`, `Failed`, or `Flatline` — the saved status.
-    /// In-progress states (`Working`, `WaitingForTool`) are normalised to
-    /// `Queued` so the agent can restart cleanly.
+    /// In-progress states (`Working`, `WaitingForTool`, `Planning`,
+    /// `AwaitingApproval`) are normalised to `Queued` so the agent can
+    /// restart cleanly.
     status: AgentStatus,
     messages: Vec<SavedMessage>,
     /// Unix epoch seconds at agent creation (approximated from saved session).
@@ -151,7 +152,10 @@ impl AgentSnapshot {
     /// `Queued` so the agent can restart from a clean state.
     pub fn from_agent(agent: &phantom_agents::Agent) -> Self {
         let status = match agent.status {
-            AgentStatus::Working | AgentStatus::WaitingForTool => AgentStatus::Queued,
+            AgentStatus::Working
+            | AgentStatus::WaitingForTool
+            | AgentStatus::Planning
+            | AgentStatus::AwaitingApproval => AgentStatus::Queued,
             other => other,
         };
 
@@ -185,7 +189,8 @@ impl AgentSnapshot {
         &self.task
     }
 
-    /// The normalised lifecycle status (never `Working` or `WaitingForTool`).
+    /// The normalised lifecycle status (never `Working`, `WaitingForTool`,
+    /// `Planning`, or `AwaitingApproval`).
     pub fn status(&self) -> AgentStatus {
         self.status
     }
@@ -563,6 +568,24 @@ mod tests {
         agent.status = AgentStatus::WaitingForTool;
         let snap = AgentSnapshot::from_agent(&agent);
         assert_eq!(snap.status(), AgentStatus::Queued);
+    }
+
+    #[test]
+    fn planning_status_normalised_to_queued() {
+        let mut agent = free_agent(4, "planning agent");
+        agent.status = AgentStatus::Planning;
+        let snap = AgentSnapshot::from_agent(&agent);
+        assert_eq!(snap.status(), AgentStatus::Queued,
+            "Planning must normalise to Queued for clean restart");
+    }
+
+    #[test]
+    fn awaiting_approval_normalised_to_queued() {
+        let mut agent = free_agent(5, "awaiting agent");
+        agent.status = AgentStatus::AwaitingApproval;
+        let snap = AgentSnapshot::from_agent(&agent);
+        assert_eq!(snap.status(), AgentStatus::Queued,
+            "AwaitingApproval must normalise to Queued for clean restart");
     }
 
     #[test]
