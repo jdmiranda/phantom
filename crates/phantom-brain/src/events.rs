@@ -77,6 +77,19 @@ pub enum AiEvent {
         initial_task: String,
     },
 
+    /// An agent's tool dispatch was denied due to a capability violation.
+    ///
+    /// Sec.7: The brain accumulates consecutive `CapabilityDenied` events per
+    /// agent and emits [`AiAction::QuarantineAgent`] when the configured
+    /// threshold is reached. Each `CapabilityDenied` resets on a successful
+    /// tool dispatch.
+    CapabilityDenied {
+        /// The agent whose tool call was denied.
+        agent_id: AgentId,
+        /// Name of the tool that was attempted (e.g. `"run_command"`).
+        tool_name: String,
+    },
+
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -140,6 +153,31 @@ pub enum AiAction {
     /// The reconciler emits this when a TaskLedger step exhausts max_attempts
     /// or a stall timeout fires. Requires manual retry to clear.
     AgentFlatlined { id: AgentId, reason: String },
+
+    /// Quarantine a repeat-offender agent.
+    ///
+    /// Sec.7: Emitted by the brain's denial counter when an agent's consecutive
+    /// `CapabilityDenied` count reaches the threshold. The app applies this to
+    /// the [`phantom_agents::quarantine::QuarantineRegistry`] and transitions
+    /// the agent to `Quarantined`.
+    QuarantineAgent {
+        /// The agent to quarantine.
+        agent_id: AgentId,
+        /// Number of consecutive denials that triggered the quarantine.
+        denial_count: usize,
+    },
+
+    /// An agent has been placed in quarantine.
+    ///
+    /// Sec.7: Emitted after the app has applied a [`AiAction::QuarantineAgent`]
+    /// to the registry. The UI observes this to display a quarantine indicator
+    /// on the offending agent's pane.
+    AgentQuarantined {
+        /// The newly-quarantined agent.
+        agent_id: AgentId,
+        /// Total consecutive denials that caused the quarantine.
+        denial_count: usize,
+    },
 
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,

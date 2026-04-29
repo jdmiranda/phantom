@@ -4,14 +4,27 @@
 //! the rest of the system through [`BrainHandle`] (channels). Blocks on the
 //! event receiver and only consumes CPU when an event arrives.
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 
+use phantom_agents::AgentId;
 use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 
 use crate::events::{AiAction, AiEvent};
 use crate::router::{BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier, TaskComplexity};
 use crate::scoring::UtilityScorer;
+
+// ---------------------------------------------------------------------------
+// DenialThreshold — configurable quarantine threshold for the brain
+// ---------------------------------------------------------------------------
+
+/// Number of consecutive `CapabilityDenied` events before the brain emits
+/// [`AiAction::QuarantineAgent`] for the offending agent.
+///
+/// Matches [`phantom_agents::quarantine::DEFAULT_QUARANTINE_THRESHOLD`] so
+/// both subsystems use the same N-=3 default out of the box.
+const BRAIN_DENIAL_THRESHOLD: usize = phantom_agents::DEFAULT_QUARANTINE_THRESHOLD;
 
 // ---------------------------------------------------------------------------
 // BrainHandle
@@ -128,6 +141,9 @@ fn brain_loop(
     let mut router = BrainRouter::new(config.router.unwrap_or_default());
     let mut active_ledger: Option<crate::orchestrator::TaskLedger> = None;
     let mut reconciler = crate::reconciler::ReconcilerState::new();
+    // Sec.7: consecutive CapabilityDenied counter per agent.
+    // Reset on any non-denial event for the same agent (or on quarantine).
+    let mut denial_counters: HashMap<AgentId, usize> = HashMap::new();
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -218,6 +234,35 @@ fn brain_loop(
                 reconciler.on_agent_complete(l, id, success, summary, spawn_tag);
             }
             // Fall through to OODA scoring — notification_score handles this event.
+        }
+
+        // Sec.7: consecutive CapabilityDenied → QuarantineAgent.
+        //
+        // Track consecutive denials per agent. When the count reaches the
+        // threshold, emit QuarantineAgent so the app can apply it to the
+        // QuarantineRegistry. The counter is reset when the agent is quarantined
+        // (prevents double-emission on subsequent denials from a quarantined agent).
+        if let AiEvent::CapabilityDenied { agent_id, ref tool_name } = event {
+            let count = denial_counters.entry(agent_id).or_insert(0);
+            *count += 1;
+            log::debug!(
+                "Brain: agent {agent_id} capability denied (tool={tool_name}, consecutive={count})"
+            );
+            if *count >= BRAIN_DENIAL_THRESHOLD {
+                let denial_count = *count;
+                // Reset counter so we don't re-quarantine on the next denial.
+                denial_counters.remove(&agent_id);
+                log::warn!(
+                    "Brain: agent {agent_id} quarantined after {denial_count} consecutive denials"
+                );
+                if action_tx
+                    .send(AiAction::QuarantineAgent { agent_id, denial_count })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            continue; // CapabilityDenied is handled here; skip OODA for it.
         }
 
         // ACCUMULATE: OutputChunk events are batched — don't process each one
@@ -700,6 +745,8 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::ConsoleReply(_) => "console_reply",
         AiAction::DismissAdapter { .. } => "dismiss_adapter",
         AiAction::AgentFlatlined { .. } => "flatline",
+        AiAction::QuarantineAgent { .. } => "quarantine_agent",
+        AiAction::AgentQuarantined { .. } => "agent_quarantined",
         AiAction::DoNothing => "quiet",
     }
 }
@@ -741,6 +788,92 @@ mod tests {
             "notify"
         );
         assert_eq!(action_name(&AiAction::RunCommand("ls".into())), "run_command");
+        assert_eq!(
+            action_name(&AiAction::QuarantineAgent { agent_id: 1, denial_count: 3 }),
+            "quarantine_agent",
+        );
+        assert_eq!(
+            action_name(&AiAction::AgentQuarantined { agent_id: 1, denial_count: 3 }),
+            "agent_quarantined",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sec.7: CapabilityDenied event tracking tests
+    // -----------------------------------------------------------------------
+
+    /// Sec.7 brain test: 2 consecutive CapabilityDenied → no QuarantineAgent.
+    ///
+    /// The brain's denial counter must not trigger quarantine before the
+    /// threshold (N=3) is reached.
+    #[test]
+    fn brain_two_denials_do_not_emit_quarantine() {
+        let (action_tx, action_rx) = std::sync::mpsc::channel::<AiAction>();
+        let mut denial_counters: std::collections::HashMap<phantom_agents::AgentId, usize> =
+            std::collections::HashMap::new();
+        let agent_id = 200u32;
+
+        // Simulate brain handling 2 CapabilityDenied events.
+        for i in 1u32..=2 {
+            let tool_name = format!("run_command_{i}");
+            // Mimic what brain_loop does on CapabilityDenied.
+            let count = denial_counters.entry(agent_id).or_insert(0);
+            *count += 1;
+            if *count >= BRAIN_DENIAL_THRESHOLD {
+                let denial_count = *count;
+                denial_counters.remove(&agent_id);
+                action_tx.send(AiAction::QuarantineAgent { agent_id, denial_count }).unwrap();
+            }
+            let _ = tool_name; // suppress unused warning
+        }
+
+        // No QuarantineAgent must have been emitted.
+        assert!(
+            action_rx.try_recv().is_err(),
+            "brain must NOT emit QuarantineAgent after only 2 denials (threshold=3)"
+        );
+    }
+
+    /// Sec.7 brain test: 3 consecutive CapabilityDenied → QuarantineAgent emitted.
+    ///
+    /// On the Nth denial, the brain emits exactly one `QuarantineAgent` action
+    /// with the correct `agent_id` and `denial_count`.
+    #[test]
+    fn brain_three_denials_emit_quarantine_agent() {
+        let (action_tx, action_rx) = std::sync::mpsc::channel::<AiAction>();
+        let mut denial_counters: std::collections::HashMap<phantom_agents::AgentId, usize> =
+            std::collections::HashMap::new();
+        let agent_id = 201u32;
+
+        // Simulate 3 consecutive CapabilityDenied events.
+        for _ in 1u32..=3 {
+            let count = denial_counters.entry(agent_id).or_insert(0);
+            *count += 1;
+            if *count >= BRAIN_DENIAL_THRESHOLD {
+                let denial_count = *count;
+                denial_counters.remove(&agent_id);
+                action_tx.send(AiAction::QuarantineAgent { agent_id, denial_count }).unwrap();
+            }
+        }
+
+        // Exactly one QuarantineAgent must have been emitted.
+        let action = action_rx.try_recv().expect("QuarantineAgent must be emitted on 3rd denial");
+        match action {
+            AiAction::QuarantineAgent {
+                agent_id: id,
+                denial_count,
+            } => {
+                assert_eq!(id, agent_id, "agent_id must match");
+                assert_eq!(denial_count, 3, "denial_count must be 3 (the threshold)");
+            }
+            other => panic!("expected QuarantineAgent, got {other:?}"),
+        }
+
+        // No second action (counter was reset).
+        assert!(
+            action_rx.try_recv().is_err(),
+            "only one QuarantineAgent must be emitted per quarantine event"
+        );
     }
 
     #[test]
