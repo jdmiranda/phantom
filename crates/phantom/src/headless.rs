@@ -471,6 +471,12 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             AiAction::Suggest { action, rationale, confidence } => {
                 println!("[BRAIN]: proactive suggestion ({confidence:.2}): {action} — {rationale}");
             }
+            AiAction::QuarantineAgent { agent_id, denial_count } => {
+                println!("[BRAIN]: quarantine agent {agent_id} after {denial_count} denials");
+            }
+            AiAction::AgentQuarantined { agent_id, denial_count } => {
+                println!("[BRAIN]: agent {agent_id} quarantined after {denial_count} denials");
+            }
             AiAction::DoNothing => {}
         }
     }

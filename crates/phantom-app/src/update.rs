@@ -180,6 +180,7 @@ impl App {
                     if let Some(action) = res.action {
                         Self::execute_brain_action(
                             action, now, &mut self.suggestion, &mut self.memory,
+                            &mut self.notification_store,
                             &mut self.console, &mut self.coordinator, &mut self.layout,
                             &mut self.scene, &mut tasks_to_spawn,
                         );
@@ -630,6 +631,13 @@ impl App {
             }
             AiAction::Suggest { action, rationale, confidence } => {
                 info!("[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}");
+            }
+            // Sec.7: quarantine registry not yet wired into App — log and skip.
+            AiAction::QuarantineAgent { agent_id, denial_count } => {
+                warn!("[PHANTOM]: QuarantineAgent({agent_id}, denials={denial_count}) — registry not yet wired");
+            }
+            AiAction::AgentQuarantined { agent_id, denial_count } => {
+                info!("[PHANTOM]: AgentQuarantined({agent_id}, denials={denial_count})");
             }
             AiAction::DoNothing => {}
         }
