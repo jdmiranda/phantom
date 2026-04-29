@@ -16,7 +16,7 @@
 //! | Task ledger            | `TaskLedger` struct                    |
 //! | Progress ledger        | `ProgressAssessment` (5-question eval) |
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
 use phantom_agents::AgentTask;
@@ -78,6 +78,21 @@ pub enum StepStatus {
 /// of a sequence of steps and assignments of those steps to individual agents."
 /// In Phantom, each step maps to an `AgentTask` variant and carries its own
 /// status tracking for the inner-loop progress assessment.
+///
+/// # DAG dependency ordering (Issue #60)
+///
+/// Each step may declare prerequisite steps via `depends_on: Vec<usize>`.
+/// The indices are positions in the `TaskLedger::plan` slice. A step is
+/// *eligible* only when every step in its dependency set has reached
+/// `StepStatus::Done`. Use `TaskLedger::eligible_next()` to query the
+/// full set of runnable steps, and `TaskLedger::has_cycle()` to validate
+/// a plan before accepting it.
+///
+/// # Provider routing (Issue #61)
+///
+/// When `preferred_provider` is `Some(id)`, the dispatch layer should look up
+/// `id` in the `ProviderCatalog` and route the `AgentTask` to that backend.
+/// If the ID is unknown the catalog falls back to `"claude-default"`.
 #[derive(Debug, Clone)]
 pub struct PlanStep {
     /// Human-readable description of what this step accomplishes.
@@ -94,10 +109,20 @@ pub struct PlanStep {
     pub max_attempts: u32,
     /// Output/result summary from the agent (if completed).
     pub result_summary: Option<String>,
+    /// Prerequisite step indices (Issue #60 — Task DAG).
+    ///
+    /// This step will not be eligible for dispatch until every step whose
+    /// index appears here has reached `StepStatus::Done`.
+    pub depends_on: Vec<usize>,
+    /// Preferred provider ID for routing this step (Issue #61).
+    ///
+    /// When `Some`, the dispatch layer resolves this ID in the
+    /// `ProviderCatalog`. Unknown IDs fall back to `"claude-default"`.
+    pub preferred_provider: Option<String>,
 }
 
 impl PlanStep {
-    /// Create a new pending plan step.
+    /// Create a new pending plan step with no dependencies.
     pub fn new(description: impl Into<String>, task: AgentTask) -> Self {
         Self {
             description: description.into(),
@@ -107,7 +132,39 @@ impl PlanStep {
             attempts: 0,
             max_attempts: 3,
             result_summary: None,
+            depends_on: Vec::new(),
+            preferred_provider: None,
         }
+    }
+
+    /// Create a pending step that must wait for `depends_on` steps to finish.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // step 1 (index 1) must complete before step 2 runs
+    /// let step2 = PlanStep::with_deps("run tests", task, vec![1]);
+    /// ```
+    pub fn with_deps(
+        description: impl Into<String>,
+        task: AgentTask,
+        depends_on: Vec<usize>,
+    ) -> Self {
+        Self {
+            depends_on,
+            ..Self::new(description, task)
+        }
+    }
+
+    /// Attach a preferred provider ID to this step (builder-style).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let step = PlanStep::new("fast check", task)
+    ///     .with_provider("claude-fast");
+    /// ```
+    pub fn with_provider(mut self, provider_id: impl Into<String>) -> Self {
+        self.preferred_provider = Some(provider_id.into());
+        self
     }
 
     /// Record a failed attempt. Returns true if retries remain.
@@ -259,9 +316,119 @@ impl TaskLedger {
     // -- Plan management ---------------------------------------------------
 
     /// Set the initial plan (from the orchestrator's first pass).
+    ///
+    /// If the dependency graph formed by `steps[i].depends_on` contains a
+    /// cycle, **all steps are immediately marked `Failed`** and the ledger
+    /// is left in a non-executable state so the reconciler can detect and
+    /// report the problem without attempting to dispatch any step.
     pub fn set_plan(&mut self, steps: Vec<PlanStep>) {
         self.plan = steps;
         self.stall_counter = 0;
+        if self.has_cycle() {
+            log::error!(
+                "TaskLedger::set_plan — dependency cycle detected; blocking all steps"
+            );
+            for step in &mut self.plan {
+                step.status = StepStatus::Failed;
+                step.result_summary =
+                    Some("blocked: dependency cycle detected in plan".into());
+            }
+        }
+    }
+
+    /// Returns all `Pending` steps whose dependency constraints are satisfied.
+    ///
+    /// A step is *eligible* when every index in `step.depends_on` refers to
+    /// a step that has already reached `StepStatus::Done`. Steps with no
+    /// dependencies are always eligible (when `Pending`).
+    ///
+    /// The returned pairs are `(step_index, &PlanStep)` so the caller can
+    /// simultaneously track position and content without a second lookup.
+    ///
+    /// # Complexity
+    ///
+    /// O(n × d) where n = number of plan steps and d = average dependency
+    /// fan-in. For typical plans (n < 20, d < 5) this is negligible.
+    pub fn eligible_next(&self) -> Vec<(usize, &PlanStep)> {
+        // Collect the index set of all completed steps.
+        let done: HashSet<usize> = self
+            .plan
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.status == StepStatus::Done)
+            .map(|(i, _)| i)
+            .collect();
+
+        self.plan
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.status == StepStatus::Pending
+                    && s.depends_on.iter().all(|dep| done.contains(dep))
+            })
+            .collect()
+    }
+
+    /// Returns `true` if the dependency graph contains a cycle.
+    ///
+    /// Uses an iterative depth-first search with three-colour marking
+    /// (white = 0, grey = 1, black = 2) to avoid stack overflows on deep
+    /// plans. Out-of-bounds indices in `depends_on` are silently skipped
+    /// (they cannot form a cycle with anything).
+    ///
+    /// This is called automatically by `set_plan`; it can also be called
+    /// before committing a plan to validate it cheaply.
+    ///
+    /// # Complexity
+    ///
+    /// O(n + e) where n = number of steps and e = total edges (sum of all
+    /// `depends_on` lengths).
+    pub fn has_cycle(&self) -> bool {
+        let n = self.plan.len();
+        // 0 = white (unvisited), 1 = grey (in stack), 2 = black (finished)
+        let mut color = vec![0u8; n];
+
+        for start in 0..n {
+            if color[start] != 0 {
+                continue; // already fully explored
+            }
+
+            // Stack entries: (node_index, edge_cursor).
+            // edge_cursor tracks which dep we are about to explore next.
+            let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+            color[start] = 1; // grey: on stack
+
+            while let Some((node, edge_idx)) = stack.last_mut() {
+                let node = *node;
+                let deps = &self.plan[node].depends_on;
+
+                if *edge_idx < deps.len() {
+                    let dep = deps[*edge_idx];
+                    *edge_idx += 1;
+
+                    if dep >= n {
+                        // Out-of-bounds: skip silently.
+                        continue;
+                    }
+
+                    match color[dep] {
+                        1 => return true,  // back-edge → cycle
+                        0 => {
+                            // Tree-edge: push and colour grey.
+                            color[dep] = 1;
+                            stack.push((dep, 0));
+                        }
+                        _ => {} // already black (finished): safe cross-edge
+                    }
+                } else {
+                    // All neighbours explored: colour black and pop.
+                    color[node] = 2;
+                    stack.pop();
+                }
+            }
+        }
+
+        false
     }
 
     /// Replace the current plan with a new one (outer-loop re-plan).
@@ -1389,5 +1556,248 @@ mod tests {
         // Now dispatch should return step 2.
         let step2 = orch.dispatch_next_step().expect("step 2");
         assert_eq!(step2.description, "step 2");
+    }
+
+    // -- Issue #60: Task DAG + cycle detection --------------------------------
+
+    /// A plan with no dependencies — all steps are immediately eligible.
+    #[test]
+    fn eligible_next_all_pending_with_no_deps() {
+        let mut ledger = TaskLedger::new("test");
+        ledger.set_plan(vec![
+            PlanStep::new("s0", free_task("s0")),
+            PlanStep::new("s1", free_task("s1")),
+            PlanStep::new("s2", free_task("s2")),
+        ]);
+        let eligible = ledger.eligible_next();
+        assert_eq!(eligible.len(), 3, "all three steps should be eligible");
+    }
+
+    /// A step with unmet dependencies is not eligible.
+    #[test]
+    fn eligible_next_blocked_step_not_returned() {
+        let mut ledger = TaskLedger::new("test");
+        // s1 depends on s0 (index 0), which is still Pending.
+        ledger.set_plan(vec![
+            PlanStep::new("s0", free_task("s0")),
+            PlanStep::with_deps("s1", free_task("s1"), vec![0]),
+        ]);
+        let eligible = ledger.eligible_next();
+        // Only s0 is eligible; s1 is blocked.
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].1.description, "s0");
+    }
+
+    /// Once a dependency completes, the dependent step becomes eligible.
+    #[test]
+    fn eligible_next_unblocks_after_dep_done() {
+        let mut ledger = TaskLedger::new("test");
+        ledger.set_plan(vec![
+            PlanStep::new("s0", free_task("s0")),
+            PlanStep::with_deps("s1", free_task("s1"), vec![0]),
+        ]);
+
+        // Mark s0 done.
+        ledger.plan[0].status = StepStatus::Done;
+
+        let eligible = ledger.eligible_next();
+        // s0 is Done (not Pending), s1 is now eligible.
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].1.description, "s1");
+    }
+
+    /// Multiple dependencies: a step is only eligible when ALL are done.
+    #[test]
+    fn eligible_next_requires_all_deps_done() {
+        let mut ledger = TaskLedger::new("test");
+        ledger.set_plan(vec![
+            PlanStep::new("s0", free_task("s0")),
+            PlanStep::new("s1", free_task("s1")),
+            PlanStep::with_deps("s2", free_task("s2"), vec![0, 1]),
+        ]);
+
+        // Only s0 done — s2 still blocked.
+        ledger.plan[0].status = StepStatus::Done;
+        assert_eq!(ledger.eligible_next().len(), 1); // only s1
+
+        // Both done — s2 eligible now.
+        ledger.plan[1].status = StepStatus::Done;
+        let eligible = ledger.eligible_next();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].1.description, "s2");
+    }
+
+    /// A diamond DAG: s0 → s1, s0 → s2, s1+s2 → s3.
+    #[test]
+    fn eligible_next_diamond_dag() {
+        let mut ledger = TaskLedger::new("test");
+        // 0: root (no deps)
+        // 1: left  (dep: 0)
+        // 2: right (dep: 0)
+        // 3: join  (deps: 1, 2)
+        ledger.set_plan(vec![
+            PlanStep::new("root", free_task("root")),
+            PlanStep::with_deps("left", free_task("left"), vec![0]),
+            PlanStep::with_deps("right", free_task("right"), vec![0]),
+            PlanStep::with_deps("join", free_task("join"), vec![1, 2]),
+        ]);
+
+        // Initially only root is eligible.
+        let e0 = ledger.eligible_next();
+        assert_eq!(e0.len(), 1);
+        assert_eq!(e0[0].1.description, "root");
+
+        // After root done, left and right become eligible.
+        ledger.plan[0].status = StepStatus::Done;
+        let e1 = ledger.eligible_next();
+        assert_eq!(e1.len(), 2);
+
+        // After left + right done, join is eligible.
+        ledger.plan[1].status = StepStatus::Done;
+        ledger.plan[2].status = StepStatus::Done;
+        let e2 = ledger.eligible_next();
+        assert_eq!(e2.len(), 1);
+        assert_eq!(e2[0].1.description, "join");
+    }
+
+    /// Active steps are not returned by eligible_next (only Pending).
+    #[test]
+    fn eligible_next_skips_active_steps() {
+        let mut ledger = TaskLedger::new("test");
+        ledger.set_plan(vec![
+            PlanStep::new("s0", free_task("s0")),
+            PlanStep::new("s1", free_task("s1")),
+        ]);
+        ledger.plan[0].status = StepStatus::Active;
+
+        let eligible = ledger.eligible_next();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].1.description, "s1");
+    }
+
+    /// A simple acyclic graph has no cycle.
+    #[test]
+    fn has_cycle_false_on_dag() {
+        let mut ledger = TaskLedger::new("test");
+        ledger.plan = vec![
+            PlanStep::new("s0", free_task("s0")),
+            PlanStep::with_deps("s1", free_task("s1"), vec![0]),
+            PlanStep::with_deps("s2", free_task("s2"), vec![1]),
+        ];
+        assert!(!ledger.has_cycle());
+    }
+
+    /// A self-loop is a cycle.
+    #[test]
+    fn has_cycle_detects_self_loop() {
+        let mut ledger = TaskLedger::new("test");
+        // s0 depends on itself.
+        ledger.plan = vec![PlanStep::with_deps("s0", free_task("s0"), vec![0])];
+        assert!(ledger.has_cycle());
+    }
+
+    /// A two-step mutual dependency is a cycle.
+    #[test]
+    fn has_cycle_detects_two_step_cycle() {
+        let mut ledger = TaskLedger::new("test");
+        // s0 ↔ s1 (both depend on each other).
+        ledger.plan = vec![
+            PlanStep::with_deps("s0", free_task("s0"), vec![1]),
+            PlanStep::with_deps("s1", free_task("s1"), vec![0]),
+        ];
+        assert!(ledger.has_cycle());
+    }
+
+    /// A three-step cycle: s0→s1→s2→s0.
+    #[test]
+    fn has_cycle_detects_three_step_cycle() {
+        let mut ledger = TaskLedger::new("test");
+        ledger.plan = vec![
+            PlanStep::with_deps("s0", free_task("s0"), vec![2]),
+            PlanStep::with_deps("s1", free_task("s1"), vec![0]),
+            PlanStep::with_deps("s2", free_task("s2"), vec![1]),
+        ];
+        assert!(ledger.has_cycle());
+    }
+
+    /// Out-of-bounds dep indices are silently ignored and do not cause a panic
+    /// or false positive cycle detection.
+    #[test]
+    fn has_cycle_ignores_oob_dep_indices() {
+        let mut ledger = TaskLedger::new("test");
+        // Index 99 does not exist in a 1-element plan.
+        ledger.plan = vec![PlanStep::with_deps("s0", free_task("s0"), vec![99])];
+        assert!(!ledger.has_cycle());
+    }
+
+    /// set_plan with a cyclic plan marks all steps Failed immediately.
+    #[test]
+    fn set_plan_blocks_all_steps_on_cycle() {
+        let mut ledger = TaskLedger::new("test");
+        let s0 = PlanStep::with_deps("s0", free_task("s0"), vec![1]);
+        let s1 = PlanStep::with_deps("s1", free_task("s1"), vec![0]);
+        ledger.set_plan(vec![s0, s1]);
+
+        for step in &ledger.plan {
+            assert_eq!(
+                step.status,
+                StepStatus::Failed,
+                "every step must be Failed when cycle is detected at set_plan"
+            );
+            assert!(
+                step.result_summary
+                    .as_deref()
+                    .is_some_and(|s| s.contains("cycle")),
+                "result_summary must mention 'cycle'"
+            );
+        }
+    }
+
+    /// A valid plan is not blocked by set_plan.
+    #[test]
+    fn set_plan_does_not_block_acyclic_plan() {
+        let mut ledger = TaskLedger::new("test");
+        let s0 = PlanStep::new("s0", free_task("s0"));
+        let s1 = PlanStep::with_deps("s1", free_task("s1"), vec![0]);
+        ledger.set_plan(vec![s0, s1]);
+
+        assert_eq!(ledger.plan[0].status, StepStatus::Pending);
+        assert_eq!(ledger.plan[1].status, StepStatus::Pending);
+    }
+
+    // -- Issue #60: PlanStep constructors -------------------------------------
+
+    /// with_deps sets depends_on and leaves other fields at defaults.
+    #[test]
+    fn plan_step_with_deps_sets_depends_on() {
+        let step = PlanStep::with_deps("my step", free_task("x"), vec![2, 5]);
+        assert_eq!(step.depends_on, vec![2, 5]);
+        assert_eq!(step.status, StepStatus::Pending);
+        assert!(step.preferred_provider.is_none());
+    }
+
+    /// with_provider sets preferred_provider via builder style.
+    #[test]
+    fn plan_step_with_provider_sets_field() {
+        let step = PlanStep::new("my step", free_task("x")).with_provider("claude-fast");
+        assert_eq!(step.preferred_provider.as_deref(), Some("claude-fast"));
+        assert!(step.depends_on.is_empty());
+    }
+
+    /// with_deps + with_provider can be combined.
+    #[test]
+    fn plan_step_with_deps_and_provider() {
+        let step =
+            PlanStep::with_deps("combined", free_task("x"), vec![0]).with_provider("ollama-phi3.5");
+        assert_eq!(step.depends_on, vec![0]);
+        assert_eq!(step.preferred_provider.as_deref(), Some("ollama-phi3.5"));
+    }
+
+    /// new() leaves depends_on empty and preferred_provider as None.
+    #[test]
+    fn plan_step_new_defaults() {
+        let step = PlanStep::new("plain step", free_task("x"));
+        assert!(step.depends_on.is_empty());
+        assert!(step.preferred_provider.is_none());
     }
 }
