@@ -5438,6 +5438,7 @@ dependencies = [
  "phantom-bundle-store",
  "phantom-bundles",
  "phantom-context",
+ "phantom-dag",
  "phantom-embeddings",
  "phantom-history",
  "phantom-mcp",
