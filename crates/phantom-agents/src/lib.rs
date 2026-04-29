@@ -44,6 +44,7 @@ pub mod tools;
 
 pub use agent::*;
 pub use correlation::CorrelationId;
+pub use dispatch::Disposition;
 pub use chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
     OpenAiChatBackend, build_backend,

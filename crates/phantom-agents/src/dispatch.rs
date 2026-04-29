@@ -85,6 +85,68 @@ use crate::taint::TaintLevel;
 use crate::tools::{ToolResult, ToolType, execute_tool};
 
 // ---------------------------------------------------------------------------
+// Disposition
+// ---------------------------------------------------------------------------
+
+/// Intent classification for an agent spawn.
+///
+/// The default is [`Disposition::Chat`] (zero-side-effect) so existing call
+/// sites that don't set a disposition are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Disposition {
+    Chat,
+    Feature,
+    BugFix,
+    Refactor,
+    Chore,
+    Synthesize,
+    Decompose,
+    Audit,
+}
+
+impl Disposition {
+    #[must_use]
+    pub fn creates_branch(self) -> bool {
+        matches!(self, Self::Feature | Self::BugFix | Self::Refactor | Self::Chore)
+    }
+
+    #[must_use]
+    pub fn requires_plan_gate(self) -> bool {
+        matches!(self, Self::Feature | Self::BugFix | Self::Refactor)
+    }
+
+    #[must_use]
+    pub fn runs_hooks(self) -> bool {
+        self.creates_branch()
+    }
+
+    #[must_use]
+    pub fn auto_approve(self) -> bool {
+        matches!(self, Self::Chat | Self::Synthesize | Self::Decompose | Self::Audit)
+    }
+
+    #[must_use]
+    pub fn skill(self) -> &'static str {
+        match self {
+            Self::Chat => "",
+            Self::Feature => "feature",
+            Self::BugFix => "bugfix",
+            Self::Refactor => "refactor",
+            Self::Chore => "chore",
+            Self::Synthesize => "synthesize",
+            Self::Decompose => "decompose",
+            Self::Audit => "",
+        }
+    }
+}
+
+impl Default for Disposition {
+    fn default() -> Self {
+        Self::Chat
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Capability gating helpers
 // ---------------------------------------------------------------------------
 
@@ -1389,5 +1451,89 @@ mod tests {
         assert!(res_b.success, "agent-b dispatch must succeed: {}", res_b.output);
         assert_eq!(res_a.output, "file-a");
         assert_eq!(res_b.output, "file-b");
+    }
+
+    // ---- Disposition -------------------------------------------------------
+
+    #[test]
+    fn disposition_default_is_chat() {
+        assert_eq!(Disposition::default(), Disposition::Chat);
+    }
+
+    #[test]
+    fn chat_auto_approve_no_branch() {
+        assert!(Disposition::Chat.auto_approve());
+        assert!(!Disposition::Chat.creates_branch());
+        assert!(!Disposition::Chat.requires_plan_gate());
+    }
+
+    #[test]
+    fn feature_full_lifecycle() {
+        assert!(!Disposition::Feature.auto_approve());
+        assert!(Disposition::Feature.creates_branch());
+        assert!(Disposition::Feature.requires_plan_gate());
+        assert!(Disposition::Feature.runs_hooks());
+        assert_eq!(Disposition::Feature.skill(), "feature");
+    }
+
+    #[test]
+    fn bugfix_full_lifecycle() {
+        assert!(Disposition::BugFix.creates_branch());
+        assert!(Disposition::BugFix.requires_plan_gate());
+        assert_eq!(Disposition::BugFix.skill(), "bugfix");
+    }
+
+    #[test]
+    fn refactor_full_lifecycle() {
+        assert!(Disposition::Refactor.creates_branch());
+        assert!(Disposition::Refactor.requires_plan_gate());
+        assert_eq!(Disposition::Refactor.skill(), "refactor");
+    }
+
+    #[test]
+    fn chore_branch_no_gate() {
+        assert!(Disposition::Chore.creates_branch());
+        assert!(!Disposition::Chore.requires_plan_gate());
+        assert_eq!(Disposition::Chore.skill(), "chore");
+    }
+
+    #[test]
+    fn synthesize_auto_approve() {
+        assert!(Disposition::Synthesize.auto_approve());
+        assert!(!Disposition::Synthesize.creates_branch());
+        assert_eq!(Disposition::Synthesize.skill(), "synthesize");
+    }
+
+    #[test]
+    fn decompose_auto_approve() {
+        assert!(Disposition::Decompose.auto_approve());
+        assert_eq!(Disposition::Decompose.skill(), "decompose");
+    }
+
+    #[test]
+    fn audit_auto_approve_no_skill() {
+        assert!(Disposition::Audit.auto_approve());
+        assert!(!Disposition::Audit.creates_branch());
+        assert_eq!(Disposition::Audit.skill(), "");
+    }
+
+    #[test]
+    fn disposition_serde_roundtrip() {
+        for d in [Disposition::Chat, Disposition::Feature, Disposition::BugFix,
+                  Disposition::Refactor, Disposition::Chore, Disposition::Synthesize,
+                  Disposition::Decompose, Disposition::Audit] {
+            let s = serde_json::to_string(&d).unwrap();
+            let back: Disposition = serde_json::from_str(&s).unwrap();
+            assert_eq!(d, back);
+        }
+    }
+
+    #[test]
+    fn runs_hooks_iff_creates_branch() {
+        for d in [Disposition::Chat, Disposition::Feature, Disposition::BugFix,
+                  Disposition::Refactor, Disposition::Chore, Disposition::Synthesize,
+                  Disposition::Decompose, Disposition::Audit] {
+            assert_eq!(d.runs_hooks(), d.creates_branch());
+        }
     }
 }

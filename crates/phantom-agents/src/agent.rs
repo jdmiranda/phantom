@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use crate::correlation::CorrelationId;
+use crate::dispatch::Disposition;
 use crate::semantic_context::SemanticContext;
 use crate::tools::{ToolCall, ToolResult};
 
@@ -175,6 +176,7 @@ pub struct Agent {
     pub id: AgentId,
     /// The task this agent was spawned to perform.
     pub task: AgentTask,
+    pub disposition: Disposition,
     /// Current lifecycle status.
     pub status: AgentStatus,
     /// Full conversation history (system + user + assistant + tools).
@@ -221,6 +223,7 @@ impl Agent {
         Self {
             id,
             task,
+            disposition: Disposition::default(),
             status: AgentStatus::Queued,
             messages: Vec::new(),
             output_log: Vec::new(),
@@ -231,6 +234,12 @@ impl Agent {
             parent_id: None,
             semantic_ctx: SemanticContext::new(),
         }
+    }
+
+    /// Create a new agent with an explicit [`Disposition`].
+    #[must_use]
+    pub fn with_disposition(id: AgentId, task: AgentTask, disposition: Disposition) -> Self {
+        Self { disposition, ..Self::new(id, task) }
     }
 
     /// Create a new agent in `Queued` status and stamp it with the given
@@ -600,6 +609,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 pub struct AgentSpawnOpts {
     /// What the agent is being spawned to do.
     pub task: AgentTask,
+    pub disposition: Disposition,
     /// Optional chat-model override. `None` falls through to the env-var
     /// resolver (`PHANTOM_AGENT_MODEL`), and ultimately to default Claude.
     pub chat_model: Option<crate::chat::ChatModel>,
@@ -616,9 +626,16 @@ impl AgentSpawnOpts {
     pub fn new(task: AgentTask) -> Self {
         Self {
             task,
+            disposition: Disposition::default(),
             chat_model: None,
             spawn_tag: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_disposition(mut self, d: Disposition) -> Self {
+        self.disposition = d;
+        self
     }
 
     /// Resolve the effective chat model for this spawn.
@@ -1485,5 +1502,32 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
         let latest = agent.semantic_ctx().latest().expect("ring-buffer has entries");
         assert_eq!(latest.command, "git status");
+    }
+
+    #[test]
+    fn new_agent_defaults_to_chat_disposition() {
+        let a = Agent::new(99, AgentTask::FreeForm { prompt: "x".into() });
+        assert_eq!(a.disposition, Disposition::Chat);
+    }
+
+    #[test]
+    fn with_disposition_sets_field() {
+        let a = Agent::with_disposition(100, AgentTask::FreeForm { prompt: "x".into() }, Disposition::BugFix);
+        assert_eq!(a.disposition, Disposition::BugFix);
+        assert_eq!(a.status, AgentStatus::Queued);
+    }
+
+    #[test]
+    fn spawn_opts_default_chat() {
+        let o = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "x".into() });
+        assert_eq!(o.disposition, Disposition::Chat);
+    }
+
+    #[test]
+    fn spawn_opts_builder() {
+        let o = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "x".into() })
+            .with_disposition(Disposition::Feature);
+        assert_eq!(o.disposition, Disposition::Feature);
+        assert!(o.chat_model.is_none());
     }
 }
