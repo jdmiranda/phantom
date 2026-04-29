@@ -275,6 +275,15 @@ pub struct App {
     #[allow(dead_code)] // Wired in Sec.4 consumer; ahead of time.
     pub(crate) denied_event_sink: crate::agent_pane::DeniedEventSink,
 
+    // -- Sec.7.3 quarantine registry (shared across all agent panes).
+    //    Tracks per-agent taint observation counts and escalates to
+    //    `QuarantineState::Quarantined` after N consecutive `Tainted`
+    //    checks. Every agent pane is handed a clone of this Arc at spawn
+    //    time via `set_substrate_handles`; the dispatch gate in
+    //    `phantom_agents::dispatch::dispatch_tool` checks it before routing
+    //    any tool call.
+    pub(crate) quarantine_registry: std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>,
+
     // -- Sec.8 user-visible notification center. Watches denial timestamps
     //    per agent and pushes a top-of-screen `Severity::Danger` banner
     //    whenever the same agent crosses the pattern threshold inside the
@@ -950,6 +959,9 @@ impl App {
             inspector_tokens: None,
             blocked_event_sink: crate::agent_pane::new_blocked_event_sink(),
             denied_event_sink: crate::agent_pane::new_denied_event_sink(),
+            quarantine_registry: std::sync::Arc::new(std::sync::Mutex::new(
+                phantom_agents::quarantine::QuarantineRegistry::new(),
+            )),
             notifications: crate::notifications::NotificationCenter::new(),
             topic_terminal_output,
             topic_terminal_error,
