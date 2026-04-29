@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "f
 tracing-appender = "0.2"
 blake3 = "1"
 thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"

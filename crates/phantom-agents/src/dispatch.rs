@@ -72,7 +72,12 @@ use crate::composer_tools::{
     ComposerTool, SpawnSubagentRequest, event_log_query, request_critique, spawn_subagent,
     wait_for_agent,
 };
+use crate::correlation::CorrelationId;
 use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
+use crate::dispatcher::{
+    DispatcherTool, DispatcherToolContext, GhTicketDispatcher, mark_ticket_done,
+    mark_ticket_in_progress, request_next_ticket,
+};
 use crate::inbox::{AgentRegistry, AgentStatus};
 use crate::quarantine::QuarantineRegistry;
 use crate::role::{AgentId, AgentRef, AgentRole, CapabilityClass};
@@ -169,6 +174,24 @@ pub struct DispatchContext<'a> {
     /// `None` skips the quarantine gate — the correct behaviour for legacy /
     /// test paths that have not wired a quarantine registry.
     pub quarantine: Option<Arc<Mutex<QuarantineRegistry>>>,
+    /// Causality token linking this dispatch turn to the pipeline run that
+    /// triggered it.
+    ///
+    /// When `Some`, tracing spans and log macros should attach this id so
+    /// every event, tool call, and log entry in the same pipeline run can be
+    /// correlated by querying `WHERE correlation_id = ?`.
+    ///
+    /// `None` means the dispatch was not initiated from a tracked user action
+    /// (legacy / test path) — this is never an error.
+    pub correlation_id: Option<CorrelationId>,
+    /// Issue #24: ticket dispatcher.
+    ///
+    /// When `Some`, the Dispatcher role's three tools (`request_next_ticket`,
+    /// `mark_ticket_in_progress`, `mark_ticket_done`) are routed to
+    /// [`GhTicketDispatcher`]. `None` returns an `"unknown tool"` style error
+    /// for those names — the correct behaviour for non-Dispatcher agents and
+    /// legacy test paths.
+    pub ticket_dispatcher: Option<Arc<GhTicketDispatcher>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +510,47 @@ pub fn dispatch_tool(
                 },
             }
         }
+    } else if let Some(dispatcher_tool) = DispatcherTool::from_api_name(name) {
+        // ---- Dispatcher tools (issue #24) ----------------------------------
+        if let Err(msg) = check_capability(ctx.role, dispatcher_tool.class()) {
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            match ctx.ticket_dispatcher.as_ref() {
+                None => result(
+                    PLACEHOLDER_TOOL,
+                    false,
+                    "ticket dispatcher not configured".into(),
+                ),
+                Some(d) => {
+                    let disp_ctx = DispatcherToolContext::new(Arc::clone(d));
+                    match dispatcher_tool {
+                        DispatcherTool::RequestNextTicket => {
+                            match request_next_ticket(args, &disp_ctx) {
+                                Ok(Some(ticket)) => {
+                                    let body = serde_json::to_string(&ticket)
+                                        .unwrap_or_else(|e| format!("encode error: {e}"));
+                                    result(PLACEHOLDER_TOOL, true, body)
+                                }
+                                Ok(None) => result(PLACEHOLDER_TOOL, true, "null".into()),
+                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                            }
+                        }
+                        DispatcherTool::MarkTicketInProgress => {
+                            match mark_ticket_in_progress(args, &disp_ctx) {
+                                Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                            }
+                        }
+                        DispatcherTool::MarkTicketDone => {
+                            match mark_ticket_done(args, &disp_ctx) {
+                                Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } else {
         // ---- Unknown -------------------------------------------------------
         result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
@@ -576,6 +640,8 @@ mod tests {
             pending_spawn,
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         }
     }
 
@@ -624,6 +690,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let result = dispatch_tool(
@@ -757,6 +825,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let result = dispatch_tool(
@@ -815,6 +885,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(upstream_id),
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // Act.
@@ -865,6 +937,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(denied_event_id),
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // Act.
@@ -926,6 +1000,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(upstream_id),
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // Act.
@@ -989,6 +1065,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(event_id),
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // This call must return — any infinite loop would cause the test to hang
@@ -1047,6 +1125,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: Some(quarantine),
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // A normal file-read that would otherwise succeed must be denied.
@@ -1098,6 +1178,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: Some(quarantine),
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1108,5 +1190,93 @@ mod tests {
             res.output,
         );
         assert_eq!(res.output, "clean-agent-data");
+    }
+
+    // ---- Correlation ID on DispatchContext ------------------------------------
+
+    /// A `DispatchContext` built with `correlation_id: Some(id)` must
+    /// successfully route the tool — the correlation field is metadata only and
+    /// must not affect routing or capability checks.
+    #[test]
+    fn dispatch_with_correlation_id_routes_normally() {
+        use crate::correlation::CorrelationId;
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("corr.txt"), "hello-correlation").unwrap();
+
+        let cid = CorrelationId::new();
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(1, AgentRole::Conversational, "traced-agent", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: Some(cid),
+            ticket_dispatcher: None,
+        };
+
+        let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
+
+        assert!(
+            res.success,
+            "dispatch with correlation_id must succeed normally: {}",
+            res.output,
+        );
+        assert_eq!(
+            res.output, "hello-correlation",
+            "output must be the file contents, got: {}",
+            res.output,
+        );
+    }
+
+    /// Two [`DispatchContext`]s built with the same [`CorrelationId`] should
+    /// each route independently — the id is carried in the context but does
+    /// not change the routing outcome.
+    #[test]
+    fn dispatch_with_shared_correlation_id_routes_independently() {
+        use crate::correlation::CorrelationId;
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), "file-a").unwrap();
+        fs::write(tmp.path().join("b.txt"), "file-b").unwrap();
+
+        let cid = CorrelationId::new();
+
+        let ctx_a = DispatchContext {
+            self_ref: AgentRef::new(1, AgentRole::Conversational, "agent-a", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: Some(cid),
+            ticket_dispatcher: None,
+        };
+
+        let ctx_b = DispatchContext {
+            self_ref: AgentRef::new(2, AgentRole::Conversational, "agent-b", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: Some(cid),
+            ticket_dispatcher: None,
+        };
+
+        let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
+        let res_b = dispatch_tool("read_file", &json!({"path": "b.txt"}), &ctx_b);
+
+        assert!(res_a.success, "agent-a dispatch must succeed: {}", res_a.output);
+        assert!(res_b.success, "agent-b dispatch must succeed: {}", res_b.output);
+        assert_eq!(res_a.output, "file-a");
+        assert_eq!(res_b.output, "file-b");
     }
 }

@@ -1711,6 +1711,8 @@ mod tests {
             pending_spawn,
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // One call → must produce exactly one denial result.

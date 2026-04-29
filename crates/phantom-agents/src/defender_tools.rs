@@ -431,6 +431,8 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let result = dispatch_tool(

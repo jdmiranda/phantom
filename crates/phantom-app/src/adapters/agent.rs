@@ -65,7 +65,7 @@ pub struct AgentAdapter {
 impl AgentAdapter {
     /// Wrap an already-spawned agent pane in the adapter.
     pub(crate) fn new(pane: AgentPane) -> Self {
-        let status = pane.status;
+        let status = pane.status();
         Self {
             pane,
             app_id: 0,
@@ -124,8 +124,8 @@ impl AppCore for AgentAdapter {
         self.pane.tail_lines(200);
 
         // Emit a bus event only on terminal status transitions (Done/Failed).
-        if self.pane.status != self.prev_status {
-            let event = match self.pane.status {
+        if self.pane.status() != self.prev_status {
+            let event = match self.pane.status() {
                 AgentPaneStatus::Done => Some((true, "Agent finished successfully".to_string())),
                 AgentPaneStatus::Failed => Some((false, "Agent failed".to_string())),
                 AgentPaneStatus::Working => None, // Not a completion event
@@ -146,7 +146,7 @@ impl AppCore for AgentAdapter {
                 });
             }
 
-            self.prev_status = self.pane.status;
+            self.prev_status = self.pane.status();
         }
     }
 
@@ -155,14 +155,14 @@ impl AppCore for AgentAdapter {
         //   total_lines.saturating_sub(output_max_lines)
         // Using cached_output_max_lines keeps this consistent so that
         // mouse.rs click-jump math doesn't overshoot by up to output_max_lines.
-        let history_size = self.pane.cached_lines.len()
+        let history_size = self.pane.cached_lines().len()
             .saturating_sub(self.cached_output_max_lines.get());
         json!({
             "type": "agent",
-            "task": self.pane.task,
-            "status": format!("{:?}", self.pane.status),
-            "output_len": self.pane.output.len(),
-            "alive": self.pane.status == AgentPaneStatus::Working,
+            "task": self.pane.task(),
+            "status": format!("{:?}", self.pane.status()),
+            "output_len": self.pane.output_len(),
+            "alive": self.pane.status() == AgentPaneStatus::Working,
             // Exposed so scrollbar click-jump (scrollbar_y_to_offset) can
             // calculate the correct target offset from a click position.
             "history_size": history_size,
@@ -204,7 +204,7 @@ impl Renderable for AgentAdapter {
 
         // Render output lines — respecting scroll_offset.
         // scroll_offset 0 = bottom (live view), N = N lines scrolled up.
-        let lines = &self.pane.cached_lines;
+        let lines = self.pane.cached_lines();
         let total_lines = lines.len();
         let history_size = total_lines.saturating_sub(output_max_lines);
         // Clamp in case scroll_offset drifted past the history.
@@ -323,11 +323,11 @@ impl Commandable for AgentAdapter {
     ) -> anyhow::Result<String> {
         match cmd {
             "dismiss" => {
-                self.pane.status = AgentPaneStatus::Done;
+                self.pane.set_status(AgentPaneStatus::Done);
                 self.dismissed = true;
                 Ok("dismissed".into())
             }
-            "status" => Ok(format!("{:?}", self.pane.status)),
+            "status" => Ok(format!("{:?}", self.pane.status())),
             "write" => {
                 // Text input from the keyboard (same as terminal "write" command).
                 if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
@@ -358,7 +358,7 @@ impl Commandable for AgentAdapter {
                 let direction = args.get("direction")
                     .and_then(|v| v.as_str())
                     .unwrap_or("down");
-                let total_lines = self.pane.cached_lines.len();
+                let total_lines = self.pane.cached_lines().len();
                 // Use the visible-row count from the last render() call so that
                 // max_offset here matches history_size in ScrollState exactly.
                 let max_offset = total_lines.saturating_sub(self.cached_output_max_lines.get());
@@ -376,7 +376,7 @@ impl Commandable for AgentAdapter {
                 let offset = args.get("offset")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
-                let total_lines = self.pane.cached_lines.len();
+                let total_lines = self.pane.cached_lines().len();
                 let max_offset = total_lines.saturating_sub(self.cached_output_max_lines.get());
                 self.scroll_offset = offset.min(max_offset);
                 Ok(format!("offset={}", self.scroll_offset))
