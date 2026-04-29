@@ -5,6 +5,8 @@
 //! implemented independently. This crate intentionally contains schema
 //! definitions only: no persistence, no indexing.
 
+pub mod events;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
