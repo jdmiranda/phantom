@@ -365,3 +365,5 @@ Rules that govern how autonomous agents coordinate within the Phantom multi-agen
 4. **Long-running agent timeout**: Any implementation agent running for more than 30 minutes without opening a PR should be checked on by sending a status message.
 
 5. **Hot-file tracking**: Before spawning an agent on a crate, check `gh pr list -R jdmiranda/phantom --state open` to confirm no other open PR already modifies the same files.
+
+6. **Branch hygiene**: All agent worktrees MUST branch from the most recent clean baseline tag, not from HEAD of main. Spawn command: `git checkout $(git describe --tags --match 'v*.baseline' --abbrev=0 2>/dev/null || git rev-parse --short origin/main) -b <branch-name>`. Never: `git checkout main -b <branch>`.
