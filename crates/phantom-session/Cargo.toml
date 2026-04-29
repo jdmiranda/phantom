@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+phantom-agents = { path = "../phantom-agents" }
 phantom-context = { path = "../phantom-context" }
 log.workspace = true
 anyhow.workspace = true
