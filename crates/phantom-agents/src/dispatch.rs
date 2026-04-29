@@ -556,6 +556,37 @@ pub fn dispatch_tool(
         result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
     };
 
+    // ---- Correlation ID: emit tool.invoked event with correlation_id -------
+    //
+    // When the dispatch context carries a correlation id AND an event log,
+    // append a `tool.invoked` envelope so every tool call in a tracked
+    // pipeline run is durably recorded with the causality token.  The id is
+    // stored as a string payload field (`"correlation_id"`) so consumers can
+    // query `WHERE payload->>'correlation_id' = ?` without needing a schema
+    // migration on `EventEnvelope` itself.
+    //
+    // The append is best-effort: a poisoned lock or I/O error is swallowed
+    // rather than converting a successful tool result into a failure.  Tracing
+    // loss is preferable to breaking the agent loop.
+    if let (Some(cid), Some(log)) = (ctx.correlation_id.as_ref(), ctx.event_log.as_ref()) {
+        let mut payload = serde_json::json!({
+            "tool": name,
+            "agent_id": ctx.self_ref.id,
+            "success": tool_result.success,
+            "correlation_id": cid.to_string(),
+        });
+        if let Some(src_id) = ctx.source_event_id {
+            payload["source_event_id"] = serde_json::Value::from(src_id);
+        }
+        if let Ok(mut guard) = log.lock() {
+            let _ = guard.append(
+                phantom_memory::event_log::EventSource::Agent { id: ctx.self_ref.id },
+                "tool.invoked",
+                payload,
+            );
+        }
+    }
+
     // ---- Sec.7.2: Taint elevation via source_event_id chain walk -----------
     //
     // Walk the source_event_id chain backwards in the event log and elevate
@@ -1529,6 +1560,105 @@ mod tests {
             !res.output.contains("WATCHER_BREACH"),
             "issue #166: shell command must not have run — sentinel in output: {}",
             res.output,
+        );
+    }
+
+    // ---- Issue #214: correlation_id propagates into the event log -----------
+
+    /// Acceptance test (issue #214): a tool dispatched with a known
+    /// [`CorrelationId`] must emit a `tool.invoked` [`EventEnvelope`] into the
+    /// event log whose payload contains `"correlation_id"` matching the
+    /// originating id.
+    ///
+    /// Verifies the full path:
+    ///   `DispatchContext::correlation_id`
+    ///   → `dispatch_tool` emit
+    ///   → `EventLog::append`
+    ///   → payload field `"correlation_id"` == id.to_string()
+    #[test]
+    fn dispatch_with_correlation_id_writes_correlation_id_to_event_log() {
+        use crate::correlation::CorrelationId;
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("probe.txt"), "corr-probe").unwrap();
+
+        let log = open_event_log(tmp.path());
+        let cid = CorrelationId::new();
+        let cid_str = cid.to_string();
+
+        let agent_id = 42u64;
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(agent_id, AgentRole::Conversational, "corr-agent", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: Some(log.clone()),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: Some(cid),
+            ticket_dispatcher: None,
+        };
+
+        // Act — dispatch a normal read_file tool.
+        let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
+        assert!(res.success, "dispatch must succeed: {}", res.output);
+
+        // Assert — the event log tail must contain a `tool.invoked` envelope
+        // whose payload carries the matching correlation_id string.
+        let tail = log.lock().unwrap().tail(usize::MAX);
+
+        let corr_event = tail
+            .iter()
+            .find(|ev| ev.kind == "tool.invoked")
+            .expect("a tool.invoked event must be present in the event log");
+
+        let stored_cid = corr_event
+            .payload
+            .get("correlation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        assert_eq!(
+            stored_cid, cid_str,
+            "event log payload must contain the originating correlation_id; \
+             got {stored_cid:?}, expected {cid_str:?}",
+        );
+
+        // The agent_id must also be stamped so the event is attributable.
+        let logged_agent_id = corr_event
+            .payload
+            .get("agent_id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(
+            logged_agent_id, agent_id,
+            "tool.invoked payload must carry agent_id={agent_id}, got {logged_agent_id}",
+        );
+
+        // No correlation_id → no tool.invoked event emitted.  Verify a
+        // context without a correlation_id does not emit a tool.invoked entry.
+        let log2 = open_event_log(&tmp.path().join("events2.jsonl"));
+        fs::write(tmp.path().join("probe2.txt"), "no-corr").unwrap();
+        let ctx_no_corr = DispatchContext {
+            self_ref: AgentRef::new(1, AgentRole::Conversational, "no-corr-agent", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: Some(log2.clone()),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
+        };
+        let res2 = dispatch_tool("read_file", &json!({"path": "probe2.txt"}), &ctx_no_corr);
+        assert!(res2.success, "no-corr dispatch must succeed: {}", res2.output);
+
+        let tail2 = log2.lock().unwrap().tail(usize::MAX);
+        assert!(
+            tail2.iter().all(|ev| ev.kind != "tool.invoked"),
+            "without a correlation_id, no tool.invoked event must be emitted; got: {tail2:?}",
         );
     }
 }
