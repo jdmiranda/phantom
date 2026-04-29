@@ -621,6 +621,7 @@ impl App {
             enable_memory: true,
             quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real evrs
             router: None,
+            catalog: None,
         });
         info!("AI brain spawned");
 

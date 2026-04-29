@@ -1807,6 +1807,9 @@ mod tests {
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             quarantine: None,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         };
         (pane, tx)
     }
@@ -1905,6 +1908,9 @@ mod tests {
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             quarantine: None,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         };
         assert!(!pane.poll());
     }
@@ -2801,6 +2807,9 @@ mod tests {
             quarantine: None,
             snapshot_sink: None,
             last_failing_capability: None,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         };
         let _ = tx; // keep sender alive so handle stays live
         assert_eq!(pane.task, "fix the failing tests");
@@ -2832,8 +2841,8 @@ mod tests {
         // Verify both are independently retrievable.
         assert!(mgr.get(id1).is_some());
         assert!(mgr.get(id2).is_some());
-        assert_eq!(mgr.get(id1).unwrap().id, id1);
-        assert_eq!(mgr.get(id2).unwrap().id, id2);
+        assert_eq!(mgr.get(id1).unwrap().id(), id1);
+        assert_eq!(mgr.get(id2).unwrap().id(), id2);
     }
 
     /// Backtick spawn via the manager starts the agent in `Working` status when
@@ -2850,7 +2859,7 @@ mod tests {
 
         let agent = mgr.get(id).expect("spawned agent must be retrievable");
         assert_eq!(
-            agent.status,
+            agent.status(),
             AgentStatus::Working,
             "spawned agent must start in Working status when capacity is available"
         );
@@ -2872,12 +2881,12 @@ mod tests {
             prompt: "long running task".into(),
         });
 
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Working);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Working);
 
         let killed = mgr.kill(id);
         assert!(killed, "kill() must return true for a Working agent");
         assert_eq!(
-            mgr.get(id).unwrap().status,
+            mgr.get(id).unwrap().status(),
             AgentStatus::Failed,
             "killed agent must be in Failed state"
         );
@@ -2898,9 +2907,9 @@ mod tests {
 
         let agent = mgr.get(id).unwrap();
         assert!(
-            agent.output_log.iter().any(|l| l.contains("killed")),
+            agent.output_log().iter().any(|l| l.contains("killed")),
             "killed agent output_log must contain a kill annotation; got: {:?}",
-            agent.output_log,
+            agent.output_log(),
         );
     }
 
@@ -2916,12 +2925,12 @@ mod tests {
             prompt: "already done".into(),
         });
         mgr.get_mut(id).unwrap().complete(true);
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Done);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Done);
 
         let killed = mgr.kill(id);
         assert!(!killed, "kill() on a Done agent must return false");
         assert_eq!(
-            mgr.get(id).unwrap().status,
+            mgr.get(id).unwrap().status(),
             AgentStatus::Done,
             "status must not change for a terminal agent"
         );
@@ -2971,14 +2980,14 @@ mod tests {
 
         // Mark one as already done.
         mgr.get_mut(id3).unwrap().complete(true);
-        assert_eq!(mgr.get(id3).unwrap().status, AgentStatus::Done);
+        assert_eq!(mgr.get(id3).unwrap().status(), AgentStatus::Done);
 
         let count = mgr.kill_all();
         assert_eq!(count, 2, "kill_all must kill exactly the two active agents");
-        assert_eq!(mgr.get(id1).unwrap().status, AgentStatus::Failed);
-        assert_eq!(mgr.get(id2).unwrap().status, AgentStatus::Failed);
+        assert_eq!(mgr.get(id1).unwrap().status(), AgentStatus::Failed);
+        assert_eq!(mgr.get(id2).unwrap().status(), AgentStatus::Failed);
         assert_eq!(
-            mgr.get(id3).unwrap().status,
+            mgr.get(id3).unwrap().status(),
             AgentStatus::Done,
             "terminal agent must not be affected by kill_all"
         );
