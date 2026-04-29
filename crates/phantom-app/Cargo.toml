@@ -60,6 +60,8 @@ phantom-ui = { path = "../phantom-ui", features = ["test-utils"] }
 phantom-bundle-store = { path = "../phantom-bundle-store", features = ["testing"] }
 phantom-stt = { path = "../phantom-stt", features = ["test-utils"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+phantom-nlp = { path = "../phantom-nlp", features = ["testing"] }
+phantom-context = { path = "../phantom-context" }
 
 [lints]
 workspace = true

@@ -14,6 +14,11 @@ regex = "1"
 thiserror = "2"
 ureq = { version = "3", features = ["json", "platform-verifier"] }
 
+[features]
+# Exposes `MockLlmBackend` for integration tests in downstream crates.
+# Do NOT enable in production builds.
+testing = []
+
 [dev-dependencies]
 # Derive `Default` for test fixtures without touching production code.
 tempfile = "3"

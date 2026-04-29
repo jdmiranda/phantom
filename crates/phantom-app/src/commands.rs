@@ -10,9 +10,10 @@ use phantom_agents::cli::{AgentCommand, parse_agent_command};
 use phantom_protocol::{AppMessage, SupervisorCommand};
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
+use phantom_nlp::{translate, Intent};
 use phantom_ui::themes;
 
-use crate::app::{App, AppState};
+use crate::app::{App, AppState, NlpTranslateResult};
 use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
 use crate::console_eval::{self, EvalResult};
@@ -360,7 +361,7 @@ impl App {
                 self.console.output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");
             }
-            other => {
+            _other => {
                 // NLP fallback: try interpreting as natural language.
                 if let Some(ref ctx) = self.context {
                     match NlpInterpreter::interpret(input, ctx) {
@@ -388,31 +389,13 @@ impl App {
                             self.console.output(format!("Did you mean: {}", options.join(", ")));
                         }
                         ResolvedAction::PassThrough => {
-                            // No command matched, no NLP match — spawn an agent.
-                            // The agent has tools, context, and the codebase map.
-                            // Don't use the brain's dumb chat client.
-                            self.console.system(format!("Spawning agent: {other}"));
-                            self.pending_brain_actions.push(
-                                phantom_brain::events::AiAction::SpawnAgent {
-                                    task: phantom_agents::AgentTask::FreeForm {
-                                        prompt: input.trim().to_string(),
-                                    },
-                                    spawn_tag: None,
-                                }
-                            );
+                            // Heuristic couldn't classify — try the LLM backend.
+                            self.try_nlp_translate_or_spawn_agent(input);
                         }
                     }
                 } else {
-                    // No context — spawn agent directly.
-                    self.console.system(format!("Spawning agent: {other}"));
-                    self.pending_brain_actions.push(
-                        phantom_brain::events::AiAction::SpawnAgent {
-                            task: phantom_agents::AgentTask::FreeForm {
-                                prompt: input.trim().to_string(),
-                            },
-                            spawn_tag: None,
-                        }
-                    );
+                    // No project context — try the LLM backend, then fall back to agent.
+                    self.try_nlp_translate_or_spawn_agent(input);
                 }
             }
         }
@@ -491,5 +474,137 @@ impl App {
         info!("Reloading config from disk");
         let config = PhantomConfig::load();
         self.theme = config.resolve_theme();
+    }
+
+    // -----------------------------------------------------------------------
+    // NLP LLM translate fallback
+    // -----------------------------------------------------------------------
+
+    /// Called when the heuristic `NlpInterpreter` returns `PassThrough`.
+    ///
+    /// If a configured `nlp_backend` is available, spawns a short-lived
+    /// background thread to call `translate()` (synchronous ureq), and sends
+    /// the result back via `nlp_translate_tx`.  The `update.rs` drain loop
+    /// picks up the result next frame.
+    ///
+    /// When no backend is configured (key absent or `nlp_llm = false`) the
+    /// function falls through to directly spawning an agent — same behaviour
+    /// as before this feature was added.
+    pub(crate) fn try_nlp_translate_or_spawn_agent(&mut self, input: &str) {
+        let input_owned = input.trim().to_string();
+
+        if let Some(ref backend) = self.nlp_backend {
+            let backend_arc = std::sync::Arc::clone(backend);
+            let tx = self.nlp_translate_tx.clone();
+            let ctx = self.context.clone();
+            // Clone before moving into the closure so we still have it for the
+            // fallback path below.
+            let input_for_closure = input_owned.clone();
+
+            let spawn_result = std::thread::Builder::new()
+                .name("nlp-translate".into())
+                .spawn(move || {
+                    let input_owned = input_for_closure;
+                    // Use the cached context, or fall back to detecting it
+                    // synchronously on the thread (cheap: just CWD scan).
+                    let detected;
+                    let ctx_ref: &phantom_context::ProjectContext = match ctx {
+                        Some(ref c) => c,
+                        None => {
+                            detected = phantom_context::ProjectContext::detect(
+                                std::path::Path::new("."),
+                            );
+                            &detected
+                        }
+                    };
+                    match translate(&input_owned, ctx_ref, backend_arc.as_ref()) {
+                        Ok(intent) => {
+                            let res = intent_to_translate_result(intent);
+                            // `try_send` — if the channel is full (8 queued calls)
+                            // we silently drop this result rather than blocking.
+                            let _ = tx.try_send(res);
+                        }
+                        Err(e) => {
+                            warn!("NLP translate error: {e}");
+                            // Fallback: surface as a clarify message.
+                            let res = NlpTranslateResult {
+                                display: format!("(NLP error: {e})"),
+                                action: None,
+                            };
+                            let _ = tx.try_send(res);
+                        }
+                    }
+                });
+
+            match spawn_result {
+                Ok(_) => {
+                    self.console.system("Thinking...");
+                }
+                Err(e) => {
+                    warn!("Failed to spawn nlp-translate thread: {e}");
+                    // Thread spawn failed — fall back to direct agent spawn.
+                    self.console.system(format!("Spawning agent: {input_owned}"));
+                    self.pending_brain_actions.push(
+                        phantom_brain::events::AiAction::SpawnAgent {
+                            task: phantom_agents::AgentTask::FreeForm {
+                                prompt: input_owned,
+                            },
+                            spawn_tag: None,
+                        }
+                    );
+                }
+            }
+        } else {
+            // No LLM backend — spawn agent directly.
+            self.console.system(format!("Spawning agent: {input_owned}"));
+            self.pending_brain_actions.push(
+                phantom_brain::events::AiAction::SpawnAgent {
+                    task: phantom_agents::AgentTask::FreeForm {
+                        prompt: input_owned,
+                    },
+                    spawn_tag: None,
+                }
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (free functions — not methods so they can be tested without App)
+// ---------------------------------------------------------------------------
+
+/// Convert an [`Intent`] returned by `translate()` into an [`NlpTranslateResult`].
+///
+/// `original_input` is used as a fallback label when the intent doesn't carry
+/// its own display-friendly description.
+pub(crate) fn intent_to_translate_result(intent: Intent) -> NlpTranslateResult {
+    match intent {
+        Intent::RunCommand { cmd } => NlpTranslateResult {
+            display: format!("Running: {cmd}"),
+            action: Some(phantom_brain::events::AiAction::RunCommand(cmd)),
+        },
+        Intent::SpawnAgent { goal } => NlpTranslateResult {
+            display: format!("Spawning agent: {goal}"),
+            action: Some(phantom_brain::events::AiAction::SpawnAgent {
+                task: phantom_agents::AgentTask::FreeForm { prompt: goal },
+                spawn_tag: None,
+            }),
+        },
+        Intent::SearchHistory { query } => {
+            // Map history search to a concrete git log command.
+            // Use {:?} Debug quoting to shell-escape the query and prevent
+            // injection: LLM-controlled input like "foo; rm -rf ~" becomes
+            // `--grep="foo; rm -rf ~"` which git treats as a literal grep
+            // pattern rather than a second shell command.
+            let cmd = format!("git log --oneline --all --grep={query:?}");
+            NlpTranslateResult {
+                display: format!("Searching history: {query}"),
+                action: Some(phantom_brain::events::AiAction::RunCommand(cmd)),
+            }
+        }
+        Intent::Clarify { question } => NlpTranslateResult {
+            display: format!("({question})"),
+            action: None,
+        },
     }
 }

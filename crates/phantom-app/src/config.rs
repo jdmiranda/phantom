@@ -24,6 +24,14 @@ pub struct PhantomConfig {
     pub skip_boot: bool,
     /// Demo mode: auto-skip boot, spawn an example agent on first frame.
     pub demo_mode: bool,
+    /// Enable the LLM-backed NLP translate fallback.
+    ///
+    /// When `true` (default) and `ANTHROPIC_API_KEY` is set, natural-language
+    /// commands that the heuristic interpreter can't classify are sent to the
+    /// Claude API for structured intent extraction. Set to `false` (or
+    /// `nlp_llm = false` / `nlp_llm = 0` in the config file) to disable the
+    /// network call and fall back directly to spawning an agent.
+    pub(crate) nlp_llm_enabled: bool,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -45,6 +53,7 @@ impl Default for PhantomConfig {
             shader_overrides: ShaderOverrides::default(),
             skip_boot: false,
             demo_mode: false,
+            nlp_llm_enabled: true,
         }
     }
 }
@@ -126,6 +135,11 @@ impl PhantomConfig {
                     "demo_mode" => {
                         config.demo_mode = matches!(value, "true" | "1" | "yes");
                     }
+                    "nlp_llm" => {
+                        // Opt-out: `nlp_llm = false` / `0` / `no` disables the
+                        // LLM translate call; anything else leaves it enabled.
+                        config.nlp_llm_enabled = !matches!(value, "false" | "0" | "no");
+                    }
                     _ => {
                         warn!("Unknown config key: {key}");
                     }
@@ -166,6 +180,14 @@ impl PhantomConfig {
         }
 
         theme
+    }
+
+    /// Returns whether the LLM-backed NLP translate fallback is enabled.
+    ///
+    /// Use this accessor instead of accessing `nlp_llm_enabled` directly from
+    /// outside the crate.
+    pub fn nlp_llm_enabled(&self) -> bool {
+        self.nlp_llm_enabled
     }
 
     /// Write a default config file to the standard path.
@@ -268,5 +290,32 @@ mod tests {
         let config = PhantomConfig::parse(toml).unwrap();
         assert_eq!(config.theme_name, "amber");
         assert!((config.font_size - 16.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn nlp_llm_enabled_defaults_to_true() {
+        let config = PhantomConfig::default();
+        assert!(
+            config.nlp_llm_enabled,
+            "nlp_llm_enabled must default to true so the LLM path is on by default"
+        );
+    }
+
+    #[test]
+    fn parse_nlp_llm_false_disables_it() {
+        let config = PhantomConfig::parse("nlp_llm = false").unwrap();
+        assert!(!config.nlp_llm_enabled);
+    }
+
+    #[test]
+    fn parse_nlp_llm_zero_disables_it() {
+        let config = PhantomConfig::parse("nlp_llm = 0").unwrap();
+        assert!(!config.nlp_llm_enabled);
+    }
+
+    #[test]
+    fn parse_nlp_llm_true_stays_enabled() {
+        let config = PhantomConfig::parse("nlp_llm = true").unwrap();
+        assert!(config.nlp_llm_enabled);
     }
 }
