@@ -112,10 +112,17 @@ impl ReconcilerState {
                 // stall counter and recent-output loop detection.
                 let _assessment = ledger.assess_progress();
                 log::info!("Reconciler: re-plan triggered — {reason}");
-                // Deferred to #32 (Reconciler: should_replan + dispatch_next_step).
-                // When that lands, spawn a Composer agent here to generate a revised
-                // plan and call ledger.replan(new_steps). For now, log and keep the
-                // ledger alive — the next tick will re-evaluate.
+                // Notify the user that the goal is being re-evaluated.
+                let _ = action_tx.send(AiAction::ShowNotification(format!(
+                    "Re-planning goal '{}': {reason}",
+                    ledger.goal
+                )));
+                // Automated re-planning (spawning a Composer agent to generate
+                // revised steps via LLM and calling `ledger.replan(new_steps)`)
+                // is a Phase 2 feature that requires the brain to hold an async
+                // LLM client. For now the ledger stays alive and the next tick
+                // will re-evaluate — stall detection or GiveUp will escalate
+                // if progress never resumes.
                 true
             }
 
@@ -551,6 +558,38 @@ mod tests {
             "step must remain Active when spawn_tag is unknown"
         );
     }
+    // -- Replan notification test (Issue #98 comment cleanup) -----------------
+
+    /// When `should_replan()` returns `Replan`, the reconciler must emit a
+    /// `ShowNotification` to the user so they can see that the goal hit a
+    /// re-plan decision point. The ledger must remain alive (`tick` returns
+    /// `true`) so subsequent ticks can re-evaluate.
+    #[test]
+    fn replan_decision_emits_notification_and_keeps_ledger_alive() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        // Force a stall: set stall_counter above the default threshold (2).
+        ledger.stall_counter = 3;
+
+        // Tick: should_replan() → Replan, must emit ShowNotification.
+        let still_active = state.tick(&mut ledger, &tx);
+        assert!(still_active, "ledger must remain active on Replan");
+
+        // Drain all actions emitted; the notification should be one of them.
+        let mut got_notification = false;
+        while let Ok(action) = rx.try_recv() {
+            if matches!(action, AiAction::ShowNotification(_)) {
+                got_notification = true;
+            }
+        }
+        assert!(
+            got_notification,
+            "reconciler must emit ShowNotification when Replan is triggered"
+        );
+    }
+
     // -- Issue #111: AgentError exit-path spawn_tag coverage -----------------
 
     /// When `drain_bus_to_brain` translates `Event::AgentError` it hard-codes

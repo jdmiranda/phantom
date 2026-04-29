@@ -229,6 +229,10 @@ pub(crate) struct AgentPane {
     /// Last error excerpt observed on a failing tool call, used to populate
     /// the `reason` field of the emitted `AgentBlocked` event.
     last_tool_error: Option<String>,
+    /// Capability class of the last failing tool call.  Used to populate the
+    /// `suggested_capability` field of `AgentBlocked` events so the Fixer can
+    /// request the correct class instead of hardcoding `"Sense"`.
+    last_failing_capability: Option<CapabilityClass>,
     /// Shared registry handle used by chat-tool dispatch (`send_to_agent`,
     /// `broadcast_to_role`, `request_critique`). Cloned from the runtime at
     /// spawn time so dispatch contexts can read/write the same directory the
@@ -254,6 +258,20 @@ pub(crate) struct AgentPane {
     /// spawn time so a Composer pane gets the Coordinate class it needs to
     /// invoke `spawn_subagent` / `broadcast_to_role`.
     role: phantom_agents::role::AgentRole,
+    /// Issue #235: shared `GhTicketDispatcher` handle injected at spawn time
+    /// when the pane's role is `Dispatcher`.
+    ///
+    /// `None` for all non-Dispatcher roles and for any Dispatcher pane whose
+    /// parent `App` could not construct the dispatcher (e.g. `GITHUB_TOKEN`
+    /// absent). When `None`, the three Dispatcher tools return the canonical
+    /// `"ticket dispatcher not configured"` error so the model self-corrects.
+    ticket_dispatcher: Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>>,
+    /// Per-agent structured lifecycle journal (JSONL on disk).
+    ///
+    /// `None` when the journal file could not be opened (e.g., permission
+    /// error or test environment without a real filesystem path). All journal
+    /// writes are best-effort — a failure never aborts an agent spawn.
+    journal: Option<phantom_memory::journal::AgentJournal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +320,9 @@ impl AgentPane {
             blocked_event_sink: None,
             denied_event_sink: None,
             last_tool_error: None,
+            last_failing_capability: None,
+            ticket_dispatcher: None,
+            journal: None,
         }
     }
 
@@ -466,6 +487,14 @@ impl AgentPane {
 
         info!("Agent pane spawned: {task_desc}");
 
+        let agent_id_u64 = agent.id as u64;
+        let mut journal = open_agent_journal(agent_id_u64);
+        if let Some(ref mut j) = journal {
+            if let Err(e) = j.record_spawn(agent_id_u64, &task_desc) {
+                warn!("AgentJournal::record_spawn failed: {e}");
+            }
+        }
+
         Self {
             task: task_desc,
             status: AgentPaneStatus::Working,
@@ -490,11 +519,14 @@ impl AgentPane {
             blocked_event_sink,
             denied_event_sink,
             last_tool_error: None,
+            last_failing_capability: None,
             registry: None,
             event_log: None,
             pending_spawn: None,
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
+            ticket_dispatcher: None,
+            journal,
         }
     }
 
@@ -519,6 +551,21 @@ impl AgentPane {
         self.role = role;
     }
 
+    /// Wire the shared [`GhTicketDispatcher`] handle for Dispatcher-role panes.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` immediately after
+    /// `set_substrate_handles` when the spawned role is
+    /// [`phantom_agents::role::AgentRole::Dispatcher`] and the App has a
+    /// configured dispatcher. `None` is the safe default — the three
+    /// Dispatcher tools will return `"ticket dispatcher not configured"` to
+    /// the model instead of panicking.
+    pub(crate) fn set_ticket_dispatcher(
+        &mut self,
+        dispatcher: std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>,
+    ) {
+        self.ticket_dispatcher = Some(dispatcher);
+    }
+
     /// Build a [`phantom_agents::dispatch::DispatchContext`] from the
     /// pane's current substrate handles, if all required pieces are wired.
     ///
@@ -532,6 +579,16 @@ impl AgentPane {
         let registry = self.registry.clone()?;
         let pending_spawn = self.pending_spawn.clone()?;
         let self_ref = self.self_ref.clone()?;
+        // Issue #235: inject the ticket dispatcher only for Dispatcher-role
+        // panes. Non-Dispatcher agents receive `None` so the three Dispatcher
+        // tools remain unreachable to them (capability gate catches first, but
+        // defence-in-depth keeps the `None` path as the safe fallback).
+        let ticket_dispatcher = if self.role == phantom_agents::role::AgentRole::Dispatcher {
+            self.ticket_dispatcher.clone()
+        } else {
+            None
+        };
+
         Some(phantom_agents::dispatch::DispatchContext {
             self_ref,
             role: self.role,
@@ -545,7 +602,7 @@ impl AgentPane {
             // quarantine registry will be plumbed in a follow-up. // see #3
             quarantine: None,
             correlation_id: None,
-            ticket_dispatcher: None,
+            ticket_dispatcher,
         })
     }
 
@@ -565,6 +622,14 @@ impl AgentPane {
                     self.output_tokens += (text.len() / 4) as u32;
                     self.output.push_str(&text);
                     self.current_assistant_text.push_str(&text);
+                    if let Some(ref mut j) = self.journal {
+                        let first_line = text.lines().next().unwrap_or("").to_string();
+                        if !first_line.is_empty() {
+                            if let Err(e) = j.record_output(self.agent.id as u64, first_line) {
+                                warn!("AgentJournal::record_output failed: {e}");
+                            }
+                        }
+                    }
                     // Cap output to prevent unbounded memory growth.
                     if self.output.len() > 65536 {
                         let mut trim = self.output.len() - 65536;
@@ -580,6 +645,11 @@ impl AgentPane {
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
+                    if let Some(ref mut j) = self.journal {
+                        if let Err(e) = j.record_tool_call(self.agent.id as u64, call.tool.api_name(), &args_display) {
+                            warn!("AgentJournal::record_tool_call failed: {e}");
+                        }
+                    }
                     if args_display.is_empty() {
                         self.output.push_str(&format!("\n▶ {}\n", call.tool.api_name()));
                     } else {
@@ -597,6 +667,15 @@ impl AgentPane {
                     }
 
                     if self.pending_tools.is_empty() {
+                        if let Some(ref mut j) = self.journal {
+                            let summary = format!(
+                                "~{}in/~{}out tokens, {} tool calls",
+                                self.input_tokens, self.output_tokens, self.tool_call_count
+                            );
+                            if let Err(e) = j.record_completion(self.agent.id as u64, true, summary) {
+                                warn!("AgentJournal::record_completion failed: {e}");
+                            }
+                        }
                         self.output.push_str(&format!(
                             "\n\n📊 ~{}in / ~{}out tokens | {} tool calls\n✓ Agent finished.\n",
                             self.input_tokens, self.output_tokens, self.tool_call_count,
@@ -613,6 +692,11 @@ impl AgentPane {
                 }
                 Some(ApiEvent::Error(e)) => {
                     self.output.push_str(&format!("\n\n✗ Error: {e}\n"));
+                    if let Some(ref mut j) = self.journal {
+                        if let Err(je) = j.record_flatline(self.agent.id as u64, &e) {
+                            warn!("AgentJournal::record_flatline failed: {je}");
+                        }
+                    }
                     self.rollback_if_dirty();
                     self.status = AgentPaneStatus::Failed;
                     self.api_handle = None;
@@ -631,6 +715,14 @@ impl AgentPane {
     /// and re-invoke the Claude API for the next turn.
     fn execute_pending_tools(&mut self) {
         if self.turn_count >= MAX_TOOL_ROUNDS {
+            if let Some(ref mut j) = self.journal {
+                if let Err(e) = j.record_flatline(
+                    self.agent.id as u64,
+                    format!("iteration limit reached ({MAX_TOOL_ROUNDS} tool rounds)"),
+                ) {
+                    warn!("AgentJournal::record_flatline (limit) failed: {e}");
+                }
+            }
             self.output.push_str(&format!(
                 "\n\n✗ Agent hit iteration limit ({MAX_TOOL_ROUNDS} tool rounds).\n"
             ));
@@ -758,6 +850,7 @@ impl AgentPane {
             if result.success {
                 self.consecutive_tool_failures = 0;
                 self.last_tool_error = None;
+                self.last_failing_capability = None;
             } else {
                 self.consecutive_tool_failures =
                     self.consecutive_tool_failures.saturating_add(1);
@@ -765,6 +858,15 @@ impl AgentPane {
                 // doesn't drag a multi-KB tool error into the spawn payload.
                 let excerpt: String = result.output.chars().take(160).collect();
                 self.last_tool_error = Some(excerpt);
+                self.last_failing_capability = Some(call.tool.capability_class());
+            }
+
+            // Push structured semantic output into the agent's ring-buffer so
+            // the model can reason about structured command results on the next
+            // turn. Only `RunCommand` results carry a `semantic_output`; all
+            // other tool types leave it `None`.
+            if let Some(ref parsed) = result.semantic_output {
+                self.agent.push_semantic_output(*parsed.clone());
             }
 
             self.agent.push_message(AgentMessage::ToolResult(result));
@@ -811,6 +913,7 @@ impl AgentPane {
             // a fresh failure starts a fresh count.
             self.consecutive_tool_failures = 0;
             self.last_tool_error = None;
+            self.last_failing_capability = None;
             return;
         };
 
@@ -830,24 +933,31 @@ impl AgentPane {
             self.output.clone()
         };
 
+        // Use the actual role and the capability class of the last failing
+        // tool so the Fixer knows which permission to request.
+        let role_label = self.role.label();
+        let suggested_cap = self
+            .last_failing_capability
+            .map(class_label)
+            .unwrap_or("Sense");
+
         let payload = build_blocked_payload(
             self.agent.id as u64,
-            "Conversational",
+            role_label,
             &reason,
             now_unix_ms(),
             &context_excerpt,
-            "Sense",
+            suggested_cap,
         );
 
+        let role = self.role;
         let event = SubstrateEvent {
             kind: EventKind::AgentBlocked {
                 agent_id: self.agent.id as u64,
                 reason: reason.clone(),
             },
             payload,
-            source: EventSource::Agent {
-                role: phantom_agents::role::AgentRole::Conversational,
-            },
+            source: EventSource::Agent { role },
         };
 
         if let Ok(mut q) = sink.lock() {
@@ -858,6 +968,7 @@ impl AgentPane {
 
         self.consecutive_tool_failures = 0;
         self.last_tool_error = None;
+        self.last_failing_capability = None;
     }
 
     /// Emit an [`EventKind::CapabilityDenied`] substrate event whenever the
@@ -1010,10 +1121,14 @@ impl AgentPane {
         if success {
             self.consecutive_tool_failures = 0;
             self.last_tool_error = None;
+            self.last_failing_capability = None;
         } else {
             self.consecutive_tool_failures =
                 self.consecutive_tool_failures.saturating_add(1);
             self.last_tool_error = Some(error_excerpt.to_string());
+            // Tests that only exercise the streak logic (not capability routing)
+            // leave `last_failing_capability` unset — `maybe_emit_blocked_event`
+            // will fall back to `"Sense"` which is acceptable for those tests.
         }
         self.maybe_emit_blocked_event();
     }
@@ -1173,6 +1288,36 @@ fn format_tool_args(tool: &ToolType, args: &serde_json::Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Journal helpers
+// ---------------------------------------------------------------------------
+
+/// Open (or create) the per-agent JSONL journal file.
+///
+/// Returns `None` on any I/O error; callers treat the journal as best-effort
+/// observability and never abort an agent spawn on journal failure.
+fn open_agent_journal(agent_id: u64) -> Option<phantom_memory::journal::AgentJournal> {
+    let dir = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".config/phantom/agents/journals"))
+        .unwrap_or_else(|| std::env::temp_dir().join("phantom-agents/journals"));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!(
+            "AgentJournal: could not create journal dir {}: {e}",
+            dir.display()
+        );
+        return None;
+    }
+    let path = dir.join(format!("{agent_id}.jsonl"));
+    match phantom_memory::journal::AgentJournal::open(&path) {
+        Ok(j) => Some(j),
+        Err(e) => {
+            warn!("AgentJournal: could not open {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App integration
 // ---------------------------------------------------------------------------
 
@@ -1283,6 +1428,22 @@ impl App {
             DEFAULT_AGENT_PANE_ROLE,
         );
 
+        // Issue #235: inject the ticket dispatcher for Dispatcher-role panes.
+        // `agent_pane.role` was just set by `set_substrate_handles` above.
+        // For the current default (Conversational) this is a no-op. When a
+        // future spawn path sets role = Dispatcher this branch fires and the
+        // pane gains live access to the GH ticket queue.
+        if agent_pane.role == phantom_agents::role::AgentRole::Dispatcher {
+            if let Some(ref td) = self.ticket_dispatcher {
+                agent_pane.set_ticket_dispatcher(std::sync::Arc::clone(td));
+            } else {
+                warn!(
+                    "Spawning a Dispatcher-role agent pane but ticket_dispatcher is None \
+                     (GITHUB_TOKEN / GH_REPO not set); ticket tools will fail gracefully"
+                );
+            }
+        }
+
         let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
 
         let scene_node = self.scene.add_node(
@@ -1384,6 +1545,7 @@ mod tests {
             blocked_event_sink: None,
             denied_event_sink: None,
             last_tool_error: None,
+            last_failing_capability: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -1396,6 +1558,8 @@ mod tests {
             pending_spawn: None,
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
+            ticket_dispatcher: None,
+            journal: None,
         };
         (pane, tx)
     }
@@ -1473,6 +1637,7 @@ mod tests {
             blocked_event_sink: None,
             denied_event_sink: None,
             last_tool_error: None,
+            last_failing_capability: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -1485,6 +1650,8 @@ mod tests {
             pending_spawn: None,
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
+            ticket_dispatcher: None,
+            journal: None,
         };
         assert!(!pane.poll());
     }
@@ -1957,5 +2124,162 @@ mod tests {
                  SubstrateEvent side still validated."
             );
         }
+    }
+
+    // ---- Issue #235: GhTicketDispatcher wiring --------------------------------
+
+    /// Constructing a `DispatchContext` for a Dispatcher-role pane that has
+    /// a configured `GhTicketDispatcher` must yield `ticket_dispatcher: Some`.
+    ///
+    /// This is the acceptance test for the fix described in issue #235:
+    /// before the fix every `DispatchContext` literal had
+    /// `ticket_dispatcher: None`, so Dispatcher agents always received
+    /// `"ticket dispatcher not configured"` when calling any of the three
+    /// Dispatcher tools.
+    #[test]
+    fn dispatcher_role_pane_with_configured_dispatcher_has_some_in_ctx() {
+        use phantom_agents::dispatcher::GhTicketDispatcher;
+        use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+        use phantom_memory::event_log::EventLog;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        // Build a Dispatcher-role pane with all substrate handles wired.
+        let (mut pane, _tx) = agent_with_handle();
+
+        let registry = Arc::new(Mutex::new(
+            phantom_agents::inbox::AgentRegistry::new(),
+        ));
+        let event_log = Arc::new(Mutex::new(
+            EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+        ));
+        let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+        let self_ref = AgentRef::new(1, AgentRole::Dispatcher, "dispatcher-1", SpawnSource::User);
+
+        pane.set_substrate_handles(
+            registry,
+            event_log,
+            pending_spawn,
+            self_ref,
+            AgentRole::Dispatcher,
+        );
+
+        // Wire the dispatcher (mock repo — no real gh calls in tests).
+        let dispatcher = GhTicketDispatcher::new("test/repo").shared();
+        pane.set_ticket_dispatcher(Arc::clone(&dispatcher));
+
+        // Build a dispatch context; the ticket_dispatcher field must be Some.
+        let ctx = pane.build_dispatch_context()
+            .expect("build_dispatch_context must return Some for a fully-wired Dispatcher pane");
+
+        assert!(
+            ctx.ticket_dispatcher.is_some(),
+            "DispatchContext for a Dispatcher-role pane with a configured \
+             GhTicketDispatcher must have ticket_dispatcher = Some"
+        );
+    }
+
+    /// Constructing a `DispatchContext` for a *non*-Dispatcher-role pane must
+    /// always yield `ticket_dispatcher: None`, even if the pane somehow had a
+    /// dispatcher wired in (defence-in-depth).
+    #[test]
+    fn non_dispatcher_role_pane_always_has_none_in_ctx() {
+        use phantom_agents::dispatcher::GhTicketDispatcher;
+        use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+        use phantom_memory::event_log::EventLog;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        let (mut pane, _tx) = agent_with_handle();
+
+        let registry = Arc::new(Mutex::new(
+            phantom_agents::inbox::AgentRegistry::new(),
+        ));
+        let event_log = Arc::new(Mutex::new(
+            EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+        ));
+        let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+        let self_ref = AgentRef::new(2, AgentRole::Watcher, "watcher-2", SpawnSource::User);
+
+        pane.set_substrate_handles(
+            registry,
+            event_log,
+            pending_spawn,
+            self_ref,
+            AgentRole::Watcher,
+        );
+
+        // Wire a dispatcher into a non-Dispatcher pane — should still be None
+        // in the resulting DispatchContext (capability gate + defence-in-depth).
+        let dispatcher = GhTicketDispatcher::new("test/repo").shared();
+        pane.set_ticket_dispatcher(Arc::clone(&dispatcher));
+
+        let ctx = pane.build_dispatch_context()
+            .expect("build_dispatch_context must return Some for a wired pane");
+
+        assert!(
+            ctx.ticket_dispatcher.is_none(),
+            "DispatchContext for a non-Dispatcher-role pane must have \
+             ticket_dispatcher = None regardless of what was set on the pane"
+        );
+    }
+
+    // ---- #230: AgentBlocked payload reflects actual role and capability ----
+
+    /// A `Defender`-role pane whose last failing tool was `RunCommand` (Act)
+    /// must produce an `AgentBlocked` payload with `agent_role = "Defender"`
+    /// and `suggested_capability = "Act"` — not the old hardcoded
+    /// `"Conversational"` / `"Sense"` strings.
+    #[test]
+    fn blocked_payload_reflects_actual_role_and_capability() {
+        let (mut pane, _tx) = agent_with_handle();
+        pane.set_role_for_test(AgentRole::Defender);
+        let sink = new_blocked_event_sink();
+        pane.set_blocked_event_sink_for_test(sink.clone());
+
+        // Simulate two consecutive failures where the denied tool is RunCommand
+        // (capability class = Act). We wire `last_failing_capability` directly
+        // via the production field path: set it before calling the test helper
+        // so `maybe_emit_blocked_event` sees the correct class.
+        pane.consecutive_tool_failures = 1;
+        pane.last_tool_error = Some("run_command denied".into());
+        pane.last_failing_capability = Some(phantom_agents::role::CapabilityClass::Act);
+        // Second failure crosses the threshold.
+        pane.consecutive_tool_failures = 2;
+        pane.maybe_emit_blocked_event();
+
+        let drained = sink.lock().unwrap();
+        assert_eq!(drained.len(), 1, "expected exactly one AgentBlocked event");
+
+        let ev = &drained[0];
+
+        // The source must attribute the event to the Defender role, not Conversational.
+        match ev.source {
+            phantom_agents::spawn_rules::EventSource::Agent { role } => {
+                assert_eq!(
+                    role,
+                    AgentRole::Defender,
+                    "source role must be Defender, not Conversational"
+                );
+            }
+            other => panic!("expected EventSource::Agent, got {other:?}"),
+        }
+
+        // The payload must carry the actual role and capability strings.
+        let payload = &ev.payload;
+        assert_eq!(
+            payload.get("agent_role").and_then(|v| v.as_str()),
+            Some("Defender"),
+            "payload agent_role must be 'Defender', not hardcoded 'Conversational'",
+        );
+        assert_eq!(
+            payload.get("suggested_capability").and_then(|v| v.as_str()),
+            Some("Act"),
+            "payload suggested_capability must be 'Act' (RunCommand class), not hardcoded 'Sense'",
+        );
     }
 }

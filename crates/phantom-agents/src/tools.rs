@@ -808,31 +808,16 @@ pub(crate) fn execute_run_command_with_policy(
     };
 
     match sandbox::execute_sandboxed(command_str, root, policy, COMMAND_TIMEOUT) {
-        Ok(sandbox_out) => {
-            // The sandbox captures combined stdout+stderr in `output`. Split by
-            // the "STDERR:\n" sentinel so the semantic parser receives clean
-            // stdout while the full combined output is returned to the agent.
-            let (stdout_part, stderr_part) = if let Some(idx) = sandbox_out.output.find("STDERR:\n") {
-                let stdout = sandbox_out.output[..idx.saturating_sub(1)].to_owned();
-                let stderr = sandbox_out.output[idx + "STDERR:\n".len()..].to_owned();
-                (stdout, stderr)
-            } else {
-                (sandbox_out.output.clone(), String::new())
-            };
-
+        Ok(out) => {
             // Classify and structure the output via phantom-semantic so agents
             // receive structured context rather than raw text alone.
-            let exit_code: Option<i32> = if sandbox_out.success { Some(0) } else { Some(1) };
             let semantic =
-                SemanticParser::parse(command_str, &stdout_part, &stderr_part, exit_code);
+                SemanticParser::parse(command_str, &out.stdout, &out.stderr, out.exit_code);
 
-            let mut result = if sandbox_out.success {
-                tool_ok(tool, sandbox_out.output)
+            let mut result = if out.success {
+                tool_ok(tool, out.output)
             } else {
-                tool_err(
-                    tool,
-                    format!("command failed\n{}", sandbox_out.output),
-                )
+                tool_err(tool, format!("command exited non-zero\n{}", out.output))
             };
             result.semantic_output = Some(Box::new(semantic));
             result

@@ -264,7 +264,15 @@ fn build_request_body(
     tools: &[ToolDefinition],
     tool_use_ids: &[String],
 ) -> Value {
-    let system = agent.system_prompt();
+    // Append the structured semantic context (most-recent N command outputs)
+    // to the base system prompt whenever the agent's ring-buffer is non-empty.
+    // This gives the model structured visibility into command history without
+    // bloating the permanent system prompt.
+    let mut system = agent.system_prompt();
+    if let Some(semantic_section) = agent.semantic_prompt_section() {
+        system.push_str("\n\n");
+        system.push_str(&semantic_section);
+    }
     let mut body = serde_json::json!({
         "model": config.model,
         "max_tokens": config.max_tokens,

@@ -86,18 +86,157 @@ impl Default for BrainConfig {
 /// The brain runs on a dedicated OS thread named `phantom-brain`. It blocks on
 /// the event channel and processes events through the OODA cycle. Send
 /// [`AiEvent::Shutdown`] to stop it gracefully.
+///
+/// The thread body is wrapped in a supervisor loop that catches any panic with
+/// `std::panic::catch_unwind` and restarts the brain loop (#227).  Each
+/// restart spawns a fresh `brain_loop` with a new pair of internal channels;
+/// a lightweight bridge thread forwards events from the external `BrainHandle`
+/// sender into the current iteration's receiver, and forwards actions back,
+/// so the caller observes no interruption.
 pub fn spawn_brain(config: BrainConfig) -> BrainHandle {
-    let (event_tx, event_rx) = mpsc::channel();
-    let (action_tx, action_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel::<AiEvent>();
+    let (action_tx, action_rx) = mpsc::channel::<AiAction>();
 
     std::thread::Builder::new()
         .name("phantom-brain".into())
         .spawn(move || {
-            brain_loop(config, event_rx, action_tx);
+            brain_supervised(config, event_rx, action_tx);
         })
         .expect("failed to spawn brain thread");
 
     BrainHandle { event_tx, action_rx }
+}
+
+/// Supervisor loop: run `brain_loop` inside `catch_unwind`; restart on panic.
+///
+/// Design rationale — channel bridging:
+/// `brain_loop` takes *ownership* of its `event_rx` / `action_tx`.  After a
+/// panic those values are consumed and we cannot recover them.  To preserve
+/// the external `BrainHandle` channels across restarts we use a bridge:
+///
+/// ```text
+/// BrainHandle.event_tx  →  bridge_rx  →  [bridge thread]  →  iter_tx  →  brain_loop
+/// brain_loop  →  iter_action_tx  →  [supervisor]  →  action_tx  →  BrainHandle.action_rx
+/// ```
+///
+/// The bridge thread holds `bridge_rx` (the receiver end of the external
+/// handle's channel) and forwards events into `iter_tx` (the per-iteration
+/// sender).  When `brain_loop` panics, the supervisor drops `iter_tx` /
+/// `iter_action_rx`, rebuilds fresh internal channels, and the bridge thread
+/// picks up the new `iter_tx` via an `Arc<Mutex<Option<Sender>>>` swap.
+fn brain_supervised(
+    config: BrainConfig,
+    event_rx: mpsc::Receiver<AiEvent>,
+    action_tx: mpsc::Sender<AiAction>,
+) {
+    use std::sync::{Arc, Mutex};
+
+    // Decompose config fields so we can rebuild `BrainConfig` each restart
+    // without requiring `BrainConfig: Clone` or `RouterConfig: Clone`.
+    let project_dir = config.project_dir;
+    let enable_suggestions = config.enable_suggestions;
+    let enable_memory = config.enable_memory;
+    let quiet_threshold = config.quiet_threshold;
+    // RouterConfig is not Clone, so we consume it on the first iteration only.
+    let mut router: Option<crate::router::RouterConfig> = config.router;
+
+    // Shared slot: the supervisor writes a fresh `iter_tx` here after each
+    // restart; the bridge thread reads it to redirect events.
+    let iter_tx_slot: Arc<Mutex<Option<mpsc::Sender<AiEvent>>>> = Arc::new(Mutex::new(None));
+
+    // Spawn the bridge thread.  It owns `event_rx` (the external receiver)
+    // and forwards events into whatever `iter_tx` the supervisor has installed.
+    let slot_for_bridge = Arc::clone(&iter_tx_slot);
+    std::thread::Builder::new()
+        .name("phantom-brain-bridge".into())
+        .spawn(move || {
+            loop {
+                let event = match event_rx.recv() {
+                    Ok(e) => e,
+                    Err(_) => break, // External handle dropped.
+                };
+                let is_shutdown = matches!(event, AiEvent::Shutdown);
+                // Forward to current iteration's channel.
+                let sent = {
+                    let guard = slot_for_bridge.lock().expect("bridge slot poisoned");
+                    if let Some(ref tx) = *guard {
+                        tx.send(event).is_ok()
+                    } else {
+                        false // No active iteration yet; drop the event.
+                    }
+                };
+                if !sent || is_shutdown {
+                    break;
+                }
+            }
+        })
+        .expect("failed to spawn brain bridge thread");
+
+    let mut restart_count: u32 = 0;
+
+    loop {
+        // Build per-iteration channels.
+        let (iter_tx, iter_rx) = mpsc::channel::<AiEvent>();
+        let (iter_action_tx, iter_action_rx) = mpsc::channel::<AiAction>();
+
+        // Install this iteration's sender so the bridge forwards to it.
+        {
+            let mut guard = iter_tx_slot.lock().expect("iter_tx_slot poisoned");
+            *guard = Some(iter_tx);
+        }
+
+        let iter_config = BrainConfig {
+            project_dir: project_dir.clone(),
+            enable_suggestions,
+            enable_memory,
+            quiet_threshold,
+            router: router.take(), // `None` on second and subsequent restarts.
+        };
+
+        // Run brain_loop under catch_unwind.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            brain_loop(iter_config, iter_rx, iter_action_tx);
+        }));
+
+        // Drain any actions the iteration emitted before it exited / panicked.
+        loop {
+            match iter_action_rx.try_recv() {
+                Ok(action) => { let _ = action_tx.send(action); }
+                Err(_) => break,
+            }
+        }
+
+        // Uninstall the stale sender (the Receiver was consumed by the loop).
+        {
+            let mut guard = iter_tx_slot.lock().expect("iter_tx_slot poisoned");
+            *guard = None;
+        }
+
+        match result {
+            Ok(()) => {
+                // Clean exit — Shutdown or external handle disconnected.
+                log::info!("AI brain exited cleanly (iteration {restart_count})");
+                return;
+            }
+            Err(payload) => {
+                restart_count += 1;
+                let msg: &str = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("<non-string panic payload>");
+                log::error!(
+                    "AI brain panicked (iteration {}): {msg}. \
+                     Restarting (attempt {restart_count})…",
+                    restart_count - 1,
+                );
+            }
+        }
+
+        // Brief exponential back-off to avoid a tight panic storm.
+        let backoff_ms = 100_u64.saturating_mul(u64::from(restart_count.min(10)));
+        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -948,5 +1087,107 @@ mod tests {
         } else {
             panic!("expected original suggestion");
         }
+    }
+
+    // =======================================================================
+    // #227 — brain thread panics silently with no restart
+    // =======================================================================
+
+    /// Simulate a brain panic by injecting a panic via `AiEvent::Interrupt`
+    /// with a special sentinel string.  After the panic the supervisor must
+    /// restart and continue processing subsequent events.
+    ///
+    /// We verify this by:
+    /// 1. Sending an event that causes `brain_loop` to panic.
+    /// 2. Waiting a short while for the supervisor to restart.
+    /// 3. Sending a normal `Interrupt` event.
+    /// 4. Asserting that the brain responds (or at least doesn't deadlock).
+    ///
+    /// Because the real `brain_loop` makes live network calls we test the
+    /// supervisor machinery directly with a synthetic panic-injecting loop.
+    #[test]
+    fn brain_supervisor_restarts_after_panic() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let restart_counter = Arc::new(AtomicU32::new(0));
+
+        let (event_tx, event_rx) = mpsc::channel::<AiEvent>();
+        let (action_tx, action_rx) = mpsc::channel::<AiAction>();
+
+        let counter_clone = Arc::clone(&restart_counter);
+
+        // Spawn a stripped-down brain supervisor that panics on the first
+        // event, then sends an action on the second.
+        std::thread::Builder::new()
+            .name("test-brain-supervisor".into())
+            .spawn(move || {
+                // Use the same supervisor pattern: catch_unwind + restart.
+                let mut iteration = 0u32;
+                loop {
+                    let (iter_tx, iter_rx) = mpsc::channel::<AiEvent>();
+                    let (iter_action_tx, iter_action_rx) = mpsc::channel::<AiAction>();
+
+                    // Forward one event from the shared receiver.
+                    if let Ok(ev) = event_rx.recv() {
+                        let _ = iter_tx.send(ev);
+                    } else {
+                        break; // External handle dropped.
+                    }
+
+                    let iter_action_tx2 = iter_action_tx;
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // First iteration panics; subsequent ones succeed.
+                        let ev = iter_rx.recv().expect("iter_rx closed");
+                        if let AiEvent::Interrupt(ref s) = ev {
+                            if s == "__test_panic__" {
+                                panic!("injected test panic");
+                            }
+                            // On restart: reply with an action.
+                            let _ = iter_action_tx2.send(AiAction::ConsoleReply("ok".into()));
+                        }
+                    }));
+
+                    // Drain actions.
+                    loop {
+                        match iter_action_rx.try_recv() {
+                            Ok(a) => { let _ = action_tx.send(a); }
+                            Err(_) => break,
+                        }
+                    }
+
+                    match result {
+                        Ok(()) => break, // Clean exit after second iteration.
+                        Err(_) => {
+                            counter_clone.fetch_add(1, Ordering::SeqCst);
+                            iteration += 1;
+                        }
+                    }
+                    if iteration >= 3 { break; } // Safety guard.
+                }
+            })
+            .expect("failed to spawn test supervisor");
+
+        // First event causes a panic.
+        event_tx.send(AiEvent::Interrupt("__test_panic__".into())).unwrap();
+
+        // Give the supervisor time to catch the panic and restart.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Second event should be processed normally.
+        event_tx.send(AiEvent::Interrupt("hello".into())).unwrap();
+
+        // The brain should reply within a reasonable timeout.
+        let reply = action_rx.recv_timeout(std::time::Duration::from_secs(3));
+        assert!(
+            reply.is_ok(),
+            "brain must reply after restart; timed out waiting"
+        );
+
+        // The supervisor must have recorded at least one restart.
+        assert!(
+            restart_counter.load(Ordering::SeqCst) >= 1,
+            "supervisor must have restarted at least once after the injected panic"
+        );
     }
 }

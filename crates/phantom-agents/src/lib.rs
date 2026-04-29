@@ -12,6 +12,7 @@ pub mod agent;
 pub mod api;
 pub mod audit;
 pub mod correlation;
+pub mod handoff;
 pub mod chat;
 pub mod chat_tools;
 pub mod cli;
