@@ -11,187 +11,61 @@ use wgpu::{
     BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType, BufferUsages,
     ColorTargetState, ColorWrites, Device, FilterMode, FragmentState, MultisampleState,
     PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, Queue, RenderPipeline,
-    RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
-    Sampler, ShaderStages, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages, TextureView, TextureViewDimension, VertexState,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    ShaderModuleDescriptor, ShaderStages, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDimension,
+    VertexState,
 };
 
 // ---------------------------------------------------------------------------
 // WGSL shader — the CRT post-processing heart of Phantom
 // ---------------------------------------------------------------------------
+//
+// The authoritative shader source lives in `shaders/crt.wgsl` at the workspace
+// root.  It is embedded at compile time via `include_str!` so the binary is
+// self-contained and naga validation tests work without a working-directory
+// constraint.
+//
+// Hot-reload (debug builds only):
+//   Set `PHANTOM_HOT_SHADERS=1` in the environment before launching the binary.
+//   On each pipeline creation (startup or resize-triggered recreation) the
+//   shader is read from `shaders/crt.wgsl` relative to the current working
+//   directory, allowing live WGSL iteration without a Rust recompile.
+//   If the file cannot be read, the embedded copy is used as a fallback.
 
-const POSTFX_SHADER: &str = r#"
-// ---- Uniforms ----
-// Layout uses vec4 for glow_color (with time packed in .w) to avoid vec3
-// alignment headaches between Rust repr(C) and WGSL std140 rules.
-struct PostFxParams {
-    scanline_intensity: f32,     //  0
-    bloom_intensity: f32,        //  4
-    chromatic_aberration: f32,   //  8
-    curvature: f32,              // 12
-    vignette_intensity: f32,     // 16
-    noise_intensity: f32,        // 20
-    time: f32,                   // 24
-    _pad0: f32,                  // 28
-    glow_color: vec3<f32>,       // 32 (vec3 aligns to 16)
-    _pad1: f32,                  // 44
-    resolution: vec2<f32>,       // 48
-    _pad2: vec2<f32>,            // 56
-                                 // total: 64
-};
+/// WGSL source for the CRT post-processing shader, embedded at compile time
+/// from `shaders/crt.wgsl`.
+///
+/// Exposed as `pub` so integration tests can validate it with naga without
+/// needing a GPU device.
+pub const CRT_WGSL: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../shaders/crt.wgsl"));
 
-@group(0) @binding(0) var scene_texture: texture_2d<f32>;
-@group(0) @binding(1) var scene_sampler: sampler;
-@group(0) @binding(2) var<uniform> params: PostFxParams;
-
-// ---- Vertex shader: full-screen triangle from vertex index ----
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
-    // Full-screen triangle trick: 3 vertices that cover the entire clip space.
-    // Vertex 0: (-1, -1)  UV (0, 1)
-    // Vertex 1: ( 3, -1)  UV (2, 1)
-    // Vertex 2: (-1,  3)  UV (0, -1)
-    // The GPU clips the oversized triangle to the viewport.
-    var out: VertexOutput;
-    let x = f32(i32(idx & 1u) * 4 - 1);
-    let y = f32(i32(idx >> 1u) * 4 - 1);
-    out.position = vec4<f32>(x, y, 0.0, 1.0);
-    // UV: map clip space to 0..1, with y flipped so (0,0) is top-left.
-    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
-    return out;
+/// Return the WGSL source to use for the current pipeline creation.
+///
+/// * **Release builds / tests**: always returns [`CRT_WGSL`] (the compile-time
+///   embedded string, zero allocation).
+/// * **Debug builds with `PHANTOM_HOT_SHADERS=1`**: reads `shaders/crt.wgsl`
+///   from the current working directory.  Falls back to the embedded copy and
+///   logs a warning on I/O error.
+fn crt_wgsl_source() -> std::borrow::Cow<'static, str> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("PHANTOM_HOT_SHADERS").is_some() {
+        match std::fs::read_to_string("shaders/crt.wgsl") {
+            Ok(src) => {
+                log::debug!("postfx: hot-reloaded shaders/crt.wgsl from disk");
+                return std::borrow::Cow::Owned(src);
+            }
+            Err(e) => {
+                log::warn!(
+                    "postfx: hot-reload failed ({}), using embedded shader",
+                    e
+                );
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(CRT_WGSL)
 }
-
-// ---- Utility functions ----
-
-// Hash-based pseudo-random noise. Returns 0..1.
-fn hash(p: vec2<f32>) -> f32 {
-    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
-    p3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
-// Barrel distortion: warp UVs outward from center to simulate CRT curvature.
-fn barrel_distort(uv: vec2<f32>, amount: f32) -> vec2<f32> {
-    let centered = uv - vec2<f32>(0.5, 0.5);
-    let r2 = dot(centered, centered);
-    let strength = amount * 2.0; // scale to a visually pleasing range
-    let warped = centered * (1.0 + strength * r2 + strength * 0.5 * r2 * r2);
-    return warped + vec2<f32>(0.5, 0.5);
-}
-
-// Check if UV is within the 0..1 range (for masking outside the CRT "glass").
-fn in_bounds(uv: vec2<f32>) -> bool {
-    return uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
-}
-
-// Sample with bounds check — return black if outside.
-fn sample_clamped(uv: vec2<f32>) -> vec4<f32> {
-    if !in_bounds(uv) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-    return textureSample(scene_texture, scene_sampler, uv);
-}
-
-// ---- Fragment shader: all CRT effects composited ----
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    var uv = in.uv;
-
-    // ------------------------------------------------------------------
-    // 1. Barrel distortion (CRT screen curvature)
-    // ------------------------------------------------------------------
-    if params.curvature > 0.0 {
-        uv = barrel_distort(uv, params.curvature);
-    }
-
-    // Outside the curved screen area — pure black.
-    if !in_bounds(uv) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    }
-
-    // ------------------------------------------------------------------
-    // 2. Chromatic aberration
-    // ------------------------------------------------------------------
-    var color: vec3<f32>;
-
-    if params.chromatic_aberration > 0.0 {
-        let center = vec2<f32>(0.5, 0.5);
-        let dist_from_center = uv - center;
-        let offset = dist_from_center * params.chromatic_aberration * 0.02;
-
-        let r = sample_clamped(uv + offset).r;
-        let g = sample_clamped(uv).g;
-        let b = sample_clamped(uv - offset).b;
-        color = vec3<f32>(r, g, b);
-    } else {
-        color = textureSample(scene_texture, scene_sampler, uv).rgb;
-    }
-
-    // ------------------------------------------------------------------
-    // 3. Phosphor bloom / glow
-    // ------------------------------------------------------------------
-    if params.bloom_intensity > 0.0 {
-        // Simple 9-tap box blur for bloom. Sample a cross + diagonals
-        // at a distance proportional to bloom intensity.
-        let texel = vec2<f32>(1.0 / params.resolution.x, 1.0 / params.resolution.y);
-        let spread = texel * (2.0 + params.bloom_intensity * 4.0);
-
-        var bloom = vec3<f32>(0.0, 0.0, 0.0);
-        bloom += sample_clamped(uv + vec2<f32>(-spread.x, -spread.y)).rgb;
-        bloom += sample_clamped(uv + vec2<f32>( 0.0,      -spread.y)).rgb;
-        bloom += sample_clamped(uv + vec2<f32>( spread.x, -spread.y)).rgb;
-        bloom += sample_clamped(uv + vec2<f32>(-spread.x,  0.0     )).rgb;
-        bloom += sample_clamped(uv + vec2<f32>( spread.x,  0.0     )).rgb;
-        bloom += sample_clamped(uv + vec2<f32>(-spread.x,  spread.y)).rgb;
-        bloom += sample_clamped(uv + vec2<f32>( 0.0,       spread.y)).rgb;
-        bloom += sample_clamped(uv + vec2<f32>( spread.x,  spread.y)).rgb;
-        bloom = bloom / 8.0;
-
-        // Tint bloom by the phosphor glow color and blend additively.
-        let glow = bloom * params.glow_color;
-        color = color + glow * params.bloom_intensity * 0.7;
-    }
-
-    // ------------------------------------------------------------------
-    // 4. Scanlines
-    // ------------------------------------------------------------------
-    if params.scanline_intensity > 0.0 {
-        let pixel_y = uv.y * params.resolution.y;
-        // Sinusoidal scanline pattern — subtle darkening on alternating lines.
-        // Using a sine wave gives a smoother, less harsh result than a step.
-        let scanline = 1.0 - params.scanline_intensity * 0.3 * (1.0 + sin(pixel_y * 3.14159265 * 2.0)) * 0.5;
-        color = color * scanline;
-    }
-
-    // ------------------------------------------------------------------
-    // 5. Vignette
-    // ------------------------------------------------------------------
-    if params.vignette_intensity > 0.0 {
-        let centered = uv - vec2<f32>(0.5, 0.5);
-        let dist = length(centered);
-        // Smooth falloff from center to edges. The 0.7071 is sqrt(0.5),
-        // the maximum distance from center to corner in UV space.
-        let vig = smoothstep(0.2, 0.7071, dist * params.vignette_intensity);
-        color = color * (1.0 - vig * 0.85);
-    }
-
-    // ------------------------------------------------------------------
-    // 6. Film grain / noise
-    // ------------------------------------------------------------------
-    if params.noise_intensity > 0.0 {
-        let noise_uv = uv * params.resolution + vec2<f32>(params.time * 127.1, params.time * 311.7);
-        let grain = hash(noise_uv) - 0.5; // -0.5 to +0.5
-        color = color + vec3<f32>(grain * params.noise_intensity * 0.12);
-    }
-
-    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-}
-"#;
 
 // ---------------------------------------------------------------------------
 // Uniform data — must match the WGSL struct layout exactly
@@ -304,9 +178,12 @@ impl PostFxPipeline {
     /// surface format so the scene can render directly into it.
     pub fn new(device: &Device, surface_format: TextureFormat, width: u32, height: u32) -> Self {
         // -- Shader module --
+        // `crt_wgsl_source()` returns the embedded compile-time copy in
+        // release/test builds, or reads from disk when PHANTOM_HOT_SHADERS
+        // is set in a debug build.
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("postfx-shader"),
-            source: wgpu::ShaderSource::Wgsl(POSTFX_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(crt_wgsl_source()),
         });
 
         // -- Offscreen texture --
@@ -537,7 +414,9 @@ fn create_offscreen_texture(
         sample_count: 1,
         dimension: TextureDimension::D2,
         format,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
+        usage: TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::TEXTURE_BINDING
+            | TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
