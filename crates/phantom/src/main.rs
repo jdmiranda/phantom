@@ -14,6 +14,7 @@ use winit::{
 };
 
 mod headless;
+mod path_resolver;
 
 struct Phantom {
     window: Option<Arc<Window>>,
@@ -462,6 +463,11 @@ fn chrono_timestamp() -> String {
 }
 
 fn main() -> Result<()> {
+    // Resolve desktop PATH before any tool is spawned. When Phantom is launched
+    // via a .app bundle or .desktop file the inherited PATH is typically missing
+    // user shell paths such as /opt/homebrew/bin and ~/.cargo/bin.
+    path_resolver::resolve_desktop_path();
+
     // Load .env file (ANTHROPIC_API_KEY, etc.) before anything else.
     let _ = dotenvy::dotenv();
 
