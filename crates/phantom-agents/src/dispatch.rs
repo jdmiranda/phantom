@@ -147,32 +147,6 @@ impl Default for Disposition {
 }
 
 // ---------------------------------------------------------------------------
-// RuntimeMode (Issue #105)
-// ---------------------------------------------------------------------------
-
-/// Runtime execution mode for the dispatch layer.
-///
-/// `SpawnOnly` is the harness gate required by issue #105: when
-/// [`DispatchContext`] is built with `runtime_mode: RuntimeMode::SpawnOnly`,
-/// `dispatch_tool` denies every tool whose name is not `"spawn_subagent"`
-/// before any capability gate or handler runs.
-///
-/// Layer ordering: quarantine gate → SpawnOnly gate → capability-class gate →
-/// handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RuntimeMode {
-    /// No extra restriction beyond role-manifest capability gating.
-    #[default]
-    Normal,
-    /// Orchestrator harness mode: only `spawn_subagent` is permitted.
-    ///
-    /// All other tool calls return
-    /// `"runtime denied: … only spawn_subagent is permitted in spawn_only mode"`
-    /// without touching any handler.
-    SpawnOnly,
-}
-
-// ---------------------------------------------------------------------------
 // Capability gating helpers
 // ---------------------------------------------------------------------------
 
