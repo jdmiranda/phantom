@@ -79,6 +79,9 @@ impl ShaderKind {
 /// This is called before handing a reloaded shader source to
 /// `wgpu::Device::create_shader_module` so that a syntax error surfaces as a
 /// log message rather than a GPU driver panic or a silent black screen.
+///
+/// Only available when the `live-reload` feature is enabled.
+#[cfg(feature = "live-reload")]
 pub fn validate_wgsl(source: &str) -> Result<(), String> {
     let module = naga::front::wgsl::parse_str(source).map_err(|e| e.emit_to_string(source))?;
 
@@ -149,11 +152,17 @@ impl ShaderWatcher {
         }
     }
 
-    /// Drain all pending reload notifications without blocking.
+    /// Pop the next pending reload notification, if any.
     ///
-    /// Returns the first queued [`ShaderKind`], or `None` if nothing changed.
-    /// Typically called once per render frame to pick up any FS events that
-    /// arrived since the last frame.
+    /// Returns the next queued [`ShaderKind`], or `None` if nothing changed.
+    /// Call in a loop once per render frame to drain all FS events that
+    /// arrived since the last frame:
+    ///
+    /// ```ignore
+    /// while let Some(kind) = watcher.try_recv_reload() {
+    ///     // rebuild pipeline for `kind`
+    /// }
+    /// ```
     ///
     /// In release builds or without `live-reload` this always returns `None`.
     pub fn try_recv_reload(&self) -> Option<ShaderKind> {
@@ -172,6 +181,9 @@ impl ShaderWatcher {
     ///   corresponding pipeline with this string.
     /// * `None`          — the file couldn't be read or failed naga validation;
     ///   the old pipeline should remain in use.
+    ///
+    /// Only available when the `live-reload` feature is enabled.
+    #[cfg(feature = "live-reload")]
     pub fn try_reload_source(kind: ShaderKind, shaders_dir: &std::path::Path) -> Option<String> {
         let path = shaders_dir.join(kind.relative_path().trim_start_matches("shaders/"));
         let source = match std::fs::read_to_string(&path) {
@@ -351,6 +363,7 @@ mod tests {
 
     /// `try_reload_source` must return `None` and NOT panic when given a
     /// directory containing a syntactically invalid WGSL file.
+    #[cfg(feature = "live-reload")]
     #[test]
     fn compile_failure_falls_back_gracefully() {
         use std::io::Write;
@@ -382,6 +395,7 @@ mod tests {
 
     /// `try_reload_source` must return `None` when the file does not exist,
     /// rather than panicking on an I/O error.
+    #[cfg(feature = "live-reload")]
     #[test]
     fn missing_file_falls_back_gracefully() {
         let dir = tempfile::tempdir().unwrap();
@@ -394,6 +408,7 @@ mod tests {
     }
 
     /// `validate_wgsl` accepts valid WGSL and rejects invalid WGSL correctly.
+    #[cfg(feature = "live-reload")]
     #[test]
     fn validate_wgsl_accepts_valid_and_rejects_invalid() {
         // Minimal valid WGSL vertex shader.
@@ -443,6 +458,7 @@ mod tests {
 
     /// `validate_wgsl` on the real embedded CRT shader must pass — guards
     /// against the embedded shader going stale relative to naga's validator.
+    #[cfg(feature = "live-reload")]
     #[test]
     fn embedded_crt_shader_passes_validation() {
         use crate::postfx::CRT_WGSL;
