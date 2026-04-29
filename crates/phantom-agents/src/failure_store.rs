@@ -245,7 +245,7 @@ mod tests {
             1,
         ));
 
-        for i in 1u32..=100 {
+        for i in 1u64..=100 {
             store.push(make_record(i, "bulk", 1));
         }
 
@@ -341,7 +341,7 @@ mod tests {
         let mut store = FailureStore::new();
 
         // Fill to capacity.
-        for i in 0u32..100 {
+        for i in 0u64..100 {
             store.push(make_record(i, &format!("err-{i}"), 1));
         }
 

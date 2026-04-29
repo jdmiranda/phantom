@@ -74,7 +74,9 @@ pub struct SavedPlanStep {
     assigned_task: AgentTask,
     status: SavedStepStatus,
     /// The agent id that was handling this step, if any.
-    agent_id: Option<u32>,
+    ///
+    /// Stored as `u64` to match `phantom_agents::AgentId` (fixes #273).
+    agent_id: Option<u64>,
     attempts: u32,
     max_attempts: u32,
     result_summary: Option<String>,
@@ -91,7 +93,7 @@ impl SavedPlanStep {
         description: String,
         assigned_task: AgentTask,
         status: SavedStepStatus,
-        agent_id: Option<u32>,
+        agent_id: Option<u64>,
         attempts: u32,
         max_attempts: u32,
         result_summary: Option<String>,
@@ -125,7 +127,7 @@ impl SavedPlanStep {
     }
 
     #[must_use]
-    pub fn agent_id(&self) -> Option<u32> {
+    pub fn agent_id(&self) -> Option<u64> {
         self.agent_id
     }
 
@@ -537,7 +539,7 @@ pub struct PlanStepBuilder {
     description: String,
     task: AgentTask,
     status: SavedStepStatus,
-    agent_id: Option<u32>,
+    agent_id: Option<u64>,
     attempts: u32,
     max_attempts: u32,
     result_summary: Option<String>,
@@ -564,7 +566,7 @@ impl PlanStepBuilder {
     }
 
     #[must_use]
-    pub fn agent_id(mut self, id: u32) -> Self {
+    pub fn agent_id(mut self, id: u64) -> Self {
         self.agent_id = Some(id);
         self
     }

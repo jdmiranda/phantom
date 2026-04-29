@@ -1085,7 +1085,7 @@ mod tests {
         let (action_tx, action_rx) = std::sync::mpsc::channel::<AiAction>();
         let mut denial_counters: std::collections::HashMap<phantom_agents::AgentId, usize> =
             std::collections::HashMap::new();
-        let agent_id = 200u32;
+        let agent_id = 200u64;
 
         // Simulate brain handling 2 CapabilityDenied events.
         for i in 1u32..=2 {
@@ -1122,7 +1122,7 @@ mod tests {
         let (action_tx, action_rx) = std::sync::mpsc::channel::<AiAction>();
         let mut denial_counters: std::collections::HashMap<phantom_agents::AgentId, usize> =
             std::collections::HashMap::new();
-        let agent_id = 201u32;
+        let agent_id = 201u64;
 
         // Simulate 3 consecutive CapabilityDenied events.
         for _ in 1u32..=3 {

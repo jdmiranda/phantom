@@ -139,7 +139,7 @@ impl SavedMessage {
 /// no longer recognised.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSnapshot {
-    id: u32,
+    id: u64,
     /// Raw task JSON. Stored as a `Value` so that unknown variants (e.g. from
     /// a snapshot written by a newer binary) do not cause `AgentStateFile::load`
     /// to fail. Use [`AgentSnapshot::task`] to attempt typed deserialization.
@@ -203,7 +203,7 @@ impl AgentSnapshot {
 
     /// The agent's numeric identifier.
     #[must_use]
-    pub fn id(&self) -> u32 {
+    pub fn id(&self) -> u64 {
         self.id
     }
 
@@ -459,7 +459,7 @@ pub enum RestoreOutcome<T> {
     /// The snapshot was present but could not be reconstructed.
     /// The caller should skip this agent but continue with others.
     Skipped {
-        agent_id: u32,
+        agent_id: u64,
         reason: String,
     },
     /// The snapshot was corrupt enough that we couldn't even extract an id.
@@ -517,7 +517,7 @@ mod tests {
     use phantom_agents::tools::{ToolCall, ToolResult, ToolType};
     use tempfile::TempDir;
 
-    fn free_agent(id: u32, prompt: &str) -> Agent {
+    fn free_agent(id: u64, prompt: &str) -> Agent {
         Agent::new(id, AgentTask::FreeForm { prompt: prompt.into() })
     }
 
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn partial_restore_returns_ok_for_valid_snapshots() {
-        let agents: Vec<AgentSnapshot> = (1u32..=3)
+        let agents: Vec<AgentSnapshot> = (1u64..=3)
             .map(|i| AgentSnapshot::from_agent(&free_agent(i, "task")))
             .collect();
         let file = AgentStateFile::new(agents);

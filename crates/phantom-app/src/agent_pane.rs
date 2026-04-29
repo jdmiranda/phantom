@@ -533,10 +533,10 @@ impl AgentPane {
 
         info!("Agent pane spawned: {task_desc}");
 
-        let agent_id_u64 = agent.id() as u64;
-        let mut journal = open_agent_journal(agent_id_u64);
+        let agent_id = agent.id();
+        let mut journal = open_agent_journal(agent_id);
         if let Some(ref mut j) = journal {
-            if let Err(e) = j.record_spawn(agent_id_u64, &task_desc) {
+            if let Err(e) = j.record_spawn(agent_id, &task_desc) {
                 warn!("AgentJournal::record_spawn failed: {e}");
             }
         }
@@ -1060,7 +1060,7 @@ impl AgentPane {
         let role = self.role;
         let event = SubstrateEvent {
             kind: EventKind::AgentBlocked {
-                agent_id: self.agent.id() as u64,
+                agent_id: self.agent.id(),
                 reason: reason.clone(),
             },
             payload,
@@ -1109,7 +1109,7 @@ impl AgentPane {
 
         let attempted_class = tool.capability_class();
         let attempted_tool = tool.api_name().to_string();
-        let agent_id = self.agent.id() as u64;
+        let agent_id = self.agent.id();
         let role = self.role;
 
         // Audit-side record (always emitted regardless of whether a sink
@@ -1556,7 +1556,8 @@ impl App {
         // runtime's `Arc<Mutex<…>>` registry + event log and a clone of the
         // App's `pending_spawn_subagent` queue. The `AgentRef` is stamped
         // with a fresh id (currently 0 — the agent module's `AgentId` is a
-        // `u32` per-session counter) and the default
+        // `u64` per-session counter, unified with QuarantineRegistry, fixes #273)
+        // and the default
         // [`DEFAULT_AGENT_PANE_ROLE`]; when the next phase wires Composer
         // panes through this path the role override will live on
         // [`AgentSpawnOpts`].
@@ -2094,7 +2095,7 @@ mod tests {
         // Kind invariant.
         match &ev.kind {
             phantom_agents::spawn_rules::EventKind::AgentBlocked { agent_id, reason } => {
-                assert_eq!(*agent_id as u64, 0u64); // test_agent has id 0
+                assert_eq!(*agent_id, 0u64); // test_agent has id 0
                 assert!(
                     reason.contains("consecutive tool failures"),
                     "reason should mention the streak; got '{reason}'",

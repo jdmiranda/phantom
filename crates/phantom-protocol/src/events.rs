@@ -7,7 +7,10 @@
 pub type AppId = u32;
 
 /// Unique agent identifier.
-pub type AgentId = u32;
+///
+/// Widened to `u64` to match `phantom_agents::AgentId` (fixes #273 — no
+/// narrowing cast required across the IPC boundary).
+pub type AgentId = u64;
 
 /// Unique session identifier.
 pub type SessionId = u32;

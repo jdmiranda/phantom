@@ -102,7 +102,10 @@ pub struct PlanStep {
     /// Current execution status.
     pub status: StepStatus,
     /// The agent ID if one has been spawned for this step.
-    pub agent_id: Option<u32>,
+    ///
+    /// Stored as `u64` to match [`phantom_agents::AgentId`] (fixes #273 — no
+    /// narrowing cast required at the reconciler / quarantine boundary).
+    pub agent_id: Option<u64>,
     /// Number of times this step has been attempted (for retry tracking).
     pub attempts: u32,
     /// Maximum attempts before marking as Failed.
