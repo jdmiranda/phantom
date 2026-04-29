@@ -41,6 +41,7 @@
 
 pub mod attention;
 pub mod brain;
+pub mod chat_backend;
 pub mod claude;
 pub mod curriculum;
 pub mod curves;
@@ -61,6 +62,10 @@ pub mod skill_store;
 
 pub use attention::{Attention, PaneSnapshot};
 pub use brain::*;
+pub use chat_backend::{
+    ChatBackend as UnifiedChatBackend, ChatOptions, ChatResponse, ClaudeBackend,
+    Message as ChatMessage, OllamaBackend, OpenAiBackend, RoutingCatalog,
+};
 pub use curriculum::*;
 pub use curves::*;
 pub use decompose::{DecompositionResult, DecompositionStep, GoalDecomposer};

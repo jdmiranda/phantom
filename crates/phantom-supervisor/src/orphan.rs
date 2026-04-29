@@ -101,7 +101,10 @@ impl Drop for PidFile {
             if let Err(e) = fs::remove_file(&self.path) {
                 warn!("failed to delete PID file on shutdown: {e}");
             } else {
-                info!("deleted PID file on clean shutdown: {}", self.path.display());
+                info!(
+                    "deleted PID file on clean shutdown: {}",
+                    self.path.display()
+                );
             }
         }
     }
@@ -124,8 +127,13 @@ fn write_pid_file(path: &Path, main_pid: u32, child_pids: Vec<u32>) -> Result<()
     let tmp_path = path.with_extension("pid.tmp");
     fs::write(&tmp_path, json.as_bytes())
         .with_context(|| format!("failed to write temp PID file {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("failed to rename PID file {} -> {}", tmp_path.display(), path.display()))?;
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to rename PID file {} -> {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
 
     info!(
         "wrote PID file: main={} children={:?} -> {}",
@@ -159,11 +167,17 @@ fn write_pid_file(path: &Path, main_pid: u32, child_pids: Vec<u32>) -> Result<()
 pub fn recover_orphans(path: &Path) -> Result<()> {
     // Step 1: no file → nothing to do.
     if !path.exists() {
-        info!("no stale PID file at {} — skipping orphan scan", path.display());
+        info!(
+            "no stale PID file at {} — skipping orphan scan",
+            path.display()
+        );
         return Ok(());
     }
 
-    info!("stale PID file found at {} — starting orphan scan", path.display());
+    info!(
+        "stale PID file found at {} — starting orphan scan",
+        path.display()
+    );
 
     // Step 2: parse.
     let data = match read_pid_file(path) {
@@ -236,8 +250,8 @@ pub fn recover_orphans(path: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn read_pid_file(path: &Path) -> Result<PidFileData> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("cannot read PID file {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("cannot read PID file {}", path.display()))?;
     let data: PidFileData = serde_json::from_slice(&bytes)
         .with_context(|| format!("cannot parse PID file {}", path.display()))?;
     Ok(data)
@@ -337,7 +351,10 @@ mod tests {
         let result = recover_orphans(&path);
         assert!(result.is_ok());
         // File must be deleted after recovery.
-        assert!(!path.exists(), "stale PID file must be removed after recovery");
+        assert!(
+            !path.exists(),
+            "stale PID file must be removed after recovery"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -356,7 +373,10 @@ mod tests {
         let result = recover_orphans(&path);
         assert!(result.is_ok());
         // File must NOT be deleted — main is still alive.
-        assert!(path.exists(), "PID file must be preserved when main is alive");
+        assert!(
+            path.exists(),
+            "PID file must be preserved when main is alive"
+        );
 
         cleanup(&path);
     }
@@ -398,7 +418,10 @@ mod tests {
         assert_eq!(data.child_pids, children);
 
         // Temp file must not linger.
-        assert!(!path.with_extension("pid.tmp").exists(), "tmp file must be gone after rename");
+        assert!(
+            !path.with_extension("pid.tmp").exists(),
+            "tmp file must be gone after rename"
+        );
 
         cleanup(&path);
     }
@@ -417,7 +440,10 @@ mod tests {
             assert!(path.exists(), "file must exist while handle is live");
         }
         // Handle dropped → file must be gone.
-        assert!(!path.exists(), "PID file must be deleted when PidFile is dropped");
+        assert!(
+            !path.exists(),
+            "PID file must be deleted when PidFile is dropped"
+        );
     }
 
     // -----------------------------------------------------------------------

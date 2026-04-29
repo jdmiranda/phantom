@@ -102,11 +102,13 @@ pub struct TerminalSize {
 }
 
 impl TerminalSize {
+    #[must_use]
     pub fn new(cols: u16, rows: u16) -> Self {
         Self { cols, rows }
     }
 
     /// Build the `WindowSize` that the PTY / kernel expects.
+    #[must_use]
     pub fn window_size(&self) -> WindowSize {
         WindowSize {
             num_cols: self.cols,
@@ -285,6 +287,7 @@ impl PhantomTerminal {
     /// exactly the bytes that were filled during the most recent `pty_read`.
     /// Returns an empty slice between reads or when `pty_read` returned `Ok(0)`.
     /// The returned slice is only valid until the next `pty_read` call.
+    #[must_use]
     #[inline]
     pub fn last_read_buf(&self) -> &[u8] {
         &self.read_buf[..self.last_read_len]
@@ -299,6 +302,7 @@ impl PhantomTerminal {
     }
 
     /// Immutable access to the terminal state (grid, cursor, modes).
+    #[must_use]
     #[inline]
     pub fn term(&self) -> &Term<PhantomEventListener> {
         &self.term
@@ -311,12 +315,14 @@ impl PhantomTerminal {
     }
 
     /// Current terminal dimensions.
+    #[must_use]
     #[inline]
     pub fn size(&self) -> TerminalSize {
         self.size
     }
 
     /// The PTY file descriptor for ioctl queries (e.g. foreground process group).
+    #[must_use]
     #[inline]
     pub fn pty_fd(&self) -> &File {
         &self.pty_reader
@@ -355,11 +361,13 @@ impl PhantomTerminal {
     }
 
     /// Current display offset from the bottom (0 = at live output).
+    #[must_use]
     pub fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
     }
 
     /// Total number of lines in scrollback history.
+    #[must_use]
     pub fn history_size(&self) -> usize {
         self.term.grid().history_size()
     }
@@ -367,6 +375,7 @@ impl PhantomTerminal {
     // -- Mouse mode API ----------------------------------------------------
 
     /// Check which mouse tracking mode the running program has requested.
+    #[must_use]
     pub fn mouse_mode(&self) -> MouseMode {
         let mode = self.term.mode();
         if mode.contains(TermMode::MOUSE_MOTION) {
@@ -381,11 +390,13 @@ impl PhantomTerminal {
     }
 
     /// Whether the terminal is in SGR mouse mode (1006).
+    #[must_use]
     pub fn sgr_mouse(&self) -> bool {
         self.term.mode().contains(TermMode::SGR_MOUSE)
     }
 
     /// Whether the terminal is using the alternate screen buffer.
+    #[must_use]
     pub fn is_alt_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
@@ -410,11 +421,13 @@ impl PhantomTerminal {
     }
 
     /// Get the selected text as a string (for clipboard copy).
+    #[must_use]
     pub fn selection_to_string(&self) -> Option<String> {
         self.term.selection_to_string()
     }
 
     /// Whether any text is currently selected.
+    #[must_use]
     pub fn has_selection(&self) -> bool {
         self.term.selection.is_some()
     }
@@ -423,6 +436,7 @@ impl PhantomTerminal {
     ///
     /// Row values are relative to the visible screen (0 = top visible row).
     /// Returns `None` if there is no selection.
+    #[must_use]
     pub fn selection_range(&self) -> Option<(usize, usize, usize, usize)> {
         let range = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term))?;
         let start_col = range.start.column.0;

@@ -32,6 +32,8 @@ members = [
     "crates/phantom-dag",
     # Speech-to-text backend abstraction (issues #56, #68).
     "crates/phantom-stt",
+    # Stateless WebSocket message broker (issue #4).
+    "crates/phantom-relay",
 ]
 resolver = "2"
 

@@ -7,9 +7,10 @@
 //!
 //! # What it does each tick
 //!
-//! 1. **Check stalled agents** — if an active dispatch has exceeded
-//!    `stall_timeout`, record a failure on that step (allowing retries) or
-//!    flatline it if retries are exhausted.
+//! 1. **Check stalled agents** — if an active dispatch has exceeded its
+//!    per-agent `timeout_seconds` (from [`phantom_agents::AgentPolicy`]),
+//!    record a failure on that step (allowing retries) or flatline it if
+//!    retries are exhausted.
 //! 2. **Evaluate the ledger** — call `should_replan()` to check for
 //!    completion, stalls, or loop detection.
 //! 3. **Dispatch the next step** — if the ledger says continue and no agent
@@ -35,16 +36,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use phantom_agents::dispatch::Disposition;
+use phantom_agents::policy::AgentPolicy;
 use phantom_agents::{AgentId, AgentTask};
 
 use crate::events::AiAction;
 use crate::orchestrator::{ReplanDecision, StepStatus, TaskLedger};
-
-/// How long an agent can be active without completing before we consider it
-/// stalled. This is a safety valve — well-behaved agents finish via
-/// `AgentComplete`; this catches the case where the agent process dies
-/// without sending a completion event.
-const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------
 // ReconcilerState
@@ -53,16 +49,25 @@ const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Lightweight tracking table owned by the brain loop alongside the
 /// [`TaskLedger`]. Survives across ticks; reset when a new goal is set.
 pub struct ReconcilerState {
-    /// Map: TaskLedger step index → (agent_id, time dispatched).
-    active_dispatches: HashMap<usize, (AgentId, Instant)>,
+    /// Map: TaskLedger step index → (agent_id, time dispatched, stall timeout).
+    ///
+    /// The per-dispatch `Duration` comes from the dispatched agent's
+    /// [`AgentPolicy::timeout_seconds`] so each step uses its own timeout
+    /// budget rather than a shared global constant. Tests override this by
+    /// substituting a custom [`AgentPolicy`] on `agent_policy` before ticking.
+    active_dispatches: HashMap<usize, (AgentId, Instant, Duration)>,
     /// Monotonically increasing agent ID namespace for reconciler-dispatched
     /// agents. Starts high to avoid collision with AgentManager's IDs.
     ///
     /// `AgentId` is now `u64` workspace-wide (fixes #273), so this field is
     /// the same type and no narrowing cast is required at dispatch time.
     next_agent_id: AgentId,
-    /// Configurable stall timeout (overrideable in tests).
-    pub stall_timeout: Duration,
+    /// Per-agent policy used when dispatching a new step.
+    ///
+    /// Callers can substitute a custom policy (e.g. in tests) before the next
+    /// tick to override the timeout or retry budget for all subsequently
+    /// dispatched agents. Production code leaves this at `AgentPolicy::default()`.
+    pub agent_policy: AgentPolicy,
 }
 
 impl ReconcilerState {
@@ -70,7 +75,7 @@ impl ReconcilerState {
         Self {
             active_dispatches: HashMap::new(),
             next_agent_id: 10_000_u64,
-            stall_timeout: DEFAULT_STALL_TIMEOUT,
+            agent_policy: AgentPolicy::default(),
         }
     }
 
@@ -164,7 +169,7 @@ impl ReconcilerState {
         let idx = match self
             .active_dispatches
             .iter()
-            .find(|&(_, &(stored_id, _))| stored_id == tag)
+            .find(|&(_, &(stored_id, _, _))| stored_id == tag)
             .map(|(&idx, _)| idx)
         {
             Some(i) => i,
@@ -242,6 +247,11 @@ impl ReconcilerState {
                 .checked_add(1)
                 .expect("reconciler next_agent_id overflowed u64 — unreachable in practice");
 
+            // Derive the stall timeout from the policy so each step uses its
+            // own budget rather than a shared global constant (closes #35).
+            let stall_timeout =
+                Duration::from_secs(self.agent_policy.timeout_seconds);
+
             // Advance step to Active before emitting SpawnAgent so that a
             // synchronous ledger inspection sees the correct state.
             if let Some(s) = ledger.plan.get_mut(idx) {
@@ -250,7 +260,8 @@ impl ReconcilerState {
                 s.attempts += 1;
             }
 
-            self.active_dispatches.insert(idx, (agent_id, Instant::now()));
+            self.active_dispatches
+                .insert(idx, (agent_id, Instant::now(), stall_timeout));
 
             log::info!(
                 "Reconciler: dispatching step {idx} (agent_id={agent_id}, \
@@ -266,7 +277,9 @@ impl ReconcilerState {
         }
     }
 
-    /// Detect dispatches that have been running longer than `stall_timeout`.
+    /// Detect dispatches that have been running longer than their per-agent
+    /// `stall_timeout` (sourced from [`AgentPolicy::timeout_seconds`] at
+    /// dispatch time, closes #35).
     ///
     /// Records a failure on the step (which either re-queues for retry or
     /// marks it Failed and emits `AgentFlatlined` if retries are exhausted).
@@ -274,8 +287,8 @@ impl ReconcilerState {
         let timed_out: Vec<(usize, AgentId)> = self
             .active_dispatches
             .iter()
-            .filter(|(_, (_, dispatched_at))| dispatched_at.elapsed() > self.stall_timeout)
-            .map(|(&idx, &(aid, _))| (idx, aid))
+            .filter(|(_, (_, dispatched_at, timeout))| dispatched_at.elapsed() > *timeout)
+            .map(|(&idx, &(aid, _, _))| (idx, aid))
             .collect();
 
         for (idx, agent_id) in timed_out {
@@ -433,7 +446,7 @@ mod tests {
     fn stall_detection_emits_flatline_on_exhausted_retries() {
         let (tx, rx) = mpsc::channel();
         let mut state = ReconcilerState {
-            stall_timeout: Duration::from_millis(1), // tiny timeout for test
+            agent_policy: AgentPolicy { timeout_seconds: 0, ..AgentPolicy::default() }, // instant timeout for test
             ..ReconcilerState::new()
         };
         let mut ledger = make_ledger(&["step one"]);
@@ -459,7 +472,7 @@ mod tests {
     fn heartbeat_flatline_carries_reason_and_matching_id() {
         let (tx, rx) = mpsc::channel();
         let mut state = ReconcilerState {
-            stall_timeout: Duration::from_millis(1),
+            agent_policy: AgentPolicy { timeout_seconds: 0, ..AgentPolicy::default() },
             ..ReconcilerState::new()
         };
         let mut ledger = make_ledger(&["compile step"]);
@@ -514,7 +527,7 @@ mod tests {
         //   stall #2 → attempts=3  (= 3, still_retrying=false, Failed + Flatlined)
         let (tx, rx) = mpsc::channel();
         let mut state = ReconcilerState {
-            stall_timeout: Duration::from_millis(1),
+            agent_policy: AgentPolicy { timeout_seconds: 0, ..AgentPolicy::default() },
             ..ReconcilerState::new()
         };
         let mut ledger = make_ledger(&["flaky step"]);
@@ -605,7 +618,7 @@ mod tests {
 
         // The tag must be Some and must equal the synthetic id in active_dispatches.
         let tag = spawn_tag.expect("spawn_tag must be Some after dispatch");
-        let (&idx, &(stored_id, _)) = state.active_dispatches.iter().next()
+        let (&idx, &(stored_id, _, _)) = state.active_dispatches.iter().next()
             .expect("active_dispatches must have one entry");
         assert_eq!(idx, 0, "step 0 should be active");
         assert_eq!(tag, stored_id, "spawn_tag must match stored synthetic id");
@@ -819,7 +832,7 @@ mod tests {
     fn stall_timeout_handles_cleanup_after_agent_error_noop() {
         let (tx, rx) = mpsc::channel();
         let mut state = ReconcilerState {
-            stall_timeout: Duration::from_millis(1),
+            agent_policy: AgentPolicy { timeout_seconds: 0, ..AgentPolicy::default() },
             ..ReconcilerState::new()
         };
         let mut ledger = make_ledger(&["step one"]);
@@ -1038,7 +1051,7 @@ mod tests {
         );
 
         // active_dispatches also stores the full u64 — no saturation to u32::MAX.
-        let &(stored_id, _) = state
+        let &(stored_id, _, _) = state
             .active_dispatches
             .values()
             .next()
