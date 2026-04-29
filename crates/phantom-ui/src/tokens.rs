@@ -26,6 +26,10 @@ pub struct ColorRoles {
     pub status_warn: [f32; 4],
     pub status_danger: [f32; 4],
     pub status_info: [f32; 4],
+    /// Selection highlight fill color. Used at 50 % alpha by default; the
+    /// alpha channel stored here is the *base* alpha — callers may further
+    /// modulate it (e.g. dim when the pane loses focus).
+    pub selection_bg: [f32; 4],
 }
 
 impl ColorRoles {
@@ -47,6 +51,8 @@ impl ColorRoles {
             status_warn: [1.00, 0.75, 0.20, 1.00],
             status_danger: [1.00, 0.30, 0.25, 1.00],
             status_info: [0.40, 0.85, 1.00, 1.00],
+            // Phosphor green at 50 % alpha — legible without hiding text.
+            selection_bg: [0.30, 1.00, 0.55, 0.50],
         }
     }
 }
@@ -151,6 +157,14 @@ mod tests {
         for &c in &[r.surface_base, r.surface_recessed, r.text_primary, r.chrome_frame] {
             assert!(c[3] > 0.0, "alpha must be positive: {c:?}");
         }
+    }
+
+    #[test]
+    fn selection_bg_token_exists_and_semi_transparent() {
+        let r = ColorRoles::phosphor();
+        // Must exist and be semi-transparent (alpha in 0..1 exclusive).
+        let a = r.selection_bg[3];
+        assert!(a > 0.0 && a < 1.0, "selection_bg alpha must be semi-transparent, got {a}");
     }
 }
 
