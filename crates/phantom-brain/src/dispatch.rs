@@ -86,6 +86,11 @@ pub trait ActionHandler {
     fn update_connection_state(&mut self, state: ConnectionState) {
         let _ = state;
     }
+
+    /// Toggle offline mode (filter cloud backends out of the routing table).
+    fn set_offline_mode(&mut self, enabled: bool) {
+        let _ = enabled;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +150,9 @@ impl AiAction {
             }
             AiAction::UpdateConnectionState { state } => {
                 handler.update_connection_state(state);
+            }
+            AiAction::SetOfflineMode { enabled } => {
+                handler.set_offline_mode(enabled);
             }
             AiAction::DoNothing => {}
         }

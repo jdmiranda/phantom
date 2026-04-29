@@ -459,6 +459,13 @@ fn brain_loop(
             continue; // CapabilityDenied is handled here; skip OODA for it.
         }
 
+        // Handle offline mode toggle.
+        if let AiEvent::SetOfflineMode { enabled } = event {
+            router.set_offline_mode(enabled);
+            log::info!("Brain: offline mode {}", if enabled { "ON" } else { "OFF" });
+            continue; // SetOfflineMode is handled here; skip OODA for it.
+        }
+
         // ACCUMULATE: OutputChunk events are batched — don't process each one
         // individually. Accumulate and let the timeout tick flush them.
         if let AiEvent::OutputChunk(ref text) = event {
@@ -1032,6 +1039,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::PauseAgent { .. } => "pause_agent",
         AiAction::ResumeAgent { .. } => "resume_agent",
         AiAction::UpdateConnectionState { .. } => "update_connection_state",
+        AiAction::SetOfflineMode { .. } => "set_offline_mode",
         AiAction::DoNothing => "quiet",
     }
 }

@@ -147,4 +147,10 @@ impl ActionHandler for AppActionHandler<'_> {
     fn update_connection_state(&mut self, state: ConnectionState) {
         info!("[PHANTOM]: Connection state updated: {state:?}");
     }
+
+    fn set_offline_mode(&mut self, enabled: bool) {
+        info!("[PHANTOM]: Offline mode {}", if enabled { "ON" } else { "OFF" });
+        // The actual router state is managed by the brain thread; this hook
+        // is the GUI-side notification surface (e.g. for status-bar updates).
+    }
 }
