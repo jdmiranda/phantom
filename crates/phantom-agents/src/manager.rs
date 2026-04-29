@@ -37,7 +37,7 @@ impl AgentManager {
 
         // If we have capacity, immediately start working.
         if self.active_count() < self.max_concurrent {
-            agent.status = AgentStatus::Working;
+            agent.set_status(AgentStatus::Working);
         }
 
         self.agents.push(agent);
@@ -46,12 +46,12 @@ impl AgentManager {
 
     /// Get an agent by ID (immutable).
     pub fn get(&self, id: AgentId) -> Option<&Agent> {
-        self.agents.iter().find(|a| a.id == id)
+        self.agents.iter().find(|a| a.id() == id)
     }
 
     /// Get an agent by ID (mutable).
     pub fn get_mut(&mut self, id: AgentId) -> Option<&mut Agent> {
-        self.agents.iter_mut().find(|a| a.id == id)
+        self.agents.iter_mut().find(|a| a.id() == id)
     }
 
     /// Get all agents.
@@ -61,13 +61,13 @@ impl AgentManager {
 
     /// Get agents with a specific status.
     pub fn by_status(&self, status: AgentStatus) -> Vec<&Agent> {
-        self.agents.iter().filter(|a| a.status == status).collect()
+        self.agents.iter().filter(|a| a.status() == status).collect()
     }
 
     /// Remove completed/failed agents older than `max_age`.
     pub fn cleanup(&mut self, max_age: Duration) {
         self.agents.retain(|agent| {
-            let dominated = matches!(agent.status, AgentStatus::Done | AgentStatus::Failed | AgentStatus::Flatline);
+            let dominated = matches!(agent.status(), AgentStatus::Done | AgentStatus::Failed | AgentStatus::Flatline);
             if !dominated {
                 return true; // keep active agents
             }
@@ -84,7 +84,7 @@ impl AgentManager {
             .iter()
             .filter(|a| {
                 matches!(
-                    a.status,
+                    a.status(),
                     AgentStatus::Working | AgentStatus::WaitingForTool
                 )
             })
@@ -101,8 +101,8 @@ impl AgentManager {
     /// Killable states include all non-terminal states: `Queued`, `Planning`,
     /// `AwaitingApproval`, `Working`, and `WaitingForTool`.
     pub fn kill(&mut self, id: AgentId) -> bool {
-        if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
-            if !agent.status.is_terminal() {
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id() == id) {
+            if !agent.status().is_terminal() {
                 agent.complete(false);
                 agent.log("[killed by user]");
                 self.promote_queued();
@@ -119,7 +119,7 @@ impl AgentManager {
     pub fn kill_all(&mut self) -> usize {
         let mut count = 0;
         for agent in &mut self.agents {
-            if !agent.status.is_terminal() {
+            if !agent.status().is_terminal() {
                 agent.complete(false);
                 agent.log("[killed by user]");
                 count += 1;
@@ -135,8 +135,8 @@ impl AgentManager {
             if active >= self.max_concurrent {
                 break;
             }
-            if agent.status == AgentStatus::Queued {
-                agent.status = AgentStatus::Working;
+            if agent.status() == AgentStatus::Queued {
+                agent.set_status(AgentStatus::Working);
                 active += 1;
             }
         }
@@ -172,7 +172,7 @@ mod tests {
     fn spawn_starts_working_when_capacity() {
         let mut mgr = AgentManager::new(2);
         let id = mgr.spawn(free_task("a"));
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Working);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Working);
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
         let mut mgr = AgentManager::new(1);
         let _id1 = mgr.spawn(free_task("a"));
         let id2 = mgr.spawn(free_task("b"));
-        assert_eq!(mgr.get(id2).unwrap().status, AgentStatus::Queued);
+        assert_eq!(mgr.get(id2).unwrap().status(), AgentStatus::Queued);
     }
 
     #[test]
@@ -196,7 +196,7 @@ mod tests {
         let mut mgr = AgentManager::new(4);
         let id = mgr.spawn(free_task("test"));
         mgr.get_mut(id).unwrap().log("hello");
-        assert_eq!(mgr.get(id).unwrap().output_log.len(), 1);
+        assert_eq!(mgr.get(id).unwrap().output_log().len(), 1);
     }
 
     #[test]
@@ -226,7 +226,7 @@ mod tests {
         let _id2 = mgr.spawn(free_task("b"));
         assert_eq!(mgr.active_count(), 2);
 
-        mgr.get_mut(id1).unwrap().status = AgentStatus::WaitingForTool;
+        mgr.get_mut(id1).unwrap().set_status(AgentStatus::WaitingForTool);
         assert_eq!(mgr.active_count(), 2); // WaitingForTool counts as active
 
         mgr.get_mut(id1).unwrap().complete(true);
@@ -271,14 +271,14 @@ mod tests {
         let id1 = mgr.spawn(free_task("a")); // Working
         let id2 = mgr.spawn(free_task("b")); // Queued
 
-        assert_eq!(mgr.get(id2).unwrap().status, AgentStatus::Queued);
+        assert_eq!(mgr.get(id2).unwrap().status(), AgentStatus::Queued);
 
         // Complete first agent and clean up.
         mgr.get_mut(id1).unwrap().complete(true);
         mgr.cleanup(Duration::ZERO);
 
         // Agent 2 should now be promoted.
-        assert_eq!(mgr.get(id2).unwrap().status, AgentStatus::Working);
+        assert_eq!(mgr.get(id2).unwrap().status(), AgentStatus::Working);
     }
 
     // -- FSM #34: kill() covers Planning + AwaitingApproval ------------------
@@ -289,11 +289,11 @@ mod tests {
         let mut mgr = AgentManager::new(0);
         let id = mgr.spawn(free_task("plan me")); // stays Queued (no capacity)
         assert!(mgr.get_mut(id).unwrap().begin_planning(), "begin_planning must succeed from Queued");
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Planning);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Planning);
 
         let killed = mgr.kill(id);
         assert!(killed, "kill() must succeed for Planning agent");
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Failed);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Failed);
     }
 
     #[test]
@@ -305,11 +305,11 @@ mod tests {
             assert!(a.begin_planning());
             assert!(a.submit_plan_for_approval());
         }
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::AwaitingApproval);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::AwaitingApproval);
 
         let killed = mgr.kill(id);
         assert!(killed, "kill() must succeed for AwaitingApproval agent");
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Failed);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Failed);
     }
 
     #[test]
@@ -323,7 +323,7 @@ mod tests {
         let id4 = mgr.spawn(free_task("d")); // Queued → Done (terminal, not killed)
 
         // Force id1 into Working directly for coverage of the original kill_all path.
-        mgr.get_mut(id1).unwrap().status = AgentStatus::Working;
+        mgr.get_mut(id1).unwrap().set_status(AgentStatus::Working);
 
         assert!(mgr.get_mut(id2).unwrap().begin_planning());
         {
@@ -338,7 +338,7 @@ mod tests {
         // id1 (Working), id2 (Planning), id3 (AwaitingApproval) → 3 killed
         // id4 is Done (terminal) → not killed
         assert_eq!(killed, 3, "kill_all() must kill Working, Planning, and AwaitingApproval agents");
-        assert_eq!(mgr.get(id4).unwrap().status, AgentStatus::Done, "terminal agent must not be killed");
+        assert_eq!(mgr.get(id4).unwrap().status(), AgentStatus::Done, "terminal agent must not be killed");
     }
 
     #[test]
@@ -349,6 +349,6 @@ mod tests {
 
         let killed = mgr.kill(id);
         assert!(!killed, "kill() must not affect a Done agent");
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Done);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Done);
     }
 }

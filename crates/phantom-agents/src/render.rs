@@ -145,7 +145,7 @@ pub fn animated_border_color(style: &AgentPaneStyle, elapsed: f32) -> [f32; 4] {
 /// ■ AGENT #3 — Fix: build error [WORKING 4.2s]
 /// ```
 pub fn agent_header(agent: &Agent) -> String {
-    let task_desc = match &agent.task {
+    let task_desc = match &agent.task() {
         AgentTask::FixError { error_summary, .. } => {
             format!("Fix: {}", truncate(error_summary, 40))
         }
@@ -159,7 +159,7 @@ pub fn agent_header(agent: &Agent) -> String {
         }
     };
 
-    let status = match agent.status {
+    let status = match agent.status() {
         AgentStatus::Queued => "QUEUED".to_string(),
         AgentStatus::Planning => format!("PLANNING {:.1}s", agent.elapsed().as_secs_f32()),
         AgentStatus::AwaitingApproval => "PENDING APPROVAL".to_string(),
@@ -170,7 +170,7 @@ pub fn agent_header(agent: &Agent) -> String {
         AgentStatus::Flatline => "FLATLINE".to_string(),
     };
 
-    format!("\u{25a0} AGENT #{} \u{2014} {} [{}]", agent.id, task_desc, status)
+    format!("\u{25a0} AGENT #{} \u{2014} {} [{}]", agent.id(), task_desc, status)
 }
 
 /// Return the tail of the agent's output log as displayable text lines.
@@ -178,9 +178,9 @@ pub fn agent_header(agent: &Agent) -> String {
 /// If the log has more than `max_lines` entries, only the most recent
 /// `max_lines` are returned (the pane scrolls to the bottom).
 pub fn agent_output_lines(agent: &Agent, max_lines: usize) -> Vec<String> {
-    let log = &agent.output_log;
+    let log = agent.output_log();
     if log.len() <= max_lines {
-        log.clone()
+        log.to_vec()
     } else {
         log[log.len() - max_lines..].to_vec()
     }
@@ -364,7 +364,7 @@ mod tests {
                 prompt: "test".into(),
             },
         );
-        agent.status = AgentStatus::Working;
+        agent.set_status(AgentStatus::Working);
         let hdr = agent_header(&agent);
         assert!(hdr.contains("WORKING"), "should show WORKING status");
         assert!(hdr.contains("s"), "should show elapsed seconds");
@@ -391,7 +391,7 @@ mod tests {
                 prompt: "test".into(),
             },
         );
-        agent.status = AgentStatus::WaitingForTool;
+        agent.set_status(AgentStatus::WaitingForTool);
         let hdr = agent_header(&agent);
         assert!(hdr.contains("TOOL CALL"));
     }

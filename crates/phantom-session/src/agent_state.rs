@@ -167,7 +167,7 @@ impl AgentSnapshot {
     /// `Queued` so the agent can restart from a clean state.
     #[must_use]
     pub fn from_agent(agent: &phantom_agents::Agent) -> Self {
-        let status = match agent.status {
+        let status = match agent.status() {
             AgentStatus::Working
             | AgentStatus::WaitingForTool
             | AgentStatus::Planning
@@ -175,7 +175,7 @@ impl AgentSnapshot {
             other => other,
         };
 
-        let messages = SavedMessage::from_agent_messages(&agent.messages);
+        let messages = SavedMessage::from_agent_messages(agent.messages());
 
         let created_at_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -189,13 +189,13 @@ impl AgentSnapshot {
             .expect("AgentTask serialization must never fail");
 
         Self {
-            id: agent.id,
+            id: agent.id(),
             task,
             status,
             messages,
             created_at_secs,
-            flatline_reason: agent.flatline_reason.clone(),
-            output_log: agent.output_log.clone(),
+            flatline_reason: agent.flatline_reason().map(|s| s.to_owned()),
+            output_log: agent.output_log().to_vec(),
         }
     }
 
@@ -413,7 +413,7 @@ impl AgentStatePersister {
     ) -> Result<usize> {
         let snapshots: Vec<AgentSnapshot> = agents
             .iter()
-            .filter(|a| include_done || a.status != AgentStatus::Done)
+            .filter(|a| include_done || a.status() != AgentStatus::Done)
             .map(|a| AgentSnapshot::from_agent(a))
             .collect();
 

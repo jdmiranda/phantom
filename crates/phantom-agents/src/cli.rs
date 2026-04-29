@@ -534,9 +534,9 @@ pub fn format_agent_list(manager: &AgentManager) -> Vec<String> {
     lines.push("|--------|----------|-----------------------------|---------------|".into());
 
     for agent in agents {
-        let id = format!("#{}", agent.id);
-        let status = status_tag(agent.status);
-        let task = task_summary(&agent.task);
+        let id = format!("#{}", agent.id());
+        let status = status_tag(agent.status());
+        let task = task_summary(agent.task());
         let time = format_duration(agent.elapsed());
         lines.push(format!(
             "|  {:<5} | {:<8} | {:<27} | {:<13} |",
@@ -552,18 +552,19 @@ pub fn format_agent_list(manager: &AgentManager) -> Vec<String> {
 pub fn format_agent_detail(agent: &Agent) -> Vec<String> {
     let mut lines = Vec::new();
 
-    lines.push(format!("Agent #{}", agent.id));
-    lines.push(format!("  Status:  {}", status_tag(agent.status)));
-    lines.push(format!("  Task:    {}", task_detail(&agent.task)));
+    lines.push(format!("Agent #{}", agent.id()));
+    lines.push(format!("  Status:  {}", status_tag(agent.status())));
+    lines.push(format!("  Task:    {}", task_detail(agent.task())));
     lines.push(format!("  Elapsed: {}", format_duration(agent.elapsed())));
-    lines.push(format!("  Messages: {}", agent.messages.len()));
+    lines.push(format!("  Messages: {}", agent.messages().len()));
 
-    if !agent.output_log.is_empty() {
+    if !agent.output_log().is_empty() {
         lines.push("  Output:".into());
-        let recent = if agent.output_log.len() > 10 {
-            &agent.output_log[agent.output_log.len() - 10..]
+        let log = agent.output_log();
+        let recent: &[String] = if log.len() > 10 {
+            &log[log.len() - 10..]
         } else {
-            &agent.output_log
+            log
         };
         for line in recent {
             lines.push(format!("    {line}"));
@@ -951,7 +952,7 @@ mod tests {
         });
         let output = execute_agent_command(&AgentCommand::Kill { id }, &mut mgr);
         assert!(output[0].contains("killed"));
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Failed);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Failed);
     }
 
     #[test]

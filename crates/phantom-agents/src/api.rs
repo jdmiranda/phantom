@@ -277,7 +277,7 @@ fn build_request_body(
         "model": config.model,
         "max_tokens": config.max_tokens,
         "system": system,
-        "messages": build_messages_with_ids(&agent.messages, tool_use_ids),
+        "messages": build_messages_with_ids(agent.messages(), tool_use_ids),
     });
 
     let tool_defs = build_tools(tools);
