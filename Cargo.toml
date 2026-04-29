@@ -19,6 +19,8 @@ members = [
     "crates/phantom-scene",
     "crates/phantom-brain",
     "crates/phantom-adapter",
+    # Retrieval / recall (Phase 2.H).
+    "crates/phantom-recall",
     # Capture / bundle pipeline (Phase 2.G).
     "crates/phantom-vision",
     "crates/phantom-bundles",
