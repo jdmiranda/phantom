@@ -743,6 +743,20 @@ impl AppCoordinator {
         self.registry.count()
     }
 
+    /// Number of running visual adapters that are in the tiled grid (not floating).
+    ///
+    /// This mirrors the `tiled_count <= 1` check in `render.rs`: chrome (title
+    /// strip, border, margin) is only drawn when there are 2+ tiled visual
+    /// adapters, so mouse-coordinate mapping must make the same distinction.
+    pub(crate) fn tiled_visual_count(&self) -> usize {
+        self.registry
+            .all_running()
+            .into_iter()
+            .filter_map(|id| self.registry.get(id))
+            .filter(|e| e.visual && !self.floating.contains(&e.id))
+            .count()
+    }
+
     /// All app IDs that are currently running.
     pub fn all_app_ids(&self) -> Vec<AppId> {
         self.registry.all_running()

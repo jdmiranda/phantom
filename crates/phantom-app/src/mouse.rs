@@ -158,13 +158,25 @@ impl App {
     }
 
     /// Convert cursor pixel position to terminal cell (col, row) for the given adapter.
+    ///
+    /// In single-pane mode the renderer skips all container chrome (outer margin,
+    /// title strip, side padding), so we must map the cursor directly against the
+    /// raw layout rect.  The check mirrors the `tiled_count <= 1` guard that
+    /// suppresses chrome drawing in `render.rs` (see PR #259).
     fn cursor_to_cell(&self, app_id: u32) -> Option<(usize, usize)> {
         let pane_id = self.coordinator.pane_id_for(app_id)?;
         let layout_rect = self.layout.get_pane_rect(pane_id).ok()?;
-        let cr = container_rect(layout_rect, self.cell_size);
-        let inner = pane_inner_rect(self.cell_size, cr);
+
+        // Single-pane: no chrome drawn → use the full layout rect directly.
+        let inner = if self.coordinator.tiled_visual_count() <= 1 {
+            layout_rect
+        } else {
+            let cr = container_rect(layout_rect, self.cell_size);
+            pane_inner_rect(self.cell_size, cr)
+        };
+
         let (px, py) = self.cursor_position;
-        // Compute grid dimensions from the pane inner rect for clamping.
+        // Compute grid dimensions from the rect for clamping.
         let max_col = if self.cell_size.0 > 0.0 {
             (inner.width / self.cell_size.0).floor() as usize
         } else {
@@ -550,5 +562,71 @@ mod tests {
         assert_eq!(winit_to_term_button(MouseButton::Middle), Some(TermMouseButton::Middle));
         assert_eq!(winit_to_term_button(MouseButton::Back), None);
         assert_eq!(winit_to_term_button(MouseButton::Forward), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #261 — single-pane chrome inset regression
+    // -----------------------------------------------------------------------
+    //
+    // Regression guard: `cursor_to_cell` must skip container/pane-inner chrome
+    // insets when only one tiled pane is present (no chrome is drawn).
+    //
+    // The test encodes the rect selection logic that `cursor_to_cell` performs:
+    //   • Single-pane path  → inner = full layout rect (origin 0,0)
+    //   • Multi-pane path   → inner = pane_inner_rect(container_rect(layout_rect))
+    //
+    // We verify that:
+    //  1. On the single-pane path, cursor at (0,0) maps to cell (0,0).
+    //  2. The multi-pane chrome insets produce a strictly positive inner origin,
+    //     which would shift the coordinate mapping — proving the bug was real.
+
+    #[test]
+    fn cursor_to_cell_single_pane_no_chrome_offset() {
+        use crate::pane::{container_rect, pane_inner_rect, CONTAINER_TITLE_H_CELLS};
+        use phantom_ui::layout::Rect;
+
+        let cell_w = 8.0_f32;
+        let cell_h = 16.0_f32;
+        let cell_size = (cell_w, cell_h);
+
+        // Full-screen layout rect (single-pane: no margin/chrome applied).
+        let layout_rect = Rect { x: 0.0, y: 0.0, width: 1280.0, height: 800.0 };
+
+        // ── Single-pane path (the fix) ──────────────────────────────────
+        // inner == layout_rect, so cursor (0,0) → cell (0,0).
+        let inner_single = layout_rect;
+        let max_col = (inner_single.width / cell_w).floor() as usize;
+        let max_row = (inner_single.height / cell_h).floor() as usize;
+        let (col, row) = pixel_to_cell(
+            0.0, 0.0,
+            inner_single.x, inner_single.y,
+            cell_w, cell_h,
+            max_col.saturating_sub(1), max_row.saturating_sub(1),
+        );
+        assert_eq!(
+            (col, row), (0, 0),
+            "single-pane: cursor at (0,0) must map to cell (0,0); got ({col},{row})",
+        );
+
+        // ── Multi-pane / pre-fix path ────────────────────────────────────
+        // Chrome insets produce a non-zero inner origin, shifting coordinates.
+        let cr = container_rect(layout_rect, cell_size);
+        let inner_multi = pane_inner_rect(cell_size, cr);
+
+        // The inner rect origin must be offset by margin + title strip.
+        assert!(
+            inner_multi.x > 0.0 || inner_multi.y > 0.0,
+            "multi-pane inner rect must have a non-zero origin due to chrome insets; \
+             got ({}, {})", inner_multi.x, inner_multi.y,
+        );
+
+        // Specifically: inner.y must be at least one title-strip height from the
+        // window top, documenting the ~12px + 1.2-cell offset that #261 reported.
+        let title_h = cell_h * CONTAINER_TITLE_H_CELLS;
+        assert!(
+            inner_multi.y >= title_h - 0.5,
+            "multi-pane inner.y must be at least one title-strip height ({title_h}px) \
+             from the window top; got {}", inner_multi.y,
+        );
     }
 }
