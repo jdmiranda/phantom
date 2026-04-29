@@ -429,6 +429,7 @@ mod tests {
             registry,
             event_log: None,
             pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
         };
 
         let result = dispatch_tool(

@@ -40,6 +40,20 @@
 //! `"capability denied: <Class> not in <Role> manifest"` body is returned.
 //! The model sees this in the next `tool_result` block and self-corrects.
 //!
+//! ## Taint elevation (Sec.7.2)
+//!
+//! After the handler returns, [`dispatch_tool`] walks the `source_event_id`
+//! chain backwards in the event log and elevates taint on the result:
+//!
+//! - Any upstream event with `kind == "capability.denied"` → at least `Suspect`.
+//! - Any upstream *agent* (identified by the event's `source` field or a
+//!   `"source_agent_id"` payload key) whose registry status is
+//!   [`crate::inbox::AgentStatus::Failed`] (quarantined) → `Tainted`.
+//!
+//! Elevation is monotone: the result taint can only increase. Callers that set
+//! `source_event_id: None` on the context opt out of the walk — the legacy /
+//! test path.
+//!
 //! ## Threading
 //!
 //! [`DispatchContext`] borrows the working dir as `&Path` (per-call) and
@@ -59,8 +73,9 @@ use crate::composer_tools::{
     wait_for_agent,
 };
 use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
-use crate::inbox::AgentRegistry;
-use crate::role::{AgentRef, AgentRole, CapabilityClass};
+use crate::inbox::{AgentRegistry, AgentStatus};
+use crate::role::{AgentId, AgentRef, AgentRole, CapabilityClass};
+use crate::taint::TaintLevel;
 use crate::tools::{ToolResult, ToolType, execute_tool};
 
 // ---------------------------------------------------------------------------
@@ -132,6 +147,125 @@ pub struct DispatchContext<'a> {
     /// Queue the Composer's `spawn_subagent` tool pushes into. The App
     /// drains this once per frame in `update.rs`.
     pub pending_spawn: Arc<Mutex<VecDeque<SpawnSubagentRequest>>>,
+    /// The substrate event id that triggered this dispatch turn, if known.
+    ///
+    /// When set, [`dispatch_tool`] walks the `source_event_id` chain
+    /// backwards in the event log and elevates the result taint:
+    /// - any upstream `"capability.denied"` event → at least `Suspect`,
+    /// - any upstream agent with [`AgentStatus::Failed`] (quarantined) →
+    ///   `Tainted`.
+    ///
+    /// `None` disables the chain walk — the correct behaviour for legacy /
+    /// test paths that have not wired an event log.
+    pub source_event_id: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Taint elevation: Sec.7.2
+// ---------------------------------------------------------------------------
+
+/// The event-log `kind` string emitted when a capability denial fires.
+const KIND_CAPABILITY_DENIED: &str = "capability.denied";
+
+/// Walk the `source_event_id` chain in `log` starting from `start_id`.
+///
+/// Returns the worst [`TaintLevel`] found across all upstream events:
+/// - `Tainted` if any upstream source agent has [`AgentStatus::Failed`].
+/// - `Suspect` if any upstream event has `kind == "capability.denied"`.
+/// - `Clean` if the chain is empty or contains neither signal.
+///
+/// The walk is bounded by the in-memory tail (`EventLog::tail`). Events that
+/// have scrolled out of the tail are treated as clean — conservative and
+/// fast, matching the log's own cap policy.
+///
+/// # Locking
+///
+/// Takes `log` and `registry` locks separately and briefly. Never holds both
+/// simultaneously, so deadlocks with other lock holders are impossible.
+fn taint_from_source_chain(
+    start_id: u64,
+    log: &Arc<Mutex<EventLog>>,
+    registry: &Arc<Mutex<AgentRegistry>>,
+) -> TaintLevel {
+    // Snapshot the in-memory tail once — avoids repeated locking in the walk.
+    let tail = {
+        let Ok(guard) = log.lock() else {
+            return TaintLevel::Clean;
+        };
+        guard.tail(usize::MAX)
+    };
+
+    // Build a lookup table: event_id → index for O(1) chain hops.
+    let by_id: std::collections::HashMap<u64, &phantom_memory::event_log::EventEnvelope> =
+        tail.iter().map(|e| (e.id, e)).collect();
+
+    let mut accumulated = TaintLevel::Clean;
+    let mut cursor: Option<u64> = Some(start_id);
+
+    while let Some(id) = cursor {
+        let Some(ev) = by_id.get(&id) else {
+            // Event has scrolled out of the tail — stop walking.
+            break;
+        };
+
+        // Check for CapabilityDenied kind → Suspect.
+        if ev.kind == KIND_CAPABILITY_DENIED {
+            accumulated = accumulated.merge(TaintLevel::Suspect);
+        }
+
+        // Check if the source agent is quarantined (Failed) → Tainted.
+        if let Some(agent_id) = source_agent_id_from_envelope(ev) {
+            if agent_is_quarantined(agent_id, registry) {
+                accumulated = accumulated.merge(TaintLevel::Tainted);
+            }
+        }
+
+        // Short-circuit: Tainted is the maximum, no need to walk further.
+        if accumulated == TaintLevel::Tainted {
+            break;
+        }
+
+        // Follow the chain link stored in the event payload.
+        cursor = ev
+            .payload
+            .get("source_event_id")
+            .and_then(|v| v.as_u64());
+    }
+
+    accumulated
+}
+
+/// Extract the originating agent id from an [`EventEnvelope`], if present.
+///
+/// Events emitted by agents carry `source: Agent { id }`. We also check a
+/// `"source_agent_id"` payload field as a fallback for hand-rolled events
+/// that embed the agent id in the payload rather than via the `source` field.
+fn source_agent_id_from_envelope(
+    ev: &phantom_memory::event_log::EventEnvelope,
+) -> Option<AgentId> {
+    // Primary: structured source field.
+    if let phantom_memory::event_log::EventSource::Agent { id } = ev.source {
+        return Some(id);
+    }
+    // Fallback: payload key, used by hand-built test events.
+    ev.payload
+        .get("source_agent_id")
+        .and_then(|v| v.as_u64())
+}
+
+/// Returns `true` iff the agent identified by `id` has [`AgentStatus::Failed`]
+/// (i.e. is quarantined) in the live registry.
+///
+/// Returns `false` when the agent is unknown or the registry lock is poisoned —
+/// conservative but safe: we never false-positive a quarantine.
+fn agent_is_quarantined(id: AgentId, registry: &Arc<Mutex<AgentRegistry>>) -> bool {
+    let Ok(guard) = registry.lock() else {
+        return false;
+    };
+    guard
+        .get(id)
+        .map(|h| *h.status.borrow() == AgentStatus::Failed)
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,155 +306,158 @@ fn result(tool: ToolType, success: bool, output: String) -> ToolResult {
 ///   uniformly.
 /// - Capability-denied: `success: false, output: "capability denied: …"`.
 /// - Unknown name: `success: false, output: "unknown tool: <name>"`.
+///
+/// After the handler returns, taint is elevated based on
+/// [`DispatchContext::source_event_id`] — see the module doc for the full
+/// Sec.7.2 rules.
 #[must_use]
 pub fn dispatch_tool(
     name: &str,
     args: &serde_json::Value,
     ctx: &DispatchContext<'_>,
 ) -> ToolResult {
-    // ---- File / git tools (existing surface) -------------------------------
-    if let Some(tool) = ToolType::from_api_name(name) {
+    // ---- Route to the appropriate tool surface -----------------------------
+    let mut tool_result = if let Some(tool) = ToolType::from_api_name(name) {
+        // ---- File / git tools ----------------------------------------------
         if let Err(msg) = check_capability(ctx.role, class_for(tool)) {
-            return result(tool, false, msg);
+            result(tool, false, msg)
+        } else {
+            let working_dir = ctx.working_dir.to_string_lossy();
+            execute_tool(tool, args, &working_dir, &ctx.role)
         }
-        let working_dir = ctx.working_dir.to_string_lossy();
-        return execute_tool(tool, args, &working_dir, &ctx.role);
-    }
-
-    // ---- Chat tools --------------------------------------------------------
-    if let Some(chat_tool) = ChatTool::from_api_name(name) {
+    } else if let Some(chat_tool) = ChatTool::from_api_name(name) {
+        // ---- Chat tools ----------------------------------------------------
         if let Err(msg) = check_capability(ctx.role, chat_tool.class()) {
-            return result(PLACEHOLDER_TOOL, false, msg);
-        }
-        let chat_ctx = ChatToolContext {
-            self_ref: ctx.self_ref.clone(),
-            registry: ctx.registry.clone(),
-            event_log: ctx.event_log.clone(),
-        };
-        return match chat_tool {
-            ChatTool::SendToAgent => match send_to_agent(args, &chat_ctx) {
-                Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
-                Err(e) => result(PLACEHOLDER_TOOL, false, e),
-            },
-            ChatTool::ReadFromAgent => match read_from_agent(args, &chat_ctx) {
-                Ok(envs) => {
-                    let body = serde_json::to_string(&envs)
-                        .unwrap_or_else(|e| format!("encode error: {e}"));
-                    result(PLACEHOLDER_TOOL, true, body)
-                }
-                Err(e) => result(PLACEHOLDER_TOOL, false, e),
-            },
-            ChatTool::BroadcastToRole => match broadcast_to_role(args, &chat_ctx) {
-                Ok(count) => result(
-                    PLACEHOLDER_TOOL,
-                    true,
-                    format!("delivered to {count} agent(s)"),
-                ),
-                Err(e) => result(PLACEHOLDER_TOOL, false, e),
-            },
-        };
-    }
-
-    // ---- Composer tools ----------------------------------------------------
-    if let Some(composer_tool) = ComposerTool::from_api_name(name) {
-        if let Err(msg) = check_capability(ctx.role, composer_tool.class()) {
-            return result(PLACEHOLDER_TOOL, false, msg);
-        }
-        return match composer_tool {
-            ComposerTool::SpawnSubagent => {
-                match spawn_subagent(args, ctx.self_ref.id, &ctx.pending_spawn) {
-                    Ok(id) => result(
-                        PLACEHOLDER_TOOL,
-                        true,
-                        format!("spawned subagent id={id}"),
-                    ),
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            let chat_ctx = ChatToolContext {
+                self_ref: ctx.self_ref.clone(),
+                registry: ctx.registry.clone(),
+                event_log: ctx.event_log.clone(),
+            };
+            match chat_tool {
+                ChatTool::SendToAgent => match send_to_agent(args, &chat_ctx) {
+                    Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
                     Err(e) => result(PLACEHOLDER_TOOL, false, e),
-                }
-            }
-            ComposerTool::WaitForAgent => {
-                let Some(log) = ctx.event_log.as_ref() else {
-                    return result(
-                        PLACEHOLDER_TOOL,
-                        false,
-                        "event log not configured".into(),
-                    );
-                };
-                match wait_for_agent(args, log) {
-                    Ok(env) => {
-                        let body = serde_json::to_string(&env)
-                            .unwrap_or_else(|e| format!("encode error: {e}"));
-                        result(PLACEHOLDER_TOOL, true, body)
-                    }
-                    Err(e) => result(PLACEHOLDER_TOOL, false, e),
-                }
-            }
-            ComposerTool::RequestCritique => {
-                let Some(log) = ctx.event_log.as_ref() else {
-                    return result(
-                        PLACEHOLDER_TOOL,
-                        false,
-                        "event log not configured".into(),
-                    );
-                };
-                let registry_guard = match ctx.registry.lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        return result(
-                            PLACEHOLDER_TOOL,
-                            false,
-                            "agent registry poisoned".into(),
-                        );
-                    }
-                };
-                match request_critique(args, &ctx.self_ref, &registry_guard, log) {
-                    Ok(env) => {
-                        let body = serde_json::to_string(&env)
-                            .unwrap_or_else(|e| format!("encode error: {e}"));
-                        result(PLACEHOLDER_TOOL, true, body)
-                    }
-                    Err(e) => result(PLACEHOLDER_TOOL, false, e),
-                }
-            }
-            ComposerTool::EventLogQuery => {
-                let Some(log) = ctx.event_log.as_ref() else {
-                    return result(
-                        PLACEHOLDER_TOOL,
-                        false,
-                        "event log not configured".into(),
-                    );
-                };
-                match event_log_query(args, log) {
+                },
+                ChatTool::ReadFromAgent => match read_from_agent(args, &chat_ctx) {
                     Ok(envs) => {
                         let body = serde_json::to_string(&envs)
                             .unwrap_or_else(|e| format!("encode error: {e}"));
                         result(PLACEHOLDER_TOOL, true, body)
                     }
                     Err(e) => result(PLACEHOLDER_TOOL, false, e),
-                }
+                },
+                ChatTool::BroadcastToRole => match broadcast_to_role(args, &chat_ctx) {
+                    Ok(count) => result(
+                        PLACEHOLDER_TOOL,
+                        true,
+                        format!("delivered to {count} agent(s)"),
+                    ),
+                    Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                },
             }
-        };
-    }
-
-    // ---- Defender tools ----------------------------------------------------
-    if let Some(defender_tool) = DefenderTool::from_api_name(name) {
-        if let Err(msg) = check_capability(ctx.role, defender_tool.class()) {
-            return result(PLACEHOLDER_TOOL, false, msg);
         }
-        let defender_ctx = DefenderToolContext {
-            self_ref: ctx.self_ref.clone(),
-            registry: ctx.registry.clone(),
-            event_log: ctx.event_log.clone(),
-        };
-        return match defender_tool {
-            DefenderTool::ChallengeAgent => match challenge_agent(args, &defender_ctx) {
-                Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
-                Err(e) => result(PLACEHOLDER_TOOL, false, e),
-            },
-        };
+    } else if let Some(composer_tool) = ComposerTool::from_api_name(name) {
+        // ---- Composer tools ------------------------------------------------
+        if let Err(msg) = check_capability(ctx.role, composer_tool.class()) {
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            match composer_tool {
+                ComposerTool::SpawnSubagent => {
+                    match spawn_subagent(args, ctx.self_ref.id, &ctx.pending_spawn) {
+                        Ok(id) => result(
+                            PLACEHOLDER_TOOL,
+                            true,
+                            format!("spawned subagent id={id}"),
+                        ),
+                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                    }
+                }
+                ComposerTool::WaitForAgent => match ctx.event_log.as_ref() {
+                    None => {
+                        result(PLACEHOLDER_TOOL, false, "event log not configured".into())
+                    }
+                    Some(log) => match wait_for_agent(args, log) {
+                        Ok(env) => {
+                            let body = serde_json::to_string(&env)
+                                .unwrap_or_else(|e| format!("encode error: {e}"));
+                            result(PLACEHOLDER_TOOL, true, body)
+                        }
+                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                    },
+                },
+                ComposerTool::RequestCritique => match ctx.event_log.as_ref() {
+                    None => {
+                        result(PLACEHOLDER_TOOL, false, "event log not configured".into())
+                    }
+                    Some(log) => match ctx.registry.lock() {
+                        Err(_) => result(
+                            PLACEHOLDER_TOOL,
+                            false,
+                            "agent registry poisoned".into(),
+                        ),
+                        Ok(registry_guard) => {
+                            match request_critique(args, &ctx.self_ref, &registry_guard, log) {
+                                Ok(env) => {
+                                    let body = serde_json::to_string(&env)
+                                        .unwrap_or_else(|e| format!("encode error: {e}"));
+                                    result(PLACEHOLDER_TOOL, true, body)
+                                }
+                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                            }
+                        }
+                    },
+                },
+                ComposerTool::EventLogQuery => match ctx.event_log.as_ref() {
+                    None => {
+                        result(PLACEHOLDER_TOOL, false, "event log not configured".into())
+                    }
+                    Some(log) => match event_log_query(args, log) {
+                        Ok(envs) => {
+                            let body = serde_json::to_string(&envs)
+                                .unwrap_or_else(|e| format!("encode error: {e}"));
+                            result(PLACEHOLDER_TOOL, true, body)
+                        }
+                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                    },
+                },
+            }
+        }
+    } else if let Some(defender_tool) = DefenderTool::from_api_name(name) {
+        // ---- Defender tools ------------------------------------------------
+        if let Err(msg) = check_capability(ctx.role, defender_tool.class()) {
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            let defender_ctx = DefenderToolContext {
+                self_ref: ctx.self_ref.clone(),
+                registry: ctx.registry.clone(),
+                event_log: ctx.event_log.clone(),
+            };
+            match defender_tool {
+                DefenderTool::ChallengeAgent => match challenge_agent(args, &defender_ctx) {
+                    Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                    Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                },
+            }
+        }
+    } else {
+        // ---- Unknown -------------------------------------------------------
+        result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+    };
+
+    // ---- Sec.7.2: Taint elevation via source_event_id chain walk -----------
+    //
+    // Walk the source_event_id chain backwards in the event log and elevate
+    // result taint when upstream sources are denied or quarantined. Runs after
+    // every fork so even capability-denied and unknown-tool results inherit
+    // taint from their call context.
+    if let (Some(start_id), Some(log)) = (ctx.source_event_id, ctx.event_log.as_ref()) {
+        let chain_taint = taint_from_source_chain(start_id, log, &ctx.registry);
+        tool_result.taint = tool_result.taint.merge(chain_taint);
     }
 
-    // ---- Unknown ----------------------------------------------------------
-    result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+    tool_result
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +470,7 @@ mod tests {
     use crate::composer_tools::new_spawn_subagent_queue;
     use crate::inbox::{AgentHandle, AgentStatus, InboxMessage};
     use crate::role::SpawnSource;
+    use phantom_memory::event_log::{EventLog, EventSource as LogEventSource};
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
@@ -355,6 +493,23 @@ mod tests {
         (handle, rx)
     }
 
+    /// Build a fake registered agent with a controllable status sender.
+    fn fake_agent_with_status(
+        id: u64,
+        role: AgentRole,
+        label: &str,
+        initial_status: AgentStatus,
+    ) -> (AgentHandle, mpsc::Receiver<InboxMessage>, watch::Sender<AgentStatus>) {
+        let (tx, rx) = mpsc::channel(8);
+        let (status_tx, status_rx) = watch::channel(initial_status);
+        let handle = AgentHandle {
+            agent_ref: AgentRef::new(id, role, label, SpawnSource::Substrate),
+            inbox: tx,
+            status: status_rx,
+        };
+        (handle, rx, status_tx)
+    }
+
     /// Build a [`DispatchContext`] for the given calling agent with an
     /// empty registry, no event log, and a fresh spawn queue.
     fn build_ctx<'a>(
@@ -373,6 +528,7 @@ mod tests {
             registry,
             event_log: None,
             pending_spawn,
+            source_event_id: None,
         }
     }
 
@@ -419,6 +575,7 @@ mod tests {
             registry,
             event_log: None,
             pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
         };
 
         let result = dispatch_tool(
@@ -550,6 +707,7 @@ mod tests {
             registry,
             event_log: None,
             pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
         };
 
         let result = dispatch_tool(
@@ -566,5 +724,168 @@ mod tests {
         );
         assert!(result.output.contains("Sense"));
         assert!(result.output.contains("Transcriber"));
+    }
+
+    // ---- Sec.7.2: taint elevation via source_event_id chain walk -----------
+
+    /// Helper: open a temp EventLog file in the given directory.
+    fn open_event_log(dir: &Path) -> Arc<Mutex<EventLog>> {
+        let log = EventLog::open(&dir.join("events.jsonl")).unwrap();
+        Arc::new(Mutex::new(log))
+    }
+
+    /// Acceptance test 1 (Sec.7.2): clean source chain → result taint is `Clean`.
+    ///
+    /// When `source_event_id` points to an event with a benign kind (not
+    /// `"capability.denied"`) and the source agent is not quarantined (`Failed`),
+    /// the result taint must remain `Clean`.
+    #[test]
+    fn dispatch_clean_source_chain_taint_is_clean() {
+        // Arrange: benign upstream event, Idle source agent.
+        let tmp = TempDir::new().unwrap();
+        let log = open_event_log(tmp.path());
+        fs::write(tmp.path().join("probe.txt"), "hello").unwrap();
+
+        let upstream_id = {
+            let mut g = log.lock().unwrap();
+            g.append(
+                LogEventSource::Agent { id: 10 },
+                "tool.invoked",
+                json!({ "tool": "read_file" }),
+            )
+            .unwrap()
+            .id
+        };
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(10, AgentRole::Conversational, "agent-10", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: Some(log),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: Some(upstream_id),
+        };
+
+        // Act.
+        let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
+
+        // Assert.
+        assert!(res.success, "dispatch should succeed: {}", res.output);
+        assert_eq!(
+            res.taint,
+            TaintLevel::Clean,
+            "clean upstream chain must yield Clean taint, got {:?}",
+            res.taint,
+        );
+    }
+
+    /// Acceptance test 2 (Sec.7.2): source chain contains a `CapabilityDenied`
+    /// event → result taint is `Suspect`.
+    ///
+    /// When the upstream event has `kind == "capability.denied"`, taint must
+    /// be elevated to at least `Suspect`.
+    #[test]
+    fn dispatch_capability_denied_upstream_taint_is_suspect() {
+        // Arrange: upstream event has the canonical denied kind.
+        let tmp = TempDir::new().unwrap();
+        let log = open_event_log(tmp.path());
+        fs::write(tmp.path().join("probe.txt"), "hello").unwrap();
+
+        let denied_event_id = {
+            let mut g = log.lock().unwrap();
+            g.append(
+                LogEventSource::Substrate,
+                KIND_CAPABILITY_DENIED,
+                json!({
+                    "agent_id": 42,
+                    "attempted_tool": "run_command",
+                }),
+            )
+            .unwrap()
+            .id
+        };
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(42, AgentRole::Conversational, "agent-42", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: Some(log),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: Some(denied_event_id),
+        };
+
+        // Act.
+        let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
+
+        // Assert.
+        assert!(res.success, "dispatch should succeed: {}", res.output);
+        assert_eq!(
+            res.taint,
+            TaintLevel::Suspect,
+            "upstream CapabilityDenied must elevate taint to Suspect, got {:?}",
+            res.taint,
+        );
+    }
+
+    /// Acceptance test 3 (Sec.7.2): source agent is quarantined (`Failed`) →
+    /// result taint is `Tainted`.
+    ///
+    /// When the upstream event originates from an agent whose registry status
+    /// is `Failed`, the taint must be elevated to `Tainted`.
+    #[test]
+    fn dispatch_quarantined_source_agent_taint_is_tainted() {
+        // Arrange: register an agent and move it to Failed (quarantined).
+        let tmp = TempDir::new().unwrap();
+        let log = open_event_log(tmp.path());
+        fs::write(tmp.path().join("probe.txt"), "hello").unwrap();
+
+        let quarantined_id: u64 = 77;
+        let (handle, _rx, status_tx) = fake_agent_with_status(
+            quarantined_id,
+            AgentRole::Watcher,
+            "quarantined",
+            AgentStatus::Idle,
+        );
+        let registry = Arc::new(Mutex::new(AgentRegistry::new()));
+        registry.lock().unwrap().register(handle);
+        // Transition to Failed — marks this agent as quarantined.
+        status_tx.send(AgentStatus::Failed).unwrap();
+
+        // Upstream event is sourced from the quarantined agent (no denied kind —
+        // pure quarantine signal).
+        let upstream_id = {
+            let mut g = log.lock().unwrap();
+            g.append(
+                LogEventSource::Agent { id: quarantined_id },
+                "tool.invoked",
+                json!({ "tool": "read_file" }),
+            )
+            .unwrap()
+            .id
+        };
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(99, AgentRole::Conversational, "caller", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry,
+            event_log: Some(log),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: Some(upstream_id),
+        };
+
+        // Act.
+        let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
+
+        // Assert.
+        assert!(res.success, "dispatch should succeed: {}", res.output);
+        assert_eq!(
+            res.taint,
+            TaintLevel::Tainted,
+            "quarantined source agent must elevate taint to Tainted, got {:?}",
+            res.taint,
+        );
     }
 }
