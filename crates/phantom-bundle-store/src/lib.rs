@@ -35,7 +35,9 @@
 
 #![allow(clippy::result_large_err)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(any(test, feature = "testing"))]
+use std::path::Path;
 use std::sync::Mutex;
 
 use phantom_bundles::{Bundle, BundleId};
@@ -341,6 +343,7 @@ impl BundleStore {
 }
 
 /// Helpers used in tests and by the recovery module.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::*;
 

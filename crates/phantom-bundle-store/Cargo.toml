@@ -13,6 +13,9 @@ description = "Unified bundle store: SQLite (encrypted via SQLCipher) + LanceDB 
 default = ["vector_search_disabled"]
 vector_search_disabled = []
 vector_search_lancedb = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema"]
+# Expose `phantom_bundle_store::testing` in integration-test binaries that
+# live outside this crate (e.g. `tests/recovery.rs`). Never enabled by default.
+testing = []
 
 [dependencies]
 # Internal
@@ -65,6 +68,8 @@ keyring = { version = "3.6", features = ["windows-native"] }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+# Enable the `testing` helpers for integration tests in `tests/`.
+phantom-bundle-store = { path = ".", features = ["testing"] }
 
 [lints]
 workspace = true
