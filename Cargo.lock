@@ -5402,11 +5402,13 @@ name = "phantom-history"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "log",
  "phantom-semantic",
  "serde",
  "serde_json",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
