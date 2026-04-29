@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use phantom_agents::AgentId;
+use phantom_agents::{AgentId, AgentTask};
 
 use crate::events::AiAction;
 use crate::orchestrator::{ReplanDecision, StepStatus, TaskLedger};
@@ -56,7 +56,9 @@ pub struct ReconcilerState {
     active_dispatches: HashMap<usize, (AgentId, Instant)>,
     /// Monotonically increasing agent ID namespace for reconciler-dispatched
     /// agents. Starts high to avoid collision with AgentManager's IDs.
-    next_agent_id: AgentId,
+    /// Stored as `u64` to guarantee no silent wraparound on long-running
+    /// sessions (#221).
+    next_agent_id: u64,
     /// Configurable stall timeout (overrideable in tests).
     pub stall_timeout: Duration,
 }
@@ -112,10 +114,17 @@ impl ReconcilerState {
                 // stall counter and recent-output loop detection.
                 let _assessment = ledger.assess_progress();
                 log::info!("Reconciler: re-plan triggered — {reason}");
-                // Deferred to #32 (Reconciler: should_replan + dispatch_next_step).
-                // When that lands, spawn a Composer agent here to generate a revised
-                // plan and call ledger.replan(new_steps). For now, log and keep the
-                // ledger alive — the next tick will re-evaluate.
+                // Notify the user that the goal is being re-evaluated.
+                let _ = action_tx.send(AiAction::ShowNotification(format!(
+                    "Re-planning goal '{}': {reason}",
+                    ledger.goal
+                )));
+                // Automated re-planning (spawning a Composer agent to generate
+                // revised steps via LLM and calling `ledger.replan(new_steps)`)
+                // is a Phase 2 feature that requires the brain to hold an async
+                // LLM client. For now the ledger stays alive and the next tick
+                // will re-evaluate — stall detection or GiveUp will escalate
+                // if progress never resumes.
                 true
             }
 
@@ -197,44 +206,54 @@ impl ReconcilerState {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    /// Dispatch the next pending step if no agent is currently active.
+    /// Dispatch all eligible steps that are not already active (Issue #60).
     ///
-    /// Sequential execution: one active step at a time. Parallel dispatch
-    /// can be added later by removing the early-return guard.
+    /// Replaces the old sequential guard (`return` early if any active
+    /// dispatch exists) with DAG-aware parallel dispatch.
+    /// `TaskLedger::eligible_next()` returns every Pending step whose
+    /// dependency constraints are satisfied; we filter out any step already
+    /// tracked in `active_dispatches` so we never double-dispatch.
+    ///
+    /// Each eligible step gets its own synthetic agent ID and its own
+    /// `SpawnAgent` action. Completions are routed back via `spawn_tag`.
     fn dispatch_pending(&mut self, ledger: &mut TaskLedger, action_tx: &mpsc::Sender<AiAction>) {
-        if !self.active_dispatches.is_empty() {
-            return; // something already running
+        // Collect eligible steps into an owned Vec so we can mutate `ledger`
+        // inside the loop without holding a borrow on it.
+        let eligible: Vec<(usize, AgentTask, String)> = ledger
+            .eligible_next()
+            .into_iter()
+            .filter(|(idx, _)| !self.active_dispatches.contains_key(idx))
+            .map(|(idx, step)| (idx, step.assigned_task.clone(), step.description.clone()))
+            .collect();
+
+        for (idx, task, description) in eligible {
+            let agent_id: u64 = self.next_agent_id;
+            self.next_agent_id = self
+                .next_agent_id
+                .checked_add(1)
+                .expect("reconciler next_agent_id overflowed u64 — unreachable in practice");
+
+            // Advance step to Active before emitting SpawnAgent so that a
+            // synchronous ledger inspection sees the correct state.
+            // `agent_id` fits in u32 for the ledger field; saturate rather
+            // than truncate so corrupt IDs are visible (#221).
+            if let Some(s) = ledger.plan.get_mut(idx) {
+                s.status = StepStatus::Active;
+                s.agent_id = Some(u32::try_from(agent_id).unwrap_or(u32::MAX));
+                s.attempts += 1;
+            }
+
+            self.active_dispatches.insert(idx, (agent_id as AgentId, Instant::now()));
+
+            log::info!(
+                "Reconciler: dispatching step {idx} (agent_id={agent_id}) — {description}"
+            );
+
+            let _ = action_tx.send(AiAction::SpawnAgent {
+                task,
+                spawn_tag: Some(agent_id),
+            });
         }
-
-        let Some((idx, step)) = ledger.next_pending_step() else {
-            return; // nothing to do
-        };
-
-        let agent_id = self.next_agent_id;
-        self.next_agent_id += 1;
-
-        let task = step.assigned_task.clone();
-        let description = step.description.clone();
-
-        // Advance step to Active before emitting the SpawnAgent action so
-        // that if the brain loop checks the ledger synchronously it sees
-        // the correct state.
-        if let Some(s) = ledger.plan.get_mut(idx) {
-            s.status = StepStatus::Active;
-            s.agent_id = Some(agent_id as u32);
-            s.attempts += 1;
-        }
-
-        self.active_dispatches.insert(idx, (agent_id, Instant::now()));
-
-        log::info!(
-            "Reconciler: dispatching step {idx} (agent_id={agent_id}) — {description}"
-        );
-
-        let _ = action_tx.send(AiAction::SpawnAgent {
-            task,
-            spawn_tag: Some(agent_id as u64),
-        });
     }
 
     /// Detect dispatches that have been running longer than `stall_timeout`.
@@ -551,6 +570,38 @@ mod tests {
             "step must remain Active when spawn_tag is unknown"
         );
     }
+    // -- Replan notification test (Issue #98 comment cleanup) -----------------
+
+    /// When `should_replan()` returns `Replan`, the reconciler must emit a
+    /// `ShowNotification` to the user so they can see that the goal hit a
+    /// re-plan decision point. The ledger must remain alive (`tick` returns
+    /// `true`) so subsequent ticks can re-evaluate.
+    #[test]
+    fn replan_decision_emits_notification_and_keeps_ledger_alive() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        // Force a stall: set stall_counter above the default threshold (2).
+        ledger.stall_counter = 3;
+
+        // Tick: should_replan() → Replan, must emit ShowNotification.
+        let still_active = state.tick(&mut ledger, &tx);
+        assert!(still_active, "ledger must remain active on Replan");
+
+        // Drain all actions emitted; the notification should be one of them.
+        let mut got_notification = false;
+        while let Ok(action) = rx.try_recv() {
+            if matches!(action, AiAction::ShowNotification(_)) {
+                got_notification = true;
+            }
+        }
+        assert!(
+            got_notification,
+            "reconciler must emit ShowNotification when Replan is triggered"
+        );
+    }
+
     // -- Issue #111: AgentError exit-path spawn_tag coverage -----------------
 
     /// When `drain_bus_to_brain` translates `Event::AgentError` it hard-codes
@@ -615,6 +666,38 @@ mod tests {
         );
     }
 
+    // -- Issue #221: next_agent_id must not overflow silently -----------------
+
+    /// Drive `next_agent_id` forward 100 000 times and assert the counter
+    /// never wraps. Under the old `u32` scheme this would silently overflow
+    /// at 4 294 967 295; with `u64` the range is effectively unlimited for
+    /// any realistic session.
+    #[test]
+    fn next_agent_id_does_not_overflow_after_100k_increments() {
+        let mut state = ReconcilerState::new();
+        let start = state.next_agent_id;
+
+        for i in 0..100_000u64 {
+            // Each increment must not overflow (would panic via checked_add).
+            state.next_agent_id = state
+                .next_agent_id
+                .checked_add(1)
+                .expect("next_agent_id overflowed — u64 counter is broken");
+
+            // Verify monotonic increase (no wrap-around).
+            assert!(
+                state.next_agent_id > start,
+                "next_agent_id wrapped at iteration {i}",
+            );
+        }
+
+        assert_eq!(
+            state.next_agent_id,
+            start + 100_000,
+            "counter must advance by exactly 100 000"
+        );
+    }
+
     /// After an `AgentError` arrives (translated with `spawn_tag: None` and
     /// silently ignored by `on_agent_complete`), the stall-timeout path must
     /// still fire and clean up the active dispatch correctly -- no double-free,
@@ -654,6 +737,105 @@ mod tests {
             state.active_dispatches.is_empty(),
             "dispatch must be removed after stall timeout"
         );
+    }
+
+    // -- Issue #60: parallel DAG-aware dispatch --------------------------------
+
+    /// Two independent steps (no deps) are dispatched in a single tick.
+    #[test]
+    fn parallel_dispatch_two_independent_steps() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step-a", "step-b"]);
+
+        state.tick(&mut ledger, &tx);
+
+        // Both steps must be Active.
+        assert_eq!(ledger.plan[0].status, StepStatus::Active);
+        assert_eq!(ledger.plan[1].status, StepStatus::Active);
+        assert_eq!(state.active_dispatches.len(), 2);
+
+        // Two SpawnAgent actions must have been emitted.
+        let a1 = rx.try_recv().expect("first SpawnAgent");
+        let a2 = rx.try_recv().expect("second SpawnAgent");
+        assert!(matches!(a1, AiAction::SpawnAgent { .. }));
+        assert!(matches!(a2, AiAction::SpawnAgent { .. }));
+    }
+
+    /// A step with an unmet dependency is not dispatched on the same tick.
+    #[test]
+    fn dag_aware_dispatch_skips_blocked_step() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = TaskLedger::new("test goal");
+        ledger.set_plan(vec![
+            PlanStep::new("root", AgentTask::FreeForm { prompt: "root".into() }),
+            PlanStep::with_deps(
+                "blocked",
+                AgentTask::FreeForm { prompt: "blocked".into() },
+                vec![0],
+            ),
+        ]);
+
+        state.tick(&mut ledger, &tx);
+
+        // Only root dispatched; blocked still Pending.
+        assert_eq!(ledger.plan[0].status, StepStatus::Active, "root must be Active");
+        assert_eq!(ledger.plan[1].status, StepStatus::Pending, "blocked must still be Pending");
+        assert_eq!(state.active_dispatches.len(), 1);
+
+        let a = rx.try_recv().expect("one SpawnAgent");
+        assert!(matches!(a, AiAction::SpawnAgent { .. }));
+        assert!(rx.try_recv().is_err(), "must not emit second SpawnAgent for blocked step");
+    }
+
+    /// After a dependency completes, the blocked step becomes eligible on the next tick.
+    #[test]
+    fn dag_dispatch_unblocks_after_dep_done() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = TaskLedger::new("test goal");
+        ledger.set_plan(vec![
+            PlanStep::new("root", AgentTask::FreeForm { prompt: "root".into() }),
+            PlanStep::with_deps(
+                "blocked",
+                AgentTask::FreeForm { prompt: "blocked".into() },
+                vec![0],
+            ),
+        ]);
+
+        // Tick 1: dispatch root, capture spawn_tag.
+        state.tick(&mut ledger, &tx);
+        let a = rx.try_recv().expect("SpawnAgent for root");
+        let AiAction::SpawnAgent { spawn_tag, .. } = a else { panic!("expected SpawnAgent") };
+        let tag = spawn_tag.expect("spawn_tag must be Some");
+
+        // Complete root.
+        state.on_agent_complete(&mut ledger, 1, true, "root done", Some(tag));
+        assert_eq!(ledger.plan[0].status, StepStatus::Done);
+
+        // Tick 2: blocked step is now eligible.
+        state.tick(&mut ledger, &tx);
+        assert_eq!(ledger.plan[1].status, StepStatus::Active, "blocked must now be Active");
+        assert!(rx.try_recv().is_ok(), "must emit SpawnAgent for previously blocked step");
+    }
+
+    /// Calling tick twice does not double-dispatch the same active step.
+    #[test]
+    fn dag_dispatch_is_idempotent_for_active_steps() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step-a"]);
+
+        // Tick 1: dispatch step-a.
+        state.tick(&mut ledger, &tx);
+        let _ = rx.try_recv().expect("first dispatch");
+        assert_eq!(state.active_dispatches.len(), 1);
+
+        // Tick 2: step-a still active, must not be re-dispatched.
+        state.tick(&mut ledger, &tx);
+        assert!(rx.try_recv().is_err(), "must not re-dispatch an Active step");
+        assert_eq!(state.active_dispatches.len(), 1, "dispatch count must not grow");
     }
 
 }

@@ -4,6 +4,19 @@
 //! Each line is a serialised [`HistoryEntry`].  The store also maintains an
 //! in-memory index (`HashMap<Uuid, u64>`) that maps entry ID → byte offset so
 //! that id-lookup stays O(1) without a full scan after the store is opened.
+//!
+//! ## Concurrency
+//!
+//! `HistoryStore::open_at` acquires an **advisory exclusive `flock`** on a
+//! companion lock file (`<path>.lock`) via [`fs2::FileExt::lock_exclusive`].
+//! The lock is advisory — it protects processes that also use `HistoryStore`
+//! but does nothing against processes that write to the JSONL file directly.
+//!
+//! If the lock is already held by another `HistoryStore` instance,
+//! `open_at` returns an `Err` immediately (non-blocking try-lock).  The
+//! caller is expected to retry or use a session-specific path.
+//!
+//! The lock file is released automatically when the `HistoryStore` is dropped.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -12,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use fs2::FileExt as _;
 use uuid::Uuid;
 
 use crate::jsonl::HistoryEntry;
@@ -24,6 +38,10 @@ use crate::jsonl::HistoryEntry;
 ///
 /// All public methods return [`anyhow::Result`] — no `.unwrap()` in production
 /// paths.
+///
+/// The store holds an exclusive advisory flock on `<path>.lock` for its
+/// entire lifetime.  A second `HistoryStore` opened on the same path will
+/// fail with a "locked" error until the first is dropped.
 pub struct HistoryStore {
     /// Path to the `.jsonl` file.
     path: PathBuf,
@@ -31,6 +49,9 @@ pub struct HistoryStore {
     index: HashMap<Uuid, u64>,
     /// Byte offset where the next append will begin.
     next_offset: u64,
+    /// Holds the exclusive flock on `<path>.lock` for the store's lifetime.
+    /// Dropping this field releases the lock.
+    _lock_file: File,
 }
 
 impl HistoryStore {
@@ -50,14 +71,50 @@ impl HistoryStore {
 
     /// Open (or create) a store at an explicit path.
     ///
-    /// Scans the existing file to rebuild the in-memory index.
+    /// Acquires an exclusive advisory flock on `<path>.lock` before scanning
+    /// the existing file to rebuild the in-memory index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - the lock file cannot be created or opened, or
+    /// - the lock is already held by another [`HistoryStore`] (or any other
+    ///   process using the same companion lock file).
     pub fn open_at(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+
+        // Create the JSONL file's parent directory if it doesn't exist yet.
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("cannot create history dir: {}", parent.display())
+                })?;
+            }
+        }
+
+        // Acquire an exclusive advisory lock via a companion `.lock` sidecar.
+        // Using a separate sidecar avoids locking the JSONL file itself, which
+        // would block concurrent *readers* that don't go through HistoryStore.
+        let lock_path = lock_path_for(&path);
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("cannot open lock file: {}", lock_path.display()))?;
+
+        lock_file.try_lock_exclusive().with_context(|| {
+            format!(
+                "history file is locked by another process: {}",
+                path.display()
+            )
+        })?;
 
         let mut store = Self {
             path,
             index: HashMap::new(),
             next_offset: 0,
+            _lock_file: lock_file,
         };
 
         store.rebuild_index()?;
@@ -218,6 +275,24 @@ impl HistoryStore {
         self.next_offset = offset;
         Ok(())
     }
+}
+
+impl Drop for HistoryStore {
+    /// Dropping the store releases the advisory lock automatically because
+    /// the OS closes the `_lock_file` file descriptor.
+    fn drop(&mut self) {
+        // Explicitly unlock for clarity and portability (NFS, etc.).
+        // Errors here are silently ignored — the fd close still releases the
+        // lock on Linux/macOS regardless.
+        let _ = self._lock_file.unlock();
+    }
+}
+
+/// Derive the companion lock file path for a JSONL store path.
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut lock = path.to_path_buf().into_os_string();
+    lock.push(".lock");
+    PathBuf::from(lock)
 }
 
 /// Default data directory: `~/.local/share/phantom/history/`.
@@ -444,7 +519,7 @@ mod tests {
             store.append(&entry("good-first", session)).unwrap();
         }
 
-        // Inject a corrupt line directly
+        // Inject a corrupt line directly (bypasses the store lock intentionally).
         {
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
             writeln!(f, "{{not valid json").unwrap();
@@ -506,5 +581,91 @@ mod tests {
 
         let restored = store.get_by_id(id).unwrap().unwrap();
         assert_eq!(restored.semantic_type(), &CommandType::Shell);
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. Concurrent open: second store errors cleanly (lock is held)
+    //
+    //     This test exercises the advisory exclusive-lock guarantee from #211:
+    //     two HistoryStore instances opened on the same path must not both
+    //     succeed — the second must return an error that contains the word
+    //     "locked" or similar, preventing silent index corruption.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn second_open_on_same_path_errors_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.jsonl");
+        let session = Uuid::new_v4();
+
+        // First store opens successfully and appends an entry.
+        let mut store_a = HistoryStore::open_at(&path).unwrap();
+        store_a.append(&entry("from-a", session)).unwrap();
+
+        // Second open on the same path must fail because store_a holds the lock.
+        let err = HistoryStore::open_at(&path)
+            .err()
+            .expect("expected an error opening a locked store, got Ok");
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("locked") || err_msg.contains("lock"),
+            "expected error message to mention lock, got: {err_msg}"
+        );
+
+        // After store_a is dropped the lock is released and a new open succeeds.
+        drop(store_a);
+        let store_b = HistoryStore::open_at(&path).unwrap();
+        assert_eq!(store_b.count(), 1);
+        let entries = store_b.recent(10).unwrap();
+        assert_eq!(entries[0].command(), "from-a");
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. Sequential stores write valid JSONL and every id resolves correctly
+    //
+    //     Verifies the "no index corruption" guarantee from #211 across the
+    //     full write → close → reopen cycle.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sequential_stores_produce_valid_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sequential.jsonl");
+        let session = Uuid::new_v4();
+
+        // Wave 1
+        let mut ids_a = Vec::new();
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            for i in 0..10u32 {
+                let e = entry(&format!("wave1-cmd-{i}"), session);
+                ids_a.push(e.id());
+                store.append(&e).unwrap();
+            }
+        }
+
+        // Wave 2
+        let mut ids_b = Vec::new();
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            for i in 0..10u32 {
+                let e = entry(&format!("wave2-cmd-{i}"), session);
+                ids_b.push(e.id());
+                store.append(&e).unwrap();
+            }
+        }
+
+        // Final read: all 20 entries must be present and resolvable.
+        let reader = HistoryStore::open_at(&path).unwrap();
+        assert_eq!(reader.count(), 20);
+
+        for (i, id) in ids_a.iter().enumerate() {
+            let found = reader.get_by_id(*id).unwrap().unwrap();
+            assert_eq!(found.command(), format!("wave1-cmd-{i}"));
+        }
+        for (i, id) in ids_b.iter().enumerate() {
+            let found = reader.get_by_id(*id).unwrap().unwrap();
+            assert_eq!(found.command(), format!("wave2-cmd-{i}"));
+        }
     }
 }

@@ -291,6 +291,11 @@ impl App {
                 } else {
                     self.console.system(format!("GOAL: {objective}"));
                     self.console.output("Spawning autonomous agent...");
+
+                    // Persist the goal so the reconciler can resume after a
+                    // restart (issue #206).
+                    self.persist_goal(&objective);
+
                     // Spawn an agent directly — the agent has tools, context,
                     // and the codebase map. Don't route through the brain's
                     // chat client.

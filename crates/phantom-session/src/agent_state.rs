@@ -126,10 +126,24 @@ impl SavedMessage {
 /// Saved state of a single agent.
 ///
 /// All fields are private; use the constructor and accessor methods.
+///
+/// # Forward-compatibility
+///
+/// `task` is stored as a raw [`serde_json::Value`] rather than as a typed
+/// [`AgentTask`]. This means that if an `AgentTask` variant is renamed or
+/// removed in a future refactor, the snapshot file still deserialises
+/// successfully — the unknown task JSON is preserved verbatim so it can be
+/// logged for diagnostics. Deserialization into a concrete `AgentTask` is
+/// deferred to [`partial_restore`], which produces
+/// [`RestoreOutcome::Skipped`] instead of a hard error when the variant is
+/// no longer recognised.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     id: u32,
-    task: AgentTask,
+    /// Raw task JSON. Stored as a `Value` so that unknown variants (e.g. from
+    /// a snapshot written by a newer binary) do not cause `AgentStateFile::load`
+    /// to fail. Use [`AgentSnapshot::task`] to attempt typed deserialization.
+    task: serde_json::Value,
     /// `Queued`, `Done`, `Failed`, or `Flatline` — the saved status.
     /// In-progress states (`Working`, `WaitingForTool`, `Planning`,
     /// `AwaitingApproval`) are normalised to `Queued` so the agent can
@@ -168,9 +182,15 @@ impl AgentSnapshot {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // Eagerly serialize the task to a raw Value so the snapshot is always
+        // writable (we own the type, so this can only fail on OOM — treat that
+        // as a programming error and unwrap).
+        let task = serde_json::to_value(&agent.task)
+            .expect("AgentTask serialization must never fail");
+
         Self {
             id: agent.id,
-            task: agent.task.clone(),
+            task,
             status,
             messages,
             created_at_secs,
@@ -187,9 +207,22 @@ impl AgentSnapshot {
         self.id
     }
 
-    /// The task the agent was performing.
+    /// Attempt to deserialize the saved task into a typed [`AgentTask`].
+    ///
+    /// Returns `None` when the task JSON contains a variant that no longer
+    /// exists in the current `AgentTask` enum (forward-compatibility gap).
+    /// Callers that encounter `None` should treat the agent as unrestorable and
+    /// skip it — [`partial_restore`] does this automatically.
     #[must_use]
-    pub fn task(&self) -> &AgentTask {
+    pub fn task(&self) -> Option<AgentTask> {
+        serde_json::from_value(self.task.clone()).ok()
+    }
+
+    /// The raw task JSON as written to disk.
+    ///
+    /// Useful for diagnostics when [`AgentSnapshot::task`] returns `None`.
+    #[must_use]
+    pub fn raw_task(&self) -> &serde_json::Value {
         &self.task
     }
 
@@ -445,22 +478,28 @@ pub fn partial_restore(file: &AgentStateFile) -> Vec<RestoreOutcome<AgentSnapsho
         .iter()
         .map(|snap| {
             // Validate the snapshot is usable:
-            // 1. The task must be representable (it always is — it's an enum
-            //    we own — but the serialization round-trip could theoretically
-            //    fail if the format drifted).
-            // 2. We require at least version 1.
+            // 1. We require at least schema version 1.
+            // 2. The task JSON must deserialize into a known AgentTask variant.
+            //    If the variant was removed or renamed since the snapshot was
+            //    written, we produce Skipped (not Err) so the caller can still
+            //    restore all other agents in the file.
             if file.version() < 1 {
                 return RestoreOutcome::Corrupt {
                     reason: format!("unsupported version {}", file.version()),
                 };
             }
 
-            // Re-serialize the task to catch any deserialization drift.
-            match serde_json::to_string(&snap.task) {
-                Ok(_) => RestoreOutcome::Ok(snap.clone()),
-                Err(e) => RestoreOutcome::Skipped {
+            // Attempt to deserialize the raw task JSON.  An unknown variant
+            // yields Skipped; any other snapshot issue that somehow reaches
+            // here also falls through to Skipped rather than a hard error.
+            match snap.task() {
+                Some(_) => RestoreOutcome::Ok(snap.clone()),
+                None => RestoreOutcome::Skipped {
                     agent_id: snap.id(),
-                    reason: format!("task re-serialization failed: {e}"),
+                    reason: format!(
+                        "task variant no longer recognised: {}",
+                        snap.raw_task()
+                    ),
                 },
             }
         })
@@ -851,5 +890,80 @@ mod tests {
 
         assert_eq!(restored.messages().len(), 1, "Only the User message; in-flight call must be stripped");
         assert!(matches!(restored.messages()[0], SavedMessage::User(_)));
+    }
+
+    // -- Issue #213: forward-compatibility — unknown AgentTask variant --------
+
+    /// Write a snapshot JSON that contains a task variant (`DeprecatedVariant`)
+    /// that does not exist in the current `AgentTask` enum, then verify that:
+    ///
+    /// 1. `AgentStateFile::load` returns `Ok(Some(_))` — no hard error.
+    /// 2. `partial_restore` marks that agent as `Skipped`, not `Ok` or `Corrupt`.
+    #[test]
+    fn load_and_partial_restore_skips_snapshot_with_unknown_task_variant() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("unknown_variant_agents.json");
+
+        // Craft a raw JSON file that looks like a valid AgentStateFile but
+        // contains a task variant that no longer exists in AgentTask.
+        let raw = serde_json::json!({
+            "version": 1,
+            "saved_at": 0,
+            "agents": [
+                {
+                    "id": 7,
+                    "task": { "DeprecatedVariant": { "data": {} } },
+                    "status": "Queued",
+                    "messages": [],
+                    "created_at_secs": 0,
+                    "flatline_reason": null,
+                    "output_log": []
+                }
+            ]
+        });
+
+        fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        // Step 1: load must succeed — no hard error.
+        let file = AgentStateFile::load(&path)
+            .expect("load must return Ok even with an unknown task variant")
+            .expect("file must be Some — it exists and is valid JSON");
+
+        assert_eq!(file.agent_count(), 1);
+
+        // Step 2: partial_restore must produce Skipped for the unknown variant.
+        let outcomes = partial_restore(&file);
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0] {
+            RestoreOutcome::Skipped { agent_id, reason } => {
+                assert_eq!(*agent_id, 7, "skipped agent must carry the correct id");
+                assert!(
+                    reason.contains("DeprecatedVariant"),
+                    "reason must include the raw task JSON; got: {reason}",
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// Verify the happy path still works after the forward-compatibility change:
+    /// a known variant round-trips through save → load → partial_restore as Ok.
+    #[test]
+    fn partial_restore_known_variant_still_ok_after_raw_task_change() {
+        let agent = free_agent(1, "ensure no regression");
+        let snap = AgentSnapshot::from_agent(&agent);
+
+        // task() must deserialize back to Some(AgentTask::FreeForm { .. }).
+        assert!(
+            snap.task().is_some(),
+            "task() must return Some for a known variant",
+        );
+
+        let file = AgentStateFile::new(vec![snap]);
+        let outcomes = partial_restore(&file);
+        assert!(
+            matches!(outcomes[0], RestoreOutcome::Ok(_)),
+            "known variant must restore as Ok",
+        );
     }
 }

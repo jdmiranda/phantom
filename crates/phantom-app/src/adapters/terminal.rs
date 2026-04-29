@@ -233,6 +233,12 @@ impl AppCore for TerminalAdapter {
             "mouse_mode": mouse_mode,
         })
     }
+
+    /// Return the raw PTY output buffer so the OODA brain can populate
+    /// `ParsedOutput::raw_output` when a `CommandComplete` event fires (#226).
+    fn output_buf_snapshot(&self) -> Option<String> {
+        Some(self.output_buf.clone())
+    }
 }
 
 impl Renderable for TerminalAdapter {
@@ -436,6 +442,22 @@ impl Commandable for TerminalAdapter {
             "select_copy" => {
                 let text = self.terminal.selection_to_string().unwrap_or_default();
                 Ok(text)
+            }
+            "select_all" => {
+                // Select from the top of scrollback history to the last cell
+                // of the visible screen.
+                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                let size = self.terminal.size();
+                let history = self.terminal.history_size() as i32;
+                // Scrollback lines are at negative Line indices.
+                let start = Point::new(Line(-history), Column(0));
+                let end = Point::new(
+                    Line((size.rows as i32).saturating_sub(1)),
+                    Column(size.cols.saturating_sub(1) as usize),
+                );
+                self.terminal.start_selection(SelectionType::Simple, start, Side::Left);
+                self.terminal.update_selection(end, Side::Right);
+                Ok("all selected".into())
             }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }

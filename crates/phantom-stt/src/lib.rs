@@ -15,6 +15,7 @@ use std::pin::Pin;
 use futures_core::Stream;
 
 pub mod openai;
+pub mod stream;
 
 /// A single transcription event emitted by a backend.
 ///
@@ -106,11 +107,13 @@ pub trait TranscriptBackend: Send + Sync {
 /// In-memory backend that emits a fixed transcript regardless of audio
 /// content. Useful for tests and as the default placeholder until a real
 /// backend is wired up.
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone, Default)]
 pub struct MockBackend {
     transcript: Vec<TranscriptEvent>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl MockBackend {
     /// Build a backend that emits no events (drains audio and completes).
     #[must_use]
@@ -126,6 +129,7 @@ impl MockBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 #[async_trait::async_trait]
 impl TranscriptBackend for MockBackend {
     fn name(&self) -> &'static str {
@@ -147,6 +151,7 @@ impl TranscriptBackend for MockBackend {
 
 // Tiny inline stream helper so we don't pull in `async-stream`. Drains the
 // audio channel, then emits each pre-canned event in order.
+#[cfg(any(test, feature = "test-utils"))]
 mod async_stream {
     use std::future::Future;
     use std::pin::Pin;
@@ -267,6 +272,74 @@ mod tests {
             assert_eq!(got.word, want.word);
             assert_eq!(got.start_ms, want.start_ms);
         }
+    }
+
+    #[tokio::test]
+    async fn mock_backend_with_stream_of_three_chunks_collects_all_events() {
+        // Three transcript events — one per audio chunk conceptually.
+        let events = vec![
+            TranscriptEvent {
+                word: "one".to_string(),
+                start_ms: 0,
+                end_ms: 200,
+                confidence: 0.95,
+                is_final: true,
+            },
+            TranscriptEvent {
+                word: "two".to_string(),
+                start_ms: 200,
+                end_ms: 400,
+                confidence: 0.90,
+                is_final: true,
+            },
+            TranscriptEvent {
+                word: "three".to_string(),
+                start_ms: 400,
+                end_ms: 600,
+                confidence: 0.85,
+                is_final: true,
+            },
+        ];
+        let backend = MockBackend::with_transcript(events.clone());
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        // Send exactly 3 chunks then close the channel.
+        for i in 0u64..3 {
+            tx.send(AudioChunk {
+                samples: vec![0.0; 160],
+                sample_rate: 16_000,
+                channels: 1,
+                timestamp_ms: i * 200,
+            })
+            .await
+            .expect("send chunk");
+        }
+        drop(tx);
+
+        let mut stream = backend.transcribe(rx).await.expect("transcribe");
+        let mut collected = Vec::new();
+        while let Some(item) = stream.next().await {
+            collected.push(item.expect("ok event"));
+        }
+
+        assert_eq!(collected.len(), 3, "expected exactly 3 transcript events");
+        assert_eq!(collected[0].word, "one");
+        assert_eq!(collected[1].word, "two");
+        assert_eq!(collected[2].word, "three");
+    }
+
+    #[tokio::test]
+    async fn mock_backend_with_empty_audio_returns_no_events() {
+        // MockBackend with no pre-configured transcript + immediately-closed channel.
+        let backend = MockBackend::new();
+        let (_tx, rx) = tokio::sync::mpsc::channel::<AudioChunk>(1);
+        drop(_tx);
+
+        let mut stream = backend.transcribe(rx).await.expect("transcribe");
+        assert!(
+            stream.next().await.is_none(),
+            "empty mock backend should yield no events"
+        );
     }
 
     // Compile-time check: BoxedTranscriptStream must be Send so backend impls

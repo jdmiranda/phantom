@@ -2516,6 +2516,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "fs4"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5238,6 +5248,7 @@ dependencies = [
  "phantom-terminal",
  "phantom-ui",
  "serde_json",
+ "uuid",
  "winit",
 ]
 
@@ -5304,6 +5315,7 @@ dependencies = [
  "phantom-scene",
  "phantom-semantic",
  "phantom-session",
+ "phantom-stt",
  "phantom-terminal",
  "phantom-ui",
  "phantom-vision",
@@ -5386,6 +5398,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-dag"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "phantom-embeddings"
 version = "0.1.0"
 dependencies = [
@@ -5404,6 +5428,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "fs2",
  "log",
  "phantom-semantic",
  "serde",
@@ -5479,6 +5504,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-recall"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "phantom-bundles",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "phantom-renderer"
 version = "0.1.0"
 dependencies = [
@@ -5531,6 +5568,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-stt"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "phantom-supervisor"
 version = "0.1.0"
 dependencies = [
@@ -5539,6 +5592,8 @@ dependencies = [
  "libc",
  "log",
  "phantom-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5567,7 +5622,30 @@ dependencies = [
 name = "phantom-vision"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64",
+ "png 0.17.16",
+ "reqwest",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "phantom-voice"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "lru",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

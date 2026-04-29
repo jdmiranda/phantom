@@ -98,6 +98,13 @@ pub struct CommandOutput {
     pub output: String,
     /// `true` iff the process exited with status 0.
     pub success: bool,
+    /// Raw stdout, unprefixed. Kept separate so callers (e.g. semantic parser)
+    /// can reason on stdout and stderr independently.
+    pub stdout: String,
+    /// Raw stderr, unprefixed.
+    pub stderr: String,
+    /// Process exit code, or `None` when the process was killed by a signal.
+    pub exit_code: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +388,7 @@ fn wait_child(
                     let _ = s.read_to_string(&mut stderr_buf);
                 }
 
-                let mut output = stdout_buf;
+                let mut output = stdout_buf.clone();
                 if !stderr_buf.is_empty() {
                     if !output.is_empty() {
                         output.push('\n');
@@ -393,6 +400,9 @@ fn wait_child(
                 return Ok(CommandOutput {
                     output,
                     success: status.success(),
+                    stdout: stdout_buf,
+                    stderr: stderr_buf,
+                    exit_code: status.code(),
                 });
             }
             None => {
@@ -638,5 +648,96 @@ mod tests {
     #[test]
     fn default_policy_is_strict() {
         assert_eq!(SandboxPolicy::default(), SandboxPolicy::Strict);
+    }
+
+    // -----------------------------------------------------------------------
+    // QA-#177 — Resource exhaustion: 100 rapid tool calls, no memory leak
+    // -----------------------------------------------------------------------
+    //
+    // Strategy (Rust-native, no external allocator hook):
+    //
+    //   1. Make 100 sequential `execute_sandboxed` calls with `SandboxPolicy::None`
+    //      (harmless `echo hi`). Each must return `Ok(...)`.
+    //
+    //   2. Assert no `SandboxError` in any result — proves no handle/descriptor
+    //      leaks that would cause spawn failures after accumulation.
+    //
+    //   3. Thread count proxy: sample the OS thread count before and after;
+    //      any increase must stay under a generous bound (≤4 extra threads).
+    //      On platforms where sampling is unavailable the test degrades
+    //      gracefully to a correctness-only check.
+    //
+    // Marked `#[ignore = "slow"]` because 100 subprocess spawns add ~2 s in CI.
+
+    #[test]
+    #[ignore = "slow"]
+    fn resource_exhaustion_100_rapid_calls_no_leak() {
+        let tmp = TempDir::new().unwrap();
+        const CALL_COUNT: usize = 100;
+        const THREAD_HEADROOM: usize = 4;
+
+        let threads_before = sample_thread_count();
+
+        let mut failures: Vec<usize> = Vec::new();
+        for i in 0..CALL_COUNT {
+            match execute_sandboxed("echo hi", tmp.path(), SandboxPolicy::None, TIMEOUT) {
+                Ok(out) => {
+                    if !out.success {
+                        failures.push(i);
+                    }
+                }
+                Err(e) => {
+                    panic!("call {i} returned SandboxError: {e}");
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} of {CALL_COUNT} calls exited non-zero (indices: {failures:?})",
+            failures.len(),
+        );
+
+        let threads_after = sample_thread_count();
+
+        // Thread-count proxy: if the OS reported values, verify no significant growth.
+        if let (Some(before), Some(after)) = (threads_before, threads_after) {
+            let growth = after.saturating_sub(before);
+            assert!(
+                growth <= THREAD_HEADROOM,
+                "thread count grew by {growth} after {CALL_COUNT} calls \
+                 (before={before}, after={after}); expected ≤{THREAD_HEADROOM} new threads",
+            );
+        }
+    }
+
+    /// Sample the thread count of the current process.
+    ///
+    /// Returns `None` on platforms where the query is unavailable or fails;
+    /// the test degrades gracefully to a correctness-only check.
+    fn sample_thread_count() -> Option<usize> {
+        // macOS: `ps -p <pid> -o thcount=`
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            let pid = std::process::id().to_string();
+            let out = Command::new("ps")
+                .args(["-p", &pid, "-o", "thcount="])
+                .output()
+                .ok()?;
+            let s = String::from_utf8_lossy(&out.stdout);
+            s.trim().parse::<usize>().ok()
+        }
+
+        // Linux: count entries in /proc/self/task/
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_dir("/proc/self/task").ok().map(|entries| entries.count())
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
     }
 }

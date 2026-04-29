@@ -12,6 +12,7 @@ pub mod agent;
 pub mod api;
 pub mod audit;
 pub mod correlation;
+pub mod handoff;
 pub mod chat;
 pub mod chat_tools;
 pub mod cli;
@@ -20,6 +21,7 @@ pub mod defender;
 pub mod defender_tools;
 pub mod dispatch;
 pub mod dispatcher;
+pub mod failure_store;
 pub mod fixer;
 pub mod inbox;
 pub mod inspector;
@@ -46,10 +48,15 @@ pub use chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
     OpenAiChatBackend, build_backend,
 };
+pub use failure_store::{FailureRecord, FailureStore};
 pub use defender::defender_spawn_rule;
 pub use manager::*;
 pub use role::{
     AgentId as RoleAgentId, AgentRef, AgentRole, CapabilityClass, RoleManifest, SpawnSource,
+};
+pub use quarantine::{
+    AgentRuntime, AutoQuarantinePolicy, QuarantineRegistry, QuarantineState,
+    DEFAULT_QUARANTINE_THRESHOLD,
 };
 pub use semantic_context::SemanticContext;
 pub use taint::TaintLevel;

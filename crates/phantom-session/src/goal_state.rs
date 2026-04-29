@@ -175,6 +175,23 @@ pub struct SavedFact {
 }
 
 impl SavedFact {
+    /// Construct a new fact with the given content, confidence, and source.
+    ///
+    /// This is the public constructor; the struct fields are kept private to
+    /// maintain the encapsulation contract (all mutation is via methods).
+    #[must_use]
+    pub fn new(
+        content: impl Into<String>,
+        confidence: SavedFactConfidence,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            confidence,
+            source: source.into(),
+        }
+    }
+
     #[must_use]
     pub fn content(&self) -> &str {
         &self.content
@@ -672,11 +689,11 @@ mod tests {
     fn sample_snapshot(goal: &str) -> GoalSnapshot {
         GoalSnapshot::new(
             goal.to_owned(),
-            vec![SavedFact {
-                content: "error in main.rs".into(),
-                confidence: SavedFactConfidence::Verified,
-                source: "agent-1".into(),
-            }],
+            vec![SavedFact::new(
+                "error in main.rs",
+                SavedFactConfidence::Verified,
+                "agent-1",
+            )],
             vec![
                 done_step("read the file"),
                 active_step("fix the error"),

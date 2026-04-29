@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use crate::correlation::CorrelationId;
+use crate::semantic_context::SemanticContext;
 use crate::tools::{ToolCall, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -201,6 +202,14 @@ pub struct Agent {
     /// Set by the Composer when it calls `spawn_subagent` so the parent–child
     /// relationship is recoverable at query time.
     pub parent_id: Option<AgentId>,
+    /// Ring-buffer of structured outputs from recent `RunCommand` tool calls.
+    ///
+    /// After every `RunCommand` result, the caller is expected to push the
+    /// `ParsedOutput` into this context via [`Agent::push_semantic_output`].
+    /// The context is rendered into agent system prompts via
+    /// [`Agent::semantic_prompt_section`] so the model can reason about
+    /// structured command history rather than raw terminal text.
+    semantic_ctx: SemanticContext,
 }
 
 impl Agent {
@@ -220,6 +229,7 @@ impl Agent {
             flatline_reason: None,
             correlation_id: None,
             parent_id: None,
+            semantic_ctx: SemanticContext::new(),
         }
     }
 
@@ -253,6 +263,29 @@ impl Agent {
     #[must_use]
     pub fn parent_id(&self) -> Option<AgentId> {
         self.parent_id
+    }
+
+    /// Push a `ParsedOutput` from a `RunCommand` tool result into the
+    /// agent's semantic ring-buffer.
+    ///
+    /// Called by `AgentPane::execute_pending_tools` immediately after a
+    /// `RunCommand` result is received. The ring-buffer caps at 10 entries
+    /// (FIFO eviction of the oldest).
+    pub fn push_semantic_output(&mut self, parsed: phantom_semantic::ParsedOutput) {
+        self.semantic_ctx.push(parsed);
+    }
+
+    /// Render the agent's semantic context as a Markdown section.
+    ///
+    /// Returns `None` when no `RunCommand` results have been pushed yet
+    /// (i.e. the ring-buffer is empty), so callers can skip injection.
+    pub fn semantic_prompt_section(&self) -> Option<String> {
+        self.semantic_ctx.as_prompt_section()
+    }
+
+    /// Immutable access to the agent's semantic context.
+    pub fn semantic_ctx(&self) -> &SemanticContext {
+        &self.semantic_ctx
     }
 
     /// Append a message to the conversation history.
@@ -1319,5 +1352,138 @@ mod tests {
             child.correlation_id(),
             "pipeline agents must share the same correlation id",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #74: SemanticContext wiring into Agent
+    // -----------------------------------------------------------------------
+
+    /// A freshly constructed agent has an empty semantic ring-buffer.
+    #[test]
+    fn new_agent_semantic_ctx_empty() {
+        let agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
+        assert!(agent.semantic_ctx().is_empty());
+        assert!(agent.semantic_prompt_section().is_none());
+    }
+
+    /// After `push_semantic_output`, the ring-buffer is non-empty and
+    /// `semantic_prompt_section` returns `Some`.
+    #[test]
+    fn push_semantic_output_populates_ring_buffer() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
+
+        let parsed = phantom_semantic::SemanticParser::parse(
+            "git status",
+            "On branch main\nnothing to commit, working tree clean\n",
+            "",
+            Some(0),
+        );
+        agent.push_semantic_output(parsed);
+
+        assert_eq!(agent.semantic_ctx().len(), 1);
+        assert!(agent.semantic_prompt_section().is_some());
+    }
+
+    /// The semantic prompt section includes the "## Recent command output"
+    /// heading and labels git status output correctly.
+    #[test]
+    fn semantic_prompt_section_contains_git_status_label() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
+
+        let parsed = phantom_semantic::SemanticParser::parse(
+            "git status",
+            "On branch feature/x\nnothing to commit, working tree clean\n",
+            "",
+            Some(0),
+        );
+        agent.push_semantic_output(parsed);
+
+        let section = agent.semantic_prompt_section().unwrap();
+        assert!(
+            section.contains("## Recent command output"),
+            "section must have heading; got: {section}"
+        );
+        assert!(
+            section.contains("git.status"),
+            "section must label git status; got: {section}"
+        );
+        assert!(
+            section.contains("feature/x"),
+            "branch name must surface; got: {section}"
+        );
+    }
+
+    /// Semantic context is FIFO-capped at MAX_ENTRIES (10). Pushing 12 entries
+    /// keeps the ring-buffer at 10 and evicts the two oldest.
+    #[test]
+    fn semantic_ctx_ring_buffer_caps_at_max_entries() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
+
+        for i in 0..12u32 {
+            let parsed = phantom_semantic::SemanticParser::parse(
+                &format!("echo {i}"),
+                &format!("{i}\n"),
+                "",
+                Some(0),
+            );
+            agent.push_semantic_output(parsed);
+        }
+
+        // Must not exceed 10.
+        assert_eq!(agent.semantic_ctx().len(), 10);
+
+        // The oldest entries (echo 0, echo 1) must be evicted.
+        let commands: Vec<&str> = agent
+            .semantic_ctx()
+            .entries()
+            .iter()
+            .map(|e| e.command.as_str())
+            .collect();
+        assert!(!commands.contains(&"echo 0"), "echo 0 should be evicted");
+        assert!(!commands.contains(&"echo 1"), "echo 1 should be evicted");
+        assert!(commands.contains(&"echo 11"), "echo 11 must be present");
+    }
+
+    /// `semantic_prompt_section` surfaces cargo test results (pass/fail counts).
+    #[test]
+    fn semantic_prompt_section_surfaces_test_results() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
+
+        let stdout = "\
+running 3 tests
+test tests::a ... ok
+test tests::b ... ok
+test tests::c ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+        let parsed =
+            phantom_semantic::SemanticParser::parse("cargo test", stdout, "", Some(0));
+        agent.push_semantic_output(parsed);
+
+        let section = agent.semantic_prompt_section().unwrap();
+        assert!(section.contains("test.result"), "label must be test.result; got: {section}");
+        assert!(section.contains("passed"), "pass count must surface; got: {section}");
+    }
+
+    /// Multiple sequential push calls accumulate in order; `semantic_ctx.latest()`
+    /// returns the most recently pushed entry.
+    #[test]
+    fn semantic_ctx_latest_is_most_recent() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
+
+        let p1 = phantom_semantic::SemanticParser::parse("echo a", "a\n", "", Some(0));
+        let p2 = phantom_semantic::SemanticParser::parse(
+            "git status",
+            "On branch main\nnothing to commit, working tree clean\n",
+            "",
+            Some(0),
+        );
+
+        agent.push_semantic_output(p1);
+        agent.push_semantic_output(p2);
+
+        let latest = agent.semantic_ctx().latest().expect("ring-buffer has entries");
+        assert_eq!(latest.command, "git status");
     }
 }

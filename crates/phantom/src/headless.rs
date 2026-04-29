@@ -6,9 +6,9 @@
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use uuid::Uuid;
 
 use phantom_agents::api::{ApiEvent, ClaudeConfig, send_message};
 use phantom_agents::cli::{AgentCommand, execute_agent_command, parse_agent_command};
@@ -19,8 +19,7 @@ use phantom_app::config::PhantomConfig;
 use phantom_brain::brain::{BrainConfig, spawn_brain};
 use phantom_brain::events::{AiAction, AiEvent};
 use phantom_context::ProjectContext;
-use phantom_history::HistoryStore;
-use phantom_history::store::HistoryEntry;
+use phantom_history::{HistoryEntry, HistoryStore};
 use phantom_memory::MemoryStore;
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
@@ -45,7 +44,8 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
 
     // Open persistent stores.
     let memory = MemoryStore::open(&project_dir)?;
-    let history = HistoryStore::open(&project_dir)?;
+    let session_id = Uuid::new_v4();
+    let mut history = HistoryStore::open(session_id)?;
 
     // Spawn the AI brain thread.
     let brain = spawn_brain(BrainConfig {
@@ -100,11 +100,10 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
                         } else {
                             for entry in &entries {
                                 let code = entry
-                                    .parsed
-                                    .exit_code
+                                    .exit_code()
                                     .map(|c| format!(" [exit {c}]"))
                                     .unwrap_or_default();
-                                println!("  $ {}{code}", entry.parsed.command);
+                                println!("  $ {}{code}", entry.command());
                             }
                         }
                     }
@@ -192,7 +191,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
                     &cmd,
                     &project_dir,
                     &brain,
-                    &history,
+                    &mut history,
                     &agents,
                     &claude_config,
                 );
@@ -225,7 +224,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
                     &input,
                     &project_dir,
                     &brain,
-                    &history,
+                    &mut history,
                     &agents,
                     &claude_config,
                 );
@@ -252,7 +251,7 @@ fn run_shell_command(
     cmd: &str,
     project_dir: &str,
     brain: &phantom_brain::brain::BrainHandle,
-    history: &HistoryStore,
+    history: &mut HistoryStore,
     _agents: &AgentManager,
     _claude_config: &Option<ClaudeConfig>,
 ) {
@@ -292,16 +291,13 @@ fn run_shell_command(
             }
 
             // Append to history.
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let entry = HistoryEntry {
-                timestamp,
-                working_dir: project_dir.to_string(),
-                parsed,
-            };
+            let entry = HistoryEntry::builder(
+                cmd,
+                project_dir,
+                Uuid::new_v4(),
+            )
+            .exit_code(out.status.code().unwrap_or(-1))
+            .build();
             if let Err(e) = history.append(&entry) {
                 log::warn!("failed to append history: {e}");
             }

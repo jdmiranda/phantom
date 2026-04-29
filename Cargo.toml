@@ -19,11 +19,19 @@ members = [
     "crates/phantom-scene",
     "crates/phantom-brain",
     "crates/phantom-adapter",
+    # Retrieval / recall (Phase 2.H).
+    "crates/phantom-recall",
     # Capture / bundle pipeline (Phase 2.G).
     "crates/phantom-vision",
     "crates/phantom-bundles",
     "crates/phantom-bundle-store",
     "crates/phantom-embeddings",
+    # Voice synthesis (TTS) — OpenAI backend + mock.
+    "crates/phantom-voice",
+    # Code dependency graph — DAG extraction + .planning/dag.json schema.
+    "crates/phantom-dag",
+    # Speech-to-text backend abstraction (issues #56, #68).
+    "crates/phantom-stt",
 ]
 resolver = "2"
 

@@ -25,6 +25,7 @@ phantom-vision = { path = "../phantom-vision" }
 phantom-bundles = { path = "../phantom-bundles" }
 phantom-bundle-store = { path = "../phantom-bundle-store" }
 phantom-embeddings = { path = "../phantom-embeddings" }
+phantom-stt = { path = "../phantom-stt" }
 
 winit.workspace = true
 wgpu.workspace = true
@@ -44,16 +45,21 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Tokio current-thread runtime for synchronous embedding calls inside
 # JobPool worker threads. The OpenAI backend is `async`, but JobPayload::run
 # is sync — we drive the async call by spinning up a per-job runtime.
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 
 [features]
 phantom-profile = []
+# Enables headless (no-GPU) boot path for CI integration tests.
+# Activated automatically by `cargo test -p phantom-app --features headless`.
+headless = []
 
 [dev-dependencies]
 png = "0.17"
 tempfile = "3"
 phantom-ui = { path = "../phantom-ui", features = ["test-utils"] }
 phantom-bundle-store = { path = "../phantom-bundle-store", features = ["testing"] }
+phantom-stt = { path = "../phantom-stt", features = ["test-utils"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]
 workspace = true

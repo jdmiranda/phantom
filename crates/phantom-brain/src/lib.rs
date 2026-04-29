@@ -43,12 +43,14 @@ pub mod brain;
 pub mod claude;
 pub mod curriculum;
 pub mod curves;
+pub mod decompose;
 pub mod events;
 pub mod goals;
 pub mod ollama;
 pub mod ooda;
 pub mod orchestrator;
 pub mod persistent_skill_registry;
+pub mod provider_catalog;
 pub mod proactive;
 pub mod reconciler;
 pub mod router;
@@ -58,9 +60,11 @@ pub mod skill_store;
 pub use brain::*;
 pub use curriculum::*;
 pub use curves::*;
+pub use decompose::{DecompositionResult, DecompositionStep, GoalDecomposer};
 pub use events::*;
 pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};
 pub use orchestrator::*;
+pub use provider_catalog::{ProviderCatalog, ProviderProfile, FALLBACK_ID};
 pub use persistent_skill_registry::{
     AgentRef, PersistentSkillRegistry, Skill, SkillHandler, SkillId, SkillProvenance,
 };

@@ -6,6 +6,18 @@ license.workspace = true
 
 [dependencies]
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+base64 = "0.22"
+png = "0.17"
+reqwest = { version = "0.12", features = ["json"] }
+
+[features]
+test-utils = []
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

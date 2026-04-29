@@ -163,6 +163,38 @@ impl SessionManager {
         }
     }
 
+    /// Return the path of the most-recent session file for `project_dir`
+    /// without loading its contents.
+    ///
+    /// This is the single source of truth for deriving sidecar paths (agent
+    /// state, goal state) from the canonical session file name. Callers that
+    /// only need the path — not the deserialized state — should prefer this
+    /// over [`load_latest`] to avoid the JSON parse cost.
+    ///
+    /// Returns `Ok(None)` if no session exists for the given project.
+    pub fn latest_path(&self, project_dir: &str) -> Result<Option<PathBuf>> {
+        let hash = project_hash(project_dir);
+        let prefix = format!("{hash}_");
+
+        let mut matching: Vec<PathBuf> = self
+            .session_files()?
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .collect();
+
+        matching.sort_by(|a, b| {
+            let ts_a = timestamp_from_filename(a);
+            let ts_b = timestamp_from_filename(b);
+            ts_b.cmp(&ts_a)
+        });
+
+        Ok(matching.into_iter().next())
+    }
+
     /// Load a specific session by file path.
     pub fn load(&self, path: &Path) -> Result<SessionState> {
         let contents = fs::read_to_string(path)
@@ -492,6 +524,72 @@ mod tests {
 
         let result = mgr.load_latest("/home/dev/other").unwrap();
         assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #206 — latest_path() returns path without deserializing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn latest_path_picks_newest_without_deserializing() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+
+        let old = sample_state(project_dir, "phantom", 1_700_000_000);
+        let mid = sample_state(project_dir, "phantom", 1_700_000_100);
+        let new = sample_state(project_dir, "phantom", 1_700_000_200);
+
+        // Save out of order.
+        mgr.save(&mid).unwrap();
+        mgr.save(&old).unwrap();
+        let newest_path = mgr.save(&new).unwrap();
+
+        let found = mgr.latest_path(project_dir).unwrap().unwrap();
+        assert_eq!(
+            found, newest_path,
+            "latest_path must return the path with the highest timestamp"
+        );
+        // Path must be a JSON file in the session directory.
+        assert_eq!(found.extension().unwrap(), "json");
+    }
+
+    #[test]
+    fn latest_path_returns_none_for_unknown_project() {
+        let (mgr, _dir) = test_manager();
+        let state = sample_state("/home/dev/phantom", "phantom", 1_700_000_000);
+        mgr.save(&state).unwrap();
+
+        let result = mgr.latest_path("/home/dev/other").unwrap();
+        assert!(
+            result.is_none(),
+            "latest_path must return None when no session exists for the project"
+        );
+    }
+
+    #[test]
+    fn latest_path_agrees_with_load_latest() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+
+        let s = sample_state(project_dir, "phantom", 1_700_000_500);
+        let saved_path = mgr.save(&s).unwrap();
+
+        // latest_path should point to the same file load_latest would read.
+        let path = mgr.latest_path(project_dir).unwrap().unwrap();
+        assert_eq!(path, saved_path);
+
+        // Deriving sidecar paths from latest_path must be stable.
+        let agent_sidecar = crate::agent_state::AgentStatePersister::sidecar_path(&path);
+        let goal_sidecar = super::super::GoalStatePersister::sidecar_path(&path);
+        assert_ne!(agent_sidecar, goal_sidecar, "agent and goal sidecars must differ");
+        assert!(
+            agent_sidecar.to_str().unwrap().contains("_agents.json"),
+            "agent sidecar must end in _agents.json"
+        );
+        assert!(
+            goal_sidecar.to_str().unwrap().contains("_goals.json"),
+            "goal sidecar must end in _goals.json"
+        );
     }
 
     #[test]

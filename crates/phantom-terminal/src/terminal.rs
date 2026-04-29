@@ -165,6 +165,10 @@ pub struct PhantomTerminal {
 
     /// Scratch buffer for PTY reads, allocated once.
     read_buf: Vec<u8>,
+
+    /// Number of valid bytes written into `read_buf` during the last
+    /// [`pty_read`](PhantomTerminal::pty_read) call.  Zero between reads.
+    last_read_len: usize,
 }
 
 impl PhantomTerminal {
@@ -214,6 +218,7 @@ impl PhantomTerminal {
             pty_write_queue,
             size,
             read_buf: vec![0u8; PTY_READ_BUF],
+            last_read_len: 0,
         })
     }
 
@@ -252,9 +257,15 @@ impl PhantomTerminal {
         let n = match self.pty_reader.read(&mut self.read_buf) {
             Ok(0) => anyhow::bail!("PTY EOF — child process exited"),
             Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(0),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.last_read_len = 0;
+                return Ok(0);
+            }
             Err(e) => return Err(e).context("PTY read failed"),
         };
+
+        // Record the number of valid bytes for `last_read_buf`.
+        self.last_read_len = n;
 
         // Feed the raw bytes through the VTE parser into the terminal.
         // This mirrors what alacritty's event_loop does: `parser.advance(&mut term, buf)`.
@@ -270,15 +281,13 @@ impl PhantomTerminal {
 
     /// Access the raw bytes from the last `pty_read` call.
     ///
-    /// Returns the slice of the internal read buffer that was filled during
-    /// the most recent read. The returned slice is only valid until the next
-    /// `pty_read` call.
+    /// Returns only the valid portion of the internal scratch buffer —
+    /// exactly the bytes that were filled during the most recent `pty_read`.
+    /// Returns an empty slice between reads or when `pty_read` returned `Ok(0)`.
+    /// The returned slice is only valid until the next `pty_read` call.
     #[inline]
     pub fn last_read_buf(&self) -> &[u8] {
-        // After pty_read, self.read_buf contains the last-read data.
-        // The length is not tracked separately, but callers can use the
-        // return value of pty_read to slice this.
-        &self.read_buf
+        &self.read_buf[..self.last_read_len]
     }
 
     /// Write raw input bytes to the PTY (keyboard/mouse input, paste data, etc.).
@@ -470,5 +479,30 @@ mod tests {
     fn default_is_not_alt_screen() {
         let term = PhantomTerminal::new(80, 24).unwrap();
         assert!(!term.is_alt_screen());
+    }
+
+    /// `last_read_buf` must return an empty slice before any read.
+    #[test]
+    fn last_read_buf_empty_before_any_read() {
+        let term = PhantomTerminal::new(80, 24).unwrap();
+        assert_eq!(term.last_read_buf().len(), 0, "no read yet — must be empty");
+    }
+
+    /// After a non-blocking read that returns 0 bytes (WouldBlock),
+    /// `last_read_buf` must also return an empty slice, not the full 64 KiB
+    /// scratch buffer.
+    #[test]
+    fn last_read_buf_returns_only_valid_bytes_after_would_block() {
+        let mut term = PhantomTerminal::new(80, 24).unwrap();
+        // The PTY is freshly spawned; reading immediately often returns
+        // WouldBlock (no shell output yet). Either way, `last_read_len` is
+        // updated: 0 on WouldBlock, n on a real read. We assert the invariant:
+        // `last_read_buf().len() == pty_read() return value`.
+        let n = term.pty_read().unwrap_or(0);
+        assert_eq!(
+            term.last_read_buf().len(),
+            n,
+            "last_read_buf().len() must equal the bytes returned by pty_read"
+        );
     }
 }

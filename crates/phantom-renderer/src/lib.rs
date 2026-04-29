@@ -8,6 +8,7 @@ pub mod images;
 pub mod screenshot;
 pub mod debug_draw;
 pub mod video;
+pub mod shader_loader;
 
 // === Phase 0.D clip-rect submodules (DO NOT DROP) ===
 //

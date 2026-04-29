@@ -4,6 +4,8 @@
 //! socket, and restarts it on failure.  Accepts user commands from stdin and
 //! relayed `UserCommand` messages over the socket.
 
+mod orphan;
+
 use std::collections::VecDeque;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write as _};
@@ -608,6 +610,17 @@ fn main() -> Result<()> {
         .init();
 
     print_banner();
+
+    // Recover orphaned child processes from any previous crashed phantom instance
+    // before we spawn a new one.
+    match orphan::pid_file_path() {
+        Ok(pid_path) => {
+            if let Err(e) = orphan::recover_orphans(&pid_path) {
+                warn!("orphan recovery encountered an error: {e}");
+            }
+        }
+        Err(e) => warn!("could not determine PID file path: {e}"),
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     install_signal_handlers(Arc::clone(&shutdown));

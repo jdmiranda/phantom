@@ -552,6 +552,60 @@ fn w4c_context_menu_hit_test() {
 }
 
 // ===========================================================================
+// Issue #226: CommandComplete must carry real output so OODA scoring works
+// ===========================================================================
+
+/// Regression test for #226.
+///
+/// Before the fix, `drain_bus_to_brain` constructed `ParsedOutput` with
+/// empty strings for `command` and `raw_output`, so `SemanticParser::parse`
+/// never ran and `errors` was always empty — making `fix_score` always 0.
+///
+/// After the fix the caller uses the terminal output buffer and the tracked
+/// command text.  This test simulates that path by calling
+/// `SemanticParser::parse` directly with realistic content and asserting the
+/// scorer sees the errors.
+#[test]
+fn b226_command_complete_with_real_output_yields_nonzero_fix_score() {
+    // Simulate what drain_bus_to_brain now does: call SemanticParser::parse
+    // with a real command + PTY buffer in the stderr slot.
+    //
+    // Production call (drain_bus_to_brain):
+    //   SemanticParser::parse(&command, "", &raw_output, Some(*exit_code))
+    //
+    // The PTY buffer is passed as `stderr` because parse_rust_errors only
+    // reads from that argument. Passing it as `stdout` (the old bug) meant
+    // cargo error parsing was always blind.
+    let raw_output = "error[E0308]: mismatched types\n  --> src/main.rs:5:9\n   |\n5  |     return \"hello\";\n   |            ^^^^^^^ expected `i32`, found `&str`";
+    let parsed = phantom_semantic::parser::SemanticParser::parse(
+        "cargo build",
+        "",          // stdout: empty — mirrors production call
+        raw_output,  // stderr slot: PTY buffer — mirrors production call
+        Some(1),
+    );
+
+    // The fix ensures `errors` is non-empty when the output contains error lines.
+    assert!(
+        !parsed.errors.is_empty(),
+        "SemanticParser must detect errors in real compiler output; got errors={:?}, raw_output={:?}",
+        parsed.errors, parsed.raw_output
+    );
+    assert_eq!(parsed.command, "cargo build", "ParsedOutput must carry the command string");
+    assert!(!parsed.raw_output.is_empty(), "ParsedOutput must carry the raw output");
+
+    // Confirm the brain scorer produces a non-zero fix score for this event.
+    let mut scorer = UtilityScorer::new();
+    scorer.idle_time = 5.0;
+    let ctx = phantom_context::ProjectContext::detect(std::path::Path::new("."));
+    let scored = scorer.fix_score(&parsed, &ctx);
+    assert!(
+        scored.score > 0.0,
+        "fix_score must be > 0 when CommandComplete carries real error output, got {}",
+        scored.score
+    );
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
