@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatModel;
+use crate::handoff::HandoffContext;
 use crate::inbox::{AgentRegistry, InboxMessage};
 use crate::role::{AgentId, AgentRef, AgentRole, SpawnSource};
 use phantom_memory::event_log::{EventEnvelope, EventLog};
@@ -130,6 +131,13 @@ pub struct SpawnSubagentRequest {
     pub chat_model: Option<ChatModel>,
     /// Composer that issued the spawn — recorded as `SpawnSource::Agent`.
     pub parent: AgentId,
+    /// Optional handoff context transferring state from the parent agent.
+    ///
+    /// When `Some`, the App's draining hook prepends
+    /// [`HandoffContext::to_prompt_block`] to the child's initial system
+    /// prompt so the receiving agent knows what was accomplished, what failed,
+    /// and which memory blocks are relevant.
+    pub handoff_context: Option<HandoffContext>,
 }
 
 /// Shared queue draining one [`SpawnSubagentRequest`] per pending tool call.
@@ -196,10 +204,29 @@ fn parse_model(name: &str) -> Option<ChatModel> {
 /// The actual spawn happens out-of-band: the queue is drained by the App's
 /// per-frame update hook, which calls `App::spawn_agent_pane_with_opts`.
 /// Clients can use the returned id with `wait_for_agent` immediately.
+///
+/// When `handoff` is `Some`, the receiving agent's initial prompt block will
+/// include the structured context from [`HandoffContext::to_prompt_block`].
+/// The task description and the handoff block are kept separate so the model
+/// can distinguish "what you need to do" from "what the parent already did".
 pub fn spawn_subagent(
     args: &serde_json::Value,
     parent: AgentId,
     queue: &SpawnSubagentQueue,
+) -> Result<AgentId, String> {
+    spawn_subagent_with_handoff(args, parent, queue, None)
+}
+
+/// Like [`spawn_subagent`] but allows the caller to inject a [`HandoffContext`]
+/// built from the parent agent's current state.
+///
+/// This is the primary entry-point used by the Composer's dispatch handler
+/// when a [`crate::correlation::CorrelationId`] and prior state are available.
+pub fn spawn_subagent_with_handoff(
+    args: &serde_json::Value,
+    parent: AgentId,
+    queue: &SpawnSubagentQueue,
+    handoff: Option<HandoffContext>,
 ) -> Result<AgentId, String> {
     let parsed: SpawnArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid spawn_subagent args: {e}"))?;
@@ -223,6 +250,7 @@ pub fn spawn_subagent(
         task: parsed.task,
         chat_model,
         parent,
+        handoff_context: handoff,
     };
 
     let mut q = queue.lock().map_err(|_| "spawn queue poisoned".to_string())?;
@@ -573,6 +601,7 @@ mod tests {
         assert_eq!(req.task, "watch the build");
         assert!(req.chat_model.is_none());
         assert_eq!(req.parent, parent);
+        assert!(req.handoff_context.is_none(), "no handoff context for plain spawn");
     }
 
     #[test]
@@ -599,6 +628,47 @@ mod tests {
         });
         let err = spawn_subagent(&args, 1, &queue).expect_err("must fail");
         assert!(err.to_lowercase().contains("unknown role"));
+    }
+
+    #[test]
+    fn spawn_subagent_with_handoff_embeds_context_in_request() {
+        use crate::agent::AgentTask;
+        use crate::handoff::HandoffContext;
+
+        let queue = new_spawn_subagent_queue();
+        let parent: AgentId = 42;
+        let task = AgentTask::FreeForm { prompt: "refactor the auth module".into() };
+
+        let ctx = HandoffContext::builder(parent, 99, task)
+            .summary("scoped all endpoints needing auth")
+            .failed_attempt("tried JWT — clock skew issues")
+            .memory_ref("mem-auth-design")
+            .build();
+
+        let args = json!({
+            "role": "actor",
+            "label": "auth-refactorer",
+            "task": "refactor the auth module",
+        });
+
+        spawn_subagent_with_handoff(&args, parent, &queue, Some(ctx)).expect("ok");
+
+        let q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1);
+        let req = &q[0];
+        assert_eq!(req.parent, parent);
+
+        let hctx = req.handoff_context.as_ref().expect("handoff context must be present");
+        assert_eq!(hctx.from_agent(), parent);
+        assert_eq!(hctx.summary(), "scoped all endpoints needing auth");
+        assert_eq!(hctx.failed_attempts().len(), 1);
+        assert_eq!(hctx.failed_attempts()[0], "tried JWT — clock skew issues");
+        assert_eq!(hctx.memory_refs(), &["mem-auth-design"]);
+
+        // The prompt block should be embeddable.
+        let block = hctx.to_prompt_block();
+        assert!(block.contains("HANDOFF CONTEXT"));
+        assert!(block.contains("scoped all endpoints needing auth"));
     }
 
     // ---- wait_for_agent ----------------------------------------------------

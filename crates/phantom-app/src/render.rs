@@ -388,7 +388,46 @@ impl App {
             let layout_rect = pane_id.and_then(|pid| self.layout.get_pane_rect(pid).ok());
 
             if tiled_count <= 1 {
-                // Single pane — skip chrome, just render the grid below.
+                // Single pane — skip container chrome (border/title), but still
+                // render the scrollbar so history is never inaccessible.
+                if let Some(ref scroll) = ro.scroll {
+                    if scroll.history_size > 0 {
+                        if let Some(layout_rect) = layout_rect {
+                            let track = scrollbar_track_rect(phantom_ui::layout::Rect {
+                                x: layout_rect.x,
+                                y: layout_rect.y,
+                                width: layout_rect.width,
+                                height: layout_rect.height,
+                            });
+                            // Track background.
+                            chrome_quads.push(QI {
+                                pos: [track.x, track.y],
+                                size: [track.width, track.height],
+                                color: [0.2, 0.2, 0.2, 0.3],
+                                border_radius: 3.0,
+                            });
+                            // Thumb.
+                            if let Some(thumb) = scrollbar_thumb_rect(
+                                track,
+                                scroll.display_offset,
+                                scroll.history_size,
+                                scroll.visible_rows,
+                            ) {
+                                let thumb_color = if is_focused {
+                                    [0.2, 1.0, 0.5, 0.4]
+                                } else {
+                                    [0.5, 0.5, 0.5, 0.5]
+                                };
+                                chrome_quads.push(QI {
+                                    pos: [thumb.x, thumb.y],
+                                    size: [thumb.width, thumb.height],
+                                    color: thumb_color,
+                                    border_radius: 3.0,
+                                });
+                            }
+                        }
+                    }
+                }
             } else if let Some(layout_rect) = layout_rect {
                 let pane_rect = container_rect(layout_rect, self.cell_size);
                 let inner_rect = pane_inner_rect(self.cell_size, pane_rect);

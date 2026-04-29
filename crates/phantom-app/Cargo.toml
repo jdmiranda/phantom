@@ -48,6 +48,9 @@ tokio = { version = "1", features = ["rt", "macros"] }
 
 [features]
 phantom-profile = []
+# Enables headless (no-GPU) boot path for CI integration tests.
+# Activated automatically by `cargo test -p phantom-app --features headless`.
+headless = []
 
 [dev-dependencies]
 png = "0.17"

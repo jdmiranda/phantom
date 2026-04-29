@@ -98,6 +98,13 @@ pub struct CommandOutput {
     pub output: String,
     /// `true` iff the process exited with status 0.
     pub success: bool,
+    /// Raw stdout, unprefixed. Kept separate so callers (e.g. semantic parser)
+    /// can reason on stdout and stderr independently.
+    pub stdout: String,
+    /// Raw stderr, unprefixed.
+    pub stderr: String,
+    /// Process exit code, or `None` when the process was killed by a signal.
+    pub exit_code: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +388,7 @@ fn wait_child(
                     let _ = s.read_to_string(&mut stderr_buf);
                 }
 
-                let mut output = stdout_buf;
+                let mut output = stdout_buf.clone();
                 if !stderr_buf.is_empty() {
                     if !output.is_empty() {
                         output.push('\n');
@@ -393,6 +400,9 @@ fn wait_child(
                 return Ok(CommandOutput {
                     output,
                     success: status.success(),
+                    stdout: stdout_buf,
+                    stderr: stderr_buf,
+                    exit_code: status.code(),
                 });
             }
             None => {
