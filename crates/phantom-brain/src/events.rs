@@ -20,7 +20,6 @@ use phantom_semantic::ParsedOutput;
 #[derive(Debug, Clone)]
 pub enum AiEvent {
     // -- Terminal I/O --------------------------------------------------------
-
     /// A command finished executing and its output has been semantically parsed.
     CommandComplete(ParsedOutput),
 
@@ -28,7 +27,6 @@ pub enum AiEvent {
     OutputChunk(String),
 
     // -- User ----------------------------------------------------------------
-
     /// The user pressed the interrupt key (e.g. `!`) with an optional command.
     Interrupt(String),
 
@@ -36,7 +34,6 @@ pub enum AiEvent {
     AgentRequest(AgentTask),
 
     // -- Agents --------------------------------------------------------------
-
     /// An agent finished its work.
     AgentComplete {
         id: AgentId,
@@ -49,13 +46,9 @@ pub enum AiEvent {
     },
 
     /// An agent needs user input before it can continue.
-    AgentNeedsInput {
-        id: AgentId,
-        question: String,
-    },
+    AgentNeedsInput { id: AgentId, question: String },
 
     // -- Environment ---------------------------------------------------------
-
     /// A watched file changed on disk.
     FileChanged(String),
 
@@ -63,7 +56,6 @@ pub enum AiEvent {
     GitStateChanged,
 
     // -- Timers --------------------------------------------------------------
-
     /// The user has been idle for `seconds` since their last input.
     UserIdle { seconds: f32 },
 
@@ -71,7 +63,6 @@ pub enum AiEvent {
     WatcherTick { agent_id: AgentId },
 
     // -- System --------------------------------------------------------------
-
     /// User set a goal for the brain to pursue autonomously.
     GoalSet {
         objective: String,
@@ -199,6 +190,22 @@ pub enum AiAction {
         rationale: String,
         /// Confidence in the suggestion, in the range `[0.0, 1.0]`.
         confidence: f32,
+    },
+
+    /// A checkpoint step is the next eligible step but cannot run until approved.
+    ///
+    /// Emitted by the reconciler when [`TaskLedger::eligible_next`] returns no
+    /// eligible steps because the next candidate step has
+    /// [`StepStatus::NeedsApproval`]. The UI should surface this as a blocking
+    /// prompt so the operator can call [`TaskLedger::approve_checkpoint`].
+    ///
+    /// The brain emits this action **once per checkpoint encounter** to avoid
+    /// spamming the UI on every reconciler tick.
+    CheckpointReached {
+        /// Index of the step in the active [`TaskLedger`] plan.
+        step_idx: usize,
+        /// Human-readable description of what the step will do once approved.
+        description: String,
     },
 
     /// Do nothing. The brain decided silence is the best action.

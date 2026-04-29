@@ -8,13 +8,13 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{debug, info, warn};
 
-use phantom_brain::events::{AiAction, AiEvent};
+use phantom_brain::events::{AiEvent};
 use phantom_brain::ooda::WorldState;
 use phantom_protocol::Event;
 use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AppCommand, ScreenshotReply};
-use crate::app::{App, AppState, SuggestionOverlay};
+use crate::app::{App, AppState};
 use crate::input::chrono_time_string;
 
 impl App {
@@ -122,12 +122,17 @@ impl App {
             }
 
             while let Some(action) = brain.try_recv_action() {
-                Self::execute_brain_action(
-                    action, now, &mut self.suggestion, &mut self.memory,
-                    &mut self.notification_store,
-                    &mut self.console, &mut self.coordinator, &mut self.layout,
-                    &mut self.scene, &mut tasks_to_spawn,
-                );
+                action.execute(&mut crate::action_context::AppActionHandler {
+                    now,
+                    suggestion: &mut self.suggestion,
+                    memory: &mut self.memory,
+                    notification_store: &mut self.notification_store,
+                    console: &mut self.console,
+                    coordinator: &mut self.coordinator,
+                    layout: &mut self.layout,
+                    scene: &mut self.scene,
+                    tasks_to_spawn: &mut tasks_to_spawn,
+                });
             }
         }
 
@@ -153,24 +158,34 @@ impl App {
             let dt_ms = (dt * 1000.0) as u64;
             let ooda_actions = self.ooda_loop.tick(&world, dt_ms);
             for action in ooda_actions {
-                Self::execute_brain_action(
-                    action, now, &mut self.suggestion, &mut self.memory,
-                    &mut self.notification_store,
-                    &mut self.console, &mut self.coordinator, &mut self.layout,
-                    &mut self.scene, &mut tasks_to_spawn,
-                );
+                action.execute(&mut crate::action_context::AppActionHandler {
+                    now,
+                    suggestion: &mut self.suggestion,
+                    memory: &mut self.memory,
+                    notification_store: &mut self.notification_store,
+                    console: &mut self.console,
+                    coordinator: &mut self.coordinator,
+                    layout: &mut self.layout,
+                    scene: &mut self.scene,
+                    tasks_to_spawn: &mut tasks_to_spawn,
+                });
             }
         }
 
         // Execute actions triggered by user interaction with suggestion options.
         let pending = std::mem::take(&mut self.pending_brain_actions);
         for action in pending {
-            Self::execute_brain_action(
-                action, now, &mut self.suggestion, &mut self.memory,
-                &mut self.notification_store,
-                &mut self.console, &mut self.coordinator, &mut self.layout,
-                &mut self.scene, &mut tasks_to_spawn,
-            );
+            action.execute(&mut crate::action_context::AppActionHandler {
+                now,
+                suggestion: &mut self.suggestion,
+                memory: &mut self.memory,
+                notification_store: &mut self.notification_store,
+                console: &mut self.console,
+                coordinator: &mut self.coordinator,
+                layout: &mut self.layout,
+                scene: &mut self.scene,
+                tasks_to_spawn: &mut tasks_to_spawn,
+            });
         }
 
         // Drain NLP translate results: each result was produced off-thread by
@@ -182,12 +197,17 @@ impl App {
                 Ok(res) => {
                     self.console.system(res.display);
                     if let Some(action) = res.action {
-                        Self::execute_brain_action(
-                            action, now, &mut self.suggestion, &mut self.memory,
-                            &mut self.notification_store,
-                            &mut self.console, &mut self.coordinator, &mut self.layout,
-                            &mut self.scene, &mut tasks_to_spawn,
-                        );
+                        action.execute(&mut crate::action_context::AppActionHandler {
+                            now,
+                            suggestion: &mut self.suggestion,
+                            memory: &mut self.memory,
+                            notification_store: &mut self.notification_store,
+                            console: &mut self.console,
+                            coordinator: &mut self.coordinator,
+                            layout: &mut self.layout,
+                            scene: &mut self.scene,
+                            tasks_to_spawn: &mut tasks_to_spawn,
+                        });
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -600,101 +620,6 @@ impl App {
                 let intent = self.pane_last_command.get(app_id).cloned();
                 let _ = self.on_command_boundary(*app_id, intent);
             }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Brain action execution (shared by brain drain + user-triggered pending)
-    // -----------------------------------------------------------------------
-
-    #[allow(clippy::too_many_arguments)]
-    fn execute_brain_action(
-        action: AiAction,
-        now: Instant,
-        suggestion: &mut Option<SuggestionOverlay>,
-        memory: &mut Option<phantom_memory::MemoryStore>,
-        notification_store: &mut Option<phantom_memory::notifications::NotificationStore>,
-        console: &mut crate::console::Console,
-        coordinator: &mut crate::coordinator::AppCoordinator,
-        layout: &mut phantom_ui::layout::LayoutEngine,
-        scene: &mut phantom_scene::tree::SceneTree,
-        tasks_to_spawn: &mut Vec<phantom_agents::AgentSpawnOpts>,
-    ) {
-        match action {
-            AiAction::ShowSuggestion { text, options } => {
-                info!("[PHANTOM]: {text}");
-                *suggestion = Some(SuggestionOverlay {
-                    text,
-                    options,
-                    shown_at: now,
-                });
-            }
-            AiAction::ShowNotification(msg) => {
-                info!("[PHANTOM]: {msg}");
-                if let Some(store) = notification_store {
-                    if let Err(e) = store.push(
-                        phantom_memory::notifications::NotificationKind::PlanReady,
-                        "Phantom",
-                        &msg,
-                        None,
-                    ) {
-                        warn!("NotificationStore::push failed: {e}");
-                    }
-                }
-            }
-            AiAction::UpdateMemory { key, value } => {
-                if let Some(mem) = memory {
-                    let _ = mem.set(
-                        &key,
-                        &value,
-                        phantom_memory::MemoryCategory::Context,
-                        phantom_memory::MemorySource::Auto,
-                    );
-                }
-            }
-            AiAction::SpawnAgent { task, spawn_tag, disposition } => {
-                info!(
-                    "[PHANTOM]: Spawning agent \
-                     (spawn_tag={spawn_tag:?}, disposition={disposition:?}, \
-                     auto_approve={})...",
-                    disposition.auto_approve(),
-                );
-                let mut opts = phantom_agents::AgentSpawnOpts::new(task)
-                    .with_disposition(disposition);
-                opts.spawn_tag = spawn_tag;
-                tasks_to_spawn.push(opts);
-            }
-            AiAction::ConsoleReply(reply) => {
-                info!("[PHANTOM]: {reply}");
-                console.output(format!("[phantom] {reply}"));
-            }
-            AiAction::RunCommand(cmd) => {
-                info!("[PHANTOM]: Running command: {cmd}");
-                let cmd_text = if cmd.ends_with('\n') {
-                    cmd
-                } else {
-                    format!("{cmd}\n")
-                };
-                let _ = coordinator
-                    .send_command_to_focused("write", &serde_json::json!({"text": cmd_text}));
-            }
-            AiAction::DismissAdapter { app_id } => {
-                info!("[PHANTOM]: Dismissing adapter {app_id}");
-                coordinator.remove_adapter(app_id, layout, scene);
-            }
-            AiAction::AgentFlatlined { id, reason } => {
-                info!("[PHANTOM]: Agent {id} flatlined: {reason}");
-            }
-            AiAction::Suggest { action, rationale, confidence } => {
-                info!("[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}");
-            }
-            AiAction::QuarantineAgent { agent_id, denial_count } => {
-                info!("[PHANTOM]: Quarantining agent {agent_id} after {denial_count} denials");
-            }
-            AiAction::AgentQuarantined { agent_id, denial_count } => {
-                info!("[PHANTOM]: Agent {agent_id} quarantined ({denial_count} denials)");
-            }
-            AiAction::DoNothing => {}
         }
     }
 

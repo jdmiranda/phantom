@@ -6,56 +6,33 @@ license.workspace = true
 description = "Unified bundle store: SQLite (encrypted via SQLCipher) + LanceDB vectors with two-phase writes."
 
 [features]
-# When `vector_search_disabled` is on, the LanceDB backend is replaced by an
-# in-memory deterministic stub. This is the default while the LanceDB Rust
-# API stabilizes (lance 4.0 + arrow 57 ecosystem is moving fast). Flip to
-# `vector_search_lancedb` once we pin a working wire-up.
 default = ["vector_search_disabled"]
 vector_search_disabled = []
-vector_search_lancedb = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema"]
-# Expose `phantom_bundle_store::testing` in integration-test binaries that
-# live outside this crate (e.g. `tests/recovery.rs`). Never enabled by default.
+lancedb = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:tokio", "dep:futures"]
+vector_search_lancedb = ["lancedb"]
 testing = []
 
 [dependencies]
-# Internal
 phantom-bundles = { path = "../phantom-bundles" }
 phantom-embeddings = { path = "../phantom-embeddings" }
-
-# SQLite + encryption-at-rest via SQLCipher.
-# `bundled-sqlcipher-vendored-openssl` ships SQLCipher + a vendored OpenSSL so
-# the build is hermetic across mac/Linux/Windows. `blob` enables incremental
-# blob I/O for large frame writes; `serde_json` powers the `tags` JSON column.
-rusqlite = { version = "0.36", features = [
-    "bundled-sqlcipher-vendored-openssl",
-    "blob",
-    "serde_json",
-] }
-
-# AEAD for frame/audio blobs.
+rusqlite = { version = "0.36", features = ["bundled-sqlcipher-vendored-openssl", "blob", "serde_json"] }
 chacha20poly1305 = "0.10"
-
-# HKDF-SHA256 for per-bundle DEK derivation.
 hkdf = "0.12"
 sha2 = "0.10"
-
-# Wipe sensitive material on drop.
 zeroize = { version = "1", features = ["derive"] }
-
-# Misc
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
-
-# Optional: LanceDB. Pulled in by `vector_search_lancedb` only.
 lancedb = { version = "0.27", optional = true }
 arrow-array = { version = "57", optional = true }
 arrow-schema = { version = "57", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+futures = { version = "0.3", optional = true }
+dirs = "5"
 
-# Master key storage (OS keychain). Platform-specific backends.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", features = ["apple-native"] }
 
@@ -68,9 +45,7 @@ keyring = { version = "3.6", features = ["windows-native"] }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
-# Enable the `testing` helpers for integration tests in `tests/`.
 phantom-bundle-store = { path = ".", features = ["testing"] }
-# Needed by the pipeline smoke tests to exercise the vision/dedup layer.
 phantom-vision = { path = "../phantom-vision" }
 
 [lints]

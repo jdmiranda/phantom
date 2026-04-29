@@ -39,12 +39,8 @@ pub struct VectorHit {
 /// store's outer mutex and are reachable across threads.
 pub trait VectorIndex: Send + Sync {
     /// Insert or replace a vector under `(modality, bundle_id)`.
-    fn upsert(
-        &self,
-        bundle_id: BundleId,
-        modality: &str,
-        vector: &[f32],
-    ) -> Result<(), StoreError>;
+    fn upsert(&self, bundle_id: BundleId, modality: &str, vector: &[f32])
+    -> Result<(), StoreError>;
 
     /// Remove a vector. Idempotent — missing entries return `Ok(())`.
     fn remove(&self, bundle_id: BundleId, modality: &str) -> Result<(), StoreError>;
@@ -88,6 +84,20 @@ impl InMemoryVectorIndex {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Direct vector lookup by `(bundle_id, modality)`.
+    ///
+    /// Returns `None` if the entry is absent or the lock is poisoned.
+    /// This is intentionally not part of the [`VectorIndex`] trait — it is
+    /// used only by the migration export path in [`crate::migrate`].
+    #[must_use]
+    pub fn get_vector(&self, bundle_id: BundleId, modality: &str) -> Option<Vec<f32>> {
+        let guard = self.inner.lock().ok()?;
+        guard
+            .get(modality)
+            .and_then(|t| t.vectors.get(&bundle_id))
+            .cloned()
     }
 }
 

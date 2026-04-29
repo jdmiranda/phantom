@@ -455,6 +455,20 @@ impl TerminalAdapter {
 
 ## 6. Agent Pipeline: Build → Review → Merge
 
+### Worktree Spawn Convention
+
+All agent worktrees MUST branch from the most recent clean baseline tag, not from HEAD of main.
+
+```bash
+# Correct — branch from baseline tag
+git checkout $(git describe --tags --match 'v*.baseline' --abbrev=0 2>/dev/null || git rev-parse --short origin/main) -b <branch-name>
+
+# Wrong — never do this
+git checkout main -b <branch-name>
+```
+
+The baseline tag marks a commit where `cargo build --workspace` and `cargo test --workspace --no-run` passed cleanly. Branching from it prevents agents from inheriting mid-stream work-in-progress from main that hasn't been gated. Current baseline: `v0.2.0-phase1.baseline`.
+
 ### Stage 0: Trait Split (Wave 0)
 
 **Agent Z — Trait Split** (WU-0)
