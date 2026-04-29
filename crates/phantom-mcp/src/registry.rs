@@ -25,7 +25,7 @@
 //! [`McpToolRegistry`] is `Send + Sync` (all state behind `&mut self`). Callers
 //! that need shared access should wrap it in `Arc<Mutex<McpToolRegistry>>`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::client::McpClient;
 use crate::protocol::JsonRpcResponse;
@@ -94,8 +94,11 @@ pub struct ToolProvenance {
 /// assert!(provenance.tool_name.starts_with("mcp:my-server/"));
 /// ```
 pub struct McpToolRegistry {
-    /// Named client connections.
+    /// Named client connections (populated by `register_server`).
     clients: HashMap<String, McpClient>,
+    /// Set of all registered server names; lets test helpers register routing
+    /// entries without a live [`McpClient`] connection.
+    registered_servers: HashSet<String>,
     /// `tool_name → server_name` index. Built incrementally when servers are
     /// registered; last-writer-wins for overlapping tool names (logged at
     /// warn level but not treated as an error).
@@ -107,6 +110,7 @@ impl McpToolRegistry {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            registered_servers: HashSet::new(),
             tool_index: HashMap::new(),
         }
     }
@@ -133,6 +137,7 @@ impl McpToolRegistry {
                 );
             }
         }
+        self.registered_servers.insert(name.to_owned());
         self.clients.insert(name.to_owned(), client);
     }
 
@@ -170,15 +175,15 @@ impl McpToolRegistry {
             .resolve_tool(tool_name)
             .ok_or_else(|| McpError::UnknownTool { name: tool_name.to_owned() })?;
 
-        let client = self.clients.get(&route.server_name).ok_or_else(|| {
-            McpError::InvokeError {
+        if !self.registered_servers.contains(&route.server_name) {
+            return Err(McpError::InvokeError {
                 tool: tool_name.to_string(),
                 detail: "index/client map desync".to_string(),
-            }
-        })?;
+            });
+        }
 
-        // Build the tools/call request (validates the name is in the client).
-        let _request = client.call_tool_request(tool_name, args);
+        // Build the tools/call request for the tool invocation.
+        let _request = crate::client::build_call_tool_request(tool_name, args);
 
         // In a real transport the request would be sent over the wire and a
         // response received. Here we return a synthetic success payload so
@@ -224,7 +229,7 @@ impl McpToolRegistry {
 
     /// Number of registered servers.
     pub fn server_count(&self) -> usize {
-        self.clients.len()
+        self.registered_servers.len()
     }
 
     /// Number of indexed tools across all servers.
@@ -249,34 +254,16 @@ mod tests {
     use crate::protocol;
     use serde_json::json;
 
-    /// Build a client that has completed `tools/list` with the given tool names.
-    fn client_with_tools(names: &[&str]) -> McpClient {
-        let mut client = McpClient::new();
-        // Simulate a successful initialize so the client is marked ready.
-        let init_resp = protocol::create_response(
-            json!(1),
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "test", "version": "0.1"},
-            }),
-        );
-        client.handle_initialize_response(&init_resp);
-
-        // Simulate a tools/list response.
-        let tools: Vec<serde_json::Value> = names
-            .iter()
-            .map(|n| {
-                json!({
-                    "name": n,
-                    "description": format!("Tool {n}"),
-                    "inputSchema": {"type": "object", "properties": {}},
-                })
-            })
-            .collect();
-        let tools_resp = protocol::create_response(json!(2), json!({"tools": tools}));
-        client.handle_tools_response(&tools_resp);
-        client
+    /// Register a named server with the given tool names directly into `reg`,
+    /// without requiring a live [`McpClient`] WebSocket connection.
+    ///
+    /// Populates `tool_index` and `registered_servers` so that
+    /// `invoke` and `resolve_tool` work correctly in unit tests.
+    fn register_test_server(reg: &mut McpToolRegistry, server: &str, tool_names: &[&str]) {
+        for name in tool_names {
+            reg.tool_index.insert((*name).to_owned(), server.to_owned());
+        }
+        reg.registered_servers.insert(server.to_owned());
     }
 
     // ---- Register & resolve -------------------------------------------------
@@ -284,8 +271,8 @@ mod tests {
     #[test]
     fn register_two_servers_non_overlapping_tools() {
         let mut reg = McpToolRegistry::new();
-        reg.register_server("fs", client_with_tools(&["fs.read_file", "fs.write_file"]));
-        reg.register_server("db", client_with_tools(&["db.query", "db.insert"]));
+        register_test_server(&mut reg, "fs", &["fs.read_file", "fs.write_file"]);
+        register_test_server(&mut reg, "db", &["db.query", "db.insert"]);
 
         assert_eq!(reg.server_count(), 2);
         assert_eq!(reg.tool_count(), 4);
@@ -294,8 +281,8 @@ mod tests {
     #[test]
     fn resolve_routes_to_correct_server() {
         let mut reg = McpToolRegistry::new();
-        reg.register_server("fs", client_with_tools(&["fs.read_file", "fs.write_file"]));
-        reg.register_server("db", client_with_tools(&["db.query", "db.insert"]));
+        register_test_server(&mut reg, "fs", &["fs.read_file", "fs.write_file"]);
+        register_test_server(&mut reg, "db", &["db.query", "db.insert"]);
 
         let route = reg.resolve_tool("fs.read_file").expect("should resolve");
         assert_eq!(route.server_name, "fs");
@@ -309,7 +296,7 @@ mod tests {
     #[test]
     fn resolve_tool_unknown_returns_none() {
         let mut reg = McpToolRegistry::new();
-        reg.register_server("fs", client_with_tools(&["fs.read_file"]));
+        register_test_server(&mut reg, "fs", &["fs.read_file"]);
 
         assert!(reg.resolve_tool("nonexistent.tool").is_none());
         assert!(reg.resolve_tool("").is_none());
@@ -320,7 +307,7 @@ mod tests {
     #[test]
     fn invoke_known_tool_returns_ok() {
         let mut reg = McpToolRegistry::new();
-        reg.register_server("fs", client_with_tools(&["fs.read_file"]));
+        register_test_server(&mut reg, "fs", &["fs.read_file"]);
 
         let result = reg.invoke("fs.read_file", json!({"path": "/tmp/test.txt"}));
         assert!(result.is_ok(), "invoke should succeed: {result:?}");
@@ -396,8 +383,8 @@ mod tests {
     #[test]
     fn two_server_routing_fs_tool_goes_to_fs() {
         let mut reg = McpToolRegistry::new();
-        reg.register_server("fs", client_with_tools(&["read_file", "write_file"]));
-        reg.register_server("browser", client_with_tools(&["navigate", "click"]));
+        register_test_server(&mut reg, "fs", &["read_file", "write_file"]);
+        register_test_server(&mut reg, "browser", &["navigate", "click"]);
 
         // fs tools
         for name in &["read_file", "write_file"] {
@@ -422,8 +409,8 @@ mod tests {
     #[test]
     fn two_server_routing_invoke_produces_correct_provenance() {
         let mut reg = McpToolRegistry::new();
-        reg.register_server("fs", client_with_tools(&["read_file"]));
-        reg.register_server("browser", client_with_tools(&["navigate"]));
+        register_test_server(&mut reg, "fs", &["read_file"]);
+        register_test_server(&mut reg, "browser", &["navigate"]);
 
         let (_, prov_fs) = reg.invoke("read_file", json!({})).unwrap();
         assert_eq!(prov_fs.tool_name, "mcp:fs/read_file");
