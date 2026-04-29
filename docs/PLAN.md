@@ -140,6 +140,43 @@ Tier 3 — architectural:
 
 ---
 
+## Agent Pipeline: Three-Artifact Spec Gate
+
+All non-trivial issues (MAST score < 7/10) must pass through a spec agent before an executor agent is spawned. The spec agent produces three artifacts in the worktree root. The executor receives only TASKS.md — not the raw issue.
+
+### SPEC.md
+Answers *what* changes, not *how*:
+- **Behavioral outcome** — observable difference after the change
+- **Current state** — exact file:line references for the code being changed
+- **Acceptance criteria** — each criterion independently testable via `cargo test`
+- **Non-goals** — explicit scope boundaries that keep the PR small
+
+### PLAN.md
+Answers *which files* and *what shape*:
+- List every file that changes
+- For each file: function signatures added/modified, new types, removed items
+- No implementation code — signatures and shapes only
+- Dependency order (which change must land first)
+
+### TASKS.md
+Answers *in what order*:
+- Numbered checklist the executor follows step-by-step
+- Each task is a single atomic action (one function, one struct, one test)
+- Gate check after every 3–5 tasks (`cargo build -p <crate>`)
+- Final acceptance check: exact `cargo test` command that must pass before PR opens
+
+### MAST Rubric
+Issues are scored 1–10. Score ≥ 7 may skip the spec agent (well-scoped, clear acceptance criteria, single crate). Score < 7 requires a spec pass.
+
+| Dimension | Weight |
+|-----------|--------|
+| **M**odularity — change confined to ≤ 2 crates | 3 |
+| **A**cceptability — acceptance criteria stated in issue | 3 |
+| **S**cope — estimated LoC change < 200 | 2 |
+| **T**estability — existing test harness covers the area | 2 |
+
+---
+
 ## Architecture Decision Records
 
 | ADR | Title | Status |
