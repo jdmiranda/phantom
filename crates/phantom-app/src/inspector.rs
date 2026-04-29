@@ -99,7 +99,11 @@ impl App {
         let inspector_tokens = self
             .inspector_tokens
             .get_or_insert_with(|| {
-                let ctx = RenderCtx::new(self.cell_size, self.cell_size.1);
+                // TODO(#149): wire real HiDPI scale factor from winit's
+                // `WindowEvent::ScaleFactorChanged` instead of hard-coding 1.0.
+                // `self.cell_size.1` (cell height in pixels) is not a valid
+                // dimensionless scale factor — passing it here was a bug.
+                let ctx = RenderCtx::new(self.cell_size, 1.0);
                 Arc::new(RwLock::new(Tokens::phosphor(ctx)))
             })
             .clone();
