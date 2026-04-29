@@ -510,7 +510,7 @@ impl AgentPane {
 
         info!("Agent pane spawned: {task_desc}");
 
-        let agent_id_u64 = agent.id as u64;
+        let agent_id_u64 = agent.id() as u64;
         let mut journal = open_agent_journal(agent_id_u64);
         if let Some(ref mut j) = journal {
             if let Err(e) = j.record_spawn(agent_id_u64, &task_desc) {
@@ -548,7 +548,7 @@ impl AgentPane {
             event_log: None,
             pending_spawn: None,
             self_ref: None,
-            role: DEFAULT_AGENT_PANE_ROLE,
+            role: initial_role,
             ticket_dispatcher: None,
             journal,
         }
@@ -673,7 +673,7 @@ impl AgentPane {
                     if let Some(ref mut j) = self.journal {
                         let first_line = text.lines().next().unwrap_or("").to_string();
                         if !first_line.is_empty() {
-                            if let Err(e) = j.record_output(self.agent.id as u64, first_line) {
+                            if let Err(e) = j.record_output(self.agent.id() as u64, first_line) {
                                 warn!("AgentJournal::record_output failed: {e}");
                             }
                         }
@@ -694,7 +694,7 @@ impl AgentPane {
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
                     if let Some(ref mut j) = self.journal {
-                        if let Err(e) = j.record_tool_call(self.agent.id as u64, call.tool.api_name(), &args_display) {
+                        if let Err(e) = j.record_tool_call(self.agent.id() as u64, call.tool.api_name(), &args_display) {
                             warn!("AgentJournal::record_tool_call failed: {e}");
                         }
                     }
@@ -720,7 +720,7 @@ impl AgentPane {
                                 "~{}in/~{}out tokens, {} tool calls",
                                 self.input_tokens, self.output_tokens, self.tool_call_count
                             );
-                            if let Err(e) = j.record_completion(self.agent.id as u64, true, summary) {
+                            if let Err(e) = j.record_completion(self.agent.id() as u64, true, summary) {
                                 warn!("AgentJournal::record_completion failed: {e}");
                             }
                         }
@@ -742,7 +742,7 @@ impl AgentPane {
                 Some(ApiEvent::Error(e)) => {
                     self.output.push_str(&format!("\n\n✗ Error: {e}\n"));
                     if let Some(ref mut j) = self.journal {
-                        if let Err(je) = j.record_flatline(self.agent.id as u64, &e) {
+                        if let Err(je) = j.record_flatline(self.agent.id() as u64, &e) {
                             warn!("AgentJournal::record_flatline failed: {je}");
                         }
                     }
@@ -767,7 +767,7 @@ impl AgentPane {
         if self.turn_count >= MAX_TOOL_ROUNDS {
             if let Some(ref mut j) = self.journal {
                 if let Err(e) = j.record_flatline(
-                    self.agent.id as u64,
+                    self.agent.id() as u64,
                     format!("iteration limit reached ({MAX_TOOL_ROUNDS} tool rounds)"),
                 ) {
                     warn!("AgentJournal::record_flatline (limit) failed: {e}");

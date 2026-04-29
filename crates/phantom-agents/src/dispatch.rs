@@ -1441,6 +1441,7 @@ mod tests {
             source_event_id: Some(denied_event_id),
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
@@ -1491,6 +1492,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // Attempt to invoke run_command — Act-class tool.

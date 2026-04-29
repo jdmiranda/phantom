@@ -63,6 +63,7 @@ fn build_dispatch_ctx<'a>(
         source_event_id: None,
         quarantine: None,
         correlation_id: None,
+        ticket_dispatcher: None,
     }
 }
 

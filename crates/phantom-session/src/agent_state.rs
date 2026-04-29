@@ -185,7 +185,7 @@ impl AgentSnapshot {
         // Eagerly serialize the task to a raw Value so the snapshot is always
         // writable (we own the type, so this can only fail on OOM — treat that
         // as a programming error and unwrap).
-        let task = serde_json::to_value(&agent.task)
+        let task = serde_json::to_value(agent.task())
             .expect("AgentTask serialization must never fail");
 
         Self {
