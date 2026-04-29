@@ -551,4 +551,109 @@ mod tests {
             "step must remain Active when spawn_tag is unknown"
         );
     }
+    // -- Issue #111: AgentError exit-path spawn_tag coverage -----------------
+
+    /// When `drain_bus_to_brain` translates `Event::AgentError` it hard-codes
+    /// `spawn_tag: None` because `AgentError` has no spawn_tag field.
+    ///
+    /// `on_agent_complete(..., spawn_tag: None)` must be a complete no-op:
+    /// the active dispatch must remain registered, the step must stay `Active`,
+    /// and no panic must occur. Cleanup of the stalled agent is left entirely
+    /// to the stall-timeout path in `check_stalled`.
+    #[test]
+    fn agent_error_with_none_spawn_tag_is_noop() {
+        let (tx, _rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        state.tick(&mut ledger, &tx); // dispatch step 0, spawns reconciler agent
+
+        // Simulate what drain_bus_to_brain does when it sees Event::AgentError:
+        // it emits AiEvent::AgentComplete { spawn_tag: None, success: false, ... }.
+        // The brain then calls on_agent_complete with spawn_tag = None.
+        state.on_agent_complete(&mut ledger, 99, false, "api error", None);
+
+        // Must be a no-op: dispatch remains, step stays Active.
+        assert_eq!(
+            ledger.plan[0].status,
+            StepStatus::Active,
+            "AgentError (spawn_tag=None) must not advance the ledger"
+        );
+        assert_eq!(
+            state.active_dispatches.len(),
+            1,
+            "active dispatch must remain registered after AgentError with spawn_tag=None"
+        );
+    }
+
+    /// When `spawn_tag` is `None`, the error event must carry `None` -- not a
+    /// default u64 (e.g. 0) or any fabricated value. This test exercises the
+    /// same `on_agent_complete` path with an explicitly `None` tag and verifies
+    /// the ledger is untouched regardless of the agent_id value.
+    #[test]
+    fn agent_error_none_spawn_tag_is_not_coerced_to_zero() {
+        let (tx, _rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        state.tick(&mut ledger, &tx); // dispatch step 0
+
+        // Passing agent_id=0 with spawn_tag=None must not be confused with
+        // "synthetic id 0" -- the reconciler must gate on spawn_tag presence
+        // first, before touching the ledger.
+        state.on_agent_complete(&mut ledger, 0, false, "oops", None);
+
+        assert_eq!(
+            ledger.plan[0].status,
+            StepStatus::Active,
+            "spawn_tag=None must short-circuit before any ledger mutation"
+        );
+        assert_eq!(
+            state.active_dispatches.len(),
+            1,
+            "dispatch must still be registered"
+        );
+    }
+
+    /// After an `AgentError` arrives (translated with `spawn_tag: None` and
+    /// silently ignored by `on_agent_complete`), the stall-timeout path must
+    /// still fire and clean up the active dispatch correctly -- no double-free,
+    /// no panic.
+    #[test]
+    fn stall_timeout_handles_cleanup_after_agent_error_noop() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState {
+            stall_timeout: Duration::from_millis(1),
+            ..ReconcilerState::new()
+        };
+        let mut ledger = make_ledger(&["step one"]);
+        ledger.plan[0].max_attempts = 1;
+
+        state.tick(&mut ledger, &tx); // dispatch
+        let _ = rx.try_recv(); // consume SpawnAgent
+
+        // Simulate AgentError arriving (no-op from reconciler's perspective).
+        state.on_agent_complete(&mut ledger, 42, false, "agent error", None);
+
+        // Step must still be Active -- the error was silently ignored.
+        assert_eq!(ledger.plan[0].status, StepStatus::Active);
+        assert_eq!(state.active_dispatches.len(), 1);
+
+        // Let the stall timeout expire, then tick.
+        std::thread::sleep(Duration::from_millis(5));
+        state.tick(&mut ledger, &tx);
+
+        // Stall timeout should have fired, exhausted retries, and emitted
+        // AgentFlatlined -- no panic.
+        let action = rx.try_recv().expect("expected AgentFlatlined from stall timeout");
+        assert!(
+            matches!(action, AiAction::AgentFlatlined { .. }),
+            "expected AgentFlatlined, got {action:?}"
+        );
+        assert!(
+            state.active_dispatches.is_empty(),
+            "dispatch must be removed after stall timeout"
+        );
+    }
+
 }
