@@ -5101,6 +5101,7 @@ dependencies = [
  "hkdf",
  "keyring",
  "lancedb",
+ "phantom-bundle-store",
  "phantom-bundles",
  "phantom-embeddings",
  "rand 0.8.6",
