@@ -320,13 +320,11 @@ error: aborting due to 1 previous error
         assert_eq!(s.options.len(), 3);
 
         // Task should reference the file.
-        match &s.task {
-            AgentTask::FixError { file, error_summary, .. } => {
-                assert_eq!(file.as_deref(), Some("src/main.rs"));
-                assert!(error_summary.contains("mismatched types"));
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { ref file, ref error_summary, .. } = s.task else {
+            unreachable!("expected FixError, got {:?}", s.task);
+        };
+            assert_eq!(file.as_deref(), Some("src/main.rs"));
+            assert!(error_summary.contains("mismatched types"));
     }
 
     #[test]
@@ -351,12 +349,10 @@ error: aborting due to 1 previous error
         assert_eq!(s.severity, SuggestionSeverity::Error);
 
         // Primary error should be the first one with file info.
-        match &s.task {
-            AgentTask::FixError { file, .. } => {
-                assert_eq!(file.as_deref(), Some("src/main.rs"));
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { ref file, .. } = s.task else {
+            unreachable!("expected FixError, got {:?}", s.task);
+        };
+            assert_eq!(file.as_deref(), Some("src/main.rs"));
     }
 
     #[test]
@@ -387,12 +383,10 @@ error: aborting due to 1 previous error
         assert_eq!(s.severity, SuggestionSeverity::Error);
 
         // Context should include the compiler suggestion.
-        match &s.task {
-            AgentTask::FixError { context, .. } => {
-                assert!(context.contains("add `;` here"), "got: {context}");
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { ref context, .. } = s.task else {
+            unreachable!("expected FixError, got {:?}", s.task);
+        };
+            assert!(context.contains("add `;` here"), "got: {context}");
     }
 
     // -----------------------------------------------------------------------
@@ -418,13 +412,11 @@ test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
         let s = suggestion.unwrap();
         assert!(s.prompt_text.contains("Test failed"));
 
-        match &s.task {
-            AgentTask::FixError { error_summary, .. } => {
-                assert!(error_summary.contains("Test failures"), "got: {error_summary}");
-                assert!(error_summary.contains("2 of 5"), "got: {error_summary}");
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { ref error_summary, .. } = s.task else {
+            unreachable!("expected FixError, got {:?}", s.task);
+        };
+            assert!(error_summary.contains("Test failures"), "got: {error_summary}");
+            assert!(error_summary.contains("2 of 5"), "got: {error_summary}");
     }
 
     #[test]
@@ -449,13 +441,11 @@ test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
         assert!(suggestion.is_some());
         let s = suggestion.unwrap();
 
-        match &s.task {
-            AgentTask::FixError { error_summary, .. } => {
-                assert!(error_summary.contains("tests::broken_a"), "got: {error_summary}");
-                assert!(error_summary.contains("tests::broken_b"), "got: {error_summary}");
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { ref error_summary, .. } = s.task else {
+            unreachable!("expected FixError, got {:?}", s.task);
+        };
+            assert!(error_summary.contains("tests::broken_a"), "got: {error_summary}");
+            assert!(error_summary.contains("tests::broken_b"), "got: {error_summary}");
     }
 
     // -----------------------------------------------------------------------
@@ -520,14 +510,12 @@ warning: unused variable: `x`
         );
 
         let task = build_task(&parsed, "/tmp/project");
-        match task {
-            AgentTask::FixError { file, error_summary, .. } => {
-                assert_eq!(file.as_deref(), Some("src/foo.rs"));
-                assert!(error_summary.contains("type mismatch"));
-                assert!(error_summary.contains("E0308"));
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { file, error_summary, .. } = task else {
+            unreachable!("expected FixError, got {:?}", task);
+        };
+            assert_eq!(file.as_deref(), Some("src/foo.rs"));
+            assert!(error_summary.contains("type mismatch"));
+            assert!(error_summary.contains("E0308"));
     }
 
     #[test]
@@ -543,13 +531,11 @@ warning: unused variable: `x`
         );
 
         let task = build_task(&parsed, "/tmp/project");
-        match task {
-            AgentTask::FixError { file, error_summary, .. } => {
-                assert!(file.is_none());
-                assert!(error_summary.contains("linker"));
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { file, error_summary, .. } = task else {
+            unreachable!("expected FixError, got {:?}", task);
+        };
+            assert!(file.is_none());
+            assert!(error_summary.contains("linker"));
     }
 
     #[test]
@@ -565,13 +551,11 @@ warning: unused variable: `x`
         );
 
         let task = build_task(&parsed, "/home/user/project");
-        match task {
-            AgentTask::FixError { context, .. } => {
-                assert!(context.contains("cargo build --release"), "got: {context}");
-                assert!(context.contains("/home/user/project"), "got: {context}");
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { context, .. } = task else {
+            unreachable!("expected FixError, got {:?}", task);
+        };
+            assert!(context.contains("cargo build --release"), "got: {context}");
+            assert!(context.contains("/home/user/project"), "got: {context}");
     }
 
     // -----------------------------------------------------------------------
@@ -765,13 +749,11 @@ warning: unused variable: `x`
         assert!(suggestion.is_some());
         let s = suggestion.unwrap();
         assert_eq!(s.severity, SuggestionSeverity::Error);
-        match &s.task {
-            AgentTask::FixError { error_summary, file, .. } => {
-                assert!(error_summary.contains("index out of bounds"));
-                assert_eq!(file.as_deref(), Some("src/main.rs"));
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { ref error_summary, ref file, .. } = s.task else {
+            unreachable!("expected FixError, got {:?}", s.task);
+        };
+            assert!(error_summary.contains("index out of bounds"));
+            assert_eq!(file.as_deref(), Some("src/main.rs"));
     }
 
     // -----------------------------------------------------------------------
@@ -795,15 +777,13 @@ warning: unused variable: `x`
         );
 
         let task = build_task(&parsed, "/tmp");
-        match task {
-            AgentTask::FixError { context, .. } => {
-                // Should contain errors 0..3 but not 3 or 4.
-                assert!(context.contains("error_0"), "got: {context}");
-                assert!(context.contains("error_2"), "got: {context}");
-                assert!(!context.contains("error_3"), "got: {context}");
-                assert!(!context.contains("error_4"), "got: {context}");
-            }
-            other => panic!("expected FixError, got {other:?}"),
-        }
+        let AgentTask::FixError { context, .. } = task else {
+            unreachable!("expected FixError, got {:?}", task);
+        };
+            // Should contain errors 0..3 but not 3 or 4.
+            assert!(context.contains("error_0"), "got: {context}");
+            assert!(context.contains("error_2"), "got: {context}");
+            assert!(!context.contains("error_3"), "got: {context}");
+            assert!(!context.contains("error_4"), "got: {context}");
     }
 }
