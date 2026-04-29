@@ -56,7 +56,7 @@ impl SemanticContext {
     ) -> &ParsedOutput {
         let parsed = SemanticParser::parse(command, stdout, stderr, exit_code);
         self.push(parsed);
-        self.entries.last().unwrap()
+        &self.entries[self.entries.len() - 1]
     }
 
     /// Return all retained entries, oldest-first.
