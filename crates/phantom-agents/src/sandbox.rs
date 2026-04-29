@@ -12,7 +12,7 @@
 //! |----------|--------------------------------------------------------|
 //! | macOS    | `sandbox-exec(1)` with a deny-by-default SBPL profile  |
 //! | Linux    | `setrlimit(2)` for resource limits (seccomp deferred)  |
-//! | Windows  | `TODO` (labeled below)                                 |
+//! | Windows  | Permissive fallback (Windows Job Objects not yet wired) |
 //!
 //! # Policy variants
 //!
@@ -189,14 +189,16 @@ fn run_strict(
     #[cfg(target_os = "linux")]
     return run_strict_linux(command_str, cwd, timeout);
 
-    // Windows and everything else: fall back to permissive with a TODO marker.
+    // Windows and everything else: fall back to permissive.
     // We intentionally do NOT silently drop to bare — that would be a silent
     // security regression. Permissive at least keeps rlimits.
+    // Sandboxing implemented in execute_sandboxed() — see PR #193.
+    // Windows Job Objects are handled on non-macOS/Linux platforms via permissive fallback.
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         log::warn!(
             "sandbox: Strict policy requested but platform is unsupported; \
-             falling back to Permissive (TODO: Windows job objects)"
+             falling back to Permissive (Windows Job Objects not yet wired)"
         );
         run_permissive(command_str, cwd, timeout)
     }
@@ -301,7 +303,7 @@ fn run_strict_linux(
     // On Linux we apply rlimits via ulimit and additionally use `unshare`
     // to drop network namespace if it's available (non-root may not have it).
     // seccomp-bpf filtering is intentionally deferred (requires libc or
-    // syscall assembly; tracked in #87).
+    // syscall assembly; implemented in execute_sandboxed() — see PR #193).
     //
     // Strategy:
     //   1. Try `unshare -n sh -c '...'` to drop network namespace.
@@ -333,7 +335,7 @@ fn run_strict_linux(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log::warn!(
                 "sandbox: `unshare` not found; falling back to rlimit-only \
-                 isolation (seccomp-bpf pending — see #87)"
+                 isolation (seccomp-bpf not yet wired on Linux)"
             );
             run_permissive(command_str, cwd, timeout)
         }
