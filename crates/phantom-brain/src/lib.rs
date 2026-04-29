@@ -47,6 +47,7 @@ pub mod events;
 pub mod goals;
 pub mod ollama;
 pub mod orchestrator;
+pub mod persistent_skill_registry;
 pub mod proactive;
 pub mod reconciler;
 pub mod router;
@@ -58,6 +59,9 @@ pub use curriculum::*;
 pub use curves::*;
 pub use events::*;
 pub use orchestrator::*;
+pub use persistent_skill_registry::{
+    AgentRef, PersistentSkillRegistry, Skill, SkillHandler, SkillId, SkillProvenance,
+};
 pub use proactive::*;
 pub use router::*;
 pub use scoring::*;
