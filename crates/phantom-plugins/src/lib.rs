@@ -25,4 +25,4 @@ pub use manifest::{
 pub use marketplace::{Marketplace, MarketplaceListing};
 pub use registry::{LoadedPlugin, PluginInfo, PluginRegistry};
 pub use script::ScriptRuntime;
-pub use wasm_host::{WasmHost, WasmRuntime};
+pub use wasm_host::{SandboxViolation, WasmHost, WasmRuntime};

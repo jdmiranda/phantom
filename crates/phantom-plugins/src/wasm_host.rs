@@ -32,6 +32,36 @@ use wasmtime::{Config, Engine, Instance, Module, Store, Val};
 use crate::host::{HookContext, HookResponse, PluginRuntime};
 use crate::manifest::{HookType, PluginManifest};
 
+// ---------------------------------------------------------------------------
+// Sandbox error
+// ---------------------------------------------------------------------------
+
+/// Typed error returned when a WASM module is rejected by the sandbox.
+///
+/// The [`WasmHost::load`] method wraps instantiation failures with this type
+/// so callers can pattern-match on sandbox violations separately from other
+/// wasmtime errors.
+#[derive(Debug)]
+pub enum SandboxViolation {
+    /// The module requested an import that the host does not provide.
+    ///
+    /// This covers all WASI imports (`wasi_snapshot_preview1::*`) as well as
+    /// any unknown host namespace.
+    UnsupportedImport(String),
+}
+
+impl std::fmt::Display for SandboxViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SandboxViolation::UnsupportedImport(msg) => {
+                write!(f, "sandbox violation — unsupported import: {msg}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SandboxViolation {}
+
 /// Fuel budget granted to each plugin store (approx 64 MiB equivalent of work).
 ///
 /// Fuel is a dimensionless counter decremented on each WASM instruction.
@@ -68,6 +98,13 @@ impl WasmHost {
     /// The bytes may be either binary WASM (`\0asm` magic) or WAT text format
     /// (wasmtime compiles WAT transparently when the `wat` feature is active).
     ///
+    /// # Sandbox guarantee
+    ///
+    /// The host provides **no imports**.  Any module that declares an import
+    /// (WASI or otherwise) is rejected at instantiation time with a
+    /// [`SandboxViolation::UnsupportedImport`] error — before any module code
+    /// runs.
+    ///
     /// On success, returns a [`WasmRuntime`] ready to accept calls.
     pub fn load(&self, wasm_bytes: &[u8]) -> Result<WasmRuntime> {
         let module = Module::new(&self.engine, wasm_bytes)
@@ -80,9 +117,30 @@ impl WasmHost {
             .map_err(|e| anyhow::anyhow!("failed to set store fuel: {e:#}"))?;
 
         // No host-side imports — plugins that require imports will fail here,
-        // which is the desired sandboxing behaviour.
-        let instance = Instance::new(&mut store, &module, &[])
-            .map_err(|e| anyhow::anyhow!("failed to instantiate WASM module: {e:#}"))?;
+        // which is the desired sandboxing behaviour.  Surface the failure as a
+        // typed `SandboxViolation` so callers can match on it specifically.
+        let instance = Instance::new(&mut store, &module, &[]).map_err(|e| {
+            let msg = e.to_string();
+            // wasmtime reports unsatisfied imports in several ways depending on
+            // version:
+            //   - "unknown import" (older wasmtime)
+            //   - "Imports provided" (older wasmtime)
+            //   - "expected N imports, found 0" (wasmtime ≥44)
+            //
+            // Any of these indicate the module declared host imports that the
+            // sandbox does not supply.  Wrap them in the typed error so callers
+            // can match on SandboxViolation specifically.
+            let is_import_error = msg.contains("unknown import")
+                || msg.contains("Imports provided")
+                || msg.contains("expected")
+                    && msg.contains("imports")
+                    && msg.contains("found");
+            if is_import_error {
+                anyhow::Error::new(SandboxViolation::UnsupportedImport(msg))
+            } else {
+                anyhow::anyhow!("failed to instantiate WASM module: {e:#}")
+            }
+        })?;
 
         Ok(WasmRuntime { store, instance })
     }
@@ -102,6 +160,12 @@ impl Default for WasmHost {
 pub struct WasmRuntime {
     store: Store<()>,
     instance: Instance,
+}
+
+impl std::fmt::Debug for WasmRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmRuntime").finish_non_exhaustive()
+    }
 }
 
 impl WasmRuntime {
