@@ -330,6 +330,39 @@ impl App {
                     }
                 }
             }
+            cmd if cmd == "history" || cmd.starts_with("history ") => {
+                let limit: usize = parts.get(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20);
+                match self.history {
+                    None => self.console.output("History store not available."),
+                    Some(ref store) => {
+                        let total = store.count();
+                        self.console.output(format!(
+                            "Command history ({total} total, showing last {limit}):"
+                        ));
+                        match store.recent(limit) {
+                            Err(e) => self.console.output(format!("history read error: {e}")),
+                            Ok(entries) if entries.is_empty() => {
+                                self.console.output("  (no commands recorded yet)");
+                            }
+                            Ok(entries) => {
+                                let start_num = total.saturating_sub(entries.len());
+                                for (i, e) in entries.iter().enumerate() {
+                                    let code = e.exit_code()
+                                        .map(|c| format!(" [exit {c}]"))
+                                        .unwrap_or_default();
+                                    self.console.output(format!(
+                                        "  {:>3}. {}{code}",
+                                        start_num + i + 1,
+                                        e.command(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             "selftest" => {
                 self.console.system("SELFTEST: brain exercising its own features...");
                 self.selftest = Some(crate::selftest::SelfTestRunner::new(false));
@@ -355,6 +388,7 @@ impl App {
                 self.console.output("  reload              Reload config from disk");
                 self.console.output("  boot                Replay boot sequence");
                 self.console.output("  video <path>        Play video through CRT shader");
+                self.console.output("  history [N]         Show last N commands (default 20)");
                 self.console.output("  suggestions         List dismissed/expired suggestion history");
                 self.console.output("  selftest            Brain exercises its own features");
                 self.console.output("  selfheal            selftest + auto-fix + commit + push");

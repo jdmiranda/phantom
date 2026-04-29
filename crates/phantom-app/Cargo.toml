@@ -46,6 +46,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # JobPool worker threads. The OpenAI backend is `async`, but JobPayload::run
 # is sync — we drive the async call by spinning up a per-job runtime.
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+uuid.workspace = true
 
 [features]
 phantom-profile = []

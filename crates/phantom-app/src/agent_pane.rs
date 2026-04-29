@@ -20,6 +20,7 @@ use phantom_agents::tools::{
     ToolCall, ToolDefinition, ToolResult, ToolType, available_tools,
 };
 use phantom_agents::{AgentSpawnOpts, AgentTask};
+use phantom_history::{AgentOutputCapture, ToolCall as HistoryToolCall};
 
 use crate::app::App;
 
@@ -253,6 +254,16 @@ pub(crate) struct AgentPane {
     /// `suggested_capability` field of `AgentBlocked` events so the Fixer can
     /// request the correct class instead of hardcoding `"Sense"`.
     last_failing_capability: Option<CapabilityClass>,
+    /// Agent output capture sidecar — `None` when launched without App wiring
+    /// (legacy / test path). The production path sets this via
+    /// [`AgentPane::set_agent_capture`] after [`AgentPane::spawn_with_opts`].
+    agent_capture: Option<AgentOutputCapture>,
+    /// Session UUID forwarded from the App's `session_uuid` field. Used as the
+    /// `session_id` parameter when appending to the capture sidecar.
+    capture_session_uuid: uuid::Uuid,
+    /// Tool calls accumulated during the current agent turn, flushed to the
+    /// sidecar on `ApiEvent::Done` or `ApiEvent::Error`.
+    capture_tool_calls: Vec<HistoryToolCall>,
     /// Shared registry handle used by chat-tool dispatch (`send_to_agent`,
     /// `broadcast_to_role`, `request_critique`). Cloned from the runtime at
     /// spawn time so dispatch contexts can read/write the same directory the
@@ -344,6 +355,9 @@ impl AgentPane {
             last_failing_capability: None,
             ticket_dispatcher: None,
             journal: None,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         }
     }
 
@@ -551,6 +565,9 @@ impl AgentPane {
             role: initial_role,
             ticket_dispatcher: None,
             journal,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         }
     }
 
@@ -613,6 +630,18 @@ impl AgentPane {
     ) {
         self.ticket_dispatcher = Some(dispatcher);
     }
+
+    /// Wire the history capture sidecar into this pane.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
+    /// When `None` is held (legacy / test path), tool calls and output are
+    /// not recorded.
+    pub(crate) fn set_agent_capture(&mut self, capture: AgentOutputCapture, session_uuid: uuid::Uuid) {
+        self.agent_capture = Some(capture);
+        self.capture_session_uuid = session_uuid;
+    }
+
+
 
     /// Build a [`phantom_agents::dispatch::DispatchContext`] from the
     /// pane's current substrate handles, if all required pieces are wired.
@@ -703,6 +732,13 @@ impl AgentPane {
                     } else {
                         self.output.push_str(&format!("\n▶ {} {}\n", call.tool.api_name(), args_display));
                     }
+                    // Record for the capture sidecar flush on Done/Error.
+                    let args_json = serde_json::to_string(&call.args).unwrap_or_default();
+                    self.capture_tool_calls.push(HistoryToolCall::new(
+                        call.tool.api_name(),
+                        args_json,
+                        None,
+                    ));
                     self.tool_use_ids.push(id.clone());
                     self.pending_tools.push((id, call));
                     got_content = true;
@@ -731,6 +767,7 @@ impl AgentPane {
                         self.status = AgentPaneStatus::Done;
                         self.api_handle = None;
                         self.push_snapshot();
+                        self.flush_capture_record();
                         self.save_conversation();
                     } else {
                         // Execute pending tools and continue conversation.
@@ -747,6 +784,7 @@ impl AgentPane {
                         }
                     }
                     self.rollback_if_dirty();
+                    self.flush_capture_record();
                     self.status = AgentPaneStatus::Failed;
                     self.api_handle = None;
                     self.push_snapshot();
@@ -1242,6 +1280,32 @@ impl AgentPane {
         }
     }
 
+    /// Flush accumulated tool calls and output text to the capture sidecar.
+    ///
+    /// Called at `ApiEvent::Done` (agent finished) and `ApiEvent::Error`
+    /// (agent failed). Drains `self.capture_tool_calls` and appends one
+    /// `AgentRecord` to the sidecar. No-ops when no sidecar is configured.
+    fn flush_capture_record(&mut self) {
+        let Some(ref capture) = self.agent_capture else {
+            return;
+        };
+        // Cap text output to 4 096 chars so the sidecar stays bounded even
+        // for chatty agents.  We take the tail (most-recent output) on the
+        // assumption that the end of the run is more useful than the start.
+        let text_output: String = if self.output.chars().count() > 4096 {
+            let tail: String = self.output.chars().rev().take(4096).collect();
+            tail.chars().rev().collect()
+        } else {
+            self.output.clone()
+        };
+        let tool_calls = std::mem::take(&mut self.capture_tool_calls);
+        let session_uuid = self.capture_session_uuid;
+        let agent_name = self.task.clone();
+        if let Err(e) = capture.append(agent_name, session_uuid, tool_calls, text_output) {
+            warn!("agent capture append failed: {e}");
+        }
+    }
+
     /// Save the agent conversation to disk for debugging and replay.
     pub(crate) fn save_conversation(&self) {
         let dir = std::env::var("HOME")
@@ -1502,6 +1566,12 @@ impl App {
                      (GITHUB_TOKEN / GH_REPO not set); ticket tools will fail gracefully"
                 );
             }
+        }
+
+        // Wire the history capture sidecar so this agent's tool calls and
+        // output are recorded in the session's agents.jsonl sidecar.
+        if let Some(ref capture) = self.agent_capture {
+            agent_pane.set_agent_capture(capture.clone(), self.session_uuid);
         }
 
         let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);

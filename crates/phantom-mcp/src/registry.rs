@@ -169,7 +169,7 @@ impl McpToolRegistry {
     pub fn invoke(
         &self,
         tool_name: &str,
-        args: serde_json::Value,
+        _args: serde_json::Value,
     ) -> Result<(serde_json::Value, ToolProvenance), McpError> {
         let route = self
             .resolve_tool(tool_name)
