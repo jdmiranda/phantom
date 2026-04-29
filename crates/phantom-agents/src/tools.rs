@@ -1601,6 +1601,114 @@ mod tests {
         assert_eq!(recovered.source_event_id, Some(99));
     }
 
+    // -- QA-#180: Unicode stress — emoji, RTL, combining chars ----------------
+    //
+    // Data-integrity test: feed agent output containing multi-codepoint Unicode
+    // through the write→read pipeline and verify byte-for-byte fidelity.
+    //
+    // This is NOT a rendering test. It exercises:
+    //   (a) `execute_write_file`  — encodes the string to UTF-8 on disk.
+    //   (b) `execute_read_file`   — decodes back via `read_to_string`.
+    //   (c) The `ToolResult::output` field — must carry the payload unchanged.
+    //
+    // Three Unicode stress classes per issue #180:
+    //   1. Emoji            "Hello 🎉 World"        (4-byte UTF-8 codepoint U+1F389)
+    //   2. Arabic RTL       "مرحبا"                 (multi-byte, right-to-left)
+    //   3. Combining chars  "e\u{0301}"             (U+0065 + U+0301 = é, 2 codepoints)
+
+    #[test]
+    fn unicode_stress_emoji_rtl_combining_chars_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+
+        // Three payloads: (filename, content)
+        let cases: &[(&str, &str)] = &[
+            ("emoji.txt", "Hello \u{1F389} World"),
+            ("rtl.txt", "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"), // مرحبا
+            ("combining.txt", "e\u{0301}"),                           // e + combining acute accent
+        ];
+
+        for (filename, payload) in cases {
+            // --- write ---
+            let write_result = execute_tool(
+                ToolType::WriteFile,
+                &serde_json::json!({ "path": filename, "content": payload }),
+                tmp.path().to_str().expect("tempdir must be valid UTF-8"),
+                &AgentRole::Actor,
+            );
+            assert!(
+                write_result.success,
+                "WriteFile failed for '{filename}': {}",
+                write_result.output,
+            );
+
+            // --- read back ---
+            let read_result = execute_tool(
+                ToolType::ReadFile,
+                &serde_json::json!({ "path": filename }),
+                tmp.path().to_str().expect("tempdir must be valid UTF-8"),
+                &AgentRole::Actor,
+            );
+            assert!(
+                read_result.success,
+                "ReadFile failed for '{filename}': {}",
+                read_result.output,
+            );
+
+            // Data integrity: output must match byte-for-byte.
+            assert_eq!(
+                read_result.output, *payload,
+                "Unicode data corrupted for '{filename}': \
+                 wrote {payload:?} but read back {:?}",
+                read_result.output,
+            );
+
+            // Belt-and-suspenders: verify char counts are preserved.
+            assert_eq!(
+                read_result.output.chars().count(),
+                payload.chars().count(),
+                "char count mismatch for '{filename}': expected {} chars, got {}",
+                payload.chars().count(),
+                read_result.output.chars().count(),
+            );
+
+            // Verify the round-trip string is valid UTF-8 (documents the guarantee).
+            assert!(
+                std::str::from_utf8(read_result.output.as_bytes()).is_ok(),
+                "output for '{filename}' is not valid UTF-8",
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_stress_run_command_echo_emoji_roundtrip() {
+        // Additional integrity check: `run_command` with printf of a Unicode
+        // codepoint.  Verifies the sandboxed shell + output-capture pipeline
+        // does not mangle 4-byte UTF-8 sequences.
+        let tmp = TempDir::new().unwrap();
+
+        let emoji = "\u{1F389}"; // 🎉
+        let result = execute_run_command_with_policy(
+            tmp.path(),
+            &serde_json::json!({ "command": "printf '%s' '🎉'" }),
+            SandboxPolicy::None,
+        );
+
+        assert!(
+            result.success,
+            "printf emoji command failed: {}",
+            result.output,
+        );
+        assert!(
+            result.output.contains(emoji),
+            "emoji codepoint U+1F389 was not preserved; got: {:?}",
+            result.output,
+        );
+        assert!(
+            std::str::from_utf8(result.output.as_bytes()).is_ok(),
+            "run_command output is not valid UTF-8 after emoji echo",
+        );
+    }
+
     // -- Issue #104: duplicate capability gate --------------------------------
     //
     // `execute_tool_with_provenance` is an *internal* helper. The dispatch
