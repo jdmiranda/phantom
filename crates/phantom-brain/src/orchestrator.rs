@@ -598,6 +598,236 @@ impl TaskLedger {
 }
 
 // ---------------------------------------------------------------------------
+// WorldState
+// ---------------------------------------------------------------------------
+
+/// A snapshot of the observable world at a single reconciler tick.
+///
+/// `should_replan` reads this struct to determine whether the active plan
+/// is still valid. Each field corresponds to exactly one replan trigger so
+/// that the decision logic is separately testable per trigger.
+///
+/// # Construction
+///
+/// ```rust,ignore
+/// let world = WorldState::builder()
+///     .errors_detected(true)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct WorldState {
+    /// New compiler / runtime errors appeared since the last tick.
+    errors_detected: bool,
+    /// At least one agent exceeded its retry limit or stall timeout.
+    agent_flatlined: bool,
+    /// The user typed a command or otherwise signalled attention.
+    user_input_arrived: bool,
+    /// The goal string or objective changed externally.
+    goal_changed: bool,
+    /// The wall-clock budget for this plan iteration has expired.
+    time_budget_exhausted: bool,
+}
+
+impl WorldState {
+    /// Create a builder for constructing a [`WorldState`].
+    pub fn builder() -> WorldStateBuilder {
+        WorldStateBuilder::default()
+    }
+
+    /// `true` when new errors appeared in the terminal output.
+    pub fn errors_detected(&self) -> bool {
+        self.errors_detected
+    }
+
+    /// `true` when an agent flatlined (exhausted retries or stalled).
+    pub fn agent_flatlined(&self) -> bool {
+        self.agent_flatlined
+    }
+
+    /// `true` when the user sent input (command, interrupt, goal change).
+    pub fn user_input_arrived(&self) -> bool {
+        self.user_input_arrived
+    }
+
+    /// `true` when the external goal was updated and the plan no longer targets it.
+    pub fn goal_changed(&self) -> bool {
+        self.goal_changed
+    }
+
+    /// `true` when the wall-clock budget for the current plan iteration is up.
+    pub fn time_budget_exhausted(&self) -> bool {
+        self.time_budget_exhausted
+    }
+
+    /// Returns `true` if any trigger that requires replanning is active.
+    ///
+    /// This is the central predicate consumed by [`Orchestrator::should_replan`].
+    pub fn any_replan_trigger(&self) -> bool {
+        self.errors_detected
+            || self.agent_flatlined
+            || self.user_input_arrived
+            || self.goal_changed
+            || self.time_budget_exhausted
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorldStateBuilder
+// ---------------------------------------------------------------------------
+
+/// Fluent builder for [`WorldState`].
+#[derive(Debug, Default)]
+pub struct WorldStateBuilder {
+    inner: WorldState,
+}
+
+impl WorldStateBuilder {
+    /// Signal that new errors were detected in the latest output.
+    pub fn errors_detected(mut self, v: bool) -> Self {
+        self.inner.errors_detected = v;
+        self
+    }
+
+    /// Signal that an agent flatlined.
+    pub fn agent_flatlined(mut self, v: bool) -> Self {
+        self.inner.agent_flatlined = v;
+        self
+    }
+
+    /// Signal that user input arrived.
+    pub fn user_input_arrived(mut self, v: bool) -> Self {
+        self.inner.user_input_arrived = v;
+        self
+    }
+
+    /// Signal that the goal was changed externally.
+    pub fn goal_changed(mut self, v: bool) -> Self {
+        self.inner.goal_changed = v;
+        self
+    }
+
+    /// Signal that the time budget for the current plan iteration has expired.
+    pub fn time_budget_exhausted(mut self, v: bool) -> Self {
+        self.inner.time_budget_exhausted = v;
+        self
+    }
+
+    /// Consume the builder and produce a [`WorldState`].
+    pub fn build(self) -> WorldState {
+        self.inner
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator
+// ---------------------------------------------------------------------------
+
+/// High-level orchestrator that wraps a [`TaskLedger`] and exposes the two
+/// methods the reconciler calls each tick.
+///
+/// The reconciler owns the `Orchestrator` for the lifetime of a goal pursuit.
+/// When `should_replan` returns `true`, the reconciler discards the current
+/// plan and triggers a Composer agent to generate a new one.
+///
+/// # Design notes
+///
+/// - All state is encapsulated: callers cannot accidentally mutate internal
+///   ledger fields. Accessors are provided for read-only inspection.
+/// - `dispatch_next_step` consumes no `AiAction` channel — it is a pure
+///   pull-from-ledger operation. The reconciler handles channel emission.
+/// - No `.unwrap()` in production paths: `dispatch_next_step` returns
+///   `Option<PlanStep>` so the caller can decide what to do when empty.
+pub struct Orchestrator {
+    ledger: TaskLedger,
+}
+
+impl Orchestrator {
+    /// Create a new orchestrator wrapping a fresh [`TaskLedger`] for `goal`.
+    pub fn new(goal: impl Into<String>) -> Self {
+        Self {
+            ledger: TaskLedger::new(goal),
+        }
+    }
+
+    /// Replace the current plan with `steps`.
+    ///
+    /// Delegates to [`TaskLedger::set_plan`] for the initial plan or
+    /// [`TaskLedger::replan`] for revisions.
+    pub fn set_plan(&mut self, steps: Vec<PlanStep>) {
+        self.ledger.set_plan(steps);
+    }
+
+    /// Replace the current plan with a revised set of steps (outer-loop replan).
+    pub fn replan(&mut self, steps: Vec<PlanStep>) {
+        self.ledger.replan(steps);
+    }
+
+    /// Read-only access to the task ledger for inspection / context building.
+    pub fn ledger(&self) -> &TaskLedger {
+        &self.ledger
+    }
+
+    /// Mutable access to the task ledger for recording outputs and updating
+    /// step status from agent completions.
+    pub fn ledger_mut(&mut self) -> &mut TaskLedger {
+        &mut self.ledger
+    }
+
+    // -----------------------------------------------------------------------
+    // Core reconciler API
+    // -----------------------------------------------------------------------
+
+    /// Determine whether the current plan should be discarded and regenerated.
+    ///
+    /// Returns `true` when at least one of the following is true:
+    ///
+    /// | Trigger                   | Cause                                        |
+    /// |---------------------------|----------------------------------------------|
+    /// | `world.errors_detected`   | New errors invalidate prior assumptions      |
+    /// | `world.agent_flatlined`   | Executing agent can no longer make progress  |
+    /// | `world.user_input_arrived`| User redirected attention; plan may be stale |
+    /// | `world.goal_changed`      | Plan no longer targets the correct objective |
+    /// | `world.time_budget_exhausted` | Outer-loop iteration budget expired      |
+    ///
+    /// Also returns `true` if the inner `TaskLedger::should_replan` evaluation
+    /// indicates the plan is stuck or all steps have failed.
+    ///
+    /// Returns `false` (no replan needed) when:
+    /// - None of the world-state triggers are active, AND
+    /// - The ledger reports [`ReplanDecision::Continue`], AND
+    /// - The ledger reports [`ReplanDecision::Complete`] (goal already done —
+    ///   no point generating a new plan).
+    pub fn should_replan(&self, world: &WorldState) -> bool {
+        // World-state triggers: any single trigger forces a replan.
+        if world.any_replan_trigger() {
+            return true;
+        }
+
+        // Ledger-derived triggers: stall, loop detection, failed steps.
+        match self.ledger.should_replan() {
+            ReplanDecision::Replan { .. } => true,
+            ReplanDecision::GiveUp { .. } => true,
+            ReplanDecision::Complete | ReplanDecision::Continue => false,
+        }
+    }
+
+    /// Pull the next pending step from the task ledger without dispatching it.
+    ///
+    /// Returns `None` when:
+    /// - The plan is empty.
+    /// - All steps are `Active`, `Done`, `Failed`, or `Skipped` (no pending work).
+    ///
+    /// The returned [`PlanStep`] is a **clone** of the ledger entry — the
+    /// caller is responsible for advancing the step's status to `Active` via
+    /// [`TaskLedger::plan`] after successfully dispatching the returned step.
+    pub fn dispatch_next_step(&self) -> Option<PlanStep> {
+        self.ledger
+            .next_pending_step()
+            .map(|(_, step)| step.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ReplanDecision
 // ---------------------------------------------------------------------------
 
@@ -913,5 +1143,251 @@ mod tests {
         assert!(ctx.contains("maybe type issue"));
         assert!(ctx.contains("VERIFIED FACTS"));
         assert!(ctx.contains("EDUCATED GUESSES"));
+    }
+
+    // -- WorldState builder ------------------------------------------------
+
+    #[test]
+    fn world_state_default_has_no_triggers() {
+        let world = WorldState::default();
+        assert!(!world.any_replan_trigger());
+        assert!(!world.errors_detected());
+        assert!(!world.agent_flatlined());
+        assert!(!world.user_input_arrived());
+        assert!(!world.goal_changed());
+        assert!(!world.time_budget_exhausted());
+    }
+
+    #[test]
+    fn world_state_builder_errors_detected() {
+        let world = WorldState::builder().errors_detected(true).build();
+        assert!(world.errors_detected());
+        assert!(world.any_replan_trigger());
+    }
+
+    #[test]
+    fn world_state_builder_agent_flatlined() {
+        let world = WorldState::builder().agent_flatlined(true).build();
+        assert!(world.agent_flatlined());
+        assert!(world.any_replan_trigger());
+    }
+
+    #[test]
+    fn world_state_builder_user_input_arrived() {
+        let world = WorldState::builder().user_input_arrived(true).build();
+        assert!(world.user_input_arrived());
+        assert!(world.any_replan_trigger());
+    }
+
+    #[test]
+    fn world_state_builder_goal_changed() {
+        let world = WorldState::builder().goal_changed(true).build();
+        assert!(world.goal_changed());
+        assert!(world.any_replan_trigger());
+    }
+
+    #[test]
+    fn world_state_builder_time_budget_exhausted() {
+        let world = WorldState::builder().time_budget_exhausted(true).build();
+        assert!(world.time_budget_exhausted());
+        assert!(world.any_replan_trigger());
+    }
+
+    // -- Orchestrator::should_replan ---------------------------------------
+
+    /// No trigger active + steady ledger → should_replan returns false.
+    #[test]
+    fn should_replan_false_when_steady() {
+        let mut orch = Orchestrator::new("fix the build");
+        orch.set_plan(vec![
+            PlanStep::new("step 1", free_task("s1")),
+            PlanStep::new("step 2", free_task("s2")),
+        ]);
+        let world = WorldState::default(); // all triggers off
+        assert!(!orch.should_replan(&world));
+    }
+
+    /// New errors trigger a replan even when the ledger says Continue.
+    #[test]
+    fn should_replan_true_on_errors_detected() {
+        let mut orch = Orchestrator::new("fix the build");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+        let world = WorldState::builder().errors_detected(true).build();
+        assert!(orch.should_replan(&world));
+    }
+
+    /// Agent flatlined triggers a replan.
+    #[test]
+    fn should_replan_true_on_agent_flatlined() {
+        let mut orch = Orchestrator::new("build feature");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+        let world = WorldState::builder().agent_flatlined(true).build();
+        assert!(orch.should_replan(&world));
+    }
+
+    /// User input arriving triggers a replan (user may have changed direction).
+    #[test]
+    fn should_replan_true_on_user_input() {
+        let mut orch = Orchestrator::new("deploy staging");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+        let world = WorldState::builder().user_input_arrived(true).build();
+        assert!(orch.should_replan(&world));
+    }
+
+    /// Goal changing triggers a replan.
+    #[test]
+    fn should_replan_true_on_goal_changed() {
+        let mut orch = Orchestrator::new("old goal");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+        let world = WorldState::builder().goal_changed(true).build();
+        assert!(orch.should_replan(&world));
+    }
+
+    /// Time budget exhausted triggers a replan.
+    #[test]
+    fn should_replan_true_on_time_budget_exhausted() {
+        let mut orch = Orchestrator::new("long running task");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+        let world = WorldState::builder().time_budget_exhausted(true).build();
+        assert!(orch.should_replan(&world));
+    }
+
+    /// Ledger stall counter exceeded triggers a replan even with no world triggers.
+    #[test]
+    fn should_replan_true_on_ledger_stall() {
+        let mut orch = Orchestrator::new("stuck goal");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+        // Drive stall_counter past the threshold (default 2).
+        orch.ledger_mut().stall_counter = 3;
+        let world = WorldState::default();
+        assert!(orch.should_replan(&world));
+    }
+
+    /// All steps failed → ledger says Replan → should_replan returns true.
+    #[test]
+    fn should_replan_true_on_all_steps_failed() {
+        let mut orch = Orchestrator::new("failing goal");
+        let mut s1 = PlanStep::new("s1", free_task("s1"));
+        s1.status = StepStatus::Failed;
+        orch.set_plan(vec![s1]);
+        let world = WorldState::default();
+        assert!(orch.should_replan(&world));
+    }
+
+    /// All steps succeeded → ledger says Complete → should_replan returns false
+    /// (no point generating a new plan when goal is already done).
+    #[test]
+    fn should_replan_false_when_complete() {
+        let mut orch = Orchestrator::new("done goal");
+        let mut s1 = PlanStep::new("s1", free_task("s1"));
+        s1.status = StepStatus::Done;
+        orch.set_plan(vec![s1]);
+        let world = WorldState::default();
+        assert!(!orch.should_replan(&world));
+    }
+
+    /// Replan budget exhausted → ledger says GiveUp → should_replan returns true
+    /// (caller needs to act on the give-up, not silently continue).
+    #[test]
+    fn should_replan_true_on_giveup() {
+        let mut orch = Orchestrator::new("hopeless goal");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+        orch.ledger_mut().replan_count = 5; // equals max_replans
+        let world = WorldState::default();
+        assert!(orch.should_replan(&world));
+    }
+
+    // -- Orchestrator::dispatch_next_step ----------------------------------
+
+    /// Returns None when the plan is empty.
+    #[test]
+    fn dispatch_next_step_none_on_empty_plan() {
+        let orch = Orchestrator::new("goal with no plan");
+        assert!(orch.dispatch_next_step().is_none());
+    }
+
+    /// Returns the first Pending step.
+    #[test]
+    fn dispatch_next_step_returns_first_pending() {
+        let mut orch = Orchestrator::new("test");
+        orch.set_plan(vec![
+            PlanStep::new("step A", free_task("a")),
+            PlanStep::new("step B", free_task("b")),
+        ]);
+        let step = orch.dispatch_next_step().expect("should return step A");
+        assert_eq!(step.description, "step A");
+    }
+
+    /// Skips Done steps and returns the next Pending one.
+    #[test]
+    fn dispatch_next_step_skips_done_steps() {
+        let mut orch = Orchestrator::new("test");
+        let mut s1 = PlanStep::new("done step", free_task("d"));
+        s1.status = StepStatus::Done;
+        let s2 = PlanStep::new("pending step", free_task("p"));
+        orch.set_plan(vec![s1, s2]);
+
+        let step = orch.dispatch_next_step().expect("should return pending step");
+        assert_eq!(step.description, "pending step");
+    }
+
+    /// Returns None when all steps are Done.
+    #[test]
+    fn dispatch_next_step_none_when_all_done() {
+        let mut orch = Orchestrator::new("test");
+        let mut s1 = PlanStep::new("s1", free_task("s1"));
+        s1.status = StepStatus::Done;
+        orch.set_plan(vec![s1]);
+
+        assert!(orch.dispatch_next_step().is_none());
+    }
+
+    /// Returns None when all steps are Active (another step already running).
+    #[test]
+    fn dispatch_next_step_none_when_all_active() {
+        let mut orch = Orchestrator::new("test");
+        let mut s1 = PlanStep::new("s1", free_task("s1"));
+        s1.status = StepStatus::Active;
+        orch.set_plan(vec![s1]);
+
+        assert!(orch.dispatch_next_step().is_none());
+    }
+
+    /// Dispatch is idempotent: calling it twice returns the same pending step
+    /// because it does not mutate ledger state.
+    #[test]
+    fn dispatch_next_step_is_idempotent() {
+        let mut orch = Orchestrator::new("test");
+        orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
+
+        let first = orch.dispatch_next_step();
+        let second = orch.dispatch_next_step();
+        assert!(first.is_some());
+        assert!(second.is_some());
+        assert_eq!(
+            first.unwrap().description,
+            second.unwrap().description,
+            "dispatch_next_step must not mutate ledger"
+        );
+    }
+
+    /// After the caller manually marks a step Active, dispatch_next_step moves
+    /// to the following Pending step — correct sequencing in the outer loop.
+    #[test]
+    fn dispatch_next_step_sequences_correctly_after_activation() {
+        let mut orch = Orchestrator::new("test");
+        orch.set_plan(vec![
+            PlanStep::new("step 1", free_task("s1")),
+            PlanStep::new("step 2", free_task("s2")),
+        ]);
+
+        // Caller takes step 1 and marks it Active.
+        let step1 = orch.dispatch_next_step().expect("step 1");
+        assert_eq!(step1.description, "step 1");
+        orch.ledger_mut().plan[0].status = StepStatus::Active;
+
+        // Now dispatch should return step 2.
+        let step2 = orch.dispatch_next_step().expect("step 2");
+        assert_eq!(step2.description, "step 2");
     }
 }
