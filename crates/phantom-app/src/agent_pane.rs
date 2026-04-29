@@ -2390,4 +2390,236 @@ mod tests {
             "payload suggested_capability must be 'Act' (RunCommand class), not hardcoded 'Sense'",
         );
     }
+
+    // =========================================================================
+    // #164 — QA: Spawn agent — backtick agent command launches AI agent pane
+    // =========================================================================
+
+    /// Constructing an `AgentPane` with a live channel handle must produce a
+    /// pane in `Working` status (the only active state the pane exposes to the
+    /// GUI).  The pane must also carry the task description verbatim so the
+    /// renderer can label it.
+    #[test]
+    fn spawn_agent_pane_status_is_working() {
+        let (pane, _tx) = agent_with_handle();
+        assert_eq!(
+            pane.status,
+            AgentPaneStatus::Working,
+            "a freshly spawned agent pane must start in Working status"
+        );
+        assert!(
+            pane.api_handle.is_some(),
+            "a freshly spawned agent pane must have a live API handle"
+        );
+    }
+
+    /// The `task` field of the pane carries the human-readable prompt so the
+    /// UI can display it in the pane header without looking up the underlying
+    /// `AgentTask`.
+    #[test]
+    fn spawn_agent_pane_task_matches_prompt() {
+        let (tx, rx) = mpsc::channel();
+        let handle = ApiHandle::from_receiver(rx);
+        let pane = AgentPane {
+            task: "fix the failing tests".into(),
+            status: AgentPaneStatus::Working,
+            output: String::from("● Agent working...\n\n"),
+            api_handle: Some(handle),
+            tool_use_ids: Vec::new(),
+            cached_lines: Vec::new(),
+            cached_len: 0,
+            agent: Agent::new(0, AgentTask::FreeForm { prompt: "fix the failing tests".into() }),
+            pending_tools: Vec::new(),
+            working_dir: ".".into(),
+            claude_config: test_config(),
+            chat_backend: None,
+            consecutive_tool_failures: 0,
+            blocked_event_sink: None,
+            denied_event_sink: None,
+            last_tool_error: None,
+            turn_count: 0,
+            current_assistant_text: String::new(),
+            permissions: PermissionSet::all(),
+            input_tokens: 0,
+            output_tokens: 0,
+            tool_call_count: 0,
+            has_file_edits: false,
+            registry: None,
+            event_log: None,
+            pending_spawn: None,
+            self_ref: None,
+            role: DEFAULT_AGENT_PANE_ROLE,
+            ticket_dispatcher: None,
+            journal: None,
+            snapshot_sink: None,
+            last_failing_capability: None,
+        };
+        let _ = tx; // keep sender alive so handle stays live
+        assert_eq!(pane.task, "fix the failing tests");
+        assert_eq!(pane.status, AgentPaneStatus::Working);
+    }
+
+    /// Multiple panes must each receive a distinct agent ID from the underlying
+    /// `Agent` allocation.  Uniqueness is enforced by `AgentManager::spawn`
+    /// (sequential IDs starting at 1), but we verify the pane's agent id is
+    /// set non-zero even in the test-fixture path by checking the two agents
+    /// get different ids when constructed through the manager.
+    #[test]
+    fn spawn_two_panes_have_unique_agent_ids() {
+        use phantom_agents::manager::AgentManager;
+        use phantom_agents::agent::AgentTask;
+
+        let mut mgr = AgentManager::new(4);
+        let id1 = mgr.spawn(AgentTask::FreeForm { prompt: "task A".into() });
+        let id2 = mgr.spawn(AgentTask::FreeForm { prompt: "task B".into() });
+
+        assert_ne!(id1, id2, "each spawned agent must receive a unique ID");
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+
+        // Verify both are independently retrievable.
+        assert!(mgr.get(id1).is_some());
+        assert!(mgr.get(id2).is_some());
+        assert_eq!(mgr.get(id1).unwrap().id, id1);
+        assert_eq!(mgr.get(id2).unwrap().id, id2);
+    }
+
+    /// Backtick spawn via the manager starts the agent in `Working` status when
+    /// there is available concurrency capacity.
+    #[test]
+    fn manager_spawn_starts_agent_in_working_status() {
+        use phantom_agents::manager::AgentManager;
+        use phantom_agents::agent::{AgentStatus, AgentTask};
+
+        let mut mgr = AgentManager::new(4);
+        let id = mgr.spawn(AgentTask::FreeForm { prompt: "do something".into() });
+
+        let agent = mgr.get(id).expect("spawned agent must be retrievable");
+        assert_eq!(
+            agent.status,
+            AgentStatus::Working,
+            "spawned agent must start in Working status when capacity is available"
+        );
+    }
+
+    // =========================================================================
+    // #167 — QA: Kill agent — backtick kill terminates a running agent cleanly
+    // =========================================================================
+
+    /// Killing a `Working` agent via the `AgentManager` transitions it to
+    /// `Failed` and logs the kill event in its output log.
+    #[test]
+    fn kill_working_agent_transitions_to_failed() {
+        use phantom_agents::manager::AgentManager;
+        use phantom_agents::agent::{AgentStatus, AgentTask};
+
+        let mut mgr = AgentManager::new(4);
+        let id = mgr.spawn(AgentTask::FreeForm { prompt: "long running task".into() });
+
+        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Working);
+
+        let killed = mgr.kill(id);
+        assert!(killed, "kill() must return true for a Working agent");
+        assert_eq!(
+            mgr.get(id).unwrap().status,
+            AgentStatus::Failed,
+            "killed agent must be in Failed state"
+        );
+    }
+
+    /// After a kill, the agent's output log must contain the kill acknowledgement
+    /// so the GUI can show the user that the agent was terminated deliberately.
+    #[test]
+    fn kill_agent_appends_kill_log_entry() {
+        use phantom_agents::manager::AgentManager;
+        use phantom_agents::agent::AgentTask;
+
+        let mut mgr = AgentManager::new(4);
+        let id = mgr.spawn(AgentTask::FreeForm { prompt: "task".into() });
+        mgr.kill(id);
+
+        let agent = mgr.get(id).unwrap();
+        assert!(
+            agent.output_log.iter().any(|l| l.contains("killed")),
+            "killed agent output_log must contain a kill annotation; got: {:?}",
+            agent.output_log,
+        );
+    }
+
+    /// Killing a `Done` agent must be a no-op: the agent stays `Done` and
+    /// `kill()` returns `false` because there is nothing to terminate.
+    #[test]
+    fn kill_terminal_agent_is_noop() {
+        use phantom_agents::manager::AgentManager;
+        use phantom_agents::agent::{AgentStatus, AgentTask};
+
+        let mut mgr = AgentManager::new(4);
+        let id = mgr.spawn(AgentTask::FreeForm { prompt: "already done".into() });
+        mgr.get_mut(id).unwrap().complete(true);
+        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Done);
+
+        let killed = mgr.kill(id);
+        assert!(!killed, "kill() on a Done agent must return false");
+        assert_eq!(
+            mgr.get(id).unwrap().status,
+            AgentStatus::Done,
+            "status must not change for a terminal agent"
+        );
+    }
+
+    /// When an `AgentPane` receives an `Error` event (e.g. from an external
+    /// kill signal injected via the API channel), it transitions to `Failed`
+    /// and drops the API handle — this mirrors what a hard kill does.
+    #[test]
+    fn pane_kill_via_error_event_transitions_to_failed_and_drops_handle() {
+        let (mut pane, tx) = agent_with_handle();
+        assert_eq!(pane.status, AgentPaneStatus::Working);
+        assert!(pane.api_handle.is_some());
+
+        // Simulate an external kill by injecting an Error event.
+        tx.send(ApiEvent::Error("killed by user".into())).expect("send must succeed");
+        pane.poll();
+
+        assert_eq!(
+            pane.status,
+            AgentPaneStatus::Failed,
+            "pane must be Failed after receiving an Error event"
+        );
+        assert!(
+            pane.api_handle.is_none(),
+            "API handle must be dropped after termination"
+        );
+        assert!(
+            pane.output.contains("killed by user"),
+            "kill reason must appear in pane output"
+        );
+    }
+
+    /// `kill_all` terminates every non-terminal agent and returns the correct count.
+    /// Agents already in a terminal state (`Done`, `Failed`, `Flatline`) must
+    /// be left untouched.
+    #[test]
+    fn kill_all_terminates_all_active_agents_and_skips_terminal() {
+        use phantom_agents::manager::AgentManager;
+        use phantom_agents::agent::{AgentStatus, AgentTask};
+
+        let mut mgr = AgentManager::new(4);
+        let id1 = mgr.spawn(AgentTask::FreeForm { prompt: "a".into() });
+        let id2 = mgr.spawn(AgentTask::FreeForm { prompt: "b".into() });
+        let id3 = mgr.spawn(AgentTask::FreeForm { prompt: "c".into() });
+
+        // Mark one as already done.
+        mgr.get_mut(id3).unwrap().complete(true);
+        assert_eq!(mgr.get(id3).unwrap().status, AgentStatus::Done);
+
+        let count = mgr.kill_all();
+        assert_eq!(count, 2, "kill_all must kill exactly the two active agents");
+        assert_eq!(mgr.get(id1).unwrap().status, AgentStatus::Failed);
+        assert_eq!(mgr.get(id2).unwrap().status, AgentStatus::Failed);
+        assert_eq!(
+            mgr.get(id3).unwrap().status,
+            AgentStatus::Done,
+            "terminal agent must not be affected by kill_all"
+        );
+    }
 }

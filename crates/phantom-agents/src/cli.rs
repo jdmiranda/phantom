@@ -1458,4 +1458,131 @@ mod tests {
             other => panic!("expected SpawnWithFlags, got {other:?}"),
         }
     }
+
+    // =========================================================================
+    // #165 — QA: Agent model flag — --model flag routes to the correct model
+    // =========================================================================
+
+    /// `--model claude:claude-opus-4-7` must parse to
+    /// `Claude("claude-opus-4-7")` and backend name must be `"claude"`.
+    #[test]
+    fn model_flag_claude_opus_4_7_resolves_to_correct_model_id() {
+        let cmd = parse_agent_command(r#"agent --model claude:claude-opus-4-7 "task""#)
+            .expect("parse must succeed");
+
+        let flags = match cmd {
+            AgentCommand::SpawnWithFlags { ref flags, .. } => flags.clone(),
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        };
+
+        let model = flags.model.expect("--model flag must be parsed");
+        match &model {
+            ChatModel::Claude(id) => assert_eq!(
+                id, "claude-opus-4-7",
+                "model id must be exactly 'claude-opus-4-7', got '{id}'"
+            ),
+            other => panic!("expected Claude variant, got {other:?}"),
+        }
+        assert_eq!(model.backend_name(), "claude");
+    }
+
+    /// `--model claude:claude-sonnet-4-6` must parse to
+    /// `Claude("claude-sonnet-4-6")`.
+    #[test]
+    fn model_flag_claude_sonnet_4_6_resolves_to_correct_model_id() {
+        let cmd = parse_agent_command(r#"agent --model claude:claude-sonnet-4-6 "task""#)
+            .expect("parse must succeed");
+
+        let flags = match cmd {
+            AgentCommand::SpawnWithFlags { ref flags, .. } => flags.clone(),
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        };
+
+        let model = flags.model.expect("--model flag must be parsed");
+        match &model {
+            ChatModel::Claude(id) => assert_eq!(
+                id, "claude-sonnet-4-6",
+                "model id must be exactly 'claude-sonnet-4-6', got '{id}'"
+            ),
+            other => panic!("expected Claude variant, got {other:?}"),
+        }
+    }
+
+    /// `--model claude:claude-haiku-4-5-20251001` must parse to
+    /// `Claude("claude-haiku-4-5-20251001")`.
+    #[test]
+    fn model_flag_claude_haiku_4_5_20251001_resolves_to_correct_model_id() {
+        let cmd =
+            parse_agent_command(r#"agent --model claude:claude-haiku-4-5-20251001 "task""#)
+                .expect("parse must succeed");
+
+        let flags = match cmd {
+            AgentCommand::SpawnWithFlags { ref flags, .. } => flags.clone(),
+            other => panic!("expected SpawnWithFlags, got {other:?}"),
+        };
+
+        let model = flags.model.expect("--model flag must be parsed");
+        match &model {
+            ChatModel::Claude(id) => assert_eq!(
+                id, "claude-haiku-4-5-20251001",
+                "model id must be exactly 'claude-haiku-4-5-20251001', got '{id}'"
+            ),
+            other => panic!("expected Claude variant, got {other:?}"),
+        }
+    }
+
+    /// An unknown model spec without a recognised backend prefix returns `None`
+    /// from `ChatModel::from_env_str` — the boundary callers use to detect
+    /// unrecognised inputs.
+    #[test]
+    fn model_flag_unknown_env_str_returns_none() {
+        let unknown_inputs = [
+            "notamodel",
+            "",
+            "totally-unknown-provider:foo",
+            "??bad??",
+        ];
+        for input in &unknown_inputs {
+            let result = ChatModel::from_env_str(input);
+            assert!(
+                result.is_none(),
+                "from_env_str({input:?}) must return None for an unknown model spec, got {result:?}"
+            );
+        }
+    }
+
+    /// All three target Claude model IDs must round-trip through
+    /// `AgentSpawnOpts::resolve_model()` unchanged when set explicitly.
+    #[test]
+    fn model_flag_all_three_claude_models_resolve_correctly() {
+        use crate::agent::{AgentSpawnOpts, AgentTask};
+
+        let cases = [
+            ("claude-opus-4-7", ChatModel::Claude("claude-opus-4-7".into())),
+            ("claude-sonnet-4-6", ChatModel::Claude("claude-sonnet-4-6".into())),
+            (
+                "claude-haiku-4-5-20251001",
+                ChatModel::Claude("claude-haiku-4-5-20251001".into()),
+            ),
+        ];
+
+        for (expected_id, model) in &cases {
+            let task = AgentTask::FreeForm { prompt: "test".into() };
+            let mut opts = AgentSpawnOpts::new(task);
+            opts.chat_model = Some(model.clone());
+
+            let resolved = opts.resolve_model();
+            match &resolved {
+                ChatModel::Claude(id) => assert_eq!(
+                    id.as_str(),
+                    *expected_id,
+                    "resolve_model() must return '{expected_id}', got '{id}'"
+                ),
+                other => panic!(
+                    "expected Claude variant for {expected_id:?}, got {other:?}"
+                ),
+            }
+            assert_eq!(resolved.backend_name(), "claude");
+        }
+    }
 }
