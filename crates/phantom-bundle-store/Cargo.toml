@@ -70,6 +70,8 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 # Enable the `testing` helpers for integration tests in `tests/`.
 phantom-bundle-store = { path = ".", features = ["testing"] }
+# Needed by the pipeline smoke tests to exercise the vision/dedup layer.
+phantom-vision = { path = "../phantom-vision" }
 
 [lints]
 workspace = true

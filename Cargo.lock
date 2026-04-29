@@ -5361,6 +5361,7 @@ dependencies = [
  "phantom-bundle-store",
  "phantom-bundles",
  "phantom-embeddings",
+ "phantom-vision",
  "rand 0.8.6",
  "rusqlite",
  "serde",
