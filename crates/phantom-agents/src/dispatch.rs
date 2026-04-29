@@ -1290,6 +1290,127 @@ mod tests {
         );
     }
 
+    /// Issue #170 — QA: quarantine release — clean calls succeed post-release.
+    ///
+    /// An agent is auto-quarantined by driving 3 consecutive `TaintLevel::Tainted`
+    /// observations through `check_and_escalate` (matching the default threshold).
+    /// After `release`, the agent's state must be `Clean` and a permitted tool
+    /// call dispatched through `dispatch_tool` must succeed — not be blocked as
+    /// if still quarantined.
+    ///
+    /// Steps:
+    /// 1. Drive 3 `Tainted` events → assert `QuarantineState::Quarantined`.
+    /// 2. Call `release` → assert `QuarantineState::Clean`.
+    /// 3. Dispatch a permitted `read_file` → assert `success: true`.
+    #[test]
+    fn dispatch_succeeds_after_quarantine_release() {
+        use crate::quarantine::{QuarantineRegistry, QuarantineState};
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("data.txt"), "post-release-content").unwrap();
+
+        let agent_id = 170u64;
+
+        // Step 1 — auto-quarantine via 3 consecutive Tainted observations.
+        let quarantine = Arc::new(Mutex::new(QuarantineRegistry::new()));
+        {
+            let mut reg = quarantine.lock().unwrap();
+            for i in 0..3 {
+                reg.check_and_escalate(
+                    agent_id,
+                    TaintLevel::Tainted,
+                    1_000 + i as u64,
+                    format!("capability denied offense {}", i + 1),
+                );
+            }
+            assert!(
+                reg.agent_is_quarantined(agent_id),
+                "agent must be quarantined after 3 consecutive Tainted observations"
+            );
+            assert!(
+                matches!(reg.state_of(agent_id), QuarantineState::Quarantined { .. }),
+                "state must be Quarantined before release"
+            );
+        }
+
+        // Confirm the quarantine gate blocks dispatch before release.
+        {
+            let ctx = DispatchContext {
+                self_ref: AgentRef::new(
+                    agent_id,
+                    AgentRole::Conversational,
+                    "offender",
+                    SpawnSource::User,
+                ),
+                role: AgentRole::Conversational,
+                working_dir: tmp.path(),
+                registry: Arc::new(Mutex::new(AgentRegistry::new())),
+                event_log: None,
+                pending_spawn: new_spawn_subagent_queue(),
+                source_event_id: None,
+                quarantine: Some(Arc::clone(&quarantine)),
+                correlation_id: None,
+                ticket_dispatcher: None,
+            };
+            let blocked = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
+            assert!(
+                !blocked.success,
+                "dispatch must be blocked while quarantined, got success=true"
+            );
+            assert!(
+                blocked.output.contains("quarantined"),
+                "blocked output must mention 'quarantined': {}",
+                blocked.output,
+            );
+        }
+
+        // Step 2 — release the quarantine.
+        {
+            let mut reg = quarantine.lock().unwrap();
+            reg.release(agent_id);
+            assert!(
+                !reg.agent_is_quarantined(agent_id),
+                "agent must not be quarantined after release"
+            );
+            assert_eq!(
+                reg.state_of(agent_id),
+                QuarantineState::Clean,
+                "state must be Clean after release"
+            );
+        }
+
+        // Step 3 — permitted tool call must now succeed.
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(
+                agent_id,
+                AgentRole::Conversational,
+                "released-agent",
+                SpawnSource::User,
+            ),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: Some(Arc::clone(&quarantine)),
+            correlation_id: None,
+            ticket_dispatcher: None,
+        };
+
+        let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
+
+        assert!(
+            res.success,
+            "released agent must be able to dispatch tools, got: {}",
+            res.output
+        );
+        assert_eq!(
+            res.output, "post-release-content",
+            "dispatch must return the file contents after release"
+        );
+    }
+
     /// Sec.7.3: A non-quarantined agent must still dispatch normally even
     /// when a quarantine registry is wired into the context.
     ///
