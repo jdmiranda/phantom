@@ -216,6 +216,16 @@ impl SkillProvenance {
             Some(self.success_count as f64 / total as f64)
         }
     }
+
+    /// Increment the success counter by one.
+    pub(super) fn increment_success(&mut self) {
+        self.success_count += 1;
+    }
+
+    /// Increment the failure counter by one.
+    pub(super) fn increment_failure(&mut self) {
+        self.failure_count += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -376,9 +386,9 @@ impl PersistentSkillRegistry {
             let mut idx = self.index.write().await;
             if let Some(skill) = idx.get_mut(id) {
                 if success {
-                    skill.provenance.success_count += 1;
+                    skill.provenance.increment_success();
                 } else {
-                    skill.provenance.failure_count += 1;
+                    skill.provenance.increment_failure();
                 }
             }
         }
@@ -801,8 +811,10 @@ mod tests {
     #[test]
     fn success_rate_correct() {
         let mut prov = SkillProvenance::new(AgentRef::from("a"));
-        prov.success_count = 3;
-        prov.failure_count = 1;
+        prov.increment_success();
+        prov.increment_success();
+        prov.increment_success();
+        prov.increment_failure();
         let rate = prov.success_rate().unwrap();
         assert!((rate - 0.75).abs() < 1e-10);
     }
