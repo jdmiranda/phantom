@@ -40,8 +40,7 @@ use phantom_adapter::AppId;
 use phantom_bundle_store::{BundleEmbeddings, BundleStore};
 use phantom_bundles::{Bundle, FrameRef};
 use phantom_embeddings::{
-    EmbedItem, EmbedRequest, Embedding, EmbeddingBackend, Modality,
-    openai::OpenAiEmbeddingBackend,
+    EmbedItem, EmbedRequest, Embedding, EmbeddingBackend, Modality, openai::OpenAiEmbeddingBackend,
 };
 use phantom_renderer::screenshot::capture_frame_sub;
 use phantom_vision::{dhash, hamming_distance};
@@ -266,7 +265,9 @@ impl JobPayload for PersistBundleJob {
             EmbeddingBackendKind::OpenAi => match build_openai_embeddings(&self.bundle) {
                 Ok(v) => v,
                 Err(e) => {
-                    log::warn!("embedding pipeline failed for {bundle_id}: {e}; persisting without vectors");
+                    log::warn!(
+                        "embedding pipeline failed for {bundle_id}: {e}; persisting without vectors"
+                    );
                     Vec::new()
                 }
             },
@@ -351,8 +352,8 @@ fn build_openai_embeddings(bundle: &Bundle) -> Result<Vec<BundleEmbeddings>, Str
     let Some(text) = transcript_chunk_for(bundle) else {
         return Ok(Vec::new());
     };
-    let backend = OpenAiEmbeddingBackend::from_env()
-        .map_err(|e| format!("openai backend init: {e}"))?;
+    let backend =
+        OpenAiEmbeddingBackend::from_env().map_err(|e| format!("openai backend init: {e}"))?;
     let request = EmbedRequest {
         modality: Modality::Text,
         items: vec![EmbedItem::Text(text)],
@@ -385,8 +386,8 @@ fn build_openai_embeddings(bundle: &Bundle) -> Result<Vec<BundleEmbeddings>, Str
 /// PNG encoder (default zlib compression) via an in-memory writer. Errors
 /// surface as a `String` so callers can pipe them straight into a log line.
 fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    use image::{ColorType, ImageEncoder};
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::{ColorType, ImageEncoder};
 
     let expected = (width as usize) * (height as usize) * 4;
     if pixels.len() != expected {
@@ -453,7 +454,9 @@ impl crate::app::App {
         // Drop adapters that no longer exist from our state map.
         let live_ids: std::collections::HashSet<AppId> =
             pane_rects.iter().map(|(id, _, _)| *id).collect();
-        self.capture_state.panes.retain(|id, _| live_ids.contains(id));
+        self.capture_state
+            .panes
+            .retain(|id, _| live_ids.contains(id));
 
         // Bundles sealed during this pass — we hand them off to the job
         // pool *after* the per-pane loop so we don't borrow self twice.
@@ -471,20 +474,16 @@ impl crate::app::App {
             pane_state.last_attempt = Some(now);
 
             // GPU readback for this pane's sub-rect. Best-effort: log & skip on error.
-            let pixels = match capture_frame_sub(
-                &self.gpu.device,
-                &self.gpu.queue,
-                texture,
-                origin,
-                extent,
-            ) {
-                Ok(p) if !p.is_empty() => p,
-                Ok(_) => continue, // Empty rect after clamp.
-                Err(e) => {
-                    log::warn!("capture_frame_sub failed for pane {app_id}: {e}");
-                    continue;
-                }
-            };
+            let pixels =
+                match capture_frame_sub(&self.gpu.device, &self.gpu.queue, texture, origin, extent)
+                {
+                    Ok(p) if !p.is_empty() => p,
+                    Ok(_) => continue, // Empty rect after clamp.
+                    Err(e) => {
+                        log::warn!("capture_frame_sub failed for pane {app_id}: {e}");
+                        continue;
+                    }
+                };
 
             // Compute perceptual hash.
             let hash = match dhash(&pixels, extent.0, extent.1) {
@@ -758,8 +757,18 @@ mod tests {
         assert_eq!(state.open_frame_count(), 1, "1 frame open before seal");
 
         // Pull the bundle out (mimics what `seal_pane_bundle` does).
-        let mut sealed = state.panes.get_mut(&pane).unwrap().open_bundle.take().unwrap();
-        sealed.seal(Some("test-boundary".into()), vec!["pane-boundary".into()], 0.5);
+        let mut sealed = state
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .open_bundle
+            .take()
+            .unwrap();
+        sealed.seal(
+            Some("test-boundary".into()),
+            vec!["pane-boundary".into()],
+            0.5,
+        );
 
         assert_eq!(state.open_frame_count(), 0, "0 open frames after take");
         assert!(sealed.sealed, "bundle sealed flag must be set");
@@ -806,7 +815,11 @@ mod tests {
         state.panes.get_mut(&pane_b).unwrap().consecutive_identical = 5;
         assert_eq!(state.consecutive_identical(pane_a), 0);
         assert_eq!(state.consecutive_identical(pane_b), 5);
-        assert_eq!(state.open_frame_count(), 2, "still 2 (A's frames unchanged)");
+        assert_eq!(
+            state.open_frame_count(),
+            2,
+            "still 2 (A's frames unchanged)"
+        );
     }
 
     /// Cadence gate sanity check: a fresh state always allows a capture;
@@ -929,8 +942,10 @@ mod tests {
     // original pixel data via `BundleStore::read_blob`.
 
     /// Build a tempdir-backed [`BundleStore`] for tests.
-    fn open_test_store() -> (tempfile::TempDir, std::sync::Arc<phantom_bundle_store::BundleStore>)
-    {
+    fn open_test_store() -> (
+        tempfile::TempDir,
+        std::sync::Arc<phantom_bundle_store::BundleStore>,
+    ) {
         use phantom_bundle_store::{StoreConfig, testing::deterministic_master_key};
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let key = deterministic_master_key(0x42);

@@ -127,9 +127,11 @@ mod tests {
     #[test]
     fn show_makes_visible() {
         let mut menu = ContextMenu::new();
-        let items = vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-        ];
+        let items = vec![MenuItem {
+            label: "Copy".into(),
+            action: MenuAction::Copy,
+            enabled: true,
+        }];
         menu.show(100.0, 200.0, items);
         assert!(menu.visible);
         assert_eq!(menu.x, 100.0);
@@ -140,9 +142,11 @@ mod tests {
     #[test]
     fn hide_clears_state() {
         let mut menu = ContextMenu::new();
-        let items = vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-        ];
+        let items = vec![MenuItem {
+            label: "Copy".into(),
+            action: MenuAction::Copy,
+            enabled: true,
+        }];
         menu.show(100.0, 200.0, items);
         menu.hide();
         assert!(!menu.visible);
@@ -159,8 +163,16 @@ mod tests {
     fn hit_test_inside_first_item() {
         let mut menu = ContextMenu::new();
         let items = vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-            MenuItem { label: "Paste".into(), action: MenuAction::Paste, enabled: true },
+            MenuItem {
+                label: "Copy".into(),
+                action: MenuAction::Copy,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Paste".into(),
+                action: MenuAction::Paste,
+                enabled: true,
+            },
         ];
         menu.show(100.0, 200.0, items);
 
@@ -172,8 +184,16 @@ mod tests {
     fn hit_test_inside_second_item() {
         let mut menu = ContextMenu::new();
         let items = vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-            MenuItem { label: "Paste".into(), action: MenuAction::Paste, enabled: true },
+            MenuItem {
+                label: "Copy".into(),
+                action: MenuAction::Copy,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Paste".into(),
+                action: MenuAction::Paste,
+                enabled: true,
+            },
         ];
         menu.show(100.0, 200.0, items);
 
@@ -184,9 +204,11 @@ mod tests {
     #[test]
     fn hit_test_outside_x() {
         let mut menu = ContextMenu::new();
-        let items = vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-        ];
+        let items = vec![MenuItem {
+            label: "Copy".into(),
+            action: MenuAction::Copy,
+            enabled: true,
+        }];
         menu.show(100.0, 200.0, items);
 
         // Click outside x range (left of menu)
@@ -198,9 +220,11 @@ mod tests {
     #[test]
     fn hit_test_below_items() {
         let mut menu = ContextMenu::new();
-        let items = vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-        ];
+        let items = vec![MenuItem {
+            label: "Copy".into(),
+            action: MenuAction::Copy,
+            enabled: true,
+        }];
         menu.show(100.0, 200.0, items);
 
         // Click below items: y = 200 + 8 + 28 + 10 = 246
@@ -211,8 +235,16 @@ mod tests {
     fn update_hover_tracks_position() {
         let mut menu = ContextMenu::new();
         let items = vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-            MenuItem { label: "Paste".into(), action: MenuAction::Paste, enabled: true },
+            MenuItem {
+                label: "Copy".into(),
+                action: MenuAction::Copy,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Paste".into(),
+                action: MenuAction::Paste,
+                enabled: true,
+            },
         ];
         menu.show(100.0, 200.0, items);
 

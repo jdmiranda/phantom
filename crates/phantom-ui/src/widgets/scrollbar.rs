@@ -76,7 +76,11 @@ pub struct ScrollState {
 impl ScrollState {
     /// Create a scroll state.
     pub fn new(display_offset: usize, history_size: usize, visible_rows: usize) -> Self {
-        Self { display_offset, history_size, visible_rows }
+        Self {
+            display_offset,
+            history_size,
+            visible_rows,
+        }
     }
 
     /// Lines of history above the visible viewport (0 = scrolled to bottom).
@@ -134,7 +138,12 @@ impl ScrollState {
         }
         let max_travel = track.height - thumb_h;
         let thumb_y = track.y + max_travel * (1.0 - self.scroll_fraction());
-        Some(Rect { x: track.x, y: thumb_y, width: track.width, height: thumb_h })
+        Some(Rect {
+            x: track.x,
+            y: thumb_y,
+            width: track.width,
+            height: thumb_h,
+        })
     }
 }
 
@@ -248,7 +257,12 @@ mod tests {
     // -- Helpers --
 
     fn track() -> Rect {
-        Rect { x: 392.0, y: 50.0, width: 8.0, height: 300.0 }
+        Rect {
+            x: 392.0,
+            y: 50.0,
+            width: 8.0,
+            height: 300.0,
+        }
     }
 
     fn state(offset: usize, history: usize, visible: usize) -> ScrollState {
@@ -428,7 +442,12 @@ mod tests {
 
     #[test]
     fn click_zero_height_always_zero() {
-        let t = Rect { x: 0.0, y: 0.0, width: 8.0, height: 0.0 };
+        let t = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 0.0,
+        };
         let offset = track_y_to_offset(t, 50.0, 500);
         assert_eq!(offset, 0);
     }

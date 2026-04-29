@@ -74,7 +74,10 @@ impl Panel {
     /// let bare       = Panel::new(None);
     /// ```
     pub fn new(title: Option<String>) -> Self {
-        Self { title, ctx: RenderCtx::fallback() }
+        Self {
+            title,
+            ctx: RenderCtx::fallback(),
+        }
     }
 
     /// Convenience constructor for a panel without a title bar.
@@ -100,7 +103,11 @@ impl Panel {
 
     /// Height (px) consumed by the title bar. Returns `0.0` when untitled.
     pub fn title_bar_height(&self) -> f32 {
-        if self.has_title() { TITLE_BAR_HEIGHT } else { 0.0 }
+        if self.has_title() {
+            TITLE_BAR_HEIGHT
+        } else {
+            0.0
+        }
     }
 
     /// The clipped body rectangle — the area inside the border and below the
@@ -119,7 +126,12 @@ impl Panel {
         let width = (outer.width - border * 2.0).max(0.0);
         let height = (outer.height - border * 2.0 - header_h).max(0.0);
 
-        Rect { x, y, width, height }
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
@@ -267,7 +279,12 @@ mod tests {
     /// Standard test rect — 400×300 at (10, 20) so we can verify absolute
     /// positions rather than asserting == 0 for everything.
     fn panel_rect() -> Rect {
-        Rect { x: 10.0, y: 20.0, width: 400.0, height: 300.0 }
+        Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 400.0,
+            height: 300.0,
+        }
     }
 
     fn tokens() -> Tokens {
@@ -313,8 +330,14 @@ mod tests {
         // Body starts immediately after the border on all sides.
         assert!((body.x - (outer.x + border)).abs() < 0.01, "body.x wrong");
         assert!((body.y - (outer.y + border)).abs() < 0.01, "body.y wrong");
-        assert!((body.width - (outer.width - border * 2.0)).abs() < 0.01, "body.width wrong");
-        assert!((body.height - (outer.height - border * 2.0)).abs() < 0.01, "body.height wrong");
+        assert!(
+            (body.width - (outer.width - border * 2.0)).abs() < 0.01,
+            "body.width wrong"
+        );
+        assert!(
+            (body.height - (outer.height - border * 2.0)).abs() < 0.01,
+            "body.height wrong"
+        );
     }
 
     // ── With title bar ────────────────────────────────────────────────────
@@ -333,7 +356,11 @@ mod tests {
     fn titled_renders_one_text_segment() {
         let panel = Panel::new(Some("Agent Log".to_owned()));
         let texts = panel.render_text(&panel_rect());
-        assert_eq!(texts.len(), 1, "titled panel must emit exactly one text segment");
+        assert_eq!(
+            texts.len(),
+            1,
+            "titled panel must emit exactly one text segment"
+        );
         assert_eq!(texts[0].text, "Agent Log");
     }
 
@@ -356,8 +383,16 @@ mod tests {
         let expected_h = outer.height - border * 2.0 - TITLE_BAR_HEIGHT - divider;
 
         assert!((body.x - (outer.x + border)).abs() < 0.01, "body.x wrong");
-        assert!((body.y - expected_y).abs() < 0.01, "body.y wrong: got {}, expected {}", body.y, expected_y);
-        assert!((body.width - (outer.width - border * 2.0)).abs() < 0.01, "body.width wrong");
+        assert!(
+            (body.y - expected_y).abs() < 0.01,
+            "body.y wrong: got {}, expected {}",
+            body.y,
+            expected_y
+        );
+        assert!(
+            (body.width - (outer.width - border * 2.0)).abs() < 0.01,
+            "body.width wrong"
+        );
         assert!((body.height - expected_h).abs() < 0.01, "body.height wrong");
     }
 
@@ -384,7 +419,8 @@ mod tests {
         for quad in &quads[1..5] {
             assert_eq!(
                 quad.color, t.colors.chrome_frame,
-                "border quad must use chrome_frame token, got {:?}", quad.color
+                "border quad must use chrome_frame token, got {:?}",
+                quad.color
             );
         }
     }
@@ -435,13 +471,25 @@ mod tests {
         let quads = panel.render_quads(&outer);
 
         // Top border: size[1] == border thickness
-        assert!((quads[1].size[1] - border).abs() < 0.01, "top border thickness mismatch");
+        assert!(
+            (quads[1].size[1] - border).abs() < 0.01,
+            "top border thickness mismatch"
+        );
         // Bottom border: size[1] == border thickness
-        assert!((quads[2].size[1] - border).abs() < 0.01, "bottom border thickness mismatch");
+        assert!(
+            (quads[2].size[1] - border).abs() < 0.01,
+            "bottom border thickness mismatch"
+        );
         // Left border: size[0] == border thickness
-        assert!((quads[3].size[0] - border).abs() < 0.01, "left border thickness mismatch");
+        assert!(
+            (quads[3].size[0] - border).abs() < 0.01,
+            "left border thickness mismatch"
+        );
         // Right border: size[0] == border thickness
-        assert!((quads[4].size[0] - border).abs() < 0.01, "right border thickness mismatch");
+        assert!(
+            (quads[4].size[0] - border).abs() < 0.01,
+            "right border thickness mismatch"
+        );
     }
 
     #[test]
@@ -450,9 +498,18 @@ mod tests {
         let outer = panel_rect();
         let quads = panel.render_quads(&outer);
         let top_border = &quads[1];
-        assert!((top_border.pos[0] - outer.x).abs() < 0.01, "top border x wrong");
-        assert!((top_border.pos[1] - outer.y).abs() < 0.01, "top border y wrong");
-        assert!((top_border.size[0] - outer.width).abs() < 0.01, "top border width wrong");
+        assert!(
+            (top_border.pos[0] - outer.x).abs() < 0.01,
+            "top border x wrong"
+        );
+        assert!(
+            (top_border.pos[1] - outer.y).abs() < 0.01,
+            "top border y wrong"
+        );
+        assert!(
+            (top_border.size[0] - outer.width).abs() < 0.01,
+            "top border width wrong"
+        );
     }
 
     #[test]
@@ -463,7 +520,10 @@ mod tests {
         let quads = panel.render_quads(&outer);
         let bottom_border = &quads[2];
         let expected_y = outer.y + outer.height - t.frame();
-        assert!((bottom_border.pos[1] - expected_y).abs() < 0.01, "bottom border y wrong");
+        assert!(
+            (bottom_border.pos[1] - expected_y).abs() < 0.01,
+            "bottom border y wrong"
+        );
     }
 
     // ── Body is inside border ─────────────────────────────────────────────
@@ -475,8 +535,14 @@ mod tests {
         let body = panel.body_rect(&outer);
         assert!(body.x > outer.x, "body.x must be inside left border");
         assert!(body.y > outer.y, "body.y must be inside top border");
-        assert!(body.x + body.width < outer.x + outer.width, "body right must be inside right border");
-        assert!(body.y + body.height < outer.y + outer.height, "body bottom must be inside bottom border");
+        assert!(
+            body.x + body.width < outer.x + outer.width,
+            "body right must be inside right border"
+        );
+        assert!(
+            body.y + body.height < outer.y + outer.height,
+            "body bottom must be inside bottom border"
+        );
     }
 
     #[test]
@@ -485,9 +551,18 @@ mod tests {
         let outer = panel_rect();
         let body = panel.body_rect(&outer);
         assert!(body.x > outer.x, "body.x must be inside left border");
-        assert!(body.y > outer.y + TITLE_BAR_HEIGHT, "body.y must be below title bar");
-        assert!(body.x + body.width < outer.x + outer.width, "body right inside border");
-        assert!(body.y + body.height < outer.y + outer.height, "body bottom inside border");
+        assert!(
+            body.y > outer.y + TITLE_BAR_HEIGHT,
+            "body.y must be below title bar"
+        );
+        assert!(
+            body.x + body.width < outer.x + outer.width,
+            "body right inside border"
+        );
+        assert!(
+            body.y + body.height < outer.y + outer.height,
+            "body bottom inside border"
+        );
     }
 
     // ── Dynamic mutation ──────────────────────────────────────────────────
@@ -533,7 +608,12 @@ mod tests {
     #[test]
     fn degenerate_rect_body_clamped_to_zero() {
         let panel = Panel::new(Some("Small".to_owned()));
-        let tiny = Rect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
+        let tiny = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
         let body = panel.body_rect(&tiny);
         // Dimensions must never go negative.
         assert!(body.width >= 0.0, "body.width must not be negative");

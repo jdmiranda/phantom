@@ -152,11 +152,13 @@ impl PhantomConfig {
 
     /// Resolve the theme: load the named built-in, then apply shader overrides.
     pub fn resolve_theme(&self) -> Theme {
-        let mut theme = themes::builtin_by_name(&self.theme_name)
-            .unwrap_or_else(|| {
-                warn!("Unknown theme '{}', falling back to phosphor", self.theme_name);
-                themes::phosphor()
-            });
+        let mut theme = themes::builtin_by_name(&self.theme_name).unwrap_or_else(|| {
+            warn!(
+                "Unknown theme '{}', falling back to phosphor",
+                self.theme_name
+            );
+            themes::phosphor()
+        });
 
         // Apply shader overrides.
         let sp = &mut theme.shader_params;

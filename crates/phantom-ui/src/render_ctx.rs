@@ -21,7 +21,10 @@ pub struct RenderCtx {
 impl RenderCtx {
     /// Construct a `RenderCtx` from cell metrics and DPI scale.
     pub fn new(cell_size: (f32, f32), dpi_scale: f32) -> Self {
-        Self { cell_size, dpi_scale }
+        Self {
+            cell_size,
+            dpi_scale,
+        }
     }
 
     /// Advance width of one monospace cell, in pixels.
@@ -51,7 +54,10 @@ impl RenderCtx {
     /// A safe fallback for tests and code paths that don't yet thread metrics.
     /// Real values flow from the live renderer.
     pub fn fallback() -> Self {
-        Self { cell_size: (8.0, 16.0), dpi_scale: 1.0 }
+        Self {
+            cell_size: (8.0, 16.0),
+            dpi_scale: 1.0,
+        }
     }
 }
 
@@ -127,4 +133,3 @@ mod tests {
         assert_eq!(a.dpi_scale, b.dpi_scale);
     }
 }
-

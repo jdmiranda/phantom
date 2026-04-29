@@ -81,7 +81,11 @@ impl Divider {
     /// [`Self::with_thickness`] to override after construction.
     pub fn new(orientation: Orientation, ctx: RenderCtx) -> Self {
         let thickness = Tokens::phosphor(ctx).hair();
-        Self { orientation, thickness, ctx }
+        Self {
+            orientation,
+            thickness,
+            ctx,
+        }
     }
 
     /// Override the divider thickness in pixels.
@@ -159,11 +163,21 @@ mod tests {
     use crate::tokens::Tokens;
 
     fn h_rect() -> Rect {
-        Rect { x: 0.0, y: 100.0, width: 1920.0, height: 1.0 }
+        Rect {
+            x: 0.0,
+            y: 100.0,
+            width: 1920.0,
+            height: 1.0,
+        }
     }
 
     fn v_rect() -> Rect {
-        Rect { x: 400.0, y: 0.0, width: 1.0, height: 600.0 }
+        Rect {
+            x: 400.0,
+            y: 0.0,
+            width: 1.0,
+            height: 600.0,
+        }
     }
 
     // ── Construction ────────────────────────────────────────────────────────
@@ -209,14 +223,22 @@ mod tests {
     fn horizontal_renders_exactly_one_quad() {
         let d = Divider::horizontal();
         let quads = d.render_quads(&h_rect());
-        assert_eq!(quads.len(), 1, "horizontal divider must emit exactly one quad");
+        assert_eq!(
+            quads.len(),
+            1,
+            "horizontal divider must emit exactly one quad"
+        );
     }
 
     #[test]
     fn vertical_renders_exactly_one_quad() {
         let d = Divider::vertical();
         let quads = d.render_quads(&v_rect());
-        assert_eq!(quads.len(), 1, "vertical divider must emit exactly one quad");
+        assert_eq!(
+            quads.len(),
+            1,
+            "vertical divider must emit exactly one quad"
+        );
     }
 
     #[test]
@@ -252,8 +274,7 @@ mod tests {
         let d = Divider::horizontal();
         let quads = d.render_quads(&h_rect());
         assert_eq!(
-            quads[0].color,
-            tokens.colors.chrome_divider,
+            quads[0].color, tokens.colors.chrome_divider,
             "divider color must come from tokens.colors.chrome_divider — no hardcoded RGBA",
         );
     }
@@ -265,8 +286,7 @@ mod tests {
         let d = Divider::vertical();
         let quads = d.render_quads(&v_rect());
         assert_eq!(
-            quads[0].color,
-            tokens.colors.chrome_divider,
+            quads[0].color, tokens.colors.chrome_divider,
             "divider color must come from tokens.colors.chrome_divider — no hardcoded RGBA",
         );
     }
@@ -291,17 +311,26 @@ mod tests {
         let chrome_divider = tokens.colors.chrome_divider;
 
         // Sanity: the token we rely on must be a real, non-zero color.
-        assert_ne!(chrome_divider, [0.0; 4], "chrome_divider token must not be zeroed");
+        assert_ne!(
+            chrome_divider, [0.0; 4],
+            "chrome_divider token must not be zeroed"
+        );
 
         // Each color role below is distinct from chrome_divider in the
         // phosphor palette; using the wrong field would cause one of these
         // assertions to fail, catching the bug.
-        assert_ne!(chrome_divider, tokens.colors.surface_base,
-            "chrome_divider must differ from surface_base");
-        assert_ne!(chrome_divider, tokens.colors.chrome_frame,
-            "chrome_divider must differ from chrome_frame");
-        assert_ne!(chrome_divider, tokens.colors.text_primary,
-            "chrome_divider must differ from text_primary");
+        assert_ne!(
+            chrome_divider, tokens.colors.surface_base,
+            "chrome_divider must differ from surface_base"
+        );
+        assert_ne!(
+            chrome_divider, tokens.colors.chrome_frame,
+            "chrome_divider must differ from chrome_frame"
+        );
+        assert_ne!(
+            chrome_divider, tokens.colors.text_primary,
+            "chrome_divider must differ from text_primary"
+        );
 
         for orientation in [Orientation::Horizontal, Orientation::Vertical] {
             let d = Divider::new(orientation, ctx);
@@ -312,16 +341,24 @@ mod tests {
             let color = d.render_quads(&rect)[0].color;
 
             // The quad color must be exactly the chrome_divider token.
-            assert_eq!(color, chrome_divider,
-                "quad color for {orientation:?} must equal tokens.colors.chrome_divider");
+            assert_eq!(
+                color, chrome_divider,
+                "quad color for {orientation:?} must equal tokens.colors.chrome_divider"
+            );
 
             // It must not be any of the other tokens (proves correct key routing).
-            assert_ne!(color, tokens.colors.surface_base,
-                "{orientation:?}: color must not be surface_base");
-            assert_ne!(color, tokens.colors.chrome_frame,
-                "{orientation:?}: color must not be chrome_frame");
-            assert_ne!(color, tokens.colors.text_primary,
-                "{orientation:?}: color must not be text_primary");
+            assert_ne!(
+                color, tokens.colors.surface_base,
+                "{orientation:?}: color must not be surface_base"
+            );
+            assert_ne!(
+                color, tokens.colors.chrome_frame,
+                "{orientation:?}: color must not be chrome_frame"
+            );
+            assert_ne!(
+                color, tokens.colors.text_primary,
+                "{orientation:?}: color must not be text_primary"
+            );
         }
     }
 
@@ -330,13 +367,19 @@ mod tests {
     #[test]
     fn horizontal_emits_no_text() {
         let d = Divider::horizontal();
-        assert!(d.render_text(&h_rect()).is_empty(), "dividers carry no text");
+        assert!(
+            d.render_text(&h_rect()).is_empty(),
+            "dividers carry no text"
+        );
     }
 
     #[test]
     fn vertical_emits_no_text() {
         let d = Divider::vertical();
-        assert!(d.render_text(&v_rect()).is_empty(), "dividers carry no text");
+        assert!(
+            d.render_text(&v_rect()).is_empty(),
+            "dividers carry no text"
+        );
     }
 
     // ── Widget trait object safety ─────────────────────────────────────────────

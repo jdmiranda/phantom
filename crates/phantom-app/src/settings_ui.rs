@@ -310,7 +310,9 @@ impl SettingsPanel {
     /// Build a normalized bar (0.0..1.0) for a float setting.
     pub fn bar_fraction(kind: &SettingsKind) -> Option<f32> {
         match kind {
-            SettingsKind::Float { min, max, value, .. } => {
+            SettingsKind::Float {
+                min, max, value, ..
+            } => {
                 let range = max - min;
                 if range > 0.0 {
                     Some((*value - *min) / range)

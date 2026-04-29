@@ -15,11 +15,9 @@ use std::sync::{Arc, RwLock};
 
 use log::{info, warn};
 
-use phantom_agents::inspector::{
-    DenialEntry, InspectorView, MAX_RECENT_DENIALS,
-};
-use phantom_ui::tokens::Tokens;
+use phantom_agents::inspector::{DenialEntry, InspectorView, MAX_RECENT_DENIALS};
 use phantom_ui::RenderCtx;
+use phantom_ui::tokens::Tokens;
 
 use crate::adapters::inspector::InspectorAdapter;
 use crate::app::App;
@@ -68,7 +66,8 @@ impl App {
         let _ = self.layout.resize(width as f32, height as f32);
 
         // Remap the existing terminal/agent's PaneId.
-        self.coordinator.remap_pane(focused_app_id, current_pane_id, existing_child);
+        self.coordinator
+            .remap_pane(focused_app_id, current_pane_id, existing_child);
 
         // Resize the existing pane to fit its new (smaller) bounds.
         if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
@@ -110,16 +109,16 @@ impl App {
 
         let adapter = InspectorAdapter::new(snapshot, inspector_tokens);
 
-        let scene_node = self.scene.add_node(
-            self.scene_content_node,
-            phantom_scene::node::NodeKind::Pane,
-        );
+        let scene_node = self
+            .scene
+            .add_node(self.scene_content_node, phantom_scene::node::NodeKind::Pane);
 
         let app_id = self.coordinator.register_adapter_at_pane(
             Box::new(adapter),
             new_child,
             scene_node,
             phantom_scene::clock::Cadence::unlimited(),
+            &mut self.layout,
         );
 
         // Focus the new inspector pane.
@@ -201,9 +200,7 @@ impl App {
             let source_chain: Vec<u64> = payload
                 .get("source_chain")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter().filter_map(|v| v.as_u64()).collect()
-                })
+                .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
                 .unwrap_or_default();
             // ts_unix_ms on the envelope is i64; clamp negatives to 0 for
             // the unsigned-millisecond contract the renderer expects.

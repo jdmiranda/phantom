@@ -93,12 +93,14 @@ impl VideoPlayback {
 
         // Scale to fit within max dimensions while preserving aspect ratio.
         // Allow upscaling so small videos fill the screen.
-        let scale = (max_width as f32 / orig_w as f32)
-            .min(max_height as f32 / orig_h as f32);
+        let scale = (max_width as f32 / orig_w as f32).min(max_height as f32 / orig_h as f32);
         let width = ((orig_w as f32 * scale) as u32) & !1; // must be even for ffmpeg
         let height = ((orig_h as f32 * scale) as u32) & !1;
 
-        info!("Video: {}x{} @ {fps}fps → scaled to {width}x{height}", orig_w, orig_h);
+        info!(
+            "Video: {}x{} @ {fps}fps → scaled to {width}x{height}",
+            orig_w, orig_h
+        );
 
         let frame_buf = Arc::new(Mutex::new(None::<VideoFrame>));
         let frame_buf_clone = Arc::clone(&frame_buf);
@@ -108,10 +110,13 @@ impl VideoPlayback {
         // Spawn audio playback — separate ffmpeg piping to macOS CoreAudio.
         let audio_process = Command::new(find_binary("ffmpeg"))
             .args([
-                "-i", &path.to_string_lossy(),
-                "-vn",                          // no video
-                "-f", "audiotoolbox",           // macOS CoreAudio output
-                "-v", "error",
+                "-i",
+                &path.to_string_lossy(),
+                "-vn", // no video
+                "-f",
+                "audiotoolbox", // macOS CoreAudio output
+                "-v",
+                "error",
                 "-",
             ])
             .stdin(Stdio::null())
@@ -189,17 +194,24 @@ impl Drop for VideoPlayback {
 fn probe_video(path: &Path) -> Option<(u32, u32, f32)> {
     let output = Command::new(find_binary("ffprobe"))
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate",
-            "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,r_frame_rate",
+            "-of",
+            "csv=p=0",
         ])
         .arg(path)
         .output()
         .ok()?;
 
     if !output.status.success() {
-        warn!("ffprobe failed: {}", String::from_utf8_lossy(&output.stderr));
+        warn!(
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         return None;
     }
 
@@ -237,11 +249,16 @@ fn decode_loop(
 ) {
     let mut child = match Command::new(find_binary("ffmpeg"))
         .args([
-            "-i", &path.to_string_lossy(),
-            "-f", "rawvideo",
-            "-pix_fmt", "rgba",
-            "-s", &format!("{width}x{height}"),
-            "-v", "error",
+            "-i",
+            &path.to_string_lossy(),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &format!("{width}x{height}"),
+            "-v",
+            "error",
             "-",
         ])
         .stdout(Stdio::piped())
@@ -262,7 +279,10 @@ fn decode_loop(
         None => return,
     };
 
-    info!("Video decoder started: {}x{}, frame_size={frame_size}, fps={fps}", width, height);
+    info!(
+        "Video decoder started: {}x{}, frame_size={frame_size}, fps={fps}",
+        width, height
+    );
 
     let frame_interval = std::time::Duration::from_secs_f64(1.0 / fps as f64);
     let start = std::time::Instant::now();

@@ -9,12 +9,7 @@
 
 /// Convert a hex color `#RRGGBB` to `[f32; 4]` with alpha = 1.0.
 const fn hex(r: u8, g: u8, b: u8) -> [f32; 4] {
-    [
-        r as f32 / 255.0,
-        g as f32 / 255.0,
-        b as f32 / 255.0,
-        1.0,
-    ]
+    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
 }
 
 /// Same as [`hex`] but with explicit alpha.
@@ -427,12 +422,12 @@ pub fn pipboy() -> Theme {
             ],
         },
         shader_params: ShaderParams {
-            scanline_intensity: 0.25,  // heavy scanlines — CRT authenticity
-            bloom_intensity: 0.20,     // strong phosphor glow
+            scanline_intensity: 0.25, // heavy scanlines — CRT authenticity
+            bloom_intensity: 0.20,    // strong phosphor glow
             chromatic_aberration: 0.02,
-            curvature: 0.06,           // slight barrel distortion
-            vignette_intensity: 0.22,  // dark corners like a real CRT
-            noise_intensity: 0.04,     // wasteland static
+            curvature: 0.06,          // slight barrel distortion
+            vignette_intensity: 0.22, // dark corners like a real CRT
+            noise_intensity: 0.04,    // wasteland static
             glow_color: rgb3(dim_green),
         },
         ui_colors: UiColors {
@@ -518,11 +513,20 @@ mod tests {
 
         assert_shader_range(&theme.shader_params, n);
 
-        assert_color_range(&theme.ui_colors.status_bar_bg, &format!("{n}.status_bar_bg"));
-        assert_color_range(&theme.ui_colors.status_bar_fg, &format!("{n}.status_bar_fg"));
+        assert_color_range(
+            &theme.ui_colors.status_bar_bg,
+            &format!("{n}.status_bar_bg"),
+        );
+        assert_color_range(
+            &theme.ui_colors.status_bar_fg,
+            &format!("{n}.status_bar_fg"),
+        );
         assert_color_range(&theme.ui_colors.tab_bar_bg, &format!("{n}.tab_bar_bg"));
         assert_color_range(&theme.ui_colors.tab_bar_fg, &format!("{n}.tab_bar_fg"));
-        assert_color_range(&theme.ui_colors.tab_active_bg, &format!("{n}.tab_active_bg"));
+        assert_color_range(
+            &theme.ui_colors.tab_active_bg,
+            &format!("{n}.tab_active_bg"),
+        );
         assert_color_range(&theme.ui_colors.border, &format!("{n}.border"));
     }
 

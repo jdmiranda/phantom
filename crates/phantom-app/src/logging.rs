@@ -7,8 +7,8 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use bitflags::bitflags;
 
@@ -195,7 +195,9 @@ impl log::Log for PhantomLogger {
                 if let Err(_e) = writeln!(f, "{msg}") {
                     let prev = self.file_write_errors.fetch_add(1, Ordering::Relaxed);
                     if prev == 0 {
-                        eprintln!("[phantom-logger] log file write failed — subsequent errors will be silent");
+                        eprintln!(
+                            "[phantom-logger] log file write failed — subsequent errors will be silent"
+                        );
                     }
                 }
             }

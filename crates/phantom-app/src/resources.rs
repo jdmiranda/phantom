@@ -7,8 +7,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 /// Unique resource identifier, derived from the canonical path.
@@ -132,11 +132,7 @@ impl ResourceManager {
     }
 
     /// Complete an async load by inserting the loaded resource data.
-    pub fn complete_load(
-        &self,
-        id: ResourceId,
-        resource: Arc<dyn Resource>,
-    ) -> anyhow::Result<()> {
+    pub fn complete_load(&self, id: ResourceId, resource: Arc<dyn Resource>) -> anyhow::Result<()> {
         let mut resources = self
             .resources
             .lock()
@@ -186,7 +182,9 @@ impl ResourceManager {
             if let Some(entry) = resources.get(&id) {
                 let prev = entry.ref_count.load(Ordering::Relaxed);
                 if prev == 0 {
-                    log::error!("ResourceManager: release() called on {id:?} with ref_count already 0");
+                    log::error!(
+                        "ResourceManager: release() called on {id:?} with ref_count already 0"
+                    );
                     debug_assert!(false, "ref-count underflow on resource {id:?}");
                     return;
                 }

@@ -5,7 +5,7 @@
 //! Thread sleeps when the panel is hidden.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use log::info;
@@ -111,7 +111,11 @@ pub(crate) fn spawn_sysmon() -> SysmonHandle {
         Err(e) => log::warn!("Failed to spawn sysmon thread: {e} — monitor disabled"),
     }
 
-    SysmonHandle { rx, latest: None, active }
+    SysmonHandle {
+        rx,
+        latest: None,
+        active,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,16 +134,25 @@ fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
 
         // Fast metrics first (< 50ms each) so the panel shows data immediately.
         let (mem_used_mb, mem_total_mb) = read_memory();
-        let mem_usage = if mem_total_mb > 0 { mem_used_mb as f32 / mem_total_mb as f32 } else { 0.0 };
+        let mem_usage = if mem_total_mb > 0 {
+            mem_used_mb as f32 / mem_total_mb as f32
+        } else {
+            0.0
+        };
         let (disk_used_gb, disk_total_gb) = read_disk_space();
-        let disk_usage = if disk_total_gb > 0.0 { disk_used_gb / disk_total_gb } else { 0.0 };
+        let disk_usage = if disk_total_gb > 0.0 {
+            disk_used_gb / disk_total_gb
+        } else {
+            0.0
+        };
         let load_avg_1m = read_load_average();
         let (battery_pct, battery_charging, battery_time_remaining) = read_battery();
         let net_connections = read_net_connections();
 
         // Disk I/O delta.
         let curr_disk_io = DiskIoCounters::read();
-        let (disk_read_kbs, disk_write_kbs) = DiskIoCounters::throughput(&prev_disk_io, &curr_disk_io, 2.0);
+        let (disk_read_kbs, disk_write_kbs) =
+            DiskIoCounters::throughput(&prev_disk_io, &curr_disk_io, 2.0);
         prev_disk_io = curr_disk_io;
 
         // Network delta.
@@ -151,12 +164,22 @@ fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
         let fast_stats = SystemStats {
             cpu_usage: 0.0, // placeholder — updated after slow poll
             load_avg_1m,
-            mem_usage, mem_used_mb, mem_total_mb,
-            disk_usage, disk_used_gb, disk_total_gb,
-            disk_read_kbs, disk_write_kbs,
-            net_rx_kbs, net_tx_kbs,
-            battery_pct, battery_charging, battery_time_remaining: battery_time_remaining.clone(),
-            cpu_temp_c: None, gpu_temp_c: None, gpu_usage: None,
+            mem_usage,
+            mem_used_mb,
+            mem_total_mb,
+            disk_usage,
+            disk_used_gb,
+            disk_total_gb,
+            disk_read_kbs,
+            disk_write_kbs,
+            net_rx_kbs,
+            net_tx_kbs,
+            battery_pct,
+            battery_charging,
+            battery_time_remaining: battery_time_remaining.clone(),
+            cpu_temp_c: None,
+            gpu_temp_c: None,
+            gpu_usage: None,
             net_connections,
         };
         let _ = tx.send(fast_stats);
@@ -166,17 +189,30 @@ fn sysmon_loop(tx: mpsc::Sender<SystemStats>, active: Arc<AtomicBool>) {
         let (cpu_temp_c, gpu_temp_c, gpu_usage) = read_powermetrics();
 
         let stats = SystemStats {
-            cpu_usage, load_avg_1m,
-            mem_usage, mem_used_mb, mem_total_mb,
-            disk_usage, disk_used_gb, disk_total_gb,
-            disk_read_kbs, disk_write_kbs,
-            net_rx_kbs, net_tx_kbs,
-            battery_pct, battery_charging, battery_time_remaining,
-            cpu_temp_c, gpu_temp_c, gpu_usage,
+            cpu_usage,
+            load_avg_1m,
+            mem_usage,
+            mem_used_mb,
+            mem_total_mb,
+            disk_usage,
+            disk_used_gb,
+            disk_total_gb,
+            disk_read_kbs,
+            disk_write_kbs,
+            net_rx_kbs,
+            net_tx_kbs,
+            battery_pct,
+            battery_charging,
+            battery_time_remaining,
+            cpu_temp_c,
+            gpu_temp_c,
+            gpu_usage,
             net_connections,
         };
 
-        if tx.send(stats).is_err() { break; }
+        if tx.send(stats).is_err() {
+            break;
+        }
         std::thread::sleep(Duration::from_secs(2));
     }
 }
@@ -221,7 +257,12 @@ fn read_cpu_usage() -> f32 {
     if let Some(idle_str) = text.split("idle").next() {
         let parts: Vec<&str> = idle_str.split(',').collect();
         if let Some(last) = parts.last() {
-            let pct: f32 = last.trim().trim_end_matches('%').trim().parse().unwrap_or(100.0);
+            let pct: f32 = last
+                .trim()
+                .trim_end_matches('%')
+                .trim()
+                .parse()
+                .unwrap_or(100.0);
             return (1.0 - pct / 100.0).clamp(0.0, 1.0);
         }
     }
@@ -230,8 +271,11 @@ fn read_cpu_usage() -> f32 {
 
 fn read_load_average() -> f32 {
     let text = shell_with_timeout("sysctl -n vm.loadavg");
-    text.trim().trim_start_matches('{').trim()
-        .split_whitespace().next()
+    text.trim()
+        .trim_start_matches('{')
+        .trim()
+        .split_whitespace()
+        .next()
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(0.0)
 }
@@ -240,7 +284,10 @@ fn num_cpus_cached() -> usize {
     use std::sync::OnceLock;
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| {
-        shell_with_timeout("sysctl -n hw.ncpu").trim().parse().unwrap_or(4)
+        shell_with_timeout("sysctl -n hw.ncpu")
+            .trim()
+            .parse()
+            .unwrap_or(4)
     })
 }
 
@@ -250,12 +297,20 @@ fn num_cpus_cached() -> usize {
 
 fn read_memory() -> (u64, u64) {
     let total_bytes: u64 = shell_with_timeout("sysctl -n hw.memsize")
-        .trim().parse().unwrap_or(0);
+        .trim()
+        .parse()
+        .unwrap_or(0);
 
     let output = shell_with_timeout("vm_stat");
 
-    let page_size: u64 = output.lines().next()
-        .and_then(|l| l.split("page size of ").nth(1).and_then(|s| s.split(' ').next().and_then(|s| s.parse().ok())))
+    let page_size: u64 = output
+        .lines()
+        .next()
+        .and_then(|l| {
+            l.split("page size of ")
+                .nth(1)
+                .and_then(|s| s.split(' ').next().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(16384);
 
     let mut active: u64 = 0;
@@ -264,10 +319,15 @@ fn read_memory() -> (u64, u64) {
     let mut speculative: u64 = 0;
 
     for line in output.lines() {
-        if line.starts_with("Pages active") { active = vm_val(line); }
-        else if line.starts_with("Pages wired") { wired = vm_val(line); }
-        else if line.starts_with("Pages occupied by compressor") { compressed = vm_val(line); }
-        else if line.starts_with("Pages speculative") { speculative = vm_val(line); }
+        if line.starts_with("Pages active") {
+            active = vm_val(line);
+        } else if line.starts_with("Pages wired") {
+            wired = vm_val(line);
+        } else if line.starts_with("Pages occupied by compressor") {
+            compressed = vm_val(line);
+        } else if line.starts_with("Pages speculative") {
+            speculative = vm_val(line);
+        }
     }
 
     let used = (active + wired + compressed + speculative) * page_size;
@@ -275,7 +335,13 @@ fn read_memory() -> (u64, u64) {
 }
 
 fn vm_val(line: &str) -> u64 {
-    line.split(':').nth(1).unwrap_or("").trim().trim_end_matches('.').parse().unwrap_or(0)
+    line.split(':')
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('.')
+        .parse()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -284,12 +350,15 @@ fn vm_val(line: &str) -> u64 {
 
 fn read_disk_space() -> (f32, f32) {
     let text = shell_with_timeout("df -g /");
-    text.lines().nth(1)
+    text.lines()
+        .nth(1)
         .and_then(|l| {
             let p: Vec<&str> = l.split_whitespace().collect();
             if p.len() >= 4 {
                 Some((p[2].parse().unwrap_or(0.0), p[1].parse().unwrap_or(0.0)))
-            } else { None }
+            } else {
+                None
+            }
         })
         .unwrap_or((0.0, 0.0))
 }
@@ -298,7 +367,10 @@ fn read_disk_space() -> (f32, f32) {
 // Disk I/O
 // ---------------------------------------------------------------------------
 
-struct DiskIoCounters { read_kb: u64, write_kb: u64 }
+struct DiskIoCounters {
+    read_kb: u64,
+    write_kb: u64,
+}
 
 impl DiskIoCounters {
     fn read() -> Self {
@@ -307,9 +379,15 @@ impl DiskIoCounters {
         if parts.len() >= 3 {
             let mb: f64 = parts[2].parse().unwrap_or(0.0);
             let kb = (mb * 1024.0) as u64;
-            Self { read_kb: kb / 2, write_kb: kb / 2 }
+            Self {
+                read_kb: kb / 2,
+                write_kb: kb / 2,
+            }
         } else {
-            Self { read_kb: 0, write_kb: 0 }
+            Self {
+                read_kb: 0,
+                write_kb: 0,
+            }
         }
     }
 
@@ -324,7 +402,10 @@ impl DiskIoCounters {
 // Network throughput
 // ---------------------------------------------------------------------------
 
-struct NetCounters { rx_bytes: u64, tx_bytes: u64 }
+struct NetCounters {
+    rx_bytes: u64,
+    tx_bytes: u64,
+}
 
 impl NetCounters {
     fn read() -> Self {
@@ -333,9 +414,15 @@ impl NetCounters {
         if parts.len() >= 10 {
             let rx: u64 = parts[6].parse().unwrap_or(0);
             let tx: u64 = parts[9].parse().unwrap_or(0);
-            Self { rx_bytes: rx, tx_bytes: tx }
+            Self {
+                rx_bytes: rx,
+                tx_bytes: tx,
+            }
         } else {
-            Self { rx_bytes: 0, tx_bytes: 0 }
+            Self {
+                rx_bytes: 0,
+                tx_bytes: 0,
+            }
         }
     }
 
@@ -348,7 +435,9 @@ impl NetCounters {
 
 fn read_net_connections() -> u32 {
     shell_with_timeout("netstat -an | grep -c ESTABLISHED")
-        .trim().parse().unwrap_or(0)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -364,10 +453,14 @@ fn read_battery() -> (Option<f32>, bool, Option<String>) {
     for line in text.lines() {
         if line.contains('%') {
             if let Some(p) = line.split('%').next() {
-                let num_str: String = p.chars().rev()
+                let num_str: String = p
+                    .chars()
+                    .rev()
                     .take_while(|c| c.is_ascii_digit())
                     .collect::<String>()
-                    .chars().rev().collect();
+                    .chars()
+                    .rev()
+                    .collect();
                 if let Ok(v) = num_str.parse::<f32>() {
                     pct = Some(v);
                 }
@@ -419,7 +512,8 @@ fn read_powermetrics() -> (Option<f32>, Option<f32>, Option<f32>) {
 }
 
 fn extract_temp(line: &str) -> Option<f32> {
-    line.split(':').nth(1)
+    line.split(':')
+        .nth(1)
         .and_then(|s| s.trim().split_whitespace().next())
         .and_then(|s| s.parse::<f32>().ok())
 }
@@ -434,18 +528,31 @@ pub(crate) fn build_resource_bar(label: &str, value: f32, detail: &str) -> Strin
     let clamped = value.clamp(0.0, 1.0);
     let filled = (clamped * BAR_WIDTH as f32).round() as usize;
     let empty = BAR_WIDTH - filled;
-    format!("▮ {:<12} {}{} {}", label, "\u{2588}".repeat(filled), "\u{2591}".repeat(empty), detail)
+    format!(
+        "▮ {:<12} {}{} {}",
+        label,
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(empty),
+        detail
+    )
 }
 
 fn usage_color(v: f32) -> [f32; 4] {
-    if v < 0.5 { [0.2, 1.0, 0.5, 1.0] }
-    else if v < 0.8 { [0.9, 0.9, 0.2, 1.0] }
-    else { [1.0, 0.35, 0.2, 1.0] }
+    if v < 0.5 {
+        [0.2, 1.0, 0.5, 1.0]
+    } else if v < 0.8 {
+        [0.9, 0.9, 0.2, 1.0]
+    } else {
+        [1.0, 0.35, 0.2, 1.0]
+    }
 }
 
 fn format_throughput(kbs: f32) -> String {
-    if kbs >= 1024.0 { format!("{:.1} MB/s", kbs / 1024.0) }
-    else { format!("{:.0} KB/s", kbs) }
+    if kbs >= 1024.0 {
+        format!("{:.1} MB/s", kbs / 1024.0)
+    } else {
+        format!("{:.0} KB/s", kbs)
+    }
 }
 
 pub(crate) fn build_monitor_lines(stats: &SystemStats) -> Vec<(String, [f32; 4])> {
@@ -455,52 +562,106 @@ pub(crate) fn build_monitor_lines(stats: &SystemStats) -> Vec<(String, [f32; 4])
 
     let mut lines = vec![
         // CPU.
-        (build_resource_bar("CPU", stats.cpu_usage, &format!("{:.0}%", stats.cpu_usage * 100.0)),
-         usage_color(stats.cpu_usage)),
+        (
+            build_resource_bar(
+                "CPU",
+                stats.cpu_usage,
+                &format!("{:.0}%", stats.cpu_usage * 100.0),
+            ),
+            usage_color(stats.cpu_usage),
+        ),
         // Memory.
-        (build_resource_bar("MEMORY", stats.mem_usage,
-            &format!("{:.1}/{:.1} GB", stats.mem_used_mb as f32 / 1024.0, stats.mem_total_mb as f32 / 1024.0)),
-         usage_color(stats.mem_usage)),
+        (
+            build_resource_bar(
+                "MEMORY",
+                stats.mem_usage,
+                &format!(
+                    "{:.1}/{:.1} GB",
+                    stats.mem_used_mb as f32 / 1024.0,
+                    stats.mem_total_mb as f32 / 1024.0
+                ),
+            ),
+            usage_color(stats.mem_usage),
+        ),
         // Disk space.
-        (build_resource_bar("DISK", stats.disk_usage,
-            &format!("{:.0}/{:.0} GB", stats.disk_used_gb, stats.disk_total_gb)),
-         usage_color(stats.disk_usage)),
+        (
+            build_resource_bar(
+                "DISK",
+                stats.disk_usage,
+                &format!("{:.0}/{:.0} GB", stats.disk_used_gb, stats.disk_total_gb),
+            ),
+            usage_color(stats.disk_usage),
+        ),
         // Load average.
-        (format!("▮ {:<12} {:.2}  ({} cores)", "LOAD AVG", stats.load_avg_1m, num_cpus),
-         if stats.load_avg_1m > num_cpus as f32 { [1.0, 0.35, 0.2, 1.0] }
-         else if stats.load_avg_1m > num_cpus as f32 * 0.7 { [0.9, 0.9, 0.2, 1.0] }
-         else { [0.2, 1.0, 0.5, 1.0] }),
+        (
+            format!(
+                "▮ {:<12} {:.2}  ({} cores)",
+                "LOAD AVG", stats.load_avg_1m, num_cpus
+            ),
+            if stats.load_avg_1m > num_cpus as f32 {
+                [1.0, 0.35, 0.2, 1.0]
+            } else if stats.load_avg_1m > num_cpus as f32 * 0.7 {
+                [0.9, 0.9, 0.2, 1.0]
+            } else {
+                [0.2, 1.0, 0.5, 1.0]
+            },
+        ),
     ];
 
     // Network throughput.
     let net_bar_val = ((stats.net_rx_kbs + stats.net_tx_kbs) / 10240.0).clamp(0.0, 1.0); // 10MB/s = full
     lines.push((
-        build_resource_bar("NETWORK", net_bar_val,
-            &format!("↓{} ↑{}", format_throughput(stats.net_rx_kbs), format_throughput(stats.net_tx_kbs))),
+        build_resource_bar(
+            "NETWORK",
+            net_bar_val,
+            &format!(
+                "↓{} ↑{}",
+                format_throughput(stats.net_rx_kbs),
+                format_throughput(stats.net_tx_kbs)
+            ),
+        ),
         cyan,
     ));
 
     // Disk I/O.
     let io_bar_val = ((stats.disk_read_kbs + stats.disk_write_kbs) / 102400.0).clamp(0.0, 1.0); // 100MB/s = full
     lines.push((
-        build_resource_bar("DISK I/O", io_bar_val,
-            &format!("R:{} W:{}", format_throughput(stats.disk_read_kbs), format_throughput(stats.disk_write_kbs))),
+        build_resource_bar(
+            "DISK I/O",
+            io_bar_val,
+            &format!(
+                "R:{} W:{}",
+                format_throughput(stats.disk_read_kbs),
+                format_throughput(stats.disk_write_kbs)
+            ),
+        ),
         dim,
     ));
 
     // Network connections.
     lines.push((
-        format!("▮ {:<12} {} established", "CONNECTIONS", stats.net_connections),
+        format!(
+            "▮ {:<12} {} established",
+            "CONNECTIONS", stats.net_connections
+        ),
         dim,
     ));
 
     // Battery (if available).
     if let Some(pct) = stats.battery_pct {
-        let status = if stats.battery_charging { "⚡" } else { "🔋" };
+        let status = if stats.battery_charging {
+            "⚡"
+        } else {
+            "🔋"
+        };
         let time = stats.battery_time_remaining.as_deref().unwrap_or("");
         let batt_frac = pct / 100.0;
         lines.push((
-            build_resource_bar("BATTERY", batt_frac, &format!("{:.0}% {status} {time}", pct)),
+            build_resource_bar(
+                "BATTERY",
+                batt_frac,
+                &format!("{:.0}% {status} {time}", pct),
+            ),
             usage_color(1.0 - batt_frac), // invert: low battery = red
         ));
     }
@@ -515,15 +676,28 @@ pub(crate) fn build_monitor_lines(stats: &SystemStats) -> Vec<(String, [f32; 4])
 
     // Temperatures (if available).
     if stats.cpu_temp_c.is_some() || stats.gpu_temp_c.is_some() {
-        let cpu_t = stats.cpu_temp_c.map(|t| format!("CPU:{:.0}°C", t)).unwrap_or_default();
-        let gpu_t = stats.gpu_temp_c.map(|t| format!("GPU:{:.0}°C", t)).unwrap_or_default();
-        let max_temp = stats.cpu_temp_c.unwrap_or(0.0).max(stats.gpu_temp_c.unwrap_or(0.0));
+        let cpu_t = stats
+            .cpu_temp_c
+            .map(|t| format!("CPU:{:.0}°C", t))
+            .unwrap_or_default();
+        let gpu_t = stats
+            .gpu_temp_c
+            .map(|t| format!("GPU:{:.0}°C", t))
+            .unwrap_or_default();
+        let max_temp = stats
+            .cpu_temp_c
+            .unwrap_or(0.0)
+            .max(stats.gpu_temp_c.unwrap_or(0.0));
         let temp_frac = (max_temp / 100.0).clamp(0.0, 1.0); // 100°C = full
         lines.push((
             build_resource_bar("THERMAL", temp_frac, &format!("{cpu_t} {gpu_t}")),
-            if max_temp > 90.0 { [1.0, 0.35, 0.2, 1.0] }
-            else if max_temp > 70.0 { [0.9, 0.9, 0.2, 1.0] }
-            else { [0.2, 1.0, 0.5, 1.0] },
+            if max_temp > 90.0 {
+                [1.0, 0.35, 0.2, 1.0]
+            } else if max_temp > 70.0 {
+                [0.9, 0.9, 0.2, 1.0]
+            } else {
+                [0.2, 1.0, 0.5, 1.0]
+            },
         ));
     }
 
@@ -540,15 +714,25 @@ mod tests {
 
     fn full_stats() -> SystemStats {
         SystemStats {
-            cpu_usage: 0.25, load_avg_1m: 2.5,
-            mem_usage: 0.60, mem_used_mb: 12288, mem_total_mb: 20480,
-            disk_usage: 0.45, disk_used_gb: 225.0, disk_total_gb: 500.0,
-            disk_read_kbs: 5120.0, disk_write_kbs: 2048.0,
-            net_rx_kbs: 1500.0, net_tx_kbs: 300.0,
-            battery_pct: Some(72.0), battery_charging: true,
+            cpu_usage: 0.25,
+            load_avg_1m: 2.5,
+            mem_usage: 0.60,
+            mem_used_mb: 12288,
+            mem_total_mb: 20480,
+            disk_usage: 0.45,
+            disk_used_gb: 225.0,
+            disk_total_gb: 500.0,
+            disk_read_kbs: 5120.0,
+            disk_write_kbs: 2048.0,
+            net_rx_kbs: 1500.0,
+            net_tx_kbs: 300.0,
+            battery_pct: Some(72.0),
+            battery_charging: true,
             battery_time_remaining: Some("1:30".into()),
-            cpu_temp_c: Some(55.0), gpu_temp_c: Some(48.0),
-            gpu_usage: Some(0.15), net_connections: 42,
+            cpu_temp_c: Some(55.0),
+            gpu_temp_c: Some(48.0),
+            gpu_usage: Some(0.15),
+            net_connections: 42,
         }
     }
 
@@ -609,7 +793,11 @@ mod tests {
     fn sysmon_handle_poll() {
         let (tx, rx) = mpsc::channel();
         let active = Arc::new(AtomicBool::new(false));
-        let mut handle = SysmonHandle { rx, latest: None, active };
+        let mut handle = SysmonHandle {
+            rx,
+            latest: None,
+            active,
+        };
         tx.send(full_stats()).unwrap();
         handle.poll();
         assert!(handle.latest.is_some());

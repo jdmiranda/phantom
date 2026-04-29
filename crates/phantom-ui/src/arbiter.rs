@@ -51,7 +51,10 @@ struct NegEntry {
 impl LayoutArbiter {
     /// Create a new arbiter with the given available content area and cell size.
     pub fn new(available: (f32, f32), cell_size: (f32, f32)) -> Self {
-        Self { available, cell_size }
+        Self {
+            available,
+            cell_size,
+        }
     }
 
     /// Update the available content area (e.g. on window resize).
@@ -81,7 +84,9 @@ impl LayoutArbiter {
             .map(|(id, pref)| {
                 let min_h = pref.min_size.1 as f32 * self.cell_size.1;
                 let mut preferred_h = pref.preferred_size.1 as f32 * self.cell_size.1;
-                let max_h = pref.max_size.map(|(_, rows)| rows as f32 * self.cell_size.1);
+                let max_h = pref
+                    .max_size
+                    .map(|(_, rows)| rows as f32 * self.cell_size.1);
 
                 // Aspect ratio constraint: if set, adjust preferred_h so that
                 // width / height == aspect_ratio. Width is always available_w.
@@ -108,7 +113,11 @@ impl LayoutArbiter {
             .collect();
 
         // Sort by priority descending (stable sort preserves insertion order for ties).
-        entries.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal));
+        entries.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // ------------------------------------------------------------------
         // Phase 1: Check if all minimums fit. If not, deny lowest-priority
@@ -173,20 +182,22 @@ impl LayoutArbiter {
             let eligible: Vec<usize> = entries
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| {
-                    !denied_ids.contains(&e.app_id)
-                        && e.allocated_h < e.preferred_h
-                })
+                .filter(|(_, e)| !denied_ids.contains(&e.app_id) && e.allocated_h < e.preferred_h)
                 .map(|(i, _)| i)
                 .collect();
 
-            let total_priority: f32 = eligible.iter().map(|&i| entries[i].priority.max(0.001)).sum();
+            let total_priority: f32 = eligible
+                .iter()
+                .map(|&i| entries[i].priority.max(0.001))
+                .sum();
 
             if total_priority > 0.0 {
                 for &i in &eligible {
                     let share = remaining * (entries[i].priority.max(0.001) / total_priority);
                     let headroom = entries[i].preferred_h - entries[i].allocated_h;
-                    let max_headroom = entries[i].max_h.map_or(headroom, |mx| (mx - entries[i].allocated_h).max(0.0));
+                    let max_headroom = entries[i]
+                        .max_h
+                        .map_or(headroom, |mx| (mx - entries[i].allocated_h).max(0.0));
                     let grant = share.min(headroom).min(max_headroom);
                     entries[i].allocated_h += grant;
                 }
@@ -304,7 +315,8 @@ impl LayoutArbiter {
                         if let Some((_, pref)) = adjusted.iter_mut().find(|(id, _)| id == app_id) {
                             let cols = (width / self.cell_size.0).round() as u32;
                             let rows = (height / self.cell_size.1).round() as u32;
-                            pref.preferred_size = (cols.max(pref.min_size.0), rows.max(pref.min_size.1));
+                            pref.preferred_size =
+                                (cols.max(pref.min_size.0), rows.max(pref.min_size.1));
                         }
                         any_counter = true;
                     }
@@ -317,7 +329,9 @@ impl LayoutArbiter {
                 }
             }
 
-            if !any_counter { break; }
+            if !any_counter {
+                break;
+            }
             plan = self.negotiate(&adjusted);
         }
 
@@ -375,10 +389,7 @@ mod tests {
         // Total preferred = 40 rows = 640px > 480px.
         // A gets its 20 rows (320px), B gets remaining 160px (10 rows).
         let arbiter = LayoutArbiter::new((640.0, 480.0), (CELL_W, CELL_H));
-        let prefs = vec![
-            (1, make_pref(5, 20, 5.0)),
-            (2, make_pref(5, 20, 1.0)),
-        ];
+        let prefs = vec![(1, make_pref(5, 20, 5.0)), (2, make_pref(5, 20, 1.0))];
         let plan = arbiter.negotiate(&prefs);
 
         assert!(plan.denied.is_empty());
@@ -399,10 +410,7 @@ mod tests {
         // Available: 160px (10 rows). A min=8 rows (128px, p=5), B min=8 rows (128px, p=1).
         // Total min = 256px > 160px. B (lower priority) denied.
         let arbiter = LayoutArbiter::new((640.0, 160.0), (CELL_W, CELL_H));
-        let prefs = vec![
-            (1, make_pref(8, 10, 5.0)),
-            (2, make_pref(8, 10, 1.0)),
-        ];
+        let prefs = vec![(1, make_pref(8, 10, 5.0)), (2, make_pref(8, 10, 1.0))];
         let plan = arbiter.negotiate(&prefs);
 
         assert_eq!(plan.denied.len(), 1);
@@ -416,10 +424,7 @@ mod tests {
         // Available: 800px. A preferred=20 rows (320px), B preferred=15 rows (240px).
         // Total preferred = 560px < 800px. Both get preferred.
         let arbiter = LayoutArbiter::new((640.0, 800.0), (CELL_W, CELL_H));
-        let prefs = vec![
-            (1, make_pref(5, 20, 2.0)),
-            (2, make_pref(5, 15, 1.0)),
-        ];
+        let prefs = vec![(1, make_pref(5, 20, 2.0)), (2, make_pref(5, 15, 1.0))];
         let plan = arbiter.negotiate(&prefs);
 
         assert!(plan.denied.is_empty());
@@ -486,16 +491,17 @@ mod tests {
     #[test]
     fn zero_priority_adapter_gets_minimum() {
         let arbiter = LayoutArbiter::new((640.0, 480.0), (CELL_W, CELL_H));
-        let prefs = vec![
-            (1, make_pref(10, 20, 5.0)),
-            (2, make_pref(5, 20, 0.0)),
-        ];
+        let prefs = vec![(1, make_pref(10, 20, 5.0)), (2, make_pref(5, 20, 0.0))];
         let plan = arbiter.negotiate(&prefs);
 
         assert!(plan.denied.is_empty());
         let r2 = plan.allocations.get(&2).unwrap();
         let min_h = 5.0 * CELL_H; // 80px
-        assert!(r2.height >= min_h - EPSILON, "zero-priority should get at least min: {}", r2.height);
+        assert!(
+            r2.height >= min_h - EPSILON,
+            "zero-priority should get at least min: {}",
+            r2.height
+        );
     }
 
     // 7. Aspect ratio constraint respected.
@@ -511,24 +517,29 @@ mod tests {
 
         let r = plan.allocations.get(&1).unwrap();
         // With aspect ratio 2.0 and width 640, preferred_h becomes 320.
-        assert!(approx_eq(r.height, 320.0), "aspect ratio height: {}", r.height);
+        assert!(
+            approx_eq(r.height, 320.0),
+            "aspect ratio height: {}",
+            r.height
+        );
     }
 
     // 8. request_resize re-negotiates correctly.
     #[test]
     fn request_resize_renegotiates() {
         let arbiter = LayoutArbiter::new((640.0, 480.0), (CELL_W, CELL_H));
-        let prefs = vec![
-            (1, make_pref(5, 15, 2.0)),
-            (2, make_pref(5, 15, 1.0)),
-        ];
+        let prefs = vec![(1, make_pref(5, 15, 2.0)), (2, make_pref(5, 15, 1.0))];
         let plan = arbiter.negotiate(&prefs);
 
         // Now adapter 1 requests to be 20 rows tall (320px).
         let new_plan = arbiter.request_resize(&plan, 1, (640.0, 320.0), &prefs);
 
         let r1 = new_plan.allocations.get(&1).unwrap();
-        assert!(approx_eq(r1.height, 320.0), "resize request height: {}", r1.height);
+        assert!(
+            approx_eq(r1.height, 320.0),
+            "resize request height: {}",
+            r1.height
+        );
     }
 
     // 9. Empty preferences returns empty plan.
@@ -566,10 +577,7 @@ mod tests {
     #[test]
     fn set_available_changes_result() {
         let mut arbiter = LayoutArbiter::new((640.0, 160.0), (CELL_W, CELL_H));
-        let prefs = vec![
-            (1, make_pref(8, 10, 5.0)),
-            (2, make_pref(8, 10, 1.0)),
-        ];
+        let prefs = vec![(1, make_pref(8, 10, 5.0)), (2, make_pref(8, 10, 1.0))];
 
         // With 160px, B is denied (min total = 256px).
         let plan1 = arbiter.negotiate(&prefs);

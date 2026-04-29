@@ -34,9 +34,7 @@ impl ImageHandler {
     /// to 0 if unspecified, meaning "use image native size").
     pub fn handle_command(&mut self, cmd: KittyCommand) -> Option<(DecodedImage, u32, u32)> {
         match cmd.action {
-            KittyAction::Transmit | KittyAction::TransmitAndDisplay => {
-                self.handle_transmit(cmd)
-            }
+            KittyAction::Transmit | KittyAction::TransmitAndDisplay => self.handle_transmit(cmd),
             KittyAction::Delete => {
                 // If there is a pending chunked transfer for this ID, discard it.
                 if let Some(id) = cmd.image_id {
@@ -75,12 +73,7 @@ impl ImageHandler {
             return None;
         }
 
-        let decoded = Self::decode_image(
-            &data,
-            cmd.format,
-            cmd.width,
-            cmd.height,
-        )?;
+        let decoded = Self::decode_image(&data, cmd.format, cmd.width, cmd.height)?;
 
         let display_cols = cmd.display_cols.unwrap_or(0);
         let display_rows = cmd.display_rows.unwrap_or(0);

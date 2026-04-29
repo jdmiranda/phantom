@@ -72,10 +72,9 @@ const SCAN_BEAM_COLOR: [f32; 4] = [0.6, 1.0, 0.8, 0.9];
 // ---------------------------------------------------------------------------
 
 const GLITCH_CHARS: &[char] = &[
-    '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}', '\u{2580}', '\u{2584}',
-    '\u{258C}', '\u{2590}', '\u{2502}', '\u{2524}', '\u{2561}', '\u{2562}',
-    '\u{2556}', '\u{2555}', '\u{2563}', '\u{2551}', '\u{2557}', '\u{255D}',
-    '\u{255C}', '\u{255B}', '\u{2510}', '\u{2514}', '\u{2534}', '\u{252C}',
+    '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}', '\u{2580}', '\u{2584}', '\u{258C}', '\u{2590}',
+    '\u{2502}', '\u{2524}', '\u{2561}', '\u{2562}', '\u{2556}', '\u{2555}', '\u{2563}', '\u{2551}',
+    '\u{2557}', '\u{255D}', '\u{255C}', '\u{255B}', '\u{2510}', '\u{2514}', '\u{2534}', '\u{252C}',
     '\u{251C}', '\u{2500}', '\u{253C}',
 ];
 
@@ -131,11 +130,31 @@ struct SysCheckDef {
 }
 
 const SYSCHECK_DEFS: &[SysCheckDef] = &[
-    SysCheckDef { label: "\u{25A0} NEURAL CORE", dots: " ............ ", status: "ONLINE" },
-    SysCheckDef { label: "\u{25A0} RENDER ENGINE", dots: " .......... ", status: "ACTIVE" },
-    SysCheckDef { label: "\u{25A0} AGENT MESH", dots: " ............. ", status: "SYNCED" },
-    SysCheckDef { label: "\u{25A0} MEMORY BANKS", dots: " ........... ", status: "847 LOADED" },
-    SysCheckDef { label: "\u{25A0} SHADER PIPELINE", dots: " ........ ", status: "CRT ACTIVE" },
+    SysCheckDef {
+        label: "\u{25A0} NEURAL CORE",
+        dots: " ............ ",
+        status: "ONLINE",
+    },
+    SysCheckDef {
+        label: "\u{25A0} RENDER ENGINE",
+        dots: " .......... ",
+        status: "ACTIVE",
+    },
+    SysCheckDef {
+        label: "\u{25A0} AGENT MESH",
+        dots: " ............. ",
+        status: "SYNCED",
+    },
+    SysCheckDef {
+        label: "\u{25A0} MEMORY BANKS",
+        dots: " ........... ",
+        status: "847 LOADED",
+    },
+    SysCheckDef {
+        label: "\u{25A0} SHADER PIPELINE",
+        dots: " ........ ",
+        status: "CRT ACTIVE",
+    },
 ];
 
 /// Kept for backwards compatibility in tests — mirrors SYSCHECK_DEFS labels.
@@ -431,7 +450,9 @@ impl BootSequence {
             BootPhase::CrtWarmup => {
                 let phase_t = (self.elapsed - T_BLACK_END) / (T_WARMUP_END - T_BLACK_END);
                 // Noise clears from center outward. clear_radius grows 0 -> ((self.rows as f32 / 2.0).powi(2) + (self.cols as f32 / 2.0).powi(2)).sqrt().
-                let clear_radius = phase_t * ((self.rows as f32 / 2.0).powi(2) + (self.cols as f32 / 2.0).powi(2)).sqrt() * 1.3;
+                let clear_radius = phase_t
+                    * ((self.rows as f32 / 2.0).powi(2) + (self.cols as f32 / 2.0).powi(2)).sqrt()
+                    * 1.3;
                 self.build_noise_lines(1.0 - phase_t * 0.7, Some(clear_radius), &mut lines);
 
                 // Scan beam: a bright horizontal line sweeping top to bottom once.
@@ -581,7 +602,11 @@ impl BootSequence {
                     if ci < chars_locked || ch == ' ' {
                         ch
                     } else {
-                        noise_char_from_hash(noise_hash(skull_start + i, ci, (self.elapsed * 15.0) as u32))
+                        noise_char_from_hash(noise_hash(
+                            skull_start + i,
+                            ci,
+                            (self.elapsed * 15.0) as u32,
+                        ))
                     }
                 })
                 .collect();
@@ -655,7 +680,11 @@ impl BootSequence {
                 let len = display.chars().count();
                 // Color shifts from dim glitch green to final bright green as chars lock.
                 let lock_fraction = if is_version {
-                    if phase_elapsed > logo_duration { 1.0 } else { 0.0 }
+                    if phase_elapsed > logo_duration {
+                        1.0
+                    } else {
+                        0.0
+                    }
                 } else {
                     (phase_elapsed / logo_duration).clamp(0.0, 1.0)
                 };
@@ -666,7 +695,11 @@ impl BootSequence {
                     color,
                     row: self.logo_start_row() + i,
                     chars_visible: len,
-                    style: if is_version { LineStyle::Normal } else { LineStyle::Logo },
+                    style: if is_version {
+                        LineStyle::Normal
+                    } else {
+                        LineStyle::Logo
+                    },
                 });
             }
         }
@@ -701,7 +734,11 @@ impl BootSequence {
                 color,
                 row: self.logo_start_row() + i,
                 chars_visible: line.chars().count(),
-                style: if is_version { LineStyle::Normal } else { LineStyle::Logo },
+                style: if is_version {
+                    LineStyle::Normal
+                } else {
+                    LineStyle::Logo
+                },
             });
         }
 
@@ -870,7 +907,8 @@ impl BootSequence {
 /// Deterministic pseudo-random hash for noise generation.
 /// Uses position and frame to create varied but repeatable patterns.
 fn noise_hash(row: usize, col: usize, frame: u32) -> u32 {
-    let mut h = (row as u32).wrapping_mul(7919)
+    let mut h = (row as u32)
+        .wrapping_mul(7919)
         .wrapping_add((col as u32).wrapping_mul(6271))
         .wrapping_add(frame.wrapping_mul(173));
     // Mix bits for better distribution.
@@ -897,11 +935,7 @@ fn build_syscheck_text(def: &SysCheckDef, elapsed: f32) -> String {
     let filled = (bar_progress * PROGRESS_BAR_WIDTH as f32) as usize;
     let empty = PROGRESS_BAR_WIDTH - filled;
 
-    let bar: String = format!(
-        "{}{}",
-        "\u{2588}".repeat(filled),
-        "\u{2591}".repeat(empty),
-    );
+    let bar: String = format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty),);
 
     let status = if bar_progress >= 1.0 {
         format!(" {}", def.status)
@@ -1031,8 +1065,14 @@ mod tests {
         let mut seq = BootSequence::new();
         seq.update(2.5); // mid logo reveal
         let lines = seq.visible_text();
-        let logo_lines: Vec<_> = lines.iter().filter(|l| l.style == LineStyle::Logo).collect();
-        assert!(!logo_lines.is_empty(), "expected logo lines during LogoReveal");
+        let logo_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| l.style == LineStyle::Logo)
+            .collect();
+        assert!(
+            !logo_lines.is_empty(),
+            "expected logo lines during LogoReveal"
+        );
     }
 
     #[test]
@@ -1040,7 +1080,10 @@ mod tests {
         let mut seq = BootSequence::new();
         seq.update(5.0); // mid system check
         let lines = seq.visible_text();
-        let status_lines: Vec<_> = lines.iter().filter(|l| l.style == LineStyle::Status).collect();
+        let status_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| l.style == LineStyle::Status)
+            .collect();
         assert!(
             !status_lines.is_empty(),
             "expected status lines during SystemCheck"
@@ -1120,10 +1163,7 @@ mod tests {
         seq.skip(); // jumps to transition
         seq.update(0.25); // mid-transition
         let p = seq.transition_progress();
-        assert!(
-            p > 0.0 && p < 1.0,
-            "expected mid-transition, got {p}"
-        );
+        assert!(p > 0.0 && p < 1.0, "expected mid-transition, got {p}");
 
         // After transition.
         seq = BootSequence::new();
@@ -1169,7 +1209,10 @@ mod tests {
         let early = build_syscheck_text(def, 0.1);
         let late = build_syscheck_text(def, 10.0);
         // Early should not have status text.
-        assert!(!early.contains("ONLINE"), "bar should not be complete at 0.1s");
+        assert!(
+            !early.contains("ONLINE"),
+            "bar should not be complete at 0.1s"
+        );
         // Late should have status text.
         assert!(late.contains("ONLINE"), "bar should be complete at 10.0s");
     }

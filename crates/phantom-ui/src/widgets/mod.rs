@@ -16,17 +16,15 @@ use phantom_renderer::quads::QuadInstance;
 // Re-exported so the App can reference `phantom_ui::widgets::Notification
 // Banner` alongside `StatusBar` / `TabBar`.
 pub mod notification_banner;
-pub use notification_banner::{
-    BannerSeverity, NotificationBanner, NOTIFICATION_BANNER_HEIGHT,
-};
+pub use notification_banner::{BannerSeverity, NOTIFICATION_BANNER_HEIGHT, NotificationBanner};
 
 // Issue #21 — bottom-of-pane status strip (left / center / right slots).
 pub mod status_strip;
-pub use status_strip::{StatusStrip, STATUS_STRIP_HEIGHT};
+pub use status_strip::{STATUS_STRIP_HEIGHT, StatusStrip};
 
 // Issue #22 — chat-style message block for agent panes.
 pub mod message_block;
-pub use message_block::{MessageBlock, MessageRole, AVATAR_GAP, AVATAR_W};
+pub use message_block::{AVATAR_GAP, AVATAR_W, MessageBlock, MessageRole};
 
 // Issue #26 — thin separator line (horizontal / vertical).
 pub mod divider;
@@ -38,22 +36,22 @@ pub use panel::{Panel, TITLE_BAR_HEIGHT};
 
 // Issue #16 — 8px vertical scrollbar with token-driven colors.
 pub mod scrollbar;
-pub use scrollbar::{ScrollState, Scrollbar, SCROLLBAR_WIDTH, track_y_to_offset};
+pub use scrollbar::{SCROLLBAR_WIDTH, ScrollState, Scrollbar, track_y_to_offset};
 
 // Issue #25 — horizontal tab strip with badge and keyboard nav.
 pub mod tab_strip;
 // Note: `Tab` is not re-exported here to avoid a name conflict with the
 // legacy private `Tab` struct used by `TabBar` in this module. Import it
 // directly: `use phantom_ui::widgets::tab_strip::Tab`.
-pub use tab_strip::{TabStrip, TAB_MIN_W};
+pub use tab_strip::{TAB_MIN_W, TabStrip};
 
 // Issue #23 — single-line text input with prompt, cursor, and history.
 pub mod input_bar;
-pub use input_bar::{InputBar, InputKey, INPUT_BAR_HEIGHT};
+pub use input_bar::{INPUT_BAR_HEIGHT, InputBar, InputKey};
 
 // Issue #30 — animated focus-ring overlay keyed to an AppId.
 pub mod focus_ring;
-pub use focus_ring::{FocusRing, FADE_DURATION_MS};
+pub use focus_ring::{FADE_DURATION_MS, FocusRing};
 
 // -----------------------------------------------------------------------
 // Color palette
@@ -467,7 +465,11 @@ mod tests {
     fn tab_bar_empty_renders_background_only() {
         let bar = TabBar::new();
         let quads = bar.render_quads(&bar_rect());
-        assert_eq!(quads.len(), 1, "empty tab bar should have one background quad");
+        assert_eq!(
+            quads.len(),
+            1,
+            "empty tab bar should have one background quad"
+        );
         assert_eq!(quads[0].color, TAB_BAR_BG);
 
         let texts = bar.render_text(&bar_rect());
@@ -550,8 +552,14 @@ mod tests {
 
         let texts = bar.render_text(&bar_rect());
         assert_eq!(texts.len(), 2);
-        assert_eq!(texts[0].color, ACTIVE_TAB_FG, "active tab should use active fg");
-        assert_eq!(texts[1].color, INACTIVE_TAB_FG, "inactive tab should use inactive fg");
+        assert_eq!(
+            texts[0].color, ACTIVE_TAB_FG,
+            "active tab should use active fg"
+        );
+        assert_eq!(
+            texts[1].color, INACTIVE_TAB_FG,
+            "inactive tab should use inactive fg"
+        );
     }
 
     // -- StatusBar tests --
@@ -577,7 +585,10 @@ mod tests {
         assert_eq!(texts.len(), 3);
 
         // Verify time segment content.
-        let time_seg = texts.iter().find(|s| s.text == "14:30").expect("should contain time");
+        let time_seg = texts
+            .iter()
+            .find(|s| s.text == "14:30")
+            .expect("should contain time");
         assert_eq!(time_seg.color, STATUS_BAR_FG);
 
         // Verify branch segment contains the branch icon and name.
@@ -585,7 +596,10 @@ mod tests {
             .iter()
             .find(|s| s.text.contains("develop"))
             .expect("should contain branch");
-        assert!(branch_seg.text.contains('\u{E0A0}'), "branch should have  icon");
+        assert!(
+            branch_seg.text.contains('\u{E0A0}'),
+            "branch should have  icon"
+        );
 
         // Verify cwd segment.
         let cwd_seg = texts

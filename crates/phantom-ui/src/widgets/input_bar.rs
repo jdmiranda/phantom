@@ -282,7 +282,10 @@ impl InputBar {
 
     /// Width in chars of the prompt (0 if absent).
     fn prompt_char_width(&self) -> usize {
-        self.prompt.as_deref().map(|p| p.chars().count()).unwrap_or(0)
+        self.prompt
+            .as_deref()
+            .map(|p| p.chars().count())
+            .unwrap_or(0)
     }
 }
 
@@ -384,7 +387,12 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn input_rect() -> Rect {
-        Rect { x: 0.0, y: 0.0, width: 800.0, height: INPUT_BAR_HEIGHT }
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: INPUT_BAR_HEIGHT,
+        }
     }
 
     fn bare_bar() -> InputBar {

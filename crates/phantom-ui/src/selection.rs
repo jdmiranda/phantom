@@ -130,7 +130,13 @@ impl SelectionRect {
                 let y = oy + sr as f32 * ch;
                 let w = (ec - sc + 1) as f32 * cw;
                 let h = (er - sr + 1) as f32 * ch;
-                vec![PixelRect { x, y, width: w, height: h, alpha }]
+                vec![PixelRect {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    alpha,
+                }]
             }
             SelectionMode::FlowingText => {
                 let mut rects = Vec::new();
@@ -140,7 +146,13 @@ impl SelectionRect {
                     let x = ox + sc as f32 * cw;
                     let y = oy + sr as f32 * ch;
                     let w = (ec - sc + 1) as f32 * cw;
-                    rects.push(PixelRect { x, y, width: w, height: ch, alpha });
+                    rects.push(PixelRect {
+                        x,
+                        y,
+                        width: w,
+                        height: ch,
+                        alpha,
+                    });
                 } else {
                     // First (partial) row: sc → end-of-row.
                     {
@@ -148,7 +160,13 @@ impl SelectionRect {
                         let y = oy + sr as f32 * ch;
                         let cols_remaining = grid_cols.saturating_sub(sc);
                         let w = cols_remaining as f32 * cw;
-                        rects.push(PixelRect { x, y, width: w, height: ch, alpha });
+                        rects.push(PixelRect {
+                            x,
+                            y,
+                            width: w,
+                            height: ch,
+                            alpha,
+                        });
                     }
 
                     // Full middle rows.
@@ -156,7 +174,13 @@ impl SelectionRect {
                         let x = ox;
                         let y = oy + row as f32 * ch;
                         let w = grid_cols as f32 * cw;
-                        rects.push(PixelRect { x, y, width: w, height: ch, alpha });
+                        rects.push(PixelRect {
+                            x,
+                            y,
+                            width: w,
+                            height: ch,
+                            alpha,
+                        });
                     }
 
                     // Last (partial) row: col 0 → ec.
@@ -164,7 +188,13 @@ impl SelectionRect {
                         let x = ox;
                         let y = oy + er as f32 * ch;
                         let w = (ec + 1) as f32 * cw;
-                        rects.push(PixelRect { x, y, width: w, height: ch, alpha });
+                        rects.push(PixelRect {
+                            x,
+                            y,
+                            width: w,
+                            height: ch,
+                            alpha,
+                        });
                     }
                 }
 
@@ -460,9 +490,15 @@ mod tests {
 
     #[test]
     fn pixel_rect_copy_clone_eq() {
-        let pr = PixelRect { x: 1.0, y: 2.0, width: 32.0, height: 16.0, alpha: 0.5 };
-        let pr2 = pr;          // Copy
-        let pr3 = pr.clone();  // Clone
+        let pr = PixelRect {
+            x: 1.0,
+            y: 2.0,
+            width: 32.0,
+            height: 16.0,
+            alpha: 0.5,
+        };
+        let pr2 = pr; // Copy
+        let pr3 = pr.clone(); // Clone
         assert_eq!(pr, pr2);
         assert_eq!(pr, pr3);
     }

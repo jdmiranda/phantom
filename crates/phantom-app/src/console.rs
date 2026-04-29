@@ -18,8 +18,26 @@ pub(crate) enum ConsoleLine {
 
 /// Known commands for tab completion.
 pub(crate) const COMMANDS: &[&str] = &[
-    "agent", "appmon", "boot", "clear", "debug", "exit", "help",
-    "goal", "inspect", "plain", "plugins", "quit", "reload", "selfheal", "selftest", "set", "suggestions", "sysmon", "theme", "video",
+    "agent",
+    "appmon",
+    "boot",
+    "clear",
+    "debug",
+    "exit",
+    "help",
+    "goal",
+    "inspect",
+    "plain",
+    "plugins",
+    "quit",
+    "reload",
+    "selfheal",
+    "selftest",
+    "set",
+    "suggestions",
+    "sysmon",
+    "theme",
+    "video",
 ];
 
 /// Quake-style drop-down console state.
@@ -106,7 +124,11 @@ impl Console {
         self.scroll_offset = 0;
         self.history_index = None;
 
-        if self.command_history.last().map_or(true, |last| last != &cmd) {
+        if self
+            .command_history
+            .last()
+            .map_or(true, |last| last != &cmd)
+        {
             self.command_history.push(cmd.clone());
         }
 
@@ -190,7 +212,12 @@ impl Console {
 
     /// Cycle to the next tab completion match.
     pub fn tab_complete(&mut self) {
-        let prefix = self.input.split_whitespace().next().unwrap_or("").to_lowercase();
+        let prefix = self
+            .input
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
 
         // If we have no matches or the prefix changed, rebuild.
         if self.tab_matches.is_empty() || self.tab_index.is_none() {
@@ -203,7 +230,9 @@ impl Console {
             // Also match against command history.
             for cmd in self.command_history.iter().rev() {
                 let first_word = cmd.split_whitespace().next().unwrap_or("");
-                if first_word.starts_with(&prefix) && !self.tab_matches.contains(&first_word.to_string()) {
+                if first_word.starts_with(&prefix)
+                    && !self.tab_matches.contains(&first_word.to_string())
+                {
                     self.tab_matches.push(first_word.to_string());
                 }
             }
@@ -218,7 +247,8 @@ impl Console {
 
         if let Some(idx) = self.tab_index {
             // Replace the first word in input with the match.
-            let rest: String = self.input
+            let rest: String = self
+                .input
                 .split_whitespace()
                 .skip(1)
                 .collect::<Vec<_>>()

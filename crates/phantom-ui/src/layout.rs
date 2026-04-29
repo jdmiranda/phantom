@@ -26,7 +26,12 @@ pub struct Rect {
 
 impl Rect {
     /// A zero-sized rect at the origin.
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    };
 }
 
 /// Opaque handle to a terminal pane within the layout tree.
@@ -83,7 +88,10 @@ impl LayoutEngine {
 
         let tab_bar = tree
             .new_leaf(Style {
-                size: Size { width: Dimension::Auto, height: Dimension::Length(tab_h) },
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Length(tab_h),
+                },
                 flex_shrink: 0.0,
                 ..Style::default()
             })
@@ -93,14 +101,20 @@ impl LayoutEngine {
             .new_leaf(Style {
                 flex_grow: 1.0,
                 flex_shrink: 1.0,
-                size: Size { width: Dimension::Auto, height: Dimension::Auto },
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Auto,
+                },
                 ..Style::default()
             })
             .context("failed to create content node")?;
 
         let status_bar = tree
             .new_leaf(Style {
-                size: Size { width: Dimension::Auto, height: Dimension::Length(status_h) },
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Length(status_h),
+                },
                 flex_shrink: 0.0,
                 ..Style::default()
             })
@@ -119,14 +133,23 @@ impl LayoutEngine {
                         bottom: LengthPercentage::Length(bottom_pad),
                     },
                     flex_direction: FlexDirection::Column,
-                    size: Size { width: Dimension::Percent(1.0), height: Dimension::Percent(1.0) },
+                    size: Size {
+                        width: Dimension::Percent(1.0),
+                        height: Dimension::Percent(1.0),
+                    },
                     ..Style::default()
                 },
                 &[tab_bar, content, status_bar],
             )
             .context("failed to create root node")?;
 
-        Ok(Self { tree, root, tab_bar, content, status_bar })
+        Ok(Self {
+            tree,
+            root,
+            tab_bar,
+            content,
+            status_bar,
+        })
     }
 
     /// Update the root dimensions and recompute the entire layout.
@@ -149,11 +172,15 @@ impl LayoutEngine {
     /// content area share space equally. Returns a `PaneId` handle that can
     /// be used for splitting, removal, and rect queries.
     pub fn add_pane(&mut self) -> Result<PaneId> {
-        let node = self.tree
+        let node = self
+            .tree
             .new_leaf(Style {
                 flex_grow: 1.0,
                 flex_shrink: 1.0,
-                size: Size { width: Dimension::Auto, height: Dimension::Percent(1.0) },
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Percent(1.0),
+                },
                 ..Style::default()
             })
             .context("failed to create pane node")?;
@@ -212,11 +239,14 @@ impl LayoutEngine {
 
     /// Set the flex_grow weight of a pane (controls how much space it gets).
     pub fn set_flex_grow(&mut self, pane: PaneId, grow: f32) -> Result<()> {
-        let mut style = self.tree.style(pane.0)
+        let mut style = self
+            .tree
+            .style(pane.0)
             .map_err(|e| anyhow::anyhow!("cannot read style: {e}"))?
             .clone();
         style.flex_grow = grow;
-        self.tree.set_style(pane.0, style)
+        self.tree
+            .set_style(pane.0, style)
             .map_err(|e| anyhow::anyhow!("cannot set style: {e}"))
     }
 
@@ -238,6 +268,52 @@ impl LayoutEngine {
     /// Return the number of direct children of the content area.
     pub fn pane_count(&self) -> usize {
         self.tree.child_count(self.content)
+    }
+
+    /// Set `min_size` and `max_size` constraints on an existing pane node.
+    ///
+    /// Both dimensions are expressed in pixels and are mapped to Taffy's
+    /// `min_size` / `max_size` style fields. Pass `None` for either bound
+    /// to clear that constraint (resets to `auto`).
+    ///
+    /// Returns an error if the `PaneId` is not found in the tree.
+    pub fn set_pane_size_constraints(
+        &mut self,
+        pane: PaneId,
+        min_size: Option<(f32, f32)>,
+        max_size: Option<(f32, f32)>,
+    ) -> Result<()> {
+        let mut style = self
+            .tree
+            .style(pane.0)
+            .map_err(|e| anyhow::anyhow!("set_pane_size_constraints: cannot read style: {e}"))?
+            .clone();
+
+        style.min_size = match min_size {
+            Some((w, h)) => Size {
+                width: Dimension::Length(w),
+                height: Dimension::Length(h),
+            },
+            None => Size {
+                width: Dimension::Auto,
+                height: Dimension::Auto,
+            },
+        };
+
+        style.max_size = match max_size {
+            Some((w, h)) => Size {
+                width: Dimension::Length(w),
+                height: Dimension::Length(h),
+            },
+            None => Size {
+                width: Dimension::Auto,
+                height: Dimension::Auto,
+            },
+        };
+
+        self.tree
+            .set_style(pane.0, style)
+            .map_err(|e| anyhow::anyhow!("set_pane_size_constraints: cannot set style: {e}"))
     }
 
     /// Return the total number of nodes in the underlying Taffy tree.
@@ -268,12 +344,21 @@ impl LayoutEngine {
         let child_style = Style {
             flex_grow: 1.0,
             flex_shrink: 1.0,
-            size: Size { width: Dimension::Auto, height: Dimension::Auto },
+            size: Size {
+                width: Dimension::Auto,
+                height: Dimension::Auto,
+            },
             ..Style::default()
         };
 
-        let left = self.tree.new_leaf(child_style.clone()).context("failed to create left split pane")?;
-        let right = self.tree.new_leaf(child_style).context("failed to create right split pane")?;
+        let left = self
+            .tree
+            .new_leaf(child_style.clone())
+            .context("failed to create left split pane")?;
+        let right = self
+            .tree
+            .new_leaf(child_style)
+            .context("failed to create right split pane")?;
 
         // Convert the existing pane node into a flex container by updating its style
         // and attaching the two new children.
@@ -285,14 +370,21 @@ impl LayoutEngine {
                     flex_direction: direction,
                     flex_grow: 1.0,
                     flex_shrink: 1.0,
-                    size: Size { width: Dimension::Auto, height: Dimension::Auto },
+                    size: Size {
+                        width: Dimension::Auto,
+                        height: Dimension::Auto,
+                    },
                     ..Style::default()
                 },
             )
             .context("failed to restyle pane as split container")?;
 
-        self.tree.add_child(pane_node, left).context("failed to add left child")?;
-        self.tree.add_child(pane_node, right).context("failed to add right child")?;
+        self.tree
+            .add_child(pane_node, left)
+            .context("failed to add left child")?;
+        self.tree
+            .add_child(pane_node, right)
+            .context("failed to add right child")?;
 
         Ok((PaneId(left), PaneId(right)))
     }
@@ -304,7 +396,9 @@ impl LayoutEngine {
         for child in children {
             self.remove_subtree(child)?;
         }
-        self.tree.remove(node).map_err(|e| anyhow::anyhow!("failed to remove node: {e}"))?;
+        self.tree
+            .remove(node)
+            .map_err(|e| anyhow::anyhow!("failed to remove node: {e}"))?;
         Ok(())
     }
 
@@ -333,9 +427,9 @@ impl LayoutEngine {
             }
             // Record the grandparent before removing so we can continue upward.
             let grandparent = self.tree.parent(node);
-            self.tree
-                .remove(node)
-                .map_err(|e| anyhow::anyhow!("prune_empty_containers: failed to remove orphaned container: {e}"))?;
+            self.tree.remove(node).map_err(|e| {
+                anyhow::anyhow!("prune_empty_containers: failed to remove orphaned container: {e}")
+            })?;
             cursor = grandparent;
         }
         Ok(())
@@ -344,7 +438,10 @@ impl LayoutEngine {
     /// Compute the absolute pixel rectangle for a node by walking up the
     /// parent chain and accumulating offsets.
     fn absolute_rect(&self, node: NodeId) -> Result<Rect> {
-        let layout = self.tree.layout(node).map_err(|e| anyhow::anyhow!("layout query failed: {e}"))?;
+        let layout = self
+            .tree
+            .layout(node)
+            .map_err(|e| anyhow::anyhow!("layout query failed: {e}"))?;
 
         let mut x = layout.location.x;
         let mut y = layout.location.y;
@@ -352,14 +449,21 @@ impl LayoutEngine {
         // Walk ancestors to accumulate absolute position.
         let mut current = node;
         while let Some(parent) = self.tree.parent(current) {
-            let parent_layout =
-                self.tree.layout(parent).map_err(|e| anyhow::anyhow!("parent layout query failed: {e}"))?;
+            let parent_layout = self
+                .tree
+                .layout(parent)
+                .map_err(|e| anyhow::anyhow!("parent layout query failed: {e}"))?;
             x += parent_layout.location.x;
             y += parent_layout.location.y;
             current = parent;
         }
 
-        Ok(Rect { x, y, width: layout.size.width, height: layout.size.height })
+        Ok(Rect {
+            x,
+            y,
+            width: layout.size.width,
+            height: layout.size.height,
+        })
     }
 }
 
@@ -384,9 +488,21 @@ mod tests {
         let tab = engine.get_tab_bar_rect().unwrap();
         let status = engine.get_status_bar_rect().unwrap();
 
-        assert!(approx_eq(tab.y, 0.0), "tab bar should start at top: got {}", tab.y);
-        assert!(approx_eq(tab.height, TAB_BAR_HEIGHT_LOGICAL), "tab bar height: got {}", tab.height);
-        assert!(approx_eq(tab.width, WINDOW_W), "tab bar width: got {}", tab.width);
+        assert!(
+            approx_eq(tab.y, 0.0),
+            "tab bar should start at top: got {}",
+            tab.y
+        );
+        assert!(
+            approx_eq(tab.height, TAB_BAR_HEIGHT_LOGICAL),
+            "tab bar height: got {}",
+            tab.height
+        );
+        assert!(
+            approx_eq(tab.width, WINDOW_W),
+            "tab bar width: got {}",
+            tab.width
+        );
 
         assert!(
             approx_eq(status.y + status.height + BOTTOM_PAD, WINDOW_H),
@@ -394,7 +510,11 @@ mod tests {
             status.y,
             status.height,
         );
-        assert!(approx_eq(status.height, STATUS_BAR_HEIGHT_LOGICAL), "status bar height: got {}", status.height);
+        assert!(
+            approx_eq(status.height, STATUS_BAR_HEIGHT_LOGICAL),
+            "status bar height: got {}",
+            status.height
+        );
     }
 
     #[test]
@@ -404,11 +524,24 @@ mod tests {
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
         let rect = engine.get_pane_rect(pane).unwrap();
-        let expected_height = WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
+        let expected_height =
+            WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
 
-        assert!(approx_eq(rect.y, TAB_BAR_HEIGHT_LOGICAL), "pane y: got {}", rect.y);
-        assert!(approx_eq(rect.height, expected_height), "pane height: got {}", rect.height);
-        assert!(approx_eq(rect.width, WINDOW_W), "pane width: got {}", rect.width);
+        assert!(
+            approx_eq(rect.y, TAB_BAR_HEIGHT_LOGICAL),
+            "pane y: got {}",
+            rect.y
+        );
+        assert!(
+            approx_eq(rect.height, expected_height),
+            "pane height: got {}",
+            rect.height
+        );
+        assert!(
+            approx_eq(rect.width, WINDOW_W),
+            "pane width: got {}",
+            rect.width
+        );
     }
 
     #[test]
@@ -422,7 +555,10 @@ mod tests {
         let r2 = engine.get_pane_rect(p2).unwrap();
 
         // Both panes should be side-by-side (content defaults to row).
-        assert!(approx_eq(r1.width + r2.width, WINDOW_W), "widths should sum to window");
+        assert!(
+            approx_eq(r1.width + r2.width, WINDOW_W),
+            "widths should sum to window"
+        );
         assert!(approx_eq(r1.width, r2.width), "widths should be equal");
     }
 
@@ -435,7 +571,10 @@ mod tests {
 
         let r_existing = engine.get_pane_rect(existing).unwrap();
         let r_new = engine.get_pane_rect(new_pane).unwrap();
-        assert!(r_existing.width > 0.0, "existing pane should have positive width");
+        assert!(
+            r_existing.width > 0.0,
+            "existing pane should have positive width"
+        );
         assert!(r_new.width > 0.0, "new pane should have positive width");
         assert!(r_new.height > 0.0, "new pane should have positive height");
     }
@@ -449,7 +588,10 @@ mod tests {
 
         let r_existing = engine.get_pane_rect(existing).unwrap();
         let r_new = engine.get_pane_rect(new_pane).unwrap();
-        assert!(r_existing.width > 0.0, "existing pane should have positive width");
+        assert!(
+            r_existing.width > 0.0,
+            "existing pane should have positive width"
+        );
         assert!(r_new.width > 0.0, "new pane should have positive width");
         assert!(r_new.height > 0.0, "new pane should have positive height");
     }
@@ -521,8 +663,7 @@ mod tests {
 
         let after = engine.total_node_count();
         assert_eq!(
-            after,
-            chrome_baseline,
+            after, chrome_baseline,
             "orphaned split container leaked: expected {chrome_baseline} nodes, got {after}",
         );
     }
@@ -546,8 +687,7 @@ mod tests {
 
             let after = engine.total_node_count();
             assert_eq!(
-                after,
-                baseline,
+                after, baseline,
                 "cycle {cycle}: node count grew from {baseline} to {after}",
             );
         }
@@ -590,9 +730,18 @@ mod tests {
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
         // All three leaves must have positive area.
-        assert!(engine.get_pane_rect(t).unwrap().height > 0.0, "T must have positive height");
-        assert!(engine.get_pane_rect(b).unwrap().height > 0.0, "B must have positive height");
-        assert!(engine.get_pane_rect(r).unwrap().width > 0.0, "R must have positive width");
+        assert!(
+            engine.get_pane_rect(t).unwrap().height > 0.0,
+            "T must have positive height"
+        );
+        assert!(
+            engine.get_pane_rect(b).unwrap().height > 0.0,
+            "B must have positive height"
+        );
+        assert!(
+            engine.get_pane_rect(r).unwrap().width > 0.0,
+            "R must have positive width"
+        );
 
         // Close T: L still has B, nothing pruned yet.
         engine.remove_pane(t).unwrap();
@@ -607,9 +756,70 @@ mod tests {
 
         let after = engine.total_node_count();
         assert_eq!(
-            after,
-            chrome_baseline,
+            after, chrome_baseline,
             "nested split leaked container nodes: expected {chrome_baseline} nodes, got {after}",
+        );
+    }
+
+    // ── set_pane_size_constraints ─────────────────────────────────────────────
+
+    /// Setting min/max constraints on a pane node must be reflected in the
+    /// Taffy style after the call and survive a subsequent layout computation.
+    #[test]
+    fn set_pane_size_constraints_updates_taffy_style() {
+        let mut engine = LayoutEngine::new().unwrap();
+        let pane = engine.add_pane().unwrap();
+
+        // Apply a concrete min/max constraint.
+        engine
+            .set_pane_size_constraints(pane, Some((200.0, 100.0)), Some((400.0, 300.0)))
+            .expect("set_pane_size_constraints should not fail for a valid pane");
+
+        // Taffy must reflect the constraint after recompute.
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+        let rect = engine.get_pane_rect(pane).unwrap();
+
+        // The pane has both a min and a max set to the same value; Taffy
+        // should clamp the allocation to the max (400 wide, 300 tall) at most.
+        assert!(
+            rect.width <= 400.0 + EPSILON,
+            "width {} must not exceed max 400",
+            rect.width,
+        );
+        assert!(
+            rect.height <= 300.0 + EPSILON,
+            "height {} must not exceed max 300",
+            rect.height,
+        );
+    }
+
+    /// Clearing constraints (passing `None`) must restore default auto sizing.
+    #[test]
+    fn set_pane_size_constraints_clear_restores_auto() {
+        let mut engine = LayoutEngine::new().unwrap();
+        let pane = engine.add_pane().unwrap();
+
+        // Constrain, then clear.
+        engine
+            .set_pane_size_constraints(pane, Some((50.0, 50.0)), Some((50.0, 50.0)))
+            .unwrap();
+        engine.set_pane_size_constraints(pane, None, None).unwrap();
+
+        // After clearing, the pane should fill the available space again.
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+        let rect = engine.get_pane_rect(pane).unwrap();
+        let expected_height =
+            WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
+
+        assert!(
+            approx_eq(rect.width, WINDOW_W),
+            "cleared pane should fill full width; got {}",
+            rect.width,
+        );
+        assert!(
+            approx_eq(rect.height, expected_height),
+            "cleared pane should fill content height; got {}",
+            rect.height,
         );
     }
 }

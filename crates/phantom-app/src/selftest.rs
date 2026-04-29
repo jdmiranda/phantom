@@ -222,22 +222,17 @@ impl SelfTestRunner {
                 // can read_file, edit_file, run_command, and git operations
                 // — no external CLI needed. The tool-use loop in agent_pane
                 // handles the execute → re-invoke → iterate cycle.
-                let first_file = self.failures.first()
-                    .and_then(|f| f.files.first().cloned());
+                let first_file = self.failures.first().and_then(|f| f.files.first().cloned());
 
-                app.pending_brain_actions.push(
-                    phantom_brain::events::AiAction::SpawnAgent {
+                app.pending_brain_actions
+                    .push(phantom_brain::events::AiAction::SpawnAgent {
                         task: phantom_agents::AgentTask::FixError {
-                            error_summary: format!(
-                                "{} selftest failure(s)",
-                                self.failures.len()
-                            ),
+                            error_summary: format!("{} selftest failure(s)", self.failures.len()),
                             file: first_file,
                             context: repair_prompt,
                         },
                         spawn_tag: None,
-                    }
-                );
+                    });
 
                 self.heal_stage = HealStage::Repairing;
             }
@@ -245,8 +240,12 @@ impl SelfTestRunner {
                 // The agent is now autonomous — it will read files, edit code,
                 // run tests, and commit via its tool-use loop. The agent pane
                 // shows progress in real-time.
-                output.push("SELFHEAL: Repair agent is autonomous. Watch its pane for progress.".into());
-                output.push("SELFHEAL: The agent can read_file, edit_file, run_command, git_status.".into());
+                output.push(
+                    "SELFHEAL: Repair agent is autonomous. Watch its pane for progress.".into(),
+                );
+                output.push(
+                    "SELFHEAL: The agent can read_file, edit_file, run_command, git_status.".into(),
+                );
                 output.push("SELFHEAL: When done, run `selftest` to verify.".into());
                 self.heal_stage = HealStage::Complete;
                 self.done = true;
@@ -265,14 +264,18 @@ impl SelfTestRunner {
     fn build_combined_repair_prompt(&self) -> String {
         let mut prompt = String::from(
             "Phantom selftest detected the following failures. \
-             Fix each one. The codebase is a Rust workspace with deny(warnings).\n\n"
+             Fix each one. The codebase is a Rust workspace with deny(warnings).\n\n",
         );
         for (i, f) in self.failures.iter().enumerate() {
-            prompt.push_str(&format!("--- Failure {} ---\n{}\n\n", i + 1, f.repair_prompt()));
+            prompt.push_str(&format!(
+                "--- Failure {} ---\n{}\n\n",
+                i + 1,
+                f.repair_prompt()
+            ));
         }
         prompt.push_str(
             "After fixing, run `cargo test --workspace` and ensure 0 failures. \
-             Make the minimal change needed."
+             Make the minimal change needed.",
         );
         prompt
     }
@@ -315,14 +318,16 @@ fn execute_action(action: &TestAction, app: &mut App) {
         TestAction::DetachToFloat => {
             if let Some(focused) = app.coordinator.focused() {
                 if !app.coordinator.is_floating(focused) {
-                    app.coordinator.detach_to_float(focused, &mut app.layout, &mut app.scene);
+                    app.coordinator
+                        .detach_to_float(focused, &mut app.layout, &mut app.scene);
                 }
             }
         }
         TestAction::DockToGrid => {
             if let Some(focused) = app.coordinator.focused() {
                 if app.coordinator.is_floating(focused) {
-                    app.coordinator.dock_to_grid(focused, &mut app.layout, &mut app.scene);
+                    app.coordinator
+                        .dock_to_grid(focused, &mut app.layout, &mut app.scene);
                 }
             }
         }
@@ -337,13 +342,11 @@ fn execute_action(action: &TestAction, app: &mut App) {
             }
         }
         TestAction::OpenContextMenu(x, y) => {
-            let items = vec![
-                crate::context_menu::MenuItem {
-                    label: "Test Item".into(),
-                    action: crate::context_menu::MenuAction::Copy,
-                    enabled: true,
-                },
-            ];
+            let items = vec![crate::context_menu::MenuItem {
+                label: "Test Item".into(),
+                action: crate::context_menu::MenuAction::Copy,
+                enabled: true,
+            }];
             app.context_menu.show(*x, *y, items);
         }
         TestAction::CloseContextMenu => {
@@ -365,59 +368,87 @@ fn execute_action(action: &TestAction, app: &mut App) {
 fn check_result_detailed(check: &TestCheck, app: &App) -> (bool, String) {
     match check {
         TestCheck::SuggestionVisible(text) => {
-            let ok = app.suggestion.as_ref().is_some_and(|s| s.text.contains(text));
-            let actual = app.suggestion.as_ref().map_or("None".into(), |s| s.text.clone());
+            let ok = app
+                .suggestion
+                .as_ref()
+                .is_some_and(|s| s.text.contains(text));
+            let actual = app
+                .suggestion
+                .as_ref()
+                .map_or("None".into(), |s| s.text.clone());
             (ok, format!("suggestion = {actual}"))
         }
         TestCheck::SuggestionHidden => {
             let ok = app.suggestion.is_none();
-            (ok, format!("suggestion present = {}", app.suggestion.is_some()))
+            (
+                ok,
+                format!("suggestion present = {}", app.suggestion.is_some()),
+            )
         }
         TestCheck::HistoryMinLen(n) => {
             let len = app.suggestion_history.len();
             (len >= *n, format!("history len = {len}"))
         }
         TestCheck::FocusedIsFloating => {
-            let floating = app.coordinator.focused().is_some_and(|id| app.coordinator.is_floating(id));
+            let floating = app
+                .coordinator
+                .focused()
+                .is_some_and(|id| app.coordinator.is_floating(id));
             (floating, format!("focused floating = {floating}"))
         }
         TestCheck::FocusedIsTiled => {
-            let tiled = app.coordinator.focused().is_some_and(|id| !app.coordinator.is_floating(id));
+            let tiled = app
+                .coordinator
+                .focused()
+                .is_some_and(|id| !app.coordinator.is_floating(id));
             (tiled, format!("focused tiled = {tiled}"))
         }
         TestCheck::FloatPosition(x, y) => {
-            let pos = app.coordinator.focused()
+            let pos = app
+                .coordinator
+                .focused()
                 .and_then(|id| app.coordinator.float_rect(id))
                 .map(|r| format!("({:.0}, {:.0})", r.x, r.y))
                 .unwrap_or("None".into());
-            let ok = app.coordinator.focused()
+            let ok = app
+                .coordinator
+                .focused()
                 .and_then(|id| app.coordinator.float_rect(id))
                 .is_some_and(|r| (r.x - x).abs() < 5.0 && (r.y - y).abs() < 5.0);
             (ok, format!("position = {pos}"))
         }
         TestCheck::FloatSize(w, h) => {
-            let size = app.coordinator.focused()
+            let size = app
+                .coordinator
+                .focused()
                 .and_then(|id| app.coordinator.float_rect(id))
                 .map(|r| format!("({:.0}, {:.0})", r.width, r.height))
                 .unwrap_or("None".into());
-            let ok = app.coordinator.focused()
+            let ok = app
+                .coordinator
+                .focused()
                 .and_then(|id| app.coordinator.float_rect(id))
                 .is_some_and(|r| (r.width - w).abs() < 5.0 && (r.height - h).abs() < 5.0);
             (ok, format!("size = {size}"))
         }
-        TestCheck::ContextMenuVisible => {
-            (app.context_menu.visible, format!("visible = {}", app.context_menu.visible))
-        }
-        TestCheck::ContextMenuHidden => {
-            (!app.context_menu.visible, format!("visible = {}", app.context_menu.visible))
-        }
+        TestCheck::ContextMenuVisible => (
+            app.context_menu.visible,
+            format!("visible = {}", app.context_menu.visible),
+        ),
+        TestCheck::ContextMenuHidden => (
+            !app.context_menu.visible,
+            format!("visible = {}", app.context_menu.visible),
+        ),
         TestCheck::HasAdapters => {
             let count = app.coordinator.all_app_ids().len();
             (count > 0, format!("adapter count = {count}"))
         }
         TestCheck::BrainAlive => {
             let alive = app.brain.is_some();
-            (alive, format!("brain = {}", if alive { "alive" } else { "dead" }))
+            (
+                alive,
+                format!("brain = {}", if alive { "alive" } else { "dead" }),
+            )
         }
         TestCheck::AlwaysPass => (true, "always".into()),
     }
@@ -445,7 +476,8 @@ fn cleanup_after_test(app: &mut App) {
     app.context_menu.hide();
     let floating: Vec<_> = app.coordinator.floating_ids().collect();
     for id in floating {
-        app.coordinator.dock_to_grid(id, &mut app.layout, &mut app.scene);
+        app.coordinator
+            .dock_to_grid(id, &mut app.layout, &mut app.scene);
     }
 }
 
@@ -465,7 +497,10 @@ fn build_test_suite() -> Vec<TestCase> {
             name: "brain is alive",
             action: TestAction::None,
             check: TestCheck::BrainAlive,
-            files: &["crates/phantom-brain/src/brain.rs", "crates/phantom-app/src/app.rs"],
+            files: &[
+                "crates/phantom-brain/src/brain.rs",
+                "crates/phantom-app/src/app.rs",
+            ],
         },
         TestCase {
             name: "show suggestion",
@@ -483,7 +518,10 @@ fn build_test_suite() -> Vec<TestCase> {
             name: "suggestion saved to history",
             action: TestAction::None,
             check: TestCheck::HistoryMinLen(1),
-            files: &["crates/phantom-app/src/input.rs", "crates/phantom-app/src/app.rs"],
+            files: &[
+                "crates/phantom-app/src/input.rs",
+                "crates/phantom-app/src/app.rs",
+            ],
         },
         TestCase {
             name: "detach to float",
