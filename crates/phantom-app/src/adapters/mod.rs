@@ -1,9 +1,11 @@
 pub mod agent;
+pub mod dag_viewer;
 pub mod inspector;
 pub mod monitor;
 pub mod terminal;
 pub mod video;
 pub use agent::AgentAdapter;
+pub use dag_viewer::DagViewerState;
 pub use monitor::MonitorAdapter;
 pub use terminal::TerminalAdapter;
 pub use video::VideoAdapter;
