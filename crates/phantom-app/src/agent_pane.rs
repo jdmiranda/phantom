@@ -128,16 +128,14 @@ fn build_capability_denied_payload(
     attempted_class: CapabilityClass,
     attempted_tool: &str,
     denied_at_unix_ms: u64,
+    source_chain: &[u64],
 ) -> serde_json::Value {
-    let source_chain: Vec<u64> = Vec::new();
     serde_json::json!({
         "agent_id": agent_id,
         "agent_role": agent_role,
         "attempted_class": class_label(attempted_class),
         "attempted_tool": attempted_tool,
         "denied_at_unix_ms": denied_at_unix_ms,
-        // Sec.2 will fill source_chain; we serialize the empty Vec so the
-        // shape is stable.
         "source_chain": source_chain,
     })
 }
@@ -903,6 +901,10 @@ impl AgentPane {
                     None,
                 )
             };
+            // Capture source_event_id before dropping the dispatch context —
+            // needed for Sec.2 provenance wiring in maybe_emit_capability_denied_event.
+            let dispatch_source_event_id: Option<u64> =
+                dispatch_ctx.as_ref().and_then(|c| c.source_event_id);
             // Drop the dispatch context borrow before mutating `self` below.
             drop(dispatch_ctx);
             let elapsed = start.elapsed();
@@ -935,14 +937,16 @@ impl AgentPane {
                 ));
             }
 
-            // Sec.1 capability-denial instrumentation: when the dispatch
+            // Sec.1/2 capability-denial instrumentation: when the dispatch
             // gate refused the call, surface a `CapabilityDenied` substrate
-            // event + matching audit-log entry before the per-result loop
-            // continues. The check is keyed on the canonical
-            // `"capability denied: …"` prefix so we catch denials from both
-            // `execute_tool` and `dispatch_tool` without coupling to the
-            // DispatchError type.
-            self.maybe_emit_capability_denied_event(call.tool, &call.args, &result, None);
+            // event + matching audit-log entry. Sec.2 populates source_chain
+            // via dispatch_source_event_id when the event log is wired.
+            self.maybe_emit_capability_denied_event(
+                call.tool,
+                &call.args,
+                &result,
+                dispatch_source_event_id,
+            );
 
             // Lars fix-thread instrumentation (Phase 2.E producer).
             //
@@ -1086,14 +1090,15 @@ impl AgentPane {
     /// with [`AuditOutcome::Denied`] so the on-disk audit trail and the
     /// substrate event log carry matching denial signals.
     ///
-    /// `source_chain` is empty until Sec.2 wires per-call provenance.
+    /// `source_chain` is populated when `source_event_id` is `Some` and the
+    /// event log is wired; otherwise it is empty (Sec.2 wiring).
     /// No-op when the sink isn't wired (test / legacy paths).
     fn maybe_emit_capability_denied_event(
         &self,
         tool: ToolType,
         args: &serde_json::Value,
         result: &ToolResult,
-        _source_event_id: Option<u64>,
+        source_event_id: Option<u64>,
     ) {
         // The dispatch gate's denial message is a contract: we match on the
         // exact prefix the model sees. This keeps us in sync with the
@@ -1124,12 +1129,21 @@ impl AgentPane {
             return;
         };
 
+        // Sec.2: walk the event-log chain to collect provenance IDs.
+        let source_chain: Vec<u64> =
+            if let (Some(start_id), Some(log)) = (source_event_id, self.event_log.as_ref()) {
+                phantom_agents::dispatch::collect_source_chain(start_id, log)
+            } else {
+                Vec::new()
+            };
+
         let payload = build_capability_denied_payload(
             agent_id,
             role.label(),
             attempted_class,
             &attempted_tool,
             now_unix_ms(),
+            &source_chain,
         );
 
         let event = SubstrateEvent {
@@ -1138,7 +1152,7 @@ impl AgentPane {
                 role,
                 attempted_class,
                 attempted_tool,
-                source_chain: Vec::new(),
+                source_chain,
             },
             payload,
             source: EventSource::Agent { role },
@@ -2223,7 +2237,7 @@ mod tests {
                 assert_eq!(attempted_tool, "run_command");
                 assert!(
                     source_chain.is_empty(),
-                    "Sec.1 emits empty source_chain; Sec.2 will populate it"
+                    "root-level denial must have empty source_chain (no event log wired)"
                 );
             }
             other => panic!("expected CapabilityDenied, got {other:?}"),

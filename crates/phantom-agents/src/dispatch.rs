@@ -336,6 +336,59 @@ fn taint_from_source_chain(
     accumulated
 }
 
+/// Walk the `source_event_id` chain in `log` starting from `start_id` and
+/// return the ordered list of event IDs encountered, including `start_id`
+/// itself.
+///
+/// The list is ordered from `start_id` to the earliest ancestor reachable
+/// through the chain. The walk terminates when:
+/// - an event ID is not found in the in-memory tail (scrolled out), or
+/// - a cycle is detected (the same ID would be visited twice).
+///
+/// This is the Sec.2 counterpart to [`taint_from_source_chain`]: instead of
+/// accumulating taint it collects the provenance chain that is stored in
+/// `EventKind::CapabilityDenied::source_chain`.
+///
+/// # Locking
+///
+/// Takes `log` once to snapshot the tail; no lock is held during the walk.
+pub fn collect_source_chain(start_id: u64, log: &Arc<Mutex<EventLog>>) -> Vec<u64> {
+    // Snapshot the in-memory tail once — avoids repeated locking in the walk.
+    let tail = {
+        let Ok(guard) = log.lock() else {
+            return vec![start_id];
+        };
+        guard.tail(usize::MAX)
+    };
+
+    // Build a lookup table: event_id → envelope for O(1) chain hops.
+    let by_id: std::collections::HashMap<u64, &phantom_memory::event_log::EventEnvelope> =
+        tail.iter().map(|e| (e.id, e)).collect();
+
+    let mut chain: Vec<u64> = Vec::new();
+    let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut cursor: Option<u64> = Some(start_id);
+
+    while let Some(id) = cursor {
+        // Cycle guard: if we've already visited this ID, stop walking.
+        if !visited.insert(id) {
+            break;
+        }
+        chain.push(id);
+        let Some(ev) = by_id.get(&id) else {
+            // Event has scrolled out of the tail — stop walking.
+            break;
+        };
+        // Follow the chain link stored in the event payload.
+        cursor = ev
+            .payload
+            .get("source_event_id")
+            .and_then(|v| v.as_u64());
+    }
+
+    chain
+}
+
 /// Extract the originating agent id from an [`EventEnvelope`], if present.
 ///
 /// Events emitted by agents carry `source: Agent { id }`. We also check a
@@ -1927,5 +1980,125 @@ mod tests {
                   Disposition::Decompose, Disposition::Audit] {
             assert_eq!(d.runs_hooks(), d.creates_branch());
         }
+    }
+
+    // ---- Sec.2: collect_source_chain -----------------------------------------
+
+    /// Helper: write a minimal event envelope to `log` and return its assigned
+    /// id. The optional `source_event_id` value is embedded in the payload so
+    /// `collect_source_chain` can follow the chain link.
+    fn push_event_with_source(
+        log: &Arc<Mutex<EventLog>>,
+        kind: &str,
+        source_event_id: Option<u64>,
+    ) -> u64 {
+        use phantom_memory::event_log::EventSource as LogEventSource;
+        let mut payload = serde_json::json!({});
+        if let Some(id) = source_event_id {
+            payload["source_event_id"] = serde_json::json!(id);
+        }
+        log.lock()
+            .unwrap()
+            .append(LogEventSource::Substrate, kind, payload)
+            .unwrap()
+            .id
+    }
+
+    /// A 3-event chain A -> B -> C (C triggered by B, B triggered by A) must
+    /// produce [C_id, B_id, A_id] — i.e. from the leaf to the root.
+    #[test]
+    fn source_chain_collects_full_causal_path() {
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(Mutex::new(
+            EventLog::open(&tmp.path().join("ev.jsonl")).unwrap(),
+        ));
+
+        let a_id = push_event_with_source(&log, "root.event", None);
+        let b_id = push_event_with_source(&log, "middle.event", Some(a_id));
+        let c_id = push_event_with_source(&log, "leaf.event", Some(b_id));
+
+        let chain = collect_source_chain(c_id, &log);
+
+        assert_eq!(
+            chain,
+            vec![c_id, b_id, a_id],
+            "chain must traverse C -> B -> A, got {chain:?}"
+        );
+    }
+
+    /// A root event with no `source_event_id` in its payload must produce a
+    /// single-element chain containing only its own ID.
+    #[test]
+    fn source_chain_root_event_returns_single_element_chain() {
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(Mutex::new(
+            EventLog::open(&tmp.path().join("ev.jsonl")).unwrap(),
+        ));
+
+        let root_id = push_event_with_source(&log, "standalone.event", None);
+
+        let chain = collect_source_chain(root_id, &log);
+
+        assert_eq!(
+            chain,
+            vec![root_id],
+            "single root event must yield [root_id], got {chain:?}"
+        );
+    }
+
+    /// A self-referential event (source_event_id == own id) must not loop:
+    /// the cycle guard must terminate the walk after visiting the ID once.
+    #[test]
+    fn source_chain_self_referential_event_does_not_loop() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ev.jsonl");
+
+        let log = Arc::new(Mutex::new(EventLog::open(&path).unwrap()));
+
+        // Step 1: write a normal event to get an id.
+        let placeholder_id = push_event_with_source(&log, "placeholder", None);
+        // The next id will be placeholder_id + 1. Write an event whose
+        // source_event_id points to its own id (the +1 slot).
+        let self_id = placeholder_id + 1;
+        {
+            use phantom_memory::event_log::EventSource as LogEventSource;
+            let payload = serde_json::json!({ "source_event_id": self_id });
+            log.lock()
+                .unwrap()
+                .append(LogEventSource::Substrate, "self.ref", payload)
+                .unwrap();
+        }
+
+        let chain = collect_source_chain(self_id, &log);
+
+        assert_eq!(
+            chain,
+            vec![self_id],
+            "self-referential event must yield [self_id], got {chain:?}"
+        );
+    }
+
+    /// `collect_source_chain` must traverse the same path as a manual walk
+    /// of `source_event_id` payload links. A 4-node chain is used to cover
+    /// more hops than the basic 3-node test.
+    #[test]
+    fn collect_source_chain_matches_source_event_id_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(Mutex::new(
+            EventLog::open(&tmp.path().join("ev.jsonl")).unwrap(),
+        ));
+
+        let e1 = push_event_with_source(&log, "ev1", None);
+        let e2 = push_event_with_source(&log, "ev2", Some(e1));
+        let e3 = push_event_with_source(&log, "ev3", Some(e2));
+        let e4 = push_event_with_source(&log, "ev4", Some(e3));
+
+        let chain = collect_source_chain(e4, &log);
+
+        assert_eq!(
+            chain,
+            vec![e4, e3, e2, e1],
+            "4-node chain must traverse e4 -> e3 -> e2 -> e1, got {chain:?}"
+        );
     }
 }
