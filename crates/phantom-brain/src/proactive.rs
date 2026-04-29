@@ -56,10 +56,7 @@ pub enum EnvSignal {
     /// Git state changed.
     GitChanged,
     /// An agent completed work.
-    AgentCompleted {
-        success: bool,
-        summary: String,
-    },
+    AgentCompleted { success: bool, summary: String },
     /// A long-running process started or is still running.
     ProcessRunning,
 }
@@ -189,7 +186,6 @@ pub struct InterventionEngine {
     window_duration_secs: f32,
 
     // -- User feedback model (approximates the paper's reward model) -------
-
     /// Acceptance rate: fraction of suggestions the user accepted.
     /// Tracks the paper's R_t = g(P_t, A_t, S_t) over time.
     pub acceptance_rate: f32,
@@ -203,7 +199,6 @@ pub struct InterventionEngine {
     pub consecutive_dismissals: u32,
 
     // -- Per-session state --------------------------------------------------
-
     /// Actions taken since last user input.
     pub actions_since_input: u32,
     /// When the last action was emitted.
@@ -294,9 +289,11 @@ impl InterventionEngine {
         let now = Instant::now();
 
         // Evict expired signals.
-        while self.signals.front().is_some_and(|s| {
-            now.duration_since(s.at).as_secs_f32() > self.window_duration_secs
-        }) {
+        while self
+            .signals
+            .front()
+            .is_some_and(|s| now.duration_since(s.at).as_secs_f32() > self.window_duration_secs)
+        {
             self.signals.pop_front();
         }
 
@@ -489,7 +486,10 @@ impl InterventionEngine {
         // Novelty boost: first-time errors get higher score.
         let is_novel = matches!(
             &latest.kind,
-            SignalKind::Env(EnvSignal::CommandFailed { is_novel_error: true, .. })
+            SignalKind::Env(EnvSignal::CommandFailed {
+                is_novel_error: true,
+                ..
+            })
         );
         let novelty_bonus = if is_novel { 0.15 } else { 0.0 };
 
@@ -554,14 +554,18 @@ impl InterventionEngine {
     fn need_from_env_changes(&self) -> Option<NeedEstimate> {
         let now = Instant::now();
 
-        let recent_changes = self.signals.iter().filter(|s| {
-            now.duration_since(s.at).as_secs() < 15
-                && matches!(
-                    s.kind,
-                    SignalKind::Env(EnvSignal::FileChanged { .. })
-                        | SignalKind::Env(EnvSignal::GitChanged)
-                )
-        }).count();
+        let recent_changes = self
+            .signals
+            .iter()
+            .filter(|s| {
+                now.duration_since(s.at).as_secs() < 15
+                    && matches!(
+                        s.kind,
+                        SignalKind::Env(EnvSignal::FileChanged { .. })
+                            | SignalKind::Env(EnvSignal::GitChanged)
+                    )
+            })
+            .count();
 
         if recent_changes > 0 {
             Some(NeedEstimate {
@@ -626,8 +630,7 @@ impl InterventionEngine {
             0.0
         };
 
-        (base + dismissal_penalty + saturation_penalty + cooldown_penalty)
-            .clamp(0.1, 0.95)
+        (base + dismissal_penalty + saturation_penalty + cooldown_penalty).clamp(0.1, 0.95)
     }
 
     // -- Action recording --------------------------------------------------
@@ -946,7 +949,9 @@ impl ProactiveSuggester {
 fn is_test_command(cmd: &str) -> bool {
     let first = cmd.split_whitespace().next().unwrap_or("");
     // Primary: first token is a well-known test runner.
-    let known_runners = ["cargo", "pytest", "jest", "mocha", "go", "rspec", "vitest", "npm", "yarn"];
+    let known_runners = [
+        "cargo", "pytest", "jest", "mocha", "go", "rspec", "vitest", "npm", "yarn",
+    ];
     if !known_runners.iter().any(|r| first.ends_with(r)) {
         return false;
     }
@@ -957,12 +962,17 @@ fn is_test_command(cmd: &str) -> bool {
 /// Return `true` if the command string looks like a build invocation.
 fn is_build_command(cmd: &str) -> bool {
     let first = cmd.split_whitespace().next().unwrap_or("");
-    let known_builders = ["cargo", "make", "cmake", "gradle", "mvn", "bazel", "buck", "npm", "yarn"];
+    let known_builders = [
+        "cargo", "make", "cmake", "gradle", "mvn", "bazel", "buck", "npm", "yarn",
+    ];
     if !known_builders.iter().any(|r| first.ends_with(r)) {
         return false;
     }
-    cmd.contains(" build") || cmd.contains(" compile") || cmd.contains(" check")
-        || cmd.contains(" install") || cmd.contains("--build")
+    cmd.contains(" build")
+        || cmd.contains(" compile")
+        || cmd.contains(" check")
+        || cmd.contains(" install")
+        || cmd.contains("--build")
 }
 
 // ---------------------------------------------------------------------------
@@ -976,8 +986,7 @@ mod tests {
     fn engine_with_expired_cooldown() -> InterventionEngine {
         let mut e = InterventionEngine::new();
         // Set last_action_at far enough in the past that cooldown is expired.
-        e.last_action_at =
-            Some(Instant::now() - std::time::Duration::from_secs(60));
+        e.last_action_at = Some(Instant::now() - std::time::Duration::from_secs(60));
         e
     }
 
@@ -1120,8 +1129,16 @@ mod tests {
         engine.actions_since_input = 100;
 
         let threshold = engine.compute_annoyance_threshold();
-        assert!(threshold <= 0.95, "threshold capped at 0.95, got {}", threshold);
-        assert!(threshold >= 0.1, "threshold floored at 0.1, got {}", threshold);
+        assert!(
+            threshold <= 0.95,
+            "threshold capped at 0.95, got {}",
+            threshold
+        );
+        assert!(
+            threshold >= 0.1,
+            "threshold floored at 0.1, got {}",
+            threshold
+        );
     }
 
     // -- Acceptance rate tracking ------------------------------------------
@@ -1343,10 +1360,18 @@ mod tests {
         let mut s = default_suggester();
         let event = AiEvent::CommandComplete(failed_output("cargo build"));
         let result = s.observe(&event);
-        if let Some(AiAction::Suggest { action, rationale, confidence }) = result {
+        if let Some(AiAction::Suggest {
+            action,
+            rationale,
+            confidence,
+        }) = result
+        {
             assert!(!action.is_empty(), "action must not be empty");
             assert!(!rationale.is_empty(), "rationale must not be empty");
-            assert!((0.0..=1.0).contains(&confidence), "confidence must be in [0,1]");
+            assert!(
+                (0.0..=1.0).contains(&confidence),
+                "confidence must be in [0,1]"
+            );
         } else {
             panic!("expected AiAction::Suggest");
         }
@@ -1386,7 +1411,10 @@ mod tests {
         // BuildError is a separate kind — its cooldown is untouched.
         let build_event = AiEvent::CommandComplete(failed_output("cargo build"));
         let r2 = s.observe(&build_event);
-        assert!(r2.is_some(), "BuildError should fire independently of TestFailed cooldown");
+        assert!(
+            r2.is_some(),
+            "BuildError should fire independently of TestFailed cooldown"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1415,7 +1443,10 @@ mod tests {
         // Idle without a prior question.
         let idle = AiEvent::UserIdle { seconds: 30.0 };
         let result = s.observe(&idle);
-        assert!(result.is_none(), "idle without a question should not trigger");
+        assert!(
+            result.is_none(),
+            "idle without a question should not trigger"
+        );
     }
 
     #[test]
@@ -1428,7 +1459,10 @@ mod tests {
         // Idle for only 5 s — below the 10 s threshold.
         let idle = AiEvent::UserIdle { seconds: 5.0 };
         let result = s.observe(&idle);
-        assert!(result.is_none(), "idle < 10 s should not trigger IdleAfterQuestion");
+        assert!(
+            result.is_none(),
+            "idle < 10 s should not trigger IdleAfterQuestion"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1440,7 +1474,10 @@ mod tests {
         let mut s = default_suggester();
         let event = AiEvent::GitStateChanged;
         let result = s.observe(&event);
-        assert!(result.is_some(), "ContextChange should fire on GitStateChanged");
+        assert!(
+            result.is_some(),
+            "ContextChange should fire on GitStateChanged"
+        );
     }
 
     #[test]
@@ -1452,7 +1489,10 @@ mod tests {
         let result = s.observe(&event);
         // FileChanged is not mapped to ContextChange in the issue spec.
         // This is intentional — GitStateChanged is the ContextChange signal.
-        assert!(result.is_none(), "FileChanged alone should not trigger ContextChange");
+        assert!(
+            result.is_none(),
+            "FileChanged alone should not trigger ContextChange"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1471,7 +1511,10 @@ mod tests {
 
         // Immediate second fire: cooldown should suppress.
         let r2 = s.observe(&event);
-        assert!(r2.is_none(), "second immediate BuildError should be suppressed by cooldown");
+        assert!(
+            r2.is_none(),
+            "second immediate BuildError should be suppressed by cooldown"
+        );
     }
 
     #[test]
@@ -1507,7 +1550,12 @@ mod tests {
         let mut s = ProactiveSuggester::new(
             vec![
                 Trigger::new(TriggerKind::BuildError, "fix build", "build failed", 0.8),
-                Trigger::new(TriggerKind::ContextChange, "review changes", "context changed", 0.6),
+                Trigger::new(
+                    TriggerKind::ContextChange,
+                    "review changes",
+                    "context changed",
+                    0.6,
+                ),
             ],
             60_000, // 60 s
         );
@@ -1520,7 +1568,10 @@ mod tests {
         // ContextChange has an independent cooldown — should still fire.
         let ctx_event = AiEvent::GitStateChanged;
         let r2 = s.observe(&ctx_event);
-        assert!(r2.is_some(), "ContextChange should fire independently of BuildError cooldown");
+        assert!(
+            r2.is_some(),
+            "ContextChange should fire independently of BuildError cooldown"
+        );
 
         // BuildError again immediately — should be suppressed.
         let r3 = s.observe(&build_event);
@@ -1535,11 +1586,17 @@ mod tests {
     fn confidence_is_clamped_to_unit_range() {
         // Clamp > 1.0.
         let t = Trigger::new(TriggerKind::BuildError, "a", "b", 2.5);
-        assert!((t.confidence - 1.0).abs() < f32::EPSILON, "confidence should clamp to 1.0");
+        assert!(
+            (t.confidence - 1.0).abs() < f32::EPSILON,
+            "confidence should clamp to 1.0"
+        );
 
         // Clamp < 0.0.
         let t = Trigger::new(TriggerKind::TestFailed, "a", "b", -0.5);
-        assert!(t.confidence.abs() < f32::EPSILON, "confidence should clamp to 0.0");
+        assert!(
+            t.confidence.abs() < f32::EPSILON,
+            "confidence should clamp to 0.0"
+        );
     }
 
     // -----------------------------------------------------------------------

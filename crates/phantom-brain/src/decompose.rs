@@ -76,7 +76,12 @@ impl DecompositionStep {
 
     // -- Constructors (crate-private so tests can build them) ----------------
 
-    fn new(description: impl Into<String>, tool: Option<String>, priority: f32, cost_ms: u32) -> Self {
+    fn new(
+        description: impl Into<String>,
+        tool: Option<String>,
+        priority: f32,
+        cost_ms: u32,
+    ) -> Self {
         Self {
             description: description.into(),
             tool,
@@ -215,9 +220,16 @@ impl GoalDecomposer {
             .collect();
 
         // Sort descending by priority (highest first).
-        steps.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal));
+        steps.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        let estimated_total_ms = steps.iter().map(|s| s.cost_ms).fold(0u32, u32::saturating_add);
+        let estimated_total_ms = steps
+            .iter()
+            .map(|s| s.cost_ms)
+            .fold(0u32, u32::saturating_add);
 
         DecompositionResult {
             goal: goal_str.to_string(),
@@ -239,15 +251,54 @@ impl GoalDecomposer {
 
         // Keyword → category mapping (ordered from most specific to least).
         let keywords: &[(&[&str], SubGoalCategory)] = &[
-            (&["deploy", "release", "ship", "publish", "push"], SubGoalCategory::Deploy),
-            (&["document", "docs", "readme", "comment"], SubGoalCategory::Document),
-            (&["refactor", "restructure", "reorganize", "cleanup", "clean up"], SubGoalCategory::Refactor),
+            (
+                &["deploy", "release", "ship", "publish", "push"],
+                SubGoalCategory::Deploy,
+            ),
+            (
+                &["document", "docs", "readme", "comment"],
+                SubGoalCategory::Document,
+            ),
+            (
+                &[
+                    "refactor",
+                    "restructure",
+                    "reorganize",
+                    "cleanup",
+                    "clean up",
+                ],
+                SubGoalCategory::Refactor,
+            ),
             (&["lint", "clippy", "fmt", "format"], SubGoalCategory::Lint),
-            (&["fix", "repair", "resolve", "patch", "debug", "correct"], SubGoalCategory::Fix),
-            (&["test", "tests", "spec", "coverage", "check"], SubGoalCategory::Test),
-            (&["build", "compile", "cargo", "make", "assemble"], SubGoalCategory::Build),
-            (&["investigate", "explore", "research", "analyse", "analyze", "understand", "review", "look"], SubGoalCategory::Investigate),
-            (&["implement", "add", "create", "write", "new", "feature"], SubGoalCategory::Generic),
+            (
+                &["fix", "repair", "resolve", "patch", "debug", "correct"],
+                SubGoalCategory::Fix,
+            ),
+            (
+                &["test", "tests", "spec", "coverage", "check"],
+                SubGoalCategory::Test,
+            ),
+            (
+                &["build", "compile", "cargo", "make", "assemble"],
+                SubGoalCategory::Build,
+            ),
+            (
+                &[
+                    "investigate",
+                    "explore",
+                    "research",
+                    "analyse",
+                    "analyze",
+                    "understand",
+                    "review",
+                    "look",
+                ],
+                SubGoalCategory::Investigate,
+            ),
+            (
+                &["implement", "add", "create", "write", "new", "feature"],
+                SubGoalCategory::Generic,
+            ),
         ];
 
         for (kws, category) in keywords {
@@ -327,14 +378,12 @@ impl GoalDecomposer {
             }
 
             SubGoalCategory::Build => {
-                vec![
-                    DecompositionStep::new(
-                        "run build command and collect compiler output",
-                        Some("RunCommand".into()),
-                        0.80,
-                        15_000,
-                    ),
-                ]
+                vec![DecompositionStep::new(
+                    "run build command and collect compiler output",
+                    Some("RunCommand".into()),
+                    0.80,
+                    15_000,
+                )]
             }
 
             SubGoalCategory::Lint => {
@@ -549,7 +598,9 @@ mod tests {
     }
 
     fn errors_world() -> OrchestratorWorldState {
-        OrchestratorWorldState::builder().errors_detected(true).build()
+        OrchestratorWorldState::builder()
+            .errors_detected(true)
+            .build()
     }
 
     // =======================================================================
@@ -563,8 +614,14 @@ mod tests {
 
         let result = decomposer.decompose("", &world);
 
-        assert!(result.steps().is_empty(), "empty goal must produce no steps");
-        assert!(!result.is_achievable(), "empty result must not be achievable");
+        assert!(
+            result.steps().is_empty(),
+            "empty goal must produce no steps"
+        );
+        assert!(
+            !result.is_achievable(),
+            "empty result must not be achievable"
+        );
         assert_eq!(result.estimated_total_ms(), 0);
     }
 
@@ -591,7 +648,10 @@ mod tests {
 
         let result = decomposer.decompose("fix tests", &world);
 
-        assert!(result.is_achievable(), "fix tests must produce at least one step");
+        assert!(
+            result.is_achievable(),
+            "fix tests must produce at least one step"
+        );
         // Should produce at minimum a Fix sub-goal and a Test sub-goal.
         assert!(
             result.steps().len() >= 2,
@@ -639,7 +699,10 @@ mod tests {
             .fold(0, u32::saturating_add);
 
         assert_eq!(result.estimated_total_ms(), manual_sum);
-        assert!(result.estimated_total_ms() > 0, "build goal must have non-zero cost");
+        assert!(
+            result.estimated_total_ms() > 0,
+            "build goal must have non-zero cost"
+        );
     }
 
     // =======================================================================
@@ -695,14 +758,17 @@ mod tests {
 
         assert!(result.is_achievable(), "fallback must still be achievable");
         // At least one step should mention investigate / context.
-        let has_investigate = result
-            .steps()
-            .iter()
-            .any(|s| s.description().contains("gather context") || s.description().contains("investigate"));
+        let has_investigate = result.steps().iter().any(|s| {
+            s.description().contains("gather context") || s.description().contains("investigate")
+        });
         assert!(
             has_investigate,
             "fallback goal should produce an investigate step; got: {:?}",
-            result.steps().iter().map(|s| s.description()).collect::<Vec<_>>()
+            result
+                .steps()
+                .iter()
+                .map(|s| s.description())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -749,9 +815,12 @@ mod tests {
     #[test]
     fn decompose_and_replan_returns_none_when_steady() {
         let mut orch = Orchestrator::new("fix the build");
-        orch.set_plan(vec![
-            PlanStep::new("step 1", phantom_agents::AgentTask::FreeForm { prompt: "s1".into() }),
-        ]);
+        orch.set_plan(vec![PlanStep::new(
+            "step 1",
+            phantom_agents::AgentTask::FreeForm {
+                prompt: "s1".into(),
+            },
+        )]);
         let world = OrchestratorWorldState::default(); // no triggers
 
         let decomposer = GoalDecomposer::new();
@@ -767,19 +836,30 @@ mod tests {
     #[test]
     fn decompose_and_replan_installs_plan_on_trigger() {
         let mut orch = Orchestrator::new("fix the failing tests");
-        orch.set_plan(vec![
-            PlanStep::new("old step", phantom_agents::AgentTask::FreeForm { prompt: "old".into() }),
-        ]);
+        orch.set_plan(vec![PlanStep::new(
+            "old step",
+            phantom_agents::AgentTask::FreeForm {
+                prompt: "old".into(),
+            },
+        )]);
 
         // Trigger a replan via errors_detected.
-        let world = OrchestratorWorldState::builder().errors_detected(true).build();
+        let world = OrchestratorWorldState::builder()
+            .errors_detected(true)
+            .build();
         let decomposer = GoalDecomposer::new();
 
         let result = orch.decompose_and_replan(&world, &decomposer);
 
-        assert!(result.is_some(), "errors_detected trigger → should produce a result");
+        assert!(
+            result.is_some(),
+            "errors_detected trigger → should produce a result"
+        );
         let dr = result.unwrap();
-        assert!(dr.is_achievable(), "decomposition should produce at least one step");
+        assert!(
+            dr.is_achievable(),
+            "decomposition should produce at least one step"
+        );
 
         // The ledger plan should have been replaced.
         let new_plan = &orch.ledger().plan;
@@ -789,10 +869,7 @@ mod tests {
         );
         // Old step should be gone.
         let still_has_old = new_plan.iter().any(|s| s.description == "old step");
-        assert!(
-            !still_has_old,
-            "old step should be replaced after replan"
-        );
+        assert!(!still_has_old, "old step should be replaced after replan");
     }
 
     // =======================================================================
@@ -856,7 +933,10 @@ mod tests {
     fn multi_keyword_goal_produces_multi_subgoal_steps() {
         let decomposer = GoalDecomposer::new();
         // "build" + "test" + "fix" → at least 3 sub-goals → many steps.
-        let result = decomposer.decompose("build the project, fix errors, and run tests", &default_world());
+        let result = decomposer.decompose(
+            "build the project, fix errors, and run tests",
+            &default_world(),
+        );
 
         // Expect steps from at least 3 different descriptions.
         assert!(
@@ -874,7 +954,9 @@ mod tests {
     #[test]
     fn replan_steps_start_as_pending() {
         let mut orch = Orchestrator::new("deploy the service");
-        let world = OrchestratorWorldState::builder().errors_detected(true).build();
+        let world = OrchestratorWorldState::builder()
+            .errors_detected(true)
+            .build();
         let decomposer = GoalDecomposer::new();
 
         orch.decompose_and_replan(&world, &decomposer);

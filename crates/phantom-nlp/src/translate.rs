@@ -301,6 +301,123 @@ impl LlmBackend for ClaudeLlmBackend {
 }
 
 // ---------------------------------------------------------------------------
+// OllamaLlmBackend — local model via Ollama's /api/chat endpoint
+// ---------------------------------------------------------------------------
+
+const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
+const OLLAMA_CHAT_TIMEOUT_SECS: u64 = 30;
+
+/// Ollama backend for [`translate`].
+///
+/// Calls Ollama's `/api/chat` endpoint on localhost. No API key required.
+/// Use [`OllamaLlmBackend::from_env`] to read the base URL from
+/// `OLLAMA_HOST` (falling back to `http://localhost:11434`) and the model
+/// from `OLLAMA_MODEL` (falling back to `phi3.5:latest`).
+#[derive(Debug)]
+pub struct OllamaLlmBackend {
+    base_url: String,
+    model: String,
+}
+
+impl OllamaLlmBackend {
+    /// Construct from explicit parameters.
+    pub fn new(model: impl Into<String>, base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+        }
+    }
+
+    /// Construct using environment variables or fall back to defaults.
+    ///
+    /// | Variable      | Default                        |
+    /// |---------------|--------------------------------|
+    /// | `OLLAMA_HOST` | `http://localhost:11434`       |
+    /// | `OLLAMA_MODEL`| `phi3.5:latest`                |
+    pub fn from_env() -> Self {
+        let base_url =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| OLLAMA_DEFAULT_URL.to_owned());
+        let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "phi3.5:latest".to_owned());
+        Self { base_url, model }
+    }
+
+    /// Returns `true` when Ollama is running and reachable at the configured URL.
+    pub fn is_available(&self) -> bool {
+        let url = format!("{}/api/tags", self.base_url);
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(2)))
+            .build()
+            .new_agent();
+        match agent.get(&url).call() {
+            Ok(resp) => resp.status() == 200,
+            Err(_) => false,
+        }
+    }
+
+    /// Return the model name in use.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+impl LlmBackend for OllamaLlmBackend {
+    fn name(&self) -> &'static str {
+        "ollama"
+    }
+
+    fn complete(&self, system_prompt: &str, user_message: &str) -> Result<String, TranslateError> {
+        let url = format!("{}/api/chat", self.base_url);
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            "stream": false,
+            "options": {
+                "num_predict": 256,
+                "temperature": 0.1
+            }
+        });
+
+        let body_str = serde_json::to_string(&body)
+            .map_err(|e| TranslateError::Other(format!("serialise error: {e}")))?;
+
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(
+                OLLAMA_CHAT_TIMEOUT_SECS,
+            )))
+            .build()
+            .new_agent();
+
+        let mut response = agent
+            .post(&url)
+            .header("content-type", "application/json")
+            .send(body_str.as_bytes())
+            .map_err(|e| TranslateError::Transport(e.to_string()))?;
+
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| TranslateError::Transport(format!("read body: {e}")))?;
+
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| TranslateError::Other(format!("parse response: {e}")))?;
+
+        // Ollama /api/chat response: { "message": { "role": "assistant", "content": "..." } }
+        let content = json
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_owned();
+
+        Ok(content)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MockLlmBackend — for tests only
 // ---------------------------------------------------------------------------
 
@@ -921,6 +1038,52 @@ mod tests {
         assert!(prompt.contains("SearchHistory"));
         assert!(prompt.contains("SpawnAgent"));
         assert!(prompt.contains("Clarify"));
+    }
+
+    // -------------------------------------------------------------------------
+    // OllamaLlmBackend — configuration and graceful failure
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn ollama_backend_name_is_ollama() {
+        let b = OllamaLlmBackend::new("phi3.5:latest", "http://localhost:11434");
+        assert_eq!(b.name(), "ollama");
+    }
+
+    #[test]
+    fn ollama_backend_stores_model() {
+        let b = OllamaLlmBackend::new("llama3:latest", "http://localhost:11434");
+        assert_eq!(b.model(), "llama3:latest");
+    }
+
+    #[test]
+    fn ollama_backend_from_env_is_constructible() {
+        // Without OLLAMA_HOST / OLLAMA_MODEL set, uses defaults.
+        let b = OllamaLlmBackend::from_env();
+        assert_eq!(b.name(), "ollama");
+        assert!(!b.model().is_empty());
+    }
+
+    #[test]
+    fn ollama_backend_is_available_does_not_panic() {
+        let b = OllamaLlmBackend::from_env();
+        let _ = b.is_available();
+    }
+
+    #[test]
+    fn ollama_backend_complete_fails_gracefully_without_server() {
+        // Point at a port that is almost certainly not running Ollama.
+        let b = OllamaLlmBackend::new("phi3.5:latest", "http://localhost:19998");
+        let result = b.complete("system", "user");
+        assert!(
+            result.is_err(),
+            "complete must return Err when Ollama is not reachable"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TranslateError::Transport(_)),
+            "unreachable server must produce TranslateError::Transport, got {err:?}"
+        );
     }
 
     /// Live integration test — only runs when ANTHROPIC_API_KEY is present.

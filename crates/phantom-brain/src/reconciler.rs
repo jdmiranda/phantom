@@ -213,17 +213,15 @@ impl ReconcilerState {
         if let Some(step) = ledger.plan.get_mut(idx) {
             if success {
                 step.record_success(summary);
-                log::info!(
-                    "Reconciler: step {} done — {}",
-                    idx,
-                    step.description
-                );
+                log::info!("Reconciler: step {} done — {}", idx, step.description);
             } else {
                 let retrying = step.record_failure(summary);
                 if retrying {
                     log::warn!(
                         "Reconciler: step {} failed, will retry (attempt={}/{})",
-                        idx, step.attempts, step.max_attempts
+                        idx,
+                        step.attempts,
+                        step.max_attempts
                     );
                 } else {
                     log::error!(
@@ -361,7 +359,12 @@ impl ReconcilerState {
             .into_iter()
             .filter(|(idx, _)| !self.active_dispatches.contains_key(idx))
             .map(|(idx, step)| {
-                (idx, step.assigned_task.clone(), step.disposition, step.description.clone())
+                (
+                    idx,
+                    step.assigned_task.clone(),
+                    step.disposition,
+                    step.description.clone(),
+                )
             })
             .collect();
 
@@ -535,7 +538,10 @@ mod tests {
 
         // Second tick — active dispatch already running, should not dispatch again.
         state.tick(&mut ledger, &tx);
-        assert!(rx.try_recv().is_err(), "should not dispatch while step active");
+        assert!(
+            rx.try_recv().is_err(),
+            "should not dispatch while step active"
+        );
     }
 
     #[test]
@@ -640,7 +646,10 @@ mod tests {
                     "flatlined id must match the spawn_tag"
                 );
                 // reason must be descriptive — not empty, not a placeholder.
-                assert!(!reason.is_empty(), "AgentFlatlined must carry a non-empty reason");
+                assert!(
+                    !reason.is_empty(),
+                    "AgentFlatlined must carry a non-empty reason"
+                );
                 assert!(
                     reason.contains("stall") || reason.contains("attempt"),
                     "reason must mention stall or attempts, got: {reason}"
@@ -694,7 +703,9 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         state.tick(&mut ledger, &tx);
 
-        let flatline = rx.try_recv().expect("expected AgentFlatlined after second stall");
+        let flatline = rx
+            .try_recv()
+            .expect("expected AgentFlatlined after second stall");
         assert!(
             matches!(flatline, AiAction::AgentFlatlined { .. }),
             "expected AgentFlatlined on final stall, got {flatline:?}"
@@ -814,7 +825,11 @@ mod tests {
             StepStatus::Active,
             "step must remain Active when spawn_tag is None"
         );
-        assert_eq!(state.active_dispatches.len(), 1, "dispatch must remain registered");
+        assert_eq!(
+            state.active_dispatches.len(),
+            1,
+            "dispatch must remain registered"
+        );
     }
 
     /// `on_agent_complete` with a spawn_tag that doesn't match any active
@@ -994,7 +1009,9 @@ mod tests {
 
         // Stall timeout should have fired, exhausted retries, and emitted
         // AgentFlatlined -- no panic.
-        let action = rx.try_recv().expect("expected AgentFlatlined from stall timeout");
+        let action = rx
+            .try_recv()
+            .expect("expected AgentFlatlined from stall timeout");
         assert!(
             matches!(action, AiAction::AgentFlatlined { .. }),
             "expected AgentFlatlined, got {action:?}"
@@ -1035,10 +1052,17 @@ mod tests {
         let mut state = ReconcilerState::new();
         let mut ledger = TaskLedger::new("test goal");
         ledger.set_plan(vec![
-            PlanStep::new("root", AgentTask::FreeForm { prompt: "root".into() }),
+            PlanStep::new(
+                "root",
+                AgentTask::FreeForm {
+                    prompt: "root".into(),
+                },
+            ),
             PlanStep::with_deps(
                 "blocked",
-                AgentTask::FreeForm { prompt: "blocked".into() },
+                AgentTask::FreeForm {
+                    prompt: "blocked".into(),
+                },
                 vec![0],
             ),
         ]);
@@ -1046,13 +1070,24 @@ mod tests {
         state.tick(&mut ledger, &tx);
 
         // Only root dispatched; blocked still Pending.
-        assert_eq!(ledger.plan[0].status, StepStatus::Active, "root must be Active");
-        assert_eq!(ledger.plan[1].status, StepStatus::Pending, "blocked must still be Pending");
+        assert_eq!(
+            ledger.plan[0].status,
+            StepStatus::Active,
+            "root must be Active"
+        );
+        assert_eq!(
+            ledger.plan[1].status,
+            StepStatus::Pending,
+            "blocked must still be Pending"
+        );
         assert_eq!(state.active_dispatches.len(), 1);
 
         let a = rx.try_recv().expect("one SpawnAgent");
         assert!(matches!(a, AiAction::SpawnAgent { .. }));
-        assert!(rx.try_recv().is_err(), "must not emit second SpawnAgent for blocked step");
+        assert!(
+            rx.try_recv().is_err(),
+            "must not emit second SpawnAgent for blocked step"
+        );
     }
 
     /// After a dependency completes, the blocked step becomes eligible on the next tick.
@@ -1062,10 +1097,17 @@ mod tests {
         let mut state = ReconcilerState::new();
         let mut ledger = TaskLedger::new("test goal");
         ledger.set_plan(vec![
-            PlanStep::new("root", AgentTask::FreeForm { prompt: "root".into() }),
+            PlanStep::new(
+                "root",
+                AgentTask::FreeForm {
+                    prompt: "root".into(),
+                },
+            ),
             PlanStep::with_deps(
                 "blocked",
-                AgentTask::FreeForm { prompt: "blocked".into() },
+                AgentTask::FreeForm {
+                    prompt: "blocked".into(),
+                },
                 vec![0],
             ),
         ]);
@@ -1073,7 +1115,9 @@ mod tests {
         // Tick 1: dispatch root, capture spawn_tag.
         state.tick(&mut ledger, &tx);
         let a = rx.try_recv().expect("SpawnAgent for root");
-        let AiAction::SpawnAgent { spawn_tag, .. } = a else { panic!("expected SpawnAgent") };
+        let AiAction::SpawnAgent { spawn_tag, .. } = a else {
+            panic!("expected SpawnAgent")
+        };
         let tag = spawn_tag.expect("spawn_tag must be Some");
 
         // Complete root.
@@ -1082,8 +1126,15 @@ mod tests {
 
         // Tick 2: blocked step is now eligible.
         state.tick(&mut ledger, &tx);
-        assert_eq!(ledger.plan[1].status, StepStatus::Active, "blocked must now be Active");
-        assert!(rx.try_recv().is_ok(), "must emit SpawnAgent for previously blocked step");
+        assert_eq!(
+            ledger.plan[1].status,
+            StepStatus::Active,
+            "blocked must now be Active"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "must emit SpawnAgent for previously blocked step"
+        );
     }
 
     /// Calling tick twice does not double-dispatch the same active step.
@@ -1100,8 +1151,15 @@ mod tests {
 
         // Tick 2: step-a still active, must not be re-dispatched.
         state.tick(&mut ledger, &tx);
-        assert!(rx.try_recv().is_err(), "must not re-dispatch an Active step");
-        assert_eq!(state.active_dispatches.len(), 1, "dispatch count must not grow");
+        assert!(
+            rx.try_recv().is_err(),
+            "must not re-dispatch an Active step"
+        );
+        assert_eq!(
+            state.active_dispatches.len(),
+            1,
+            "dispatch count must not grow"
+        );
     }
 
     // -- Issue #49: auto-approve fast path for safe dispositions ------------------
@@ -1123,7 +1181,9 @@ mod tests {
         // Build a step with Chat disposition (read-only — should auto-approve).
         let step = PlanStep::new(
             "chat step",
-            AgentTask::FreeForm { prompt: "summarise the diff".into() },
+            AgentTask::FreeForm {
+                prompt: "summarise the diff".into(),
+            },
         )
         .with_disposition(Disposition::Chat);
         ledger.set_plan(vec![step]);
@@ -1345,8 +1405,7 @@ mod tests {
             .next()
             .expect("active_dispatches must have one entry");
         assert_eq!(
-            stored_id,
-            above_u32_max,
+            stored_id, above_u32_max,
             "active_dispatches must store the raw u64 agent ID, not a saturated u32 (fixes #273)"
         );
 
@@ -1357,5 +1416,4 @@ mod tests {
             "PlanStep::agent_id must store the full u64 agent ID (fixes #273)"
         );
     }
-
 }
