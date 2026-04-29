@@ -1,0 +1,9 @@
+[package]
+name = "phantom-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stateless WebSocket message broker routing opaque envelopes by PeerId"
+
+[lints]
+workspace = true
