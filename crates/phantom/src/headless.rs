@@ -505,6 +505,18 @@ impl ActionHandler for HeadlessActionHandler {
     fn agent_quarantined(&mut self, agent_id: phantom_agents::AgentId, denial_count: usize) {
         println!("[BRAIN]: agent {agent_id} quarantined after {denial_count} denials");
     }
+
+    fn pause_agent(&mut self, agent_id: phantom_agents::AgentId, reason: phantom_agents::agent::PauseReason) {
+        println!("[BRAIN]: pausing agent {agent_id} ({reason:?})");
+    }
+
+    fn resume_agent(&mut self, agent_id: phantom_agents::AgentId) {
+        println!("[BRAIN]: resuming agent {agent_id}");
+    }
+
+    fn update_connection_state(&mut self, state: phantom_brain::events::ConnectionState) {
+        println!("[BRAIN]: connection state: {state:?}");
+    }
 }
 
 fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {

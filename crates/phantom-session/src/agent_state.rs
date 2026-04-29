@@ -230,7 +230,7 @@ impl AgentSnapshot {
     /// `Planning`, or `AwaitingApproval`).
     #[must_use]
     pub fn status(&self) -> AgentStatus {
-        self.status
+        self.status.clone()
     }
 
     /// Saved conversation messages (in-flight tool calls stripped).

@@ -28,6 +28,26 @@ pub type AgentId = u64;
 // AgentStatus
 // ---------------------------------------------------------------------------
 
+/// The reason an agent was paused.
+///
+/// Attached to [`AgentStatus::Paused`] so consumers can decide how to surface
+/// the event in the UI and whether to auto-resume or require user action.
+///
+/// Issue #321: Graceful agent pause/resume on network disconnect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PauseReason {
+    /// The upstream network is unreachable (DNS failure, TCP timeout, etc.).
+    NetworkUnavailable,
+    /// A specific chat-completion provider is responding with errors or
+    /// rate-limits but the network itself is up.
+    BackendDegraded {
+        /// Human-readable provider identifier (e.g. `"anthropic"`, `"openai"`).
+        provider: String,
+    },
+    /// The user explicitly asked to pause the agent.
+    UserRequested,
+}
+
 /// Agent lifecycle state.
 ///
 /// The full FSM (see issue #34):
@@ -38,11 +58,17 @@ pub type AgentId = u64;
 ///                                          Failed → Queued (retry)
 ///                                            ↓
 ///                                         Flatline → Queued (manual retry)
+///
+/// Working / WaitingForTool → Paused → Working  (issue #321)
 /// ```
 ///
 /// `Queued` may also skip straight to `Working` when there is no plan gate
 /// in effect (the existing fast path for non-gated tasks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Note: `Copy` is intentionally absent because `Paused { reason: PauseReason }`
+/// contains a heap-allocated `String` inside `BackendDegraded`. Use `.clone()`
+/// when you need an owned copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStatus {
     /// Waiting to start (queued behind concurrency limit).
     Queued,
@@ -56,6 +82,15 @@ pub enum AgentStatus {
     Working,
     /// Called a tool, waiting for the result.
     WaitingForTool,
+    /// Temporarily suspended due to a recoverable condition (network outage,
+    /// backend degradation, or explicit user request).  Transitions back to
+    /// `Working` when the condition clears.
+    ///
+    /// Issue #321: Graceful agent pause/resume on network disconnect.
+    Paused {
+        /// Why the agent was paused.
+        reason: PauseReason,
+    },
     /// Completed successfully.
     Done,
     /// Completed with an error.
@@ -82,12 +117,15 @@ impl AgentStatus {
     /// | Working           | Done              |
     /// | Working           | Failed            |
     /// | Working           | Flatline          |
+    /// | Working           | Paused            | (backend unavailable / user requested)
     /// | WaitingForTool    | Working           |
     /// | WaitingForTool    | Failed            |
     /// | WaitingForTool    | Flatline          |
+    /// | WaitingForTool    | Paused            | (backend unavailable mid-tool)
+    /// | Paused            | Working           | (backend restored / user resumed)
     /// | Failed            | Queued            | (retry)
     /// | Flatline          | Queued            | (manual retry)
-    pub fn can_transition_to(self, next: AgentStatus) -> bool {
+    pub fn can_transition_to(&self, next: &AgentStatus) -> bool {
         use AgentStatus::*;
         matches!(
             (self, next),
@@ -101,9 +139,12 @@ impl AgentStatus {
                 | (Working, Done)
                 | (Working, Failed)
                 | (Working, Flatline)
+                | (Working, Paused { .. })            // #321: pause on backend unavailable
                 | (WaitingForTool, Working)
                 | (WaitingForTool, Failed)
                 | (WaitingForTool, Flatline)
+                | (WaitingForTool, Paused { .. })     // #321: pause mid-tool
+                | (Paused { .. }, Working)            // #321: resume when backend restores
                 | (Failed, Queued)                    // retry
                 | (Flatline, Queued)                  // manual retry
         )
@@ -112,7 +153,7 @@ impl AgentStatus {
     /// Returns `true` if the agent is in a terminal state that cannot advance
     /// without an explicit external trigger (retry, user action, etc.).
     #[must_use]
-    pub fn is_terminal(self) -> bool {
+    pub fn is_terminal(&self) -> bool {
         matches!(self, AgentStatus::Done | AgentStatus::Failed | AgentStatus::Flatline)
     }
 
@@ -120,8 +161,24 @@ impl AgentStatus {
     /// or waiting for a tool result). Used by the concurrency gate in
     /// [`crate::manager::AgentManager`].
     #[must_use]
-    pub fn is_active(self) -> bool {
+    pub fn is_active(&self) -> bool {
         matches!(self, AgentStatus::Working | AgentStatus::WaitingForTool)
+    }
+
+    /// Returns `true` if the agent is currently paused.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        matches!(self, AgentStatus::Paused { .. })
+    }
+
+    /// Returns the pause reason if the agent is in `Paused` state.
+    #[must_use]
+    pub fn pause_reason(&self) -> Option<&PauseReason> {
+        if let AgentStatus::Paused { reason } = self {
+            Some(reason)
+        } else {
+            None
+        }
     }
 }
 
@@ -299,7 +356,7 @@ impl Agent {
     /// Return the current lifecycle status.
     #[must_use]
     pub fn status(&self) -> AgentStatus {
-        self.status
+        self.status.clone()
     }
 
     /// Set the lifecycle status directly, bypassing FSM guards.
@@ -470,7 +527,7 @@ impl Agent {
     /// current state does not permit this transition (no-op on failure so the
     /// caller can decide how to handle the invalid sequence).
     pub fn begin_planning(&mut self) -> bool {
-        if self.status.can_transition_to(AgentStatus::Planning) {
+        if self.status.can_transition_to(&AgentStatus::Planning) {
             self.status = AgentStatus::Planning;
             true
         } else {
@@ -482,7 +539,7 @@ impl Agent {
     ///
     /// Valid only from `Planning`. Returns `true` on success.
     pub fn submit_plan_for_approval(&mut self) -> bool {
-        if self.status.can_transition_to(AgentStatus::AwaitingApproval) {
+        if self.status.can_transition_to(&AgentStatus::AwaitingApproval) {
             self.status = AgentStatus::AwaitingApproval;
             true
         } else {
@@ -495,7 +552,7 @@ impl Agent {
     /// Valid from `Planning` (auto-approve) or `AwaitingApproval` (user/policy
     /// approve). Returns `true` on success.
     pub fn approve_plan(&mut self) -> bool {
-        if self.status.can_transition_to(AgentStatus::Working) {
+        if self.status.can_transition_to(&AgentStatus::Working) {
             self.status = AgentStatus::Working;
             true
         } else {
@@ -508,7 +565,7 @@ impl Agent {
     ///
     /// Returns `true` on success.
     pub fn request_revision(&mut self) -> bool {
-        if self.status.can_transition_to(AgentStatus::Planning) {
+        if self.status.can_transition_to(&AgentStatus::Planning) {
             self.status = AgentStatus::Planning;
             true
         } else {
@@ -538,10 +595,46 @@ impl Agent {
 
     /// Reset a flatlined agent back to Queued for manual retry.
     pub fn retry(&mut self) {
-        debug_assert_eq!(self.status, AgentStatus::Flatline, "retry() called on non-flatlined agent");
+        debug_assert!(
+            matches!(self.status, AgentStatus::Flatline),
+            "retry() called on non-flatlined agent"
+        );
         self.status = AgentStatus::Queued;
         self.flatline_reason = None;
         self.completed_at = None;
+    }
+
+    /// Pause the agent due to a recoverable condition.
+    ///
+    /// Valid from `Working` or `WaitingForTool`. Returns `true` on success,
+    /// `false` if the current status does not allow pausing.
+    ///
+    /// Issue #321: Called by the reconciler when `backend.is_available()` returns
+    /// `false`. The conversation history is preserved so the agent can resume
+    /// exactly where it left off.
+    pub fn pause(&mut self, reason: PauseReason) -> bool {
+        let next = AgentStatus::Paused { reason };
+        if self.status.can_transition_to(&next) {
+            self.status = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resume the agent from a paused state.
+    ///
+    /// Valid only from `Paused`. Returns `true` on success.
+    ///
+    /// Issue #321: Called by the reconciler when `backend.is_available()` returns
+    /// `true` again after a period of unavailability.
+    pub fn resume(&mut self) -> bool {
+        if self.status.can_transition_to(&AgentStatus::Working) {
+            self.status = AgentStatus::Working;
+            true
+        } else {
+            false
+        }
     }
 
     /// Duration since creation.
@@ -690,12 +783,13 @@ impl Agent {
             }
         };
 
-        let status_tag = match self.status {
+        let status_tag = match &self.status {
             AgentStatus::Queued => "QUEUED",
             AgentStatus::Planning => "PLANNING",
             AgentStatus::AwaitingApproval => "PENDING APPROVAL",
             AgentStatus::Working => "WORKING",
             AgentStatus::WaitingForTool => "WAITING",
+            AgentStatus::Paused { .. } => "PAUSED",
             AgentStatus::Done => "DONE",
             AgentStatus::Failed => "FAILED",
             AgentStatus::Flatline => "FLATLINE",
@@ -1140,10 +1234,6 @@ mod tests {
 
     #[test]
     fn agent_message_tool_result_includes_provenance() {
-        // Pushing a ToolResult onto the agent's history must preserve the
-        // provenance fields. This is the substrate's promise that every
-        // entry in agent.messages() can be walked back to the substrate event
-        // that triggered the tool call.
         let mut agent = Agent::new(
             1,
             AgentTask::FreeForm {
@@ -1165,9 +1255,6 @@ mod tests {
 
     #[test]
     fn source_chain_for_last_call_walks_back_n_results() {
-        // Five ToolResults with event ids [10, 20, 30, 40, 50] in
-        // chronological order. Calling source_chain_for_last_call(3) returns
-        // the three most-recent ones, ordered most-recent-first: [50, 40, 30].
         let mut agent = Agent::new(
             1,
             AgentTask::FreeForm {
@@ -1188,9 +1275,6 @@ mod tests {
 
     #[test]
     fn source_chain_excludes_user_and_assistant_messages() {
-        // Only ToolResult messages contribute event ids to the chain. User,
-        // Assistant, System, and ToolCall messages are skipped — they don't
-        // carry a source_event_id and aren't in the input chain.
         let mut agent = Agent::new(
             1,
             AgentTask::FreeForm {
@@ -1218,9 +1302,6 @@ mod tests {
 
     #[test]
     fn source_chain_for_last_call_skips_results_without_event_id() {
-        // ToolResults with `source_event_id == None` (legacy / test paths
-        // that didn't populate provenance) are skipped — they don't break
-        // the chain, they just don't contribute an id.
         let mut agent = Agent::new(
             1,
             AgentTask::FreeForm {
@@ -1242,7 +1323,6 @@ mod tests {
 
     #[test]
     fn source_chain_for_last_call_zero_depth_returns_empty() {
-        // depth = 0 short-circuits to an empty Vec without scanning history.
         let mut agent = Agent::new(
             1,
             AgentTask::FreeForm {
@@ -1259,50 +1339,47 @@ mod tests {
 
     #[test]
     fn can_transition_to_planning_from_queued() {
-        assert!(AgentStatus::Queued.can_transition_to(AgentStatus::Planning));
+        assert!(AgentStatus::Queued.can_transition_to(&AgentStatus::Planning));
     }
 
     #[test]
     fn can_transition_to_awaiting_approval_from_planning() {
-        assert!(AgentStatus::Planning.can_transition_to(AgentStatus::AwaitingApproval));
+        assert!(AgentStatus::Planning.can_transition_to(&AgentStatus::AwaitingApproval));
     }
 
     #[test]
     fn can_transition_to_working_from_awaiting_approval() {
-        assert!(AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Working));
+        assert!(AgentStatus::AwaitingApproval.can_transition_to(&AgentStatus::Working));
     }
 
     #[test]
     fn can_transition_to_working_from_planning_auto_approve() {
-        // The plan gate may auto-approve without going through AwaitingApproval.
-        assert!(AgentStatus::Planning.can_transition_to(AgentStatus::Working));
+        assert!(AgentStatus::Planning.can_transition_to(&AgentStatus::Working));
     }
 
     #[test]
     fn can_transition_awaiting_approval_back_to_planning_on_revision() {
-        // A user may reject the plan and request revision — agent re-plans.
-        assert!(AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Planning));
+        assert!(AgentStatus::AwaitingApproval.can_transition_to(&AgentStatus::Planning));
     }
 
     #[test]
     fn invalid_transition_planning_to_done() {
-        assert!(!AgentStatus::Planning.can_transition_to(AgentStatus::Done));
+        assert!(!AgentStatus::Planning.can_transition_to(&AgentStatus::Done));
     }
 
     #[test]
     fn invalid_transition_awaiting_approval_to_done() {
-        assert!(!AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Done));
+        assert!(!AgentStatus::AwaitingApproval.can_transition_to(&AgentStatus::Done));
     }
 
     #[test]
     fn invalid_transition_awaiting_approval_to_failed_directly() {
-        // Cannot jump straight to Failed from AwaitingApproval — must go Working first.
-        assert!(!AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Failed));
+        assert!(!AgentStatus::AwaitingApproval.can_transition_to(&AgentStatus::Failed));
     }
 
     #[test]
     fn invalid_transition_done_to_planning() {
-        assert!(!AgentStatus::Done.can_transition_to(AgentStatus::Planning));
+        assert!(!AgentStatus::Done.can_transition_to(&AgentStatus::Planning));
     }
 
     #[test]
@@ -1351,7 +1428,6 @@ mod tests {
 
     #[test]
     fn approve_plan_from_planning_auto_approve() {
-        // Planning → Working directly (auto-approve path, no user interaction).
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         agent.begin_planning();
         let ok = agent.approve_plan();
@@ -1361,9 +1437,6 @@ mod tests {
 
     #[test]
     fn approve_plan_fast_path_from_queued() {
-        // Queued → Working is the no-gate fast path and a valid transition,
-        // so approve_plan() from Queued succeeds (it routes through the same
-        // can_transition_to(Working) guard).
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         let ok = agent.approve_plan();
         assert!(ok, "approve_plan() must succeed from Queued via the fast path");
@@ -1372,9 +1445,8 @@ mod tests {
 
     #[test]
     fn approve_plan_fails_from_done() {
-        // Done is a terminal state — cannot transition to Working.
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
-        agent.complete(true); // → Done
+        agent.complete(true);
         let ok = agent.approve_plan();
         assert!(!ok, "approve_plan() must fail from Done");
         assert_eq!(agent.status(), AgentStatus::Done, "status must not change");
@@ -1401,7 +1473,6 @@ mod tests {
 
     #[test]
     fn full_plan_gate_happy_path() {
-        // Queued → Planning → AwaitingApproval → Working → Done
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         assert_eq!(agent.status(), AgentStatus::Queued);
         assert!(agent.begin_planning());
@@ -1416,18 +1487,14 @@ mod tests {
 
     #[test]
     fn full_plan_gate_with_revision() {
-        // Queued → Planning → AwaitingApproval → Planning → AwaitingApproval → Working
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
         agent.begin_planning();
         agent.submit_plan_for_approval();
         assert_eq!(agent.status(), AgentStatus::AwaitingApproval);
-        // User rejects, requests revision.
         assert!(agent.request_revision());
         assert_eq!(agent.status(), AgentStatus::Planning);
-        // Agent replans, resubmits.
         assert!(agent.submit_plan_for_approval());
         assert_eq!(agent.status(), AgentStatus::AwaitingApproval);
-        // User approves.
         assert!(agent.approve_plan());
         assert_eq!(agent.status(), AgentStatus::Working);
     }
@@ -1481,14 +1548,8 @@ mod tests {
     #[test]
     fn new_agent_has_no_correlation_id() {
         let agent = Agent::new(1, AgentTask::FreeForm { prompt: "test".into() });
-        assert!(
-            agent.correlation_id().is_none(),
-            "Agent::new must leave correlation_id as None",
-        );
-        assert!(
-            agent.parent_id().is_none(),
-            "Agent::new must leave parent_id as None",
-        );
+        assert!(agent.correlation_id().is_none());
+        assert!(agent.parent_id().is_none());
     }
 
     #[test]
@@ -1501,16 +1562,8 @@ mod tests {
             Some(7),
         );
 
-        assert_eq!(
-            agent.correlation_id(),
-            Some(cid),
-            "with_correlation must stamp the given CorrelationId",
-        );
-        assert_eq!(
-            agent.parent_id(),
-            Some(7),
-            "with_correlation must stamp the given parent_id",
-        );
+        assert_eq!(agent.correlation_id(), Some(cid));
+        assert_eq!(agent.parent_id(), Some(7));
     }
 
     #[test]
@@ -1524,7 +1577,7 @@ mod tests {
         );
 
         assert_eq!(agent.correlation_id(), Some(cid));
-        assert!(agent.parent_id().is_none(), "parent_id must be None when not supplied");
+        assert!(agent.parent_id().is_none());
     }
 
     #[test]
@@ -1536,32 +1589,22 @@ mod tests {
             cid,
             None,
         );
-        assert_eq!(
-            agent.status(),
-            AgentStatus::Queued,
-            "with_correlation must start in Queued status",
-        );
+        assert_eq!(agent.status(), AgentStatus::Queued);
     }
 
     #[test]
     fn pipeline_agents_share_correlation_id() {
-        // All agents in a pipeline run should carry the same CorrelationId.
         let cid = CorrelationId::new();
         let parent = Agent::with_correlation(1, AgentTask::FreeForm { prompt: "orchestrator".into() }, cid, None);
         let child = Agent::with_correlation(2, AgentTask::FreeForm { prompt: "worker".into() }, cid, Some(1));
 
-        assert_eq!(
-            parent.correlation_id(),
-            child.correlation_id(),
-            "pipeline agents must share the same correlation id",
-        );
+        assert_eq!(parent.correlation_id(), child.correlation_id());
     }
 
     // -----------------------------------------------------------------------
     // Issue #74: SemanticContext wiring into Agent
     // -----------------------------------------------------------------------
 
-    /// A freshly constructed agent has an empty semantic ring-buffer.
     #[test]
     fn new_agent_semantic_ctx_empty() {
         let agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
@@ -1569,8 +1612,6 @@ mod tests {
         assert!(agent.semantic_prompt_section().is_none());
     }
 
-    /// After `push_semantic_output`, the ring-buffer is non-empty and
-    /// `semantic_prompt_section` returns `Some`.
     #[test]
     fn push_semantic_output_populates_ring_buffer() {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
@@ -1587,8 +1628,6 @@ mod tests {
         assert!(agent.semantic_prompt_section().is_some());
     }
 
-    /// The semantic prompt section includes the "## Recent command output"
-    /// heading and labels git status output correctly.
     #[test]
     fn semantic_prompt_section_contains_git_status_label() {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
@@ -1602,22 +1641,11 @@ mod tests {
         agent.push_semantic_output(parsed);
 
         let section = agent.semantic_prompt_section().unwrap();
-        assert!(
-            section.contains("## Recent command output"),
-            "section must have heading; got: {section}"
-        );
-        assert!(
-            section.contains("git.status"),
-            "section must label git status; got: {section}"
-        );
-        assert!(
-            section.contains("feature/x"),
-            "branch name must surface; got: {section}"
-        );
+        assert!(section.contains("## Recent command output"), "section must have heading; got: {section}");
+        assert!(section.contains("git.status"), "section must label git status; got: {section}");
+        assert!(section.contains("feature/x"), "branch name must surface; got: {section}");
     }
 
-    /// Semantic context is FIFO-capped at MAX_ENTRIES (10). Pushing 12 entries
-    /// keeps the ring-buffer at 10 and evicts the two oldest.
     #[test]
     fn semantic_ctx_ring_buffer_caps_at_max_entries() {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
@@ -1632,10 +1660,8 @@ mod tests {
             agent.push_semantic_output(parsed);
         }
 
-        // Must not exceed 10.
         assert_eq!(agent.semantic_ctx().len(), 10);
 
-        // The oldest entries (echo 0, echo 1) must be evicted.
         let commands: Vec<&str> = agent
             .semantic_ctx()
             .entries()
@@ -1647,7 +1673,6 @@ mod tests {
         assert!(commands.contains(&"echo 11"), "echo 11 must be present");
     }
 
-    /// `semantic_prompt_section` surfaces cargo test results (pass/fail counts).
     #[test]
     fn semantic_prompt_section_surfaces_test_results() {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
@@ -1669,8 +1694,6 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert!(section.contains("passed"), "pass count must surface; got: {section}");
     }
 
-    /// Multiple sequential push calls accumulate in order; `semantic_ctx.latest()`
-    /// returns the most recently pushed entry.
     #[test]
     fn semantic_ctx_latest_is_most_recent() {
         let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "hi".into() });
@@ -1695,8 +1718,8 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn spawn_opts_new_defaults_role_and_label_to_none() {
         let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "task".into() });
-        assert!(opts.role.is_none(), "AgentSpawnOpts::new must default role to None");
-        assert!(opts.label.is_none(), "AgentSpawnOpts::new must default label to None");
+        assert!(opts.role.is_none());
+        assert!(opts.label.is_none());
     }
 
     #[test]
@@ -1704,22 +1727,14 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         use crate::role::AgentRole;
         let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "sec".into() })
             .with_role(AgentRole::Defender);
-        assert_eq!(
-            opts.role,
-            Some(AgentRole::Defender),
-            "with_role(Defender) must set opts.role = Some(Defender)",
-        );
+        assert_eq!(opts.role, Some(AgentRole::Defender));
     }
 
     #[test]
     fn spawn_opts_with_label_is_preserved() {
         let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "work".into() })
             .with_label("custom-defender");
-        assert_eq!(
-            opts.label.as_deref(),
-            Some("custom-defender"),
-            "with_label must set opts.label = Some(custom-defender)",
-        );
+        assert_eq!(opts.label.as_deref(), Some("custom-defender"));
     }
 
     #[test]
@@ -1739,24 +1754,13 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let q = queue.lock().expect("queue lock");
         assert_eq!(q.len(), 1);
         let req = &q[0];
-        assert_eq!(req.assigned_id, id, "assigned_id must match returned id");
-        assert_eq!(
-            req.role,
-            AgentRole::Defender,
-            "SpawnSubagentRequest.role must be Defender, not Conversational",
-        );
-        assert_eq!(
-            req.label,
-            "sec-watcher",
-            "SpawnSubagentRequest.label must be sec-watcher",
-        );
+        assert_eq!(req.assigned_id, id);
+        assert_eq!(req.role, AgentRole::Defender);
+        assert_eq!(req.label, "sec-watcher");
     }
 
     // ---- Disposition wiring (#38 / #49) ------------------------------------
 
-    /// Chat-disposition agents must jump Queued → Working via `try_auto_approve`,
-    /// never visiting `AwaitingApproval`. This is the agent-level anchor for the
-    /// auto-approve fast path (Issue #49).
     #[test]
     fn try_auto_approve_chat_goes_queued_to_working_directly() {
         let mut agent = Agent::with_disposition(
@@ -1768,16 +1772,10 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
         let approved = agent.try_auto_approve();
 
-        assert!(approved, "try_auto_approve must return true for Chat disposition");
-        assert_eq!(
-            agent.status(),
-            AgentStatus::Working,
-            "Chat agent must be Working after try_auto_approve, not AwaitingApproval",
-        );
+        assert!(approved);
+        assert_eq!(agent.status(), AgentStatus::Working);
     }
 
-    /// `try_auto_approve` on Synthesize, Decompose, and Audit must also
-    /// short-circuit to Working (all satisfy `auto_approve()`).
     #[test]
     fn try_auto_approve_synthesize_decompose_audit_go_to_working() {
         for disposition in [Disposition::Synthesize, Disposition::Decompose, Disposition::Audit] {
@@ -1786,20 +1784,11 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 AgentTask::FreeForm { prompt: "task".into() },
                 disposition,
             );
-            assert!(
-                agent.try_auto_approve(),
-                "{disposition:?} must auto-approve",
-            );
-            assert_eq!(
-                agent.status(),
-                AgentStatus::Working,
-                "{disposition:?} must end up Working, not AwaitingApproval",
-            );
+            assert!(agent.try_auto_approve(), "{disposition:?} must auto-approve");
+            assert_eq!(agent.status(), AgentStatus::Working);
         }
     }
 
-    /// Write-side dispositions (Feature, BugFix, Refactor, Chore) must NOT
-    /// auto-approve — they require the full plan gate.
     #[test]
     fn try_auto_approve_returns_false_for_write_dispositions() {
         for disposition in [
@@ -1813,15 +1802,8 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 AgentTask::FreeForm { prompt: "task".into() },
                 disposition,
             );
-            assert!(
-                !agent.try_auto_approve(),
-                "{disposition:?} must not auto-approve",
-            );
-            assert_eq!(
-                agent.status(),
-                AgentStatus::Queued,
-                "{disposition:?} must remain Queued when try_auto_approve returns false",
-            );
+            assert!(!agent.try_auto_approve(), "{disposition:?} must not auto-approve");
+            assert_eq!(agent.status(), AgentStatus::Queued);
         }
     }
 
@@ -1877,5 +1859,103 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             .with_disposition(Disposition::Feature);
         assert_eq!(o.disposition, Disposition::Feature);
         assert!(o.chat_model.is_none());
+    }
+
+    // ---- Issue #321: Pause / Resume FSM transitions -------------------------
+
+    #[test]
+    fn pause_from_working_network_unavailable() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.set_status(AgentStatus::Working);
+        let ok = agent.pause(PauseReason::NetworkUnavailable);
+        assert!(ok, "pause() must succeed from Working");
+        assert_eq!(
+            agent.status(),
+            AgentStatus::Paused { reason: PauseReason::NetworkUnavailable }
+        );
+        assert!(agent.status().is_paused());
+    }
+
+    #[test]
+    fn pause_from_working_backend_degraded() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.set_status(AgentStatus::Working);
+        let ok = agent.pause(PauseReason::BackendDegraded { provider: "anthropic".into() });
+        assert!(ok);
+        assert!(agent.status().is_paused());
+        assert_eq!(
+            agent.status().pause_reason(),
+            Some(&PauseReason::BackendDegraded { provider: "anthropic".into() })
+        );
+    }
+
+    #[test]
+    fn pause_from_waiting_for_tool() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.set_status(AgentStatus::WaitingForTool);
+        let ok = agent.pause(PauseReason::NetworkUnavailable);
+        assert!(ok, "pause() must succeed from WaitingForTool");
+        assert!(agent.status().is_paused());
+    }
+
+    #[test]
+    fn resume_from_paused_transitions_to_working() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.set_status(AgentStatus::Paused { reason: PauseReason::NetworkUnavailable });
+        let ok = agent.resume();
+        assert!(ok, "resume() must succeed from Paused");
+        assert_eq!(agent.status(), AgentStatus::Working);
+    }
+
+    #[test]
+    fn pause_from_queued_is_rejected() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        let ok = agent.pause(PauseReason::NetworkUnavailable);
+        assert!(!ok, "pause() must fail from Queued");
+        assert_eq!(agent.status(), AgentStatus::Queued, "status must not change");
+    }
+
+    #[test]
+    fn resume_from_working_is_rejected() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.set_status(AgentStatus::Working);
+        let ok = agent.resume();
+        assert!(!ok, "resume() must fail from Working");
+        assert_eq!(agent.status(), AgentStatus::Working, "status must not change");
+    }
+
+    #[test]
+    fn paused_is_not_terminal() {
+        let s = AgentStatus::Paused { reason: PauseReason::NetworkUnavailable };
+        assert!(!s.is_terminal(), "Paused must not be terminal");
+    }
+
+    #[test]
+    fn paused_is_not_active() {
+        let s = AgentStatus::Paused { reason: PauseReason::NetworkUnavailable };
+        assert!(!s.is_active(), "Paused must not be is_active()");
+    }
+
+    #[test]
+    fn status_line_shows_paused_tag() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.set_status(AgentStatus::Working);
+        agent.pause(PauseReason::NetworkUnavailable);
+        let line = agent.status_line();
+        assert!(line.contains("PAUSED"), "status line must show PAUSED tag; got: {line}");
+    }
+
+    #[test]
+    fn pause_reason_serde_round_trip() {
+        let reasons = [
+            PauseReason::NetworkUnavailable,
+            PauseReason::BackendDegraded { provider: "openai".into() },
+            PauseReason::UserRequested,
+        ];
+        for r in &reasons {
+            let json = serde_json::to_string(r).expect("serialize");
+            let back: PauseReason = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(r, &back, "PauseReason must round-trip through serde");
+        }
     }
 }

@@ -8,12 +8,12 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{debug, info, warn};
 
-use phantom_brain::events::{AiEvent};
+use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::WorldState;
-use phantom_protocol::Event;
 use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AppCommand, ScreenshotReply};
+use phantom_protocol::Event;
 use crate::app::{App, AppState};
 use crate::input::chrono_time_string;
 

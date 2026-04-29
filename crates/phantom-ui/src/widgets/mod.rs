@@ -124,19 +124,60 @@ pub trait Widget {
 // StatusBar
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// ConnectionIndicator
+// -----------------------------------------------------------------------
+
+/// Connection state of the AI backend, shown in the status bar.
+///
+/// This is a UI-facing mirror of the brain's `ConnectionState` enum.
+/// It lives in `phantom-ui` to avoid a cross-crate dependency on
+/// `phantom-brain` from the UI layer; the app layer maps between the two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionIndicator {
+    /// All backends reachable — no indicator shown.
+    Connected,
+    /// A named provider is degraded — shown in amber.
+    Degraded { provider: String },
+    /// Network offline — shown in red.
+    Offline,
+}
+
+impl ConnectionIndicator {
+    /// Short label displayed in the status bar (empty when connected).
+    pub fn label(&self) -> String {
+        match self {
+            Self::Connected => String::new(),
+            Self::Degraded { provider } => format!("~ {provider}"),
+            Self::Offline => "OFFLINE".to_owned(),
+        }
+    }
+
+    /// RGBA color for the indicator text.
+    pub fn color(&self) -> [f32; 4] {
+        match self {
+            Self::Connected => [0.6, 0.7, 0.6, 1.0],
+            Self::Degraded { .. } => [0.9, 0.7, 0.2, 1.0],
+            Self::Offline => [0.9, 0.3, 0.3, 1.0],
+        }
+    }
+}
+
 /// Bottom status bar showing working directory, git branch, and time.
 ///
 /// The bar is divided into three regions:
 /// - **Left**: current working directory, truncated with a leading `...` if
 ///   the path is too long for the available space.
 /// - **Center**: git branch name prefixed with a branch icon ( ).
-/// - **Right**: wall clock in `HH:MM` format.
+/// - **Right**: wall clock in `HH:MM` format, optionally preceded by a
+///   connection indicator when the AI backend is degraded or offline.
 #[derive(Clone, Debug)]
 pub struct StatusBar {
     cwd: String,
     branch: String,
     time: String,
     activity: Option<String>,
+    connection: Option<ConnectionIndicator>,
 }
 
 impl StatusBar {
@@ -147,6 +188,7 @@ impl StatusBar {
             branch: String::from("main"),
             time: String::from("00:00"),
             activity: None,
+            connection: None,
         }
     }
 
@@ -174,6 +216,18 @@ impl StatusBar {
     /// Take and clear the current activity message.
     pub fn take_activity(&mut self) -> Option<String> {
         self.activity.take()
+    }
+
+    /// Update the AI backend connection indicator.
+    ///
+    /// Pass `None` to clear the indicator (equivalent to `Connected`).
+    pub fn set_connection(&mut self, indicator: Option<ConnectionIndicator>) {
+        self.connection = indicator;
+    }
+
+    /// The current connection indicator, if any.
+    pub fn connection(&self) -> Option<&ConnectionIndicator> {
+        self.connection.as_ref()
     }
 
     /// Truncate `text` so it fits within `max_chars`, prepending `...` if needed.
@@ -209,7 +263,7 @@ impl Widget for StatusBar {
     }
 
     fn render_text(&self, rect: &Rect) -> Vec<TextSegment> {
-        let mut segments = Vec::with_capacity(3);
+        let mut segments = Vec::with_capacity(4);
         // Padding scales with screen width so content survives CRT barrel
         // distortion at edges. ~1.5% of width handles curvature up to ~0.06.
         let padding = (rect.width * 0.015).max(8.0);
@@ -225,6 +279,22 @@ impl Widget for StatusBar {
             y: text_y,
             color: STATUS_BAR_FG,
         });
+
+        // -- Right-of-center: connection indicator (shown when not Connected) --
+        if let Some(indicator) = &self.connection {
+            let label = indicator.label();
+            if !label.is_empty() {
+                let indicator_width = label.len() as f32 * CHAR_WIDTH;
+                let gap = 8.0;
+                let indicator_x = time_x - indicator_width - gap;
+                segments.push(TextSegment {
+                    text: label,
+                    x: indicator_x,
+                    y: text_y,
+                    color: indicator.color(),
+                });
+            }
+        }
 
         // -- Center: branch with icon --
         let branch_text = format!("\u{E0A0} {}", self.branch);

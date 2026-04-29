@@ -4,6 +4,7 @@
 //! Both are passed over `std::sync::mpsc` channels between the brain thread
 //! and the rest of the application.
 
+use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 use phantom_agents::{AgentId, AgentTask};
 use phantom_semantic::ParsedOutput;
@@ -193,21 +194,43 @@ pub enum AiAction {
     },
 
     /// A checkpoint step is the next eligible step but cannot run until approved.
-    ///
-    /// Emitted by the reconciler when [`TaskLedger::eligible_next`] returns no
-    /// eligible steps because the next candidate step has
-    /// [`StepStatus::NeedsApproval`]. The UI should surface this as a blocking
-    /// prompt so the operator can call [`TaskLedger::approve_checkpoint`].
-    ///
-    /// The brain emits this action **once per checkpoint encounter** to avoid
-    /// spamming the UI on every reconciler tick.
     CheckpointReached {
-        /// Index of the step in the active [`TaskLedger`] plan.
         step_idx: usize,
-        /// Human-readable description of what the step will do once approved.
         description: String,
     },
 
+    /// Pause a running agent because its backend became unavailable.
+    PauseAgent {
+        agent_id: AgentId,
+        reason: PauseReason,
+    },
+
+    /// Resume a previously paused agent because its backend is available again.
+    ResumeAgent { agent_id: AgentId },
+
+    /// Update the connection state displayed in the status bar.
+    UpdateConnectionState { state: ConnectionState },
+
+
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionState
+// ---------------------------------------------------------------------------
+
+/// The connectivity status of the AI backend as observed by the reconciler.
+///
+/// Mirrors the `PauseReason` taxonomy but is a coarser, UI-facing enum.
+/// The reconciler derives this from the most recent `PauseReason` seen across
+/// all paused agents and broadcasts it via [`AiAction::UpdateConnectionState`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// All backends are reachable.
+    Connected,
+    /// A named provider is responding but returning errors or degraded results.
+    Degraded { provider: String },
+    /// No backend is reachable (network down or all providers offline).
+    Offline,
 }
