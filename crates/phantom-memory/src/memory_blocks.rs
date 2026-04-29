@@ -147,11 +147,7 @@ impl BlockHandle {
         }
 
         {
-            let mut guard = self
-                .block
-                .value
-                .write()
-                .expect("block value lock poisoned");
+            let mut guard = self.block.value.write().expect("block value lock poisoned");
             *guard = value;
         }
         let new_rev = self.block.revision.fetch_add(1, Ordering::AcqRel) + 1;
@@ -351,7 +347,9 @@ mod tests {
         writer.write("update".to_string()).unwrap();
 
         // Wait for the bump notification.
-        rx.changed().await.expect("watch sender must still be alive");
+        rx.changed()
+            .await
+            .expect("watch sender must still be alive");
         assert_eq!(*rx.borrow(), 1);
         assert_eq!(reader.read(), "update");
     }

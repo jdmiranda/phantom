@@ -357,11 +357,7 @@ impl AgentJournal {
     }
 
     /// All in-memory entries produced by `agent_id` in the given `phase`.
-    pub fn filter_by_agent_and_phase(
-        &self,
-        agent_id: AgentId,
-        phase: Phase,
-    ) -> Vec<JournalEntry> {
+    pub fn filter_by_agent_and_phase(&self, agent_id: AgentId, phase: Phase) -> Vec<JournalEntry> {
         self.log
             .tail(usize::MAX)
             .into_iter()
@@ -451,8 +447,10 @@ mod tests {
         let (mut j, _, _dir) = mk_journal("basic.jsonl");
 
         j.record(1, Phase::Lifecycle, Level::Info, "first").unwrap();
-        j.record(2, Phase::Execution, Level::Debug, "second").unwrap();
-        j.record(1, Phase::Completion, Level::Info, "third").unwrap();
+        j.record(2, Phase::Execution, Level::Debug, "second")
+            .unwrap();
+        j.record(1, Phase::Completion, Level::Info, "third")
+            .unwrap();
 
         let tail = j.tail(10);
         assert_eq!(tail.len(), 3);
@@ -635,8 +633,10 @@ mod tests {
     fn filter_by_level_returns_matching() {
         let (mut j, _, _dir) = mk_journal("level_filter.jsonl");
 
-        j.record(1, Phase::Execution, Level::Debug, "verbose").unwrap();
-        j.record(1, Phase::Execution, Level::Info, "normal").unwrap();
+        j.record(1, Phase::Execution, Level::Debug, "verbose")
+            .unwrap();
+        j.record(1, Phase::Execution, Level::Info, "normal")
+            .unwrap();
         j.record(1, Phase::Lifecycle, Level::Error, "dead").unwrap();
         j.record(2, Phase::Execution, Level::Warn, "odd").unwrap();
         j.record(2, Phase::Completion, Level::Info, "ok").unwrap();
@@ -663,7 +663,14 @@ mod tests {
 
         // Manually craft entries at known timestamps.
         let make = |agent_id: u64, ts: i64, msg: &str| {
-            JournalEntry::new(agent_id, next_global_sequence(), ts, Phase::Execution, Level::Info, msg)
+            JournalEntry::new(
+                agent_id,
+                next_global_sequence(),
+                ts,
+                Phase::Execution,
+                Level::Info,
+                msg,
+            )
         };
 
         j.append(make(1, 1000, "before")).unwrap();
@@ -695,16 +702,16 @@ mod tests {
         let (mut j, _, _dir) = mk_journal("seq.jsonl");
 
         let entries: Vec<_> = (0..10)
-            .map(|_| {
-                j.record(1, Phase::Execution, Level::Info, "x")
-                    .unwrap()
-            })
+            .map(|_| j.record(1, Phase::Execution, Level::Info, "x").unwrap())
             .collect();
 
         let seqs: Vec<u64> = entries.iter().map(|e| e.sequence()).collect();
         // All sequences must be strictly increasing.
         for pair in seqs.windows(2) {
-            assert!(pair[1] > pair[0], "sequence must be strictly increasing: {pair:?}");
+            assert!(
+                pair[1] > pair[0],
+                "sequence must be strictly increasing: {pair:?}"
+            );
         }
     }
 

@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod event_log;
 pub mod handoff_log;
 pub mod journal;

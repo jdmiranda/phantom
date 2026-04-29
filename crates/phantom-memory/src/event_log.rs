@@ -209,10 +209,7 @@ impl EventLog {
         }
         drop(probe);
 
-        let file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)?;
+        let file = OpenOptions::new().append(true).create(true).open(path)?;
         let writer = BufWriter::new(file);
 
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -492,12 +489,8 @@ mod tests {
         let (path, _dir) = ev_path("tail.jsonl");
         let mut log = EventLog::open(&path).unwrap();
         for i in 0..10 {
-            log.append(
-                EventSource::Substrate,
-                "evt",
-                serde_json::json!({ "i": i }),
-            )
-            .unwrap();
+            log.append(EventSource::Substrate, "evt", serde_json::json!({ "i": i }))
+                .unwrap();
         }
 
         let tail = log.tail(3);
@@ -526,8 +519,12 @@ mod tests {
             .unwrap();
         log.append(EventSource::Substrate, "foo.bar", serde_json::json!({}))
             .unwrap();
-        log.append(EventSource::Agent { id: 1 }, "foo.baz", serde_json::json!({}))
-            .unwrap();
+        log.append(
+            EventSource::Agent { id: 1 },
+            "foo.baz",
+            serde_json::json!({}),
+        )
+        .unwrap();
 
         let foos = log.filter_kind("foo.bar");
         assert_eq!(foos.len(), 2);
@@ -609,7 +606,10 @@ mod tests {
             .unwrap();
         log.flush().unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
-        assert!(after.contains("\"kind\":\"a\""), "kind not flushed: {after}");
+        assert!(
+            after.contains("\"kind\":\"a\""),
+            "kind not flushed: {after}"
+        );
     }
 
     #[test]
@@ -817,7 +817,10 @@ mod tests {
         // Subsequent write: must fail immediately with poisoned error, not
         // attempt the underlying writer again.
         let second = machine.write_line(b"another line\n");
-        assert!(second.is_err(), "poisoned machine must reject subsequent writes");
+        assert!(
+            second.is_err(),
+            "poisoned machine must reject subsequent writes"
+        );
         assert_eq!(
             second.unwrap_err().kind(),
             ErrorKind::BrokenPipe,
@@ -845,9 +848,15 @@ mod tests {
         assert!(!log.is_poisoned(), "log must start un-poisoned");
         log.append(EventSource::Substrate, "ok", serde_json::json!({}))
             .unwrap();
-        assert!(!log.is_poisoned(), "successful append must not poison the log");
+        assert!(
+            !log.is_poisoned(),
+            "successful append must not poison the log"
+        );
         log.flush().unwrap();
-        assert!(!log.is_poisoned(), "successful flush must not poison the log");
+        assert!(
+            !log.is_poisoned(),
+            "successful flush must not poison the log"
+        );
     }
 
     /// StorageFull error kind constant is correctly identified.
