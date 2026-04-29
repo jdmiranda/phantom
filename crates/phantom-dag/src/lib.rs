@@ -13,7 +13,7 @@ pub mod overlay;
 
 pub use edge::{DagEdge, EdgeKind};
 pub use node::{DagNode, NodeKind};
-pub use overlay::{NodeOverlay, OverlayIndex};
+pub use overlay::{NodeOverlay, OverlayIndex, build_overlay};
 
 use std::collections::HashMap;
 
