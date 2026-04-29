@@ -140,6 +140,8 @@ impl StatusStrip {
     /// Pixel budget (in chars) available inside a slot after padding.
     fn chars_in_slot(&self, slot_w: f32) -> usize {
         let inner = (slot_w - TOKEN_PAD * 2.0).max(0.0);
+        // Floor division (truncating cast) is intentional: we must not render a
+        // partial character that would overflow the slot's pixel boundary.
         (inner / self.ctx.cell_w()) as usize
     }
 }
@@ -406,6 +408,26 @@ mod tests {
         );
     }
 
+    /// A rect with width 0 must not panic and must produce no text segments.
+    /// Every slot's inner budget is ≤ 0, so `chars_in_slot` returns 0 and all
+    /// content is suppressed by `truncate`.
+    #[test]
+    fn zero_width_rect_produces_no_text_and_does_not_panic() {
+        let ctx = RenderCtx::fallback();
+        let s = strip_with_ctx("LEFT", "CENTER", "RIGHT", ctx);
+        let zero_rect = Rect { x: 0.0, y: 980.0, width: 0.0, height: STATUS_STRIP_HEIGHT };
+        // Must not panic.
+        let texts = s.render_text(&zero_rect);
+        assert!(
+            texts.is_empty(),
+            "zero-width rect should produce no text segments, got {}",
+            texts.len()
+        );
+        // Background quad should still be emitted (zero-area is valid for the renderer).
+        let quads = s.render_quads(&zero_rect);
+        assert_eq!(quads.len(), 1, "background quad must always be emitted");
+    }
+
     /// At 300 px total with an 8 px cell: each slot = 100 px, inner = 84 px,
     /// max_chars = 10. A 15-char string must be truncated to ≤10 chars and
     /// end with `…`.
@@ -468,7 +490,6 @@ mod tests {
         assert_eq!(texts.len(), 1);
 
         let text_w = "RIGHT".chars().count() as f32 * ctx.cell_w();
-        let _expected_x = wide_rect().width - TOKEN_PAD - text_w;
         let slot_w = wide_rect().width / 3.0;
         let right_slot_x = slot_w * 2.0;
         let actual_expected = right_slot_x + slot_w - TOKEN_PAD - text_w;
@@ -486,7 +507,13 @@ mod tests {
         );
     }
 
-    /// Center text must be within the center slot (second third).
+    /// Center text must be within the center slot (second third) AND must be
+    /// symmetrically placed — equidistant from the left and right edges of that
+    /// slot (within 1 px for integer-rounding tolerance).
+    ///
+    /// The containment check alone would silently pass even if the text were
+    /// flush-left inside the slot. The symmetry assertion below catches that
+    /// regression.
     #[test]
     fn center_slot_x_is_within_center_third() {
         let ctx = RenderCtx::fallback();
@@ -499,6 +526,7 @@ mod tests {
         let center_slot_end = slot_w * 2.0;
         let text_w = "CENTER".chars().count() as f32 * ctx.cell_w();
 
+        // ── Containment ──────────────────────────────────────────────────────
         assert!(
             texts[0].x >= center_slot_start,
             "center text starts before center slot: x={}",
@@ -508,6 +536,17 @@ mod tests {
             texts[0].x + text_w <= center_slot_end + 0.01,
             "center text exceeds center slot: x+w={}",
             texts[0].x + text_w
+        );
+
+        // ── Symmetry ─────────────────────────────────────────────────────────
+        // Distance from the text's left edge to the slot's left edge must equal
+        // the distance from the text's right edge to the slot's right edge (±1 px).
+        let gap_left = texts[0].x - center_slot_start;
+        let gap_right = center_slot_end - (texts[0].x + text_w);
+        assert!(
+            (gap_left - gap_right).abs() <= 1.0,
+            "center text is not symmetric within its slot: \
+             gap_left={gap_left:.2} gap_right={gap_right:.2} (must be equal ±1 px)"
         );
     }
 
