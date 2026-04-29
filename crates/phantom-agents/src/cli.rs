@@ -633,6 +633,8 @@ fn format_capability(cap: CapabilityClass) -> &'static str {
 fn status_tag(status: AgentStatus) -> &'static str {
     match status {
         AgentStatus::Queued => "QUEUED",
+        AgentStatus::Planning => "PLANNING",
+        AgentStatus::AwaitingApproval => "PENDING",
         AgentStatus::Working => "WORKING",
         AgentStatus::WaitingForTool => "WAITING",
         AgentStatus::Done => "DONE",
