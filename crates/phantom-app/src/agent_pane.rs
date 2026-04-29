@@ -295,6 +295,9 @@ pub(crate) struct AgentPane {
     /// absent). When `None`, the three Dispatcher tools return the canonical
     /// `"ticket dispatcher not configured"` error so the model self-corrects.
     ticket_dispatcher: Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>>,
+    /// Issue #105: runtime execution mode gate. Defaults to `Normal`.
+    #[allow(dead_code)]
+    runtime_mode: phantom_agents::dispatch::RuntimeMode,
     /// Per-agent structured lifecycle journal (JSONL on disk).
     ///
     /// `None` when the journal file could not be opened (e.g., permission
@@ -363,6 +366,7 @@ impl AgentPane {
             snapshot_sink: None,
             last_failing_capability: None,
             ticket_dispatcher: None,
+            runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             agent_capture: None,
             capture_session_uuid: uuid::Uuid::nil(),
@@ -573,6 +577,7 @@ impl AgentPane {
             self_ref: None,
             role: initial_role,
             ticket_dispatcher: None,
+            runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal,
             agent_capture: None,
             capture_session_uuid: uuid::Uuid::nil(),
@@ -692,6 +697,7 @@ impl AgentPane {
             quarantine: self.quarantine.clone(),
             correlation_id: None,
             ticket_dispatcher,
+            runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
         })
     }
 
@@ -1720,6 +1726,7 @@ mod tests {
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
+            runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             quarantine: None,
         };
@@ -1814,6 +1821,7 @@ mod tests {
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
+            runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             quarantine: None,
         };
@@ -2653,6 +2661,7 @@ mod tests {
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
+            runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             quarantine: None,
             snapshot_sink: None,

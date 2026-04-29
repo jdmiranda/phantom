@@ -292,6 +292,7 @@ const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o";
 
 /// OpenAI Chat Completions implementation of [`ChatBackend`].
+#[derive(Debug)]
 pub struct OpenAiChatBackend {
     api_key: String,
     model: String,

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use phantom_agents::audit::{AuditOutcome, emit_tool_call};
-use phantom_agents::dispatch::{DispatchContext, dispatch_tool};
+use phantom_agents::dispatch::{DispatchContext, RuntimeMode, dispatch_tool};
 use phantom_agents::inbox::{AgentHandle, AgentRegistry, AgentStatus, InboxMessage};
 use phantom_agents::role::{AgentId, AgentRef, AgentRole, SpawnSource};
 use phantom_agents::sandbox::{SandboxPolicy, execute_sandboxed};
@@ -64,6 +64,7 @@ fn build_dispatch_ctx<'a>(
         quarantine: None,
         correlation_id: None,
         ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
     }
 }
 

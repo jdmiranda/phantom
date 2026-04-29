@@ -147,6 +147,32 @@ impl Default for Disposition {
 }
 
 // ---------------------------------------------------------------------------
+// RuntimeMode (Issue #105)
+// ---------------------------------------------------------------------------
+
+/// Runtime execution mode for the dispatch layer.
+///
+/// `SpawnOnly` is the harness gate required by issue #105: when
+/// [`DispatchContext`] is built with `runtime_mode: RuntimeMode::SpawnOnly`,
+/// `dispatch_tool` denies every tool whose name is not `"spawn_subagent"`
+/// before any capability gate or handler runs.
+///
+/// Layer ordering: quarantine gate → SpawnOnly gate → capability-class gate →
+/// handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeMode {
+    /// No extra restriction beyond role-manifest capability gating.
+    #[default]
+    Normal,
+    /// Orchestrator harness mode: only `spawn_subagent` is permitted.
+    ///
+    /// All other tool calls return
+    /// `"runtime denied: … only spawn_subagent is permitted in spawn_only mode"`
+    /// without touching any handler.
+    SpawnOnly,
+}
+
+// ---------------------------------------------------------------------------
 // Capability gating helpers
 // ---------------------------------------------------------------------------
 
@@ -254,6 +280,15 @@ pub struct DispatchContext<'a> {
     /// for those names — the correct behaviour for non-Dispatcher agents and
     /// legacy test paths.
     pub ticket_dispatcher: Option<Arc<GhTicketDispatcher>>,
+    /// Issue #105: runtime execution mode gate.
+    ///
+    /// Defaults to [`RuntimeMode::Normal`] (no extra restriction). Set to
+    /// [`RuntimeMode::SpawnOnly`] in the orchestrator harness to block every
+    /// tool other than `spawn_subagent` before the capability gate runs.
+    ///
+    /// Legacy and test paths that do not set this field explicitly should use
+    /// `RuntimeMode::Normal`.
+    pub runtime_mode: RuntimeMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +823,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         }
     }
 
@@ -838,6 +874,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let result = dispatch_tool(
@@ -973,6 +1010,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let result = dispatch_tool(
@@ -1144,6 +1182,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // Act.
@@ -1196,6 +1235,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // Act.
@@ -1259,6 +1299,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // Act.
@@ -1324,6 +1365,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // This call must return — any infinite loop would cause the test to hang
@@ -1384,6 +1426,7 @@ mod tests {
             quarantine: Some(quarantine),
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // A normal file-read that would otherwise succeed must be denied.
@@ -1466,6 +1509,7 @@ mod tests {
                 quarantine: Some(Arc::clone(&quarantine)),
                 correlation_id: None,
                 ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
             };
             let blocked = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
             assert!(
@@ -1511,6 +1555,7 @@ mod tests {
             quarantine: Some(Arc::clone(&quarantine)),
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
@@ -1558,6 +1603,7 @@ mod tests {
             quarantine: Some(quarantine),
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1594,6 +1640,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
@@ -1634,6 +1681,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let ctx_b = DispatchContext {
@@ -1647,6 +1695,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
@@ -1709,6 +1758,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
@@ -1760,6 +1810,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // Attempt to invoke run_command — Act-class tool.
@@ -1834,6 +1885,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // Act — dispatch a normal read_file tool.
@@ -1887,6 +1939,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
         let res2 = dispatch_tool("read_file", &json!({"path": "probe2.txt"}), &ctx_no_corr);
         assert!(res2.success, "no-corr dispatch must succeed: {}", res2.output);
