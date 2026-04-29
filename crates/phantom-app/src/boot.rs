@@ -1210,4 +1210,83 @@ mod tests {
     fn glitch_chars_nonempty() {
         assert!(!GLITCH_CHARS.is_empty());
     }
+
+    // ── QA #158: First launch — boot animation reaches Done without panic ──
+
+    /// Simulate the full boot sequence using fixed-size ticks until Done.
+    /// Each tick is 16 ms (~60 fps). The sequence must reach Done within
+    /// a bounded number of ticks and must never panic.
+    #[test]
+    fn qa_158_boot_reaches_done_via_incremental_ticks() {
+        let mut seq = BootSequence::with_size(80, 24);
+
+        // Tick at ~60 fps. Maximum budget: 10 seconds of simulated time.
+        let dt = 1.0 / 60.0;
+        let max_ticks = (10.0 / dt) as u32 + 1;
+
+        let mut ticks = 0u32;
+        // Boot waits for a keypress at Welcome; dismiss it after it arrives.
+        let mut dismissed = false;
+
+        for _ in 0..max_ticks {
+            seq.update(dt);
+            ticks += 1;
+
+            // Dismiss once the sequence is waiting for a keypress.
+            if !dismissed && seq.is_waiting() {
+                seq.dismiss();
+                dismissed = true;
+            }
+
+            if seq.is_done() {
+                break;
+            }
+
+            // Reading visible_text each frame must never panic.
+            let _ = seq.visible_text();
+        }
+
+        assert!(
+            seq.is_done(),
+            "boot sequence did not reach Done within {max_ticks} ticks (~10 s); \
+             stopped at {:?} after {ticks} ticks",
+            seq.phase(),
+        );
+        // After Done the visible text must be empty (terminal has taken over).
+        assert!(
+            seq.visible_text().is_empty(),
+            "expected no visible text after Done, got {} lines",
+            seq.visible_text().len(),
+        );
+    }
+
+    /// Boot sequence must reach Done within 8 seconds of simulated time
+    /// (10 s budget gives ample headroom for 7 s sequence + jitter).
+    #[test]
+    fn qa_158_boot_completes_within_reasonable_elapsed_time() {
+        let mut seq = BootSequence::new();
+        // Simulate dismiss at Welcome and let transition play out.
+        seq.update(6.2); // into Welcome
+        assert_eq!(seq.phase(), BootPhase::Welcome);
+        seq.dismiss();
+        seq.update(0.6); // through transition (0.5 s)
+        assert!(seq.is_done(), "boot should be Done ~0.5 s after dismiss");
+        assert!(seq.elapsed() < 8.0, "elapsed {} exceeds 8 s budget", seq.elapsed());
+    }
+
+    /// Shell responsiveness stub: after Done, visible_text is empty and
+    /// the boot state machine accepts further update() calls without panic.
+    #[test]
+    fn qa_158_boot_done_state_is_stable() {
+        let mut seq = BootSequence::new();
+        seq.skip_immediate();
+        assert!(seq.is_done());
+
+        // Further ticks must be no-ops and must not panic.
+        for _ in 0..100 {
+            seq.update(0.016);
+        }
+        assert!(seq.is_done(), "Done must remain Done indefinitely");
+        assert!(seq.visible_text().is_empty());
+    }
 }
