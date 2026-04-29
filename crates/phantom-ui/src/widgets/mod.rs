@@ -40,6 +40,21 @@ pub use panel::{Panel, TITLE_BAR_HEIGHT};
 pub mod scrollbar;
 pub use scrollbar::{ScrollState, Scrollbar, SCROLLBAR_WIDTH, track_y_to_offset};
 
+// Issue #25 — horizontal tab strip with badge and keyboard nav.
+pub mod tab_strip;
+// Note: `Tab` is not re-exported here to avoid a name conflict with the
+// legacy private `Tab` struct used by `TabBar` in this module. Import it
+// directly: `use phantom_ui::widgets::tab_strip::Tab`.
+pub use tab_strip::{TabStrip, TAB_MIN_W};
+
+// Issue #23 — single-line text input with prompt, cursor, and history.
+pub mod input_bar;
+pub use input_bar::{InputBar, InputKey, INPUT_BAR_HEIGHT};
+
+// Issue #30 — animated focus-ring overlay keyed to an AppId.
+pub mod focus_ring;
+pub use focus_ring::{FocusRing, FADE_DURATION_MS};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------
