@@ -86,12 +86,12 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a session manager using the default session directory
     /// (`~/.config/phantom/sessions/`).
+    ///
+    /// The directory is determined by [`session_dir_path`], which is the single
+    /// source of truth for that path. Adding XDG support or any other path
+    /// change only needs to happen in that one function.
     pub fn new() -> Result<Self> {
-        let home = std::env::var("HOME").context("HOME not set")?;
-        let session_dir = PathBuf::from(home)
-            .join(".config")
-            .join("phantom")
-            .join("sessions");
+        let session_dir = session_dir_path()?;
         fs::create_dir_all(&session_dir)
             .with_context(|| format!("failed to create session dir: {}", session_dir.display()))?;
         Ok(Self { session_dir })
@@ -242,6 +242,16 @@ impl SessionManager {
     }
 
     // -----------------------------------------------------------------------
+    // Test-only accessors
+    // -----------------------------------------------------------------------
+
+    /// Expose the resolved session directory for unit tests.
+    #[cfg(test)]
+    pub(crate) fn session_dir(&self) -> &PathBuf {
+        &self.session_dir
+    }
+
+    // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
@@ -268,6 +278,23 @@ impl SessionManager {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/// Return the canonical session directory path: `$HOME/.config/phantom/sessions/`.
+///
+/// This is the single source of truth for the session directory location.
+/// Both [`SessionManager::new`] and any caller that needs to know where sessions
+/// live (e.g. `is_session_restore` checks) must call this function rather than
+/// re-deriving the path independently.
+///
+/// # Errors
+/// Returns an error if the `HOME` environment variable is not set.
+pub fn session_dir_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("phantom")
+        .join("sessions"))
+}
 
 /// Deterministic hash of a project directory path, used as a filename prefix.
 fn project_hash(project_dir: &str) -> u64 {
@@ -523,6 +550,23 @@ mod tests {
 
         let msg = SessionManager::welcome_message(&state);
         assert_eq!(msg, "Welcome back. You were working on empty.");
+    }
+
+    // =======================================================================
+    // Issue #135 — single source of truth for session directory
+    // =======================================================================
+
+    /// `SessionManager::new()` must agree with `session_dir_path()` on the
+    /// directory it uses.  If either is updated (e.g. XDG_DATA_HOME support)
+    /// the other must be updated too — this test prevents silent divergence.
+    #[test]
+    fn session_manager_new_uses_session_dir_path() {
+        let expected = session_dir_path().expect("HOME must be set for this test");
+        let mgr = SessionManager::new().expect("SessionManager::new() failed");
+        assert_eq!(
+            mgr.session_dir(), &expected,
+            "SessionManager::new() chose a different directory than session_dir_path()"
+        );
     }
 
     #[test]
