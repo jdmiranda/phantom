@@ -1,6 +1,8 @@
 pub mod arbiter;
+pub mod cursor;
 pub mod layout;
 pub mod render_ctx;
+pub mod selection;
 pub mod tokens;
 pub mod widgets;
 pub mod keybinds;
@@ -12,3 +14,11 @@ pub mod themes;
 // `use` line. This matches how `Rect` is implicitly available via
 // `crate::layout::Rect`.
 pub use render_ctx::RenderCtx;
+
+// Re-export the cursor blink primitive at the crate root for ergonomic access:
+// `phantom_ui::CursorBlink` alongside `phantom_ui::RenderCtx`.
+pub use cursor::{CursorBlink, DEFAULT_PERIOD_MS};
+
+// Re-export selection primitives so callers can write
+// `phantom_ui::SelectionRect` / `phantom_ui::SelectionMode`.
+pub use selection::{PixelRect, SelectionMode, SelectionRect};
