@@ -389,6 +389,7 @@ fn brain_loop(
         }
 
         // Forward AgentComplete to the reconciler to advance the task ledger.
+        // Also scan the summary for a sentinel plan and auto-submit it.
         if let AiEvent::AgentComplete {
             id,
             success,
@@ -396,6 +397,37 @@ fn brain_loop(
             spawn_tag,
         } = event
         {
+            // Plan extraction: if the agent's summary contains a sentinel heading
+            // (## Plan, ## Steps, etc.) parse the numbered list and submit it to
+            // the active TaskLedger.  When no ledger is active, create a fresh one
+            // for the extracted goal so the reconciler can drive it forward.
+            if let Some(steps) = crate::plan_extractor::extract_plan_from_text(summary) {
+                log::info!(
+                    "Brain: agent {id} output contained a sentinel plan ({} steps); \
+                     submitting to TaskLedger",
+                    steps.len()
+                );
+                if let Some(ref mut l) = active_ledger {
+                    l.set_plan(steps);
+                    reconciler.reset();
+                } else {
+                    // No ledger yet — create one from the extracted plan.
+                    let mut ledger =
+                        crate::orchestrator::TaskLedger::new("Agent-extracted plan");
+                    ledger.set_plan(steps);
+                    active_ledger = Some(ledger);
+                    reconciler.reset();
+                }
+                // Kick the first step immediately without waiting for the 3s timeout.
+                let mut terminal = false;
+                if let Some(ref mut l) = active_ledger {
+                    terminal = !reconciler.tick(l, &action_tx);
+                }
+                if terminal {
+                    active_ledger = None;
+                }
+            }
+
             if let Some(ref mut l) = active_ledger {
                 reconciler.on_agent_complete(l, id, success, summary, spawn_tag);
             }

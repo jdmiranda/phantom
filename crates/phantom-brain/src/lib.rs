@@ -52,6 +52,7 @@ pub mod ollama;
 pub mod ooda;
 pub mod orchestrator;
 pub mod persistent_skill_registry;
+pub mod plan_extractor;
 pub mod proactive;
 pub mod provider_catalog;
 pub mod reconciler;
