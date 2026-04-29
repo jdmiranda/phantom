@@ -20,6 +20,7 @@ pub mod defender;
 pub mod defender_tools;
 pub mod dispatch;
 pub mod dispatcher;
+pub mod failure_store;
 pub mod fixer;
 pub mod inbox;
 pub mod inspector;
@@ -46,6 +47,7 @@ pub use chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
     OpenAiChatBackend, build_backend,
 };
+pub use failure_store::{FailureRecord, FailureStore};
 pub use defender::defender_spawn_rule;
 pub use manager::*;
 pub use role::{
