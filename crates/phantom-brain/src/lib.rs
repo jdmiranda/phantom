@@ -39,36 +39,40 @@
 //! handle.send_event(AiEvent::Shutdown).ok();
 //! ```
 
+pub mod attention;
 pub mod brain;
 pub mod claude;
 pub mod curriculum;
 pub mod curves;
 pub mod decompose;
 pub mod events;
+pub mod goal;
 pub mod goals;
 pub mod ollama;
 pub mod ooda;
 pub mod orchestrator;
 pub mod persistent_skill_registry;
-pub mod provider_catalog;
 pub mod proactive;
+pub mod provider_catalog;
 pub mod reconciler;
 pub mod router;
 pub mod scoring;
 pub mod skill_store;
 
+pub use attention::{Attention, PaneSnapshot};
 pub use brain::*;
 pub use curriculum::*;
 pub use curves::*;
 pub use decompose::{DecompositionResult, DecompositionStep, GoalDecomposer};
 pub use events::*;
+pub use goal::{ChatBackend, ClaudeChatBackend, Goal, Step, parse_steps};
 pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};
 pub use orchestrator::*;
-pub use provider_catalog::{ProviderCatalog, ProviderProfile, FALLBACK_ID};
 pub use persistent_skill_registry::{
     AgentRef, PersistentSkillRegistry, Skill, SkillHandler, SkillId, SkillProvenance,
 };
 pub use proactive::*;
+pub use provider_catalog::{FALLBACK_ID, ProviderCatalog, ProviderProfile};
 pub use router::*;
 pub use scoring::*;
 pub use skill_store::*;
@@ -179,11 +183,7 @@ mod tests {
         let parsed = parsed_with_errors();
 
         let scored = scorer.fix_score(&parsed, &ctx);
-        assert!(
-            scored.score >= 0.9,
-            "expected >= 0.9, got {}",
-            scored.score
-        );
+        assert!(scored.score >= 0.9, "expected >= 0.9, got {}", scored.score);
     }
 
     // =======================================================================
@@ -216,11 +216,7 @@ mod tests {
         let parsed = parsed_success();
 
         let scored = scorer.fix_score(&parsed, &ctx);
-        assert!(
-            scored.score == 0.0,
-            "expected 0.0, got {}",
-            scored.score
-        );
+        assert!(scored.score == 0.0, "expected 0.0, got {}", scored.score);
     }
 
     // =======================================================================
@@ -286,11 +282,7 @@ mod tests {
         let parsed = parsed_with_errors();
 
         let scored = scorer.explain_score(&parsed, 2.0);
-        assert!(
-            scored.score == 0.0,
-            "expected 0.0, got {}",
-            scored.score
-        );
+        assert!(scored.score == 0.0, "expected 0.0, got {}", scored.score);
     }
 
     // =======================================================================
@@ -385,11 +377,7 @@ mod tests {
         ctx.commands.test = None;
 
         let scored = scorer.watcher_score(&ctx);
-        assert!(
-            scored.score == 0.0,
-            "expected 0.0, got {}",
-            scored.score
-        );
+        assert!(scored.score == 0.0, "expected 0.0, got {}", scored.score);
     }
 
     // =======================================================================
@@ -435,11 +423,7 @@ mod tests {
         scorer.chattiness = 0.9;
 
         let scored = scorer.quiet_score();
-        assert!(
-            scored.score <= 1.0,
-            "expected <= 1.0, got {}",
-            scored.score
-        );
+        assert!(scored.score <= 1.0, "expected <= 1.0, got {}", scored.score);
     }
 
     // =======================================================================
@@ -645,11 +629,7 @@ mod tests {
         let event = AiEvent::UserIdle { seconds: 10.0 };
 
         let scored = scorer.notification_score(&event);
-        assert!(
-            scored.score == 0.0,
-            "expected 0.0, got {}",
-            scored.score
-        );
+        assert!(scored.score == 0.0, "expected 0.0, got {}", scored.score);
     }
 
     // =======================================================================
@@ -661,7 +641,10 @@ mod tests {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (action_tx, action_rx) = std::sync::mpsc::channel();
 
-        let handle = BrainHandle { event_tx, action_rx };
+        let handle = BrainHandle {
+            event_tx,
+            action_rx,
+        };
 
         // Send an event.
         handle.send_event(AiEvent::Shutdown).unwrap();
@@ -684,7 +667,10 @@ mod tests {
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
         let (_action_tx, action_rx) = std::sync::mpsc::channel::<AiAction>();
 
-        let handle = BrainHandle { event_tx, action_rx };
+        let handle = BrainHandle {
+            event_tx,
+            action_rx,
+        };
 
         assert!(handle.try_recv_action().is_none());
     }
@@ -753,7 +739,10 @@ mod tests {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (_action_tx, action_rx) = std::sync::mpsc::channel::<AiAction>();
 
-        let handle = BrainHandle { event_tx, action_rx };
+        let handle = BrainHandle {
+            event_tx,
+            action_rx,
+        };
         let sender_clone = handle.event_sender();
 
         sender_clone.send(AiEvent::GitStateChanged).unwrap();
