@@ -201,8 +201,13 @@ fn taint_from_source_chain(
 
     let mut accumulated = TaintLevel::Clean;
     let mut cursor: Option<u64> = Some(start_id);
+    let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
     while let Some(id) = cursor {
+        // Cycle guard: if we've already processed this event id, stop walking.
+        if !visited.insert(id) {
+            break;
+        }
         let Some(ev) = by_id.get(&id) else {
             // Event has scrolled out of the tail — stop walking.
             break;
@@ -886,6 +891,68 @@ mod tests {
             TaintLevel::Tainted,
             "quarantined source agent must elevate taint to Tainted, got {:?}",
             res.taint,
+        );
+    }
+
+    // ---- Cycle detection in source-event chain --------------------------------
+
+    #[test]
+    fn dispatch_self_referential_chain_does_not_loop() {
+        // Create an event whose `source_event_id` payload field points to its
+        // own id. The walk must terminate (not spin forever) and return a
+        // deterministic taint level.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "hi").unwrap();
+
+        let path = tmp.path().join("events.jsonl");
+        let event_id = {
+            let mut raw = EventLog::open(&path).unwrap();
+            // Append a placeholder first so we know the id that will be assigned.
+            let placeholder = raw
+                .append(
+                    phantom_memory::event_log::EventSource::Substrate,
+                    "agent.speak",
+                    serde_json::json!({}),
+                )
+                .unwrap();
+            let self_id = placeholder.id;
+
+            // Re-open in append mode and write a corrected version that points to
+            // itself via source_event_id. Since EventLog assigns monotonic ids we
+            // cannot easily mutate; instead we directly append a second event that
+            // has source_event_id == its own id (id=2 → source_event_id=2).
+            let self_ref_ev = raw
+                .append(
+                    phantom_memory::event_log::EventSource::Substrate,
+                    "agent.speak",
+                    serde_json::json!({ "source_event_id": self_id + 1 }),
+                )
+                .unwrap();
+            self_ref_ev.id
+        };
+
+        let log = Arc::new(Mutex::new(EventLog::open(&path).unwrap()));
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(1, AgentRole::Conversational, "a", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: Some(log),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: Some(event_id),
+        };
+
+        // This call must return — any infinite loop would cause the test to hang
+        // and be caught by the test harness timeout.
+        let r = dispatch_tool("read_file", &serde_json::json!({"path": "f.txt"}), &ctx);
+        assert!(r.success, "dispatch must succeed on self-referential chain");
+        // Taint is Clean because neither event is capability.denied nor from a
+        // quarantined agent.
+        assert_eq!(
+            r.taint,
+            crate::taint::TaintLevel::Clean,
+            "self-referential clean chain must not elevate taint",
         );
     }
 }
