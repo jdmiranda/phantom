@@ -212,17 +212,17 @@ pub struct App {
     // -- Lars fix-thread sink: shared queue of `EventKind::AgentBlocked`
     //    substrate events emitted by agent panes when their consecutive
     //    tool-call failure streak crosses the threshold. Each spawned
-    //    `AgentPane` is given a clone; `update.rs::poll_agent_panes` drains
-    //    the queue each frame and forwards into the substrate runtime
-    //    (Phase 2.G consumer).
+    //    `AgentPane` is given a clone; the drain step inline in
+    //    `update.rs::update` runs each frame and forwards into the substrate
+    //    runtime (Phase 2.G consumer).
     #[allow(dead_code)] // Wired in Phase 2.G consumer; ahead of time.
     pub(crate) blocked_event_sink: crate::agent_pane::BlockedEventSink,
 
     // -- Sec.1 capability-denial sink: parallel queue of
     //    `EventKind::CapabilityDenied` substrate events emitted by agent
     //    panes whenever the Layer-2 dispatch gate refuses a tool call. Each
-    //    spawned `AgentPane` is given a clone; `update.rs::poll_agent_panes`
-    //    drains the queue each frame and forwards into the substrate
+    //    spawned `AgentPane` is given a clone; the drain step inline in
+    //    `update.rs::update` runs each frame and forwards into the substrate
     //    runtime. The Defender spawn rule (Sec.4 consumer) reads these.
     #[allow(dead_code)] // Wired in Sec.4 consumer; ahead of time.
     pub(crate) denied_event_sink: crate::agent_pane::DeniedEventSink,

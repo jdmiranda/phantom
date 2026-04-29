@@ -236,11 +236,10 @@ impl App {
         // Lars fix-thread consumer (Phase 2.G): drain any `EventKind::AgentBlocked`
         // substrate events that agent panes pushed into `App.blocked_event_sink`
         // during this frame's tool-result processing, and forward each into the
-        // runtime's pending queue. The runtime's `tick()` (called above, before
-        // `poll_agent_panes`) has already drained the previous frame's pending,
-        // so these events will be evaluated by spawn rules on the *next* tick —
-        // which is exactly when `last_actions()` will surface the queued Fixer
-        // `SpawnAction`.
+        // runtime's pending queue. The runtime's `tick()` (called above) has
+        // already drained the previous frame's pending, so these events will be
+        // evaluated by spawn rules on the *next* tick — which is exactly when
+        // `last_actions()` will surface the queued Fixer `SpawnAction`.
         let blocked = self.drain_blocked_events();
         for event in blocked {
             self.runtime.push_event(event);
@@ -731,9 +730,8 @@ impl App {
 // the substrate slice the consumer actually depends on:
 // `BlockedEventSink` → drain → `AgentRuntime::push_event` → `tick()` →
 // `last_actions()` returning a Fixer `SpawnAction`. The drain+forward step
-// mirrors the real one-liner spliced into `App::update` after
-// `poll_agent_panes`, so a green test here is a green producer→consumer
-// loop in production.
+// mirrors the logic inline in `App::update`, so a green test here is a
+// green producer→consumer loop in production.
 #[cfg(test)]
 mod tests {
     use phantom_agents::role::AgentRole;

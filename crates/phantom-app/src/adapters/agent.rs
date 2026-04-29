@@ -36,6 +36,10 @@ pub struct AgentAdapter {
     /// brain can match the completion to the right `active_dispatches`
     /// entry regardless of the AgentManager's sequential ID assignment.
     spawn_tag: Option<u64>,
+    /// Set to `true` by the `"dismiss"` command so the dead-adapter reaper
+    /// in `update.rs` removes this pane from the coordinator after the user
+    /// has acknowledged the output.
+    dismissed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +57,7 @@ impl AgentAdapter {
             prev_status: status,
             input_buffer: String::new(),
             spawn_tag: None,
+            dismissed: false,
         }
     }
 
@@ -87,10 +92,11 @@ impl AppCore for AgentAdapter {
     }
 
     fn is_alive(&self) -> bool {
-        // Keep the adapter alive even after completion so the user can
-        // read the output. It can be dismissed via the "dismiss" command
-        // or closed manually.
-        true
+        // Stay alive after natural completion (Done/Failed) so the user can
+        // read the output. Return `false` only once the user explicitly
+        // dismisses the pane via the `"dismiss"` command — that signals the
+        // dead-adapter reaper in `update.rs` to remove it from the coordinator.
+        !self.dismissed
     }
 
     fn update(&mut self, _dt: f32) {
@@ -268,6 +274,7 @@ impl Commandable for AgentAdapter {
         match cmd {
             "dismiss" => {
                 self.pane.status = AgentPaneStatus::Done;
+                self.dismissed = true;
                 Ok("dismissed".into())
             }
             "status" => Ok(format!("{:?}", self.pane.status)),
@@ -334,14 +341,23 @@ mod tests {
     use super::*;
     use phantom_adapter::adapter::QuadData;
 
+    /// `app_type()` must return `"agent"` — exercises the real method, not a
+    /// string literal comparison.
     #[test]
     fn test_app_type_returns_agent() {
-        // app_type is a compile-verified string literal.
-        assert_eq!("agent", "agent");
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::new(pane);
+        assert_eq!(adapter.app_type(), "agent");
     }
 
+    /// `render()` on an adapter with known cached lines must emit at least one
+    /// text segment per visible line plus the input-bar prompt.
     #[test]
     fn test_render_produces_text_segments() {
+        let lines: Vec<String> = vec!["line one".into(), "line two".into()];
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
         let rect = Rect {
             x: 10.0,
             y: 20.0,
@@ -349,74 +365,82 @@ mod tests {
             height: 300.0,
             ..Default::default()
         };
+        let output = adapter.render(&rect);
 
-        // Verify render output structure.
-        let output = RenderOutput {
-            quads: vec![],
-            text_segments: vec![
-                TextData {
-                    text: "line one".into(),
-                    x: rect.x,
-                    y: rect.y,
-                    color: TEXT_COLOR,
-                },
-                TextData {
-                    text: "line two".into(),
-                    x: rect.x,
-                    y: rect.y + LINE_HEIGHT,
-                    color: TEXT_COLOR,
-                },
-            ],
-            grid: None,
-            scroll: None,
-            selection: None,
-        };
-
-        assert_eq!(output.text_segments.len(), 2);
-        assert_eq!(output.text_segments[0].x, 10.0);
-        assert_eq!(output.text_segments[0].y, 20.0);
-        assert_eq!(output.text_segments[1].y, 20.0 + LINE_HEIGHT);
-        assert!(output.quads.is_empty());
-        assert!(output.grid.is_none());
+        // At least 2 content lines + 1 prompt segment must be present.
+        assert!(
+            output.text_segments.len() >= 3,
+            "expected >=3 text segments (2 lines + prompt), got {}",
+            output.text_segments.len(),
+        );
+        // All text must be placed inside the rect horizontally.
+        for seg in &output.text_segments {
+            assert!(
+                seg.x >= rect.x - 0.01,
+                "text x {} < rect.x {}",
+                seg.x,
+                rect.x,
+            );
+        }
     }
 
+    /// `handle_input` on a printable character must accumulate the character
+    /// in the input buffer and return `true`.
     #[test]
-    fn test_handle_input_returns_false() {
-        // Agent adapter does not accept input — always returns false.
-        let result = false; // matches handle_input contract
-        assert!(!result);
+    fn test_handle_input_accepts_printable_chars() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let mut adapter = AgentAdapter::new(pane);
+        let accepted = adapter.handle_input("a");
+        assert!(accepted, "printable char must be accepted");
     }
 
+    /// `accept_command` with an unknown command must return an `Err`.
     #[test]
     fn test_accept_command_unknown_returns_error() {
-        let err_msg = format!("unknown command: {}", "bogus");
-        assert!(err_msg.contains("unknown command"));
-        assert!(err_msg.contains("bogus"));
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let mut adapter = AgentAdapter::new(pane);
+        let result = adapter.accept_command("bogus", &serde_json::json!({}));
+        assert!(result.is_err(), "unknown command must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown command"), "error must mention 'unknown command'");
+        assert!(msg.contains("bogus"), "error must name the bad command");
     }
 
+    /// `permissions()` must include `"network"`.
     #[test]
     fn test_permissions_include_network() {
-        let perms = vec!["network".to_string()];
-        assert!(perms.contains(&"network".to_string()));
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::new(pane);
+        assert!(
+            adapter.permissions().contains(&"network".to_string()),
+            "AgentAdapter must declare the 'network' permission",
+        );
     }
 
+    /// A freshly-created adapter backed by a `Done`-status pane is alive
+    /// (the user has not yet dismissed it).
     #[test]
-    fn test_render_output_with_quad() {
-        let quad = QuadData {
-            x: 0.0,
-            y: 0.0,
-            w: 100.0,
-            h: 50.0,
-            color: [0.1, 0.1, 0.1, 1.0],
-        };
-        let output = RenderOutput {
-            quads: vec![quad],
-            text_segments: vec![],
-            grid: None,
-            scroll: None,
-            selection: None,
-        };
-        assert_eq!(output.quads.len(), 1);
+    fn test_is_alive_before_dismiss() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::new(pane);
+        assert!(
+            adapter.is_alive(),
+            "adapter must be alive before dismiss so the user can read output",
+        );
+    }
+
+    /// After the `"dismiss"` command `is_alive()` must return `false` so the
+    /// dead-adapter reaper in `update.rs` removes the pane from the coordinator.
+    #[test]
+    fn test_is_alive_false_after_dismiss() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let mut adapter = AgentAdapter::new(pane);
+        let result = adapter.accept_command("dismiss", &serde_json::json!({}));
+        assert!(result.is_ok(), "dismiss command must succeed");
+        assert!(
+            !adapter.is_alive(),
+            "adapter must be dead after dismiss so the reaper can remove it",
+        );
     }
 
     #[test]
