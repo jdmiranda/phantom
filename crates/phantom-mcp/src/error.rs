@@ -1,14 +1,13 @@
-//! Error types for the MCP client.
+//! Error types for the `phantom-mcp` crate.
 //!
-//! `McpError` is distinct from Phantom's internal `anyhow` errors so that
-//! callers can match on specific failure modes (transport, timeout, server-
-//! side JSON-RPC errors) without stringly-typed inspection.
+//! [`McpError`] is the single error type shared across the client, registry,
+//! and server layers. Variants cover both transport-level failures and
+//! higher-level routing errors surfaced by [`crate::registry::McpToolRegistry`].
 
 use thiserror::Error;
 
-/// Errors that can be returned by [`McpClient`](crate::client::McpClient)
-/// operations.
-#[derive(Debug, Error)]
+/// All failure modes in the MCP subsystem.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum McpError {
     /// A TCP/WebSocket-level failure (connect refused, connection reset, etc.).
     #[error("MCP transport error: {0}")]
@@ -38,4 +37,14 @@ pub enum McpError {
     /// connection has been lost and not re-established).
     #[error("MCP client not connected")]
     NotConnected,
+
+    /// No registered server advertises the requested tool name.
+    #[error("unknown MCP tool: {name}")]
+    UnknownTool { name: String },
+
+    /// The client produced an error response or the call could not be
+    /// completed. `tool` names the tool being invoked; `detail` carries the
+    /// error message from the server or a description of the local failure.
+    #[error("MCP invoke error for tool '{tool}': {detail}")]
+    InvokeError { tool: String, detail: String },
 }
