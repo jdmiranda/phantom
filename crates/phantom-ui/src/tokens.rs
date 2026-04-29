@@ -30,6 +30,11 @@ pub struct ColorRoles {
     /// alpha channel stored here is the *base* alpha — callers may further
     /// modulate it (e.g. dim when the pane loses focus).
     pub selection_bg: [f32; 4],
+    /// Focus ring / keyboard-navigation outline color.
+    ///
+    /// Used by [`FocusRing`](crate::widgets::focus_ring::FocusRing) as the
+    /// 2 px outline drawn around the focused pane or widget.
+    pub accent_focus: [f32; 4],
 }
 
 impl ColorRoles {
@@ -53,6 +58,9 @@ impl ColorRoles {
             status_info: [0.40, 0.85, 1.00, 1.00],
             // Phosphor green at 50 % alpha — legible without hiding text.
             selection_bg: [0.30, 1.00, 0.55, 0.50],
+            // Bright cyan-green focus outline — high contrast on the phosphor
+            // background without clashing with the green text palette.
+            accent_focus: [0.20, 0.90, 1.00, 1.00],
         }
     }
 }
@@ -165,6 +173,13 @@ mod tests {
         // Must exist and be semi-transparent (alpha in 0..1 exclusive).
         let a = r.selection_bg[3];
         assert!(a > 0.0 && a < 1.0, "selection_bg alpha must be semi-transparent, got {a}");
+    }
+
+    #[test]
+    fn accent_focus_token_is_opaque_and_bright() {
+        let r = ColorRoles::phosphor();
+        assert_eq!(r.accent_focus[3], 1.0, "accent_focus alpha must be 1.0 (opaque)");
+        assert!(r.accent_focus[2] > 0.5, "accent_focus should have elevated blue channel");
     }
 }
 
