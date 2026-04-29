@@ -823,8 +823,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        }
+            runtime_mode: RuntimeMode::Normal,        }
     }
 
     // ---- File/git surface --------------------------------------------------
@@ -874,8 +873,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let result = dispatch_tool(
             "send_to_agent",
@@ -1010,8 +1008,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let result = dispatch_tool(
             "send_to_agent",
@@ -1182,8 +1179,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         // Act.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1235,8 +1231,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         // Act.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1299,8 +1294,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         // Act.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1365,8 +1359,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         // This call must return — any infinite loop would cause the test to hang
         // and be caught by the test harness timeout.
@@ -1426,8 +1419,7 @@ mod tests {
             quarantine: Some(quarantine),
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         // A normal file-read that would otherwise succeed must be denied.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1509,8 +1501,7 @@ mod tests {
                 quarantine: Some(Arc::clone(&quarantine)),
                 correlation_id: None,
                 ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-            };
+                runtime_mode: RuntimeMode::Normal,            };
             let blocked = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
             assert!(
                 !blocked.success,
@@ -1555,8 +1546,7 @@ mod tests {
             quarantine: Some(Arc::clone(&quarantine)),
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
 
@@ -1603,8 +1593,7 @@ mod tests {
             quarantine: Some(quarantine),
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
 
@@ -1640,8 +1629,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
 
@@ -1681,8 +1669,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let ctx_b = DispatchContext {
             self_ref: AgentRef::new(2, AgentRole::Conversational, "agent-b", SpawnSource::User),
@@ -1695,8 +1682,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
         let res_b = dispatch_tool("read_file", &json!({"path": "b.txt"}), &ctx_b);
@@ -1758,8 +1744,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
 
@@ -1810,8 +1795,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         // Attempt to invoke run_command — Act-class tool.
         let res = dispatch_tool(
@@ -1885,8 +1869,7 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
 
         // Act — dispatch a normal read_file tool.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1939,8 +1922,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        };
+            runtime_mode: RuntimeMode::Normal,        };
         let res2 = dispatch_tool("read_file", &json!({"path": "probe2.txt"}), &ctx_no_corr);
         assert!(res2.success, "no-corr dispatch must succeed: {}", res2.output);
 
@@ -1950,6 +1932,7 @@ mod tests {
             "without a correlation_id, no tool.invoked event must be emitted; got: {tail2:?}",
         );
     }
+
 
     // ---- Disposition -------------------------------------------------------
 
