@@ -32,6 +32,7 @@ use phantom_ui::widgets::{StatusBar, TabBar};
 use phantom_adapter::{EventBus, TopicId, DataType};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
 use phantom_brain::events::AiEvent;
+use phantom_brain::ooda::{OodaConfig, OodaLoop};
 use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 use phantom_plugins::PluginRegistry;
@@ -139,6 +140,10 @@ pub struct App {
 
     // -- AI Brain (OODA loop on dedicated thread) --
     pub(crate) brain: Option<BrainHandle>,
+
+    // -- Per-frame OODA loop (Observe/Orient/Decide/Act driven by render clock).
+    //    Runs synchronously in update() — see ooda.rs and issue #45.
+    pub(crate) ooda_loop: OodaLoop,
 
     // -- Substrate runtime (Phase 1/2 primitives: supervisor, event log,
     //    agent registry, memory blocks, spawn rules). Ticked once per frame
@@ -715,6 +720,7 @@ impl App {
             debug_hud: false,
             debug_hud_selected: 0,
             brain: Some(brain),
+            ooda_loop: OodaLoop::new(OodaConfig::default()),
             runtime,
             context: Some(context),
             memory,

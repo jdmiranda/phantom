@@ -46,6 +46,7 @@ pub mod curves;
 pub mod events;
 pub mod goals;
 pub mod ollama;
+pub mod ooda;
 pub mod orchestrator;
 pub mod persistent_skill_registry;
 pub mod proactive;
@@ -58,6 +59,7 @@ pub use brain::*;
 pub use curriculum::*;
 pub use curves::*;
 pub use events::*;
+pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};
 pub use orchestrator::*;
 pub use persistent_skill_registry::{
     AgentRef, PersistentSkillRegistry, Skill, SkillHandler, SkillId, SkillProvenance,

@@ -333,6 +333,13 @@ pub struct Behavior {
     pub id: String,
     /// The action class (determines base score range).
     pub class: ActionClass,
+    /// Optional top-level viability gate.
+    ///
+    /// If present and the gate returns `false` for the current context, the
+    /// entire behavior is treated as non-viable and returns 0.0 (the behavior
+    /// cannot even earn its class base score). This is the DA:I root-filter
+    /// that prevents non-applicable behaviors from polluting the score table.
+    pub viable: Option<Box<dyn Fn(&ScoringContext) -> bool + Send>>,
     /// The considerations that compose this behavior's score.
     /// Score = base_score + sum(consideration.evaluate()).
     pub considerations: Vec<Consideration>,
@@ -342,9 +349,17 @@ impl Behavior {
     /// Evaluate this behavior: run all considerations and sum their outputs,
     /// added to the class base score.
     ///
+    /// Returns 0.0 immediately if the `viable` gate is present and fails.
     /// This is the DA:I additive composition: start at base_score for the
     /// action class, then add each consideration's curve output.
     pub fn evaluate(&self, ctx: &ScoringContext) -> f32 {
+        // Root viability check — if the behavior can't possibly apply, score 0.
+        if let Some(ref gate) = self.viable {
+            if !gate(ctx) {
+                return 0.0;
+            }
+        }
+
         let base = self.class.base_score();
         let max_add = self.class.dynamic_range();
 
@@ -570,10 +585,11 @@ impl Default for BehaviorDecisionSystem {
 /// with explicit considerations and response curves.
 pub fn build_default_behaviors() -> Vec<Behavior> {
     vec![
-        // -- Quiet baseline (Basic class, always contributes) --
+        // -- Quiet baseline (Basic class, always viable) --
         Behavior {
             id: "quiet".into(),
             class: ActionClass::Basic,
+            viable: None, // always eligible
             considerations: vec![
                 Consideration {
                     name: "baseline".into(),
@@ -591,9 +607,11 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             ],
         },
         // -- Fix error (Reaction class: 50-70) --
+        // Viable only when errors are present and user is not actively typing.
         Behavior {
             id: "fix_error".into(),
             class: ActionClass::Reaction,
+            viable: Some(Box::new(|ctx| ctx.has_errors && ctx.idle_secs >= 2.0)),
             considerations: vec![
                 // Must have errors.
                 Consideration {
@@ -632,9 +650,11 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             ],
         },
         // -- Explain error (Support class: 25-45) --
+        // Viable only when there are errors and the user has been idle > 5s.
         Behavior {
             id: "explain_error".into(),
             class: ActionClass::Support,
+            viable: Some(Box::new(|ctx| ctx.has_errors && ctx.idle_secs > 5.0 && !ctx.in_repl)),
             considerations: vec![
                 // User must have been idle after an error.
                 Consideration {
@@ -653,9 +673,11 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             ],
         },
         // -- Offer help (Support class: 25-45, lower than explain) --
+        // Viable only after a long idle with no errors.
         Behavior {
             id: "offer_help".into(),
             class: ActionClass::Support,
+            viable: Some(Box::new(|ctx| !ctx.has_errors && ctx.idle_secs > 30.0 && !ctx.in_repl)),
             considerations: vec![
                 Consideration {
                     name: "long_idle_no_errors".into(),
@@ -669,9 +691,11 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             ],
         },
         // -- Update memory (Proactive class: 20-40) --
+        // Viable only when a new pattern was detected.
         Behavior {
             id: "update_memory".into(),
             class: ActionClass::Proactive,
+            viable: Some(Box::new(|ctx| ctx.new_pattern_detected)),
             considerations: vec![
                 Consideration {
                     name: "new_pattern".into(),
@@ -685,9 +709,11 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             ],
         },
         // -- Watch build (Proactive class: 20-40) --
+        // Viable only while an active process is running.
         Behavior {
             id: "watch_build".into(),
             class: ActionClass::Proactive,
+            viable: Some(Box::new(|ctx| ctx.has_active_process)),
             considerations: vec![
                 Consideration {
                     name: "active_process".into(),
@@ -701,9 +727,11 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             ],
         },
         // -- Notification: agent complete (Reaction class: 50-70) --
+        // Viable only when an agent just completed.
         Behavior {
             id: "notify_agent_complete".into(),
             class: ActionClass::Reaction,
+            viable: Some(Box::new(|ctx| ctx.agent_just_completed)),
             considerations: vec![
                 Consideration {
                     name: "agent_completed".into(),
@@ -717,9 +745,11 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             ],
         },
         // -- Notification: file/git change (Proactive class: 20-40) --
+        // Viable only when a file or git change was detected this frame.
         Behavior {
             id: "notify_change".into(),
             class: ActionClass::Proactive,
+            viable: Some(Box::new(|ctx| ctx.file_or_git_changed)),
             considerations: vec![
                 Consideration {
                     name: "file_or_git_changed".into(),
@@ -1237,6 +1267,7 @@ mod tests {
         let behavior = Behavior {
             id: "test".into(),
             class: ActionClass::Proactive, // base = 20
+            viable: None,
             considerations: vec![
                 Consideration {
                     name: "a".into(),
@@ -1262,6 +1293,7 @@ mod tests {
         let behavior = Behavior {
             id: "test".into(),
             class: ActionClass::Proactive, // base=20, range=20, max=40
+            viable: None,
             considerations: vec![
                 Consideration {
                     name: "huge".into(),
@@ -1325,6 +1357,7 @@ mod tests {
         bds.register(Behavior {
             id: "idle".into(),
             class: ActionClass::Basic,
+            viable: None,
             considerations: vec![Consideration {
                 name: "always".into(),
                 filter: None,
@@ -1337,6 +1370,7 @@ mod tests {
         bds.register(Behavior {
             id: "fix_error".into(),
             class: ActionClass::Reaction,
+            viable: None,
             considerations: vec![Consideration {
                 name: "has_errors".into(),
                 filter: Some(Filter {
@@ -1368,6 +1402,7 @@ mod tests {
         bds.register(Behavior {
             id: "idle".into(),
             class: ActionClass::Basic,
+            viable: None,
             considerations: vec![Consideration {
                 name: "always".into(),
                 filter: None,
@@ -1376,9 +1411,11 @@ mod tests {
             }],
         });
 
+        // fix_error now has a viability gate: only applicable when has_errors.
         bds.register(Behavior {
             id: "fix_error".into(),
             class: ActionClass::Reaction,
+            viable: Some(Box::new(|ctx| ctx.has_errors)),
             considerations: vec![Consideration {
                 name: "has_errors".into(),
                 filter: Some(Filter {
@@ -1390,23 +1427,12 @@ mod tests {
             }],
         });
 
-        // No errors -- fix_error filter fails, scores 50 + 0 = 50.
-        // Wait, no: if filter fails, consideration returns 0. So fix_error = base(50) + 0 = 50.
-        // idle = base(0) + 5 = 5.
-        // Hmm, that's wrong -- fix_error still gets its base score even if all considerations fail.
-        //
-        // This is actually correct per DA:I: the base score is the class floor. But in DA:I,
-        // the evaluation tree returns false (filter at root level) and the snippet is not
-        // counted at all. We need a "viability" check.
-        //
-        // For now, this test documents the current behavior. The fix is to add
-        // a root-level viability filter to Behavior::evaluate.
+        // No errors — fix_error.viable returns false → scores 0.
+        // idle: base(0) + 5 = 5. idle wins.
         let ctx = ScoringContext::default();
         let snapshot = bds.evaluate(&ctx);
-        // fix_error scores 50 (base only) vs idle at 5. This is a known limitation
-        // that should be fixed by adding a "viable" gate to Behavior.
-        // For now, just verify the evaluation runs.
-        assert!(!snapshot.scores.is_empty());
+        assert_eq!(snapshot.winner_id, "idle", "idle should win when no errors");
+        assert!((snapshot.winner_score - 5.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1416,6 +1442,7 @@ mod tests {
         bds.register(Behavior {
             id: "a".into(),
             class: ActionClass::Proactive,
+            viable: None,
             considerations: vec![Consideration {
                 name: "score_a".into(),
                 filter: None,
@@ -1427,6 +1454,7 @@ mod tests {
         bds.register(Behavior {
             id: "b".into(),
             class: ActionClass::Proactive,
+            viable: None,
             considerations: vec![Consideration {
                 name: "score_b".into(),
                 filter: None,
