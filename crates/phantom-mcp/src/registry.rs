@@ -30,32 +30,7 @@ use std::collections::HashMap;
 use crate::client::McpClient;
 use crate::protocol::JsonRpcResponse;
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Errors returned by the MCP tool registry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum McpError {
-    /// No registered server advertises the requested tool name.
-    UnknownTool { name: String },
-    /// The client produced an error response or the call could not be
-    /// completed.
-    InvokeError { server: String, message: String },
-}
-
-impl std::fmt::Display for McpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownTool { name } => write!(f, "unknown MCP tool: {name}"),
-            Self::InvokeError { server, message } => {
-                write!(f, "MCP invoke error from '{server}': {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for McpError {}
+pub use crate::error::McpError;
 
 // ---------------------------------------------------------------------------
 // McpToolRoute
@@ -195,9 +170,12 @@ impl McpToolRegistry {
             .resolve_tool(tool_name)
             .ok_or_else(|| McpError::UnknownTool { name: tool_name.to_owned() })?;
 
-        let client = self.clients.get(&route.server_name).expect(
-            "tool_index and clients map are always in sync; server must exist",
-        );
+        let client = self.clients.get(&route.server_name).ok_or_else(|| {
+            McpError::InvokeError {
+                tool: tool_name.to_string(),
+                detail: "index/client map desync".to_string(),
+            }
+        })?;
 
         // Build the tools/call request (validates the name is in the client).
         let _request = client.call_tool_request(tool_name, args);
@@ -227,8 +205,8 @@ impl McpToolRegistry {
     ) -> Result<(serde_json::Value, ToolProvenance), McpError> {
         if let Some(err) = &response.error {
             return Err(McpError::InvokeError {
-                server: server_name.to_owned(),
-                message: err.message.clone(),
+                tool: format!("mcp:{server_name}/{tool_name}"),
+                detail: err.message.clone(),
             });
         }
 
@@ -407,8 +385,8 @@ mod tests {
         assert_eq!(
             err,
             McpError::InvokeError {
-                server: "fs".to_owned(),
-                message: "invalid params".to_owned(),
+                tool: "mcp:fs/fs.write_file".to_owned(),
+                detail: "invalid params".to_owned(),
             }
         );
     }
@@ -465,11 +443,11 @@ mod tests {
     #[test]
     fn mcp_error_display_invoke_error() {
         let err = McpError::InvokeError {
-            server: "my-server".to_owned(),
-            message: "timeout".to_owned(),
+            tool: "my-tool".to_owned(),
+            detail: "timeout".to_owned(),
         };
         let s = err.to_string();
-        assert!(s.contains("my-server"));
+        assert!(s.contains("my-tool"));
         assert!(s.contains("timeout"));
     }
 

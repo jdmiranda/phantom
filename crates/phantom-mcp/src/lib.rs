@@ -25,5 +25,5 @@ pub use protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpResource, McpTool,
     create_error, create_request, create_response,
 };
-pub use registry::{McpError, McpToolRegistry, McpToolRoute, ToolProvenance};
+pub use registry::{McpToolRegistry, McpToolRoute, ToolProvenance};
 pub use server::PhantomMcpServer;
