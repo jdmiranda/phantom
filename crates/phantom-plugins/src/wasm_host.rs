@@ -412,4 +412,145 @@ mod tests {
              the sandbox must reject unsatisfied host imports"
         );
     }
+
+    // ------------------------------------------------------------------
+    // QA-#186 — WASM plugin sandbox: WASI imports rejected at instantiation
+    // ------------------------------------------------------------------
+    //
+    // Spec: any WASM module that imports a WASI syscall must be rejected by
+    // `WasmHost::load` at *instantiation* time — before any code executes —
+    // surfacing an `Err`, never allowing execution.
+    //
+    // This suite tests three WASI syscall categories:
+    //   1. `fd_write`    (stdio output)  — the canonical WASI output call
+    //   2. `path_open`   (file open)     — filesystem access
+    //   3. `sock_accept` (networking)    — socket syscall
+    //
+    // Additional invariants verified:
+    //   4. A module mixing WASI imports with clean exports is rejected in full.
+    //   5. A clean module (no WASI imports) loads fine — control condition.
+    //   6. Rejection surfaces as `Err`, never as a panic.
+
+    /// WAT module that imports `wasi_snapshot_preview1::path_open`.
+    const WASI_PATH_OPEN_WAT: &str = r#"
+        (module
+            (import "wasi_snapshot_preview1" "path_open"
+                (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+            (func (export "main"))
+        )
+    "#;
+
+    /// WAT module that imports `wasi_snapshot_preview1::sock_accept`.
+    const WASI_SOCK_ACCEPT_WAT: &str = r#"
+        (module
+            (import "wasi_snapshot_preview1" "sock_accept"
+                (func $sock_accept (param i32 i32 i32) (result i32)))
+            (func (export "main"))
+        )
+    "#;
+
+    /// WAT module that mixes a WASI import with a legitimate exported function.
+    ///
+    /// The clean export must NOT allow instantiation to succeed — the whole
+    /// module must be rejected because of the WASI dependency.
+    const WASI_MIXED_WAT: &str = r#"
+        (module
+            (import "wasi_snapshot_preview1" "fd_write"
+                (func $fd_write (param i32 i32 i32 i32) (result i32)))
+            (func $add (export "add") (param i32 i32) (result i32)
+                local.get 0
+                local.get 1
+                i32.add
+            )
+        )
+    "#;
+
+    #[test]
+    fn qa_186_wasi_fd_write_rejected_at_instantiation() {
+        // fd_write is the canonical WASI output syscall. A plugin that imports
+        // it must be rejected before any of its code runs.
+        let h = host();
+        let result = h.load(WASI_IMPORT_WAT.as_bytes());
+        assert!(
+            result.is_err(),
+            "QA-#186: fd_write import must be rejected at instantiation; \
+             got Ok — sandbox failed to hold"
+        );
+    }
+
+    #[test]
+    fn qa_186_wasi_path_open_rejected_at_instantiation() {
+        // path_open grants filesystem access — must be blocked.
+        let h = host();
+        let result = h.load(WASI_PATH_OPEN_WAT.as_bytes());
+        assert!(
+            result.is_err(),
+            "QA-#186: path_open import must be rejected at instantiation; \
+             got Ok — filesystem syscall leaked through sandbox"
+        );
+    }
+
+    #[test]
+    fn qa_186_wasi_sock_accept_rejected_at_instantiation() {
+        // sock_accept grants network access — must be blocked.
+        let h = host();
+        let result = h.load(WASI_SOCK_ACCEPT_WAT.as_bytes());
+        assert!(
+            result.is_err(),
+            "QA-#186: sock_accept import must be rejected at instantiation; \
+             got Ok — network syscall leaked through sandbox"
+        );
+    }
+
+    #[test]
+    fn qa_186_wasi_mixed_module_rejected_despite_clean_export() {
+        // A module that has both a WASI import AND a legitimate export must
+        // still be rejected in full — the clean export must not serve as a
+        // bypass mechanism.
+        let h = host();
+        let result = h.load(WASI_MIXED_WAT.as_bytes());
+        assert!(
+            result.is_err(),
+            "QA-#186: a module mixing WASI imports and clean exports must be \
+             rejected; got Ok — sandbox does not reject mixed modules"
+        );
+    }
+
+    #[test]
+    fn qa_186_clean_module_without_wasi_loads_successfully() {
+        // Control condition: a module with no host imports loads fine.
+        // This verifies the sandbox rejects WASI specifically, not all modules.
+        let h = host();
+        let result = h.load(ADD_WAT.as_bytes());
+        assert!(
+            result.is_ok(),
+            "QA-#186 control: a clean module (no WASI imports) must load; \
+             got Err: {:?}",
+            result.err(),
+        );
+    }
+
+    #[test]
+    fn qa_186_rejection_is_an_error_not_a_panic() {
+        // The sandbox must surface the denial as an `Err`, never panic or
+        // abort. This is the "fail safe, not fail loud" property.
+        //
+        // We use `std::panic::catch_unwind` to make the no-panic contract
+        // explicit; a panic would itself be a test failure.
+        let result = std::panic::catch_unwind(|| {
+            let h = WasmHost::new().expect("WasmHost::new");
+            h.load(WASI_IMPORT_WAT.as_bytes())
+        });
+        match result {
+            Ok(load_result) => {
+                assert!(
+                    load_result.is_err(),
+                    "QA-#186: WASI import must produce Err, not Ok"
+                );
+            }
+            Err(_) => panic!(
+                "QA-#186: WasmHost::load panicked on WASI import — must return Err instead"
+            ),
+        }
+    }
 }
