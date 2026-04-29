@@ -500,8 +500,8 @@ impl App {
                             .unwrap_or_default();
                         let parsed = phantom_semantic::parser::SemanticParser::parse(
                             &command,
-                            &raw_output,
                             "",
+                            &raw_output,
                             Some(*exit_code),
                         );
                         Some(AiEvent::CommandComplete(parsed))

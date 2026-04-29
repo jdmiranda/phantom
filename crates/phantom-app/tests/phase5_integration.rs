@@ -568,14 +568,19 @@ fn w4c_context_menu_hit_test() {
 #[test]
 fn b226_command_complete_with_real_output_yields_nonzero_fix_score() {
     // Simulate what drain_bus_to_brain now does: call SemanticParser::parse
-    // with a real command + stderr that contains a compiler error.
-    // Cargo writes diagnostics to stderr; the output buffer may contain both,
-    // so we use the same string for both stdout and the combined raw_output.
-    let stderr = "error[E0308]: mismatched types\n  --> src/main.rs:5:9\n   |\n5  |     return \"hello\";\n   |            ^^^^^^^ expected `i32`, found `&str`";
+    // with a real command + PTY buffer in the stderr slot.
+    //
+    // Production call (drain_bus_to_brain):
+    //   SemanticParser::parse(&command, "", &raw_output, Some(*exit_code))
+    //
+    // The PTY buffer is passed as `stderr` because parse_rust_errors only
+    // reads from that argument. Passing it as `stdout` (the old bug) meant
+    // cargo error parsing was always blind.
+    let raw_output = "error[E0308]: mismatched types\n  --> src/main.rs:5:9\n   |\n5  |     return \"hello\";\n   |            ^^^^^^^ expected `i32`, found `&str`";
     let parsed = phantom_semantic::parser::SemanticParser::parse(
         "cargo build",
-        "",      // stdout is empty for failed builds
-        stderr,  // cargo writes errors here
+        "",          // stdout: empty — mirrors production call
+        raw_output,  // stderr slot: PTY buffer — mirrors production call
         Some(1),
     );
 
