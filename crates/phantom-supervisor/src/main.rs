@@ -601,6 +601,76 @@ fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
 }
 
 // ---------------------------------------------------------------------------
+// macOS: DYLD_FALLBACK_LIBRARY_PATH injection
+// ---------------------------------------------------------------------------
+
+/// On macOS, `DYLD_FALLBACK_LIBRARY_PATH` must be set before the dynamic
+/// linker resolves Swift runtime libraries used by the audio-capture backend.
+/// When Phantom is launched via `cargo run --bin phantom` (without `run.sh`)
+/// this variable may be absent, causing `dlopen` failures at runtime.
+///
+/// This function injects a suitable path early in the supervisor — before the
+/// phantom child process is spawned — so the child inherits it automatically.
+/// It is a no-op if the variable is already set.
+#[cfg(target_os = "macos")]
+fn inject_dyld_fallback() {
+    if std::env::var("DYLD_FALLBACK_LIBRARY_PATH").is_ok() {
+        // Already set (e.g. caller exported it, or run.sh set it). Respect it.
+        return;
+    }
+
+    match find_swift_runtime_path() {
+        Some(path) => {
+            info!("injecting DYLD_FALLBACK_LIBRARY_PATH={path}");
+            // SAFETY: single-threaded at this point in main(); no other threads
+            // have been spawned yet when we call this.
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var("DYLD_FALLBACK_LIBRARY_PATH", &path);
+            }
+        }
+        None => {
+            warn!(
+                "Swift runtime not found — audio capture will be unavailable \
+                 (set DYLD_FALLBACK_LIBRARY_PATH manually if needed)"
+            );
+        }
+    }
+}
+
+/// Probe for the Swift standard-library directory on the host macOS system.
+///
+/// Strategy (in order):
+/// 1. Ask `xcrun --show-sdk-path` and derive `<sdk>/usr/lib/swift`.
+/// 2. Fall back to the well-known system path `/usr/lib/swift`.
+#[cfg(target_os = "macos")]
+fn find_swift_runtime_path() -> Option<String> {
+    // --- Strategy 1: xcrun SDK path -------------------------------------------
+    if let Ok(output) = std::process::Command::new("xcrun")
+        .args(["--show-sdk-path"])
+        .output()
+    {
+        if output.status.success() {
+            let sdk = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !sdk.is_empty() {
+                let candidate = format!("{sdk}/usr/lib/swift");
+                if std::path::Path::new(&candidate).exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // --- Strategy 2: well-known system path ------------------------------------
+    let fallback = "/usr/lib/swift";
+    if std::path::Path::new(fallback).exists() {
+        return Some(fallback.to_string());
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Entrypoint
 // ---------------------------------------------------------------------------
 
@@ -608,6 +678,11 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
+
+    // Inject DYLD_FALLBACK_LIBRARY_PATH on macOS so Swift-backed audio capture
+    // works when launched directly via `cargo run --bin phantom` without run.sh.
+    #[cfg(target_os = "macos")]
+    inject_dyld_fallback();
 
     print_banner();
 

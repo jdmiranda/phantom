@@ -245,7 +245,7 @@ pub fn extract_grid_themed<T: EventListener>(
             // Check if this cell is in the selection.
             let is_selected = selection_range
                 .as_ref()
-                .map_or(false, |range| {
+                .is_some_and(|range| {
                     range.contains(Point::new(Line(row_idx as i32), Column(col_idx)))
                 });
 
@@ -350,6 +350,7 @@ fn extract_cursor<T: EventListener>(term: &Term<T>) -> CursorState {
 /// - Indices 0..16: standard ANSI colors.
 /// - Indices 16..232: 6x6x6 color cube.
 /// - Indices 232..256: grayscale ramp.
+#[must_use]
 pub fn ansi_color_table() -> [[f32; 4]; 256] {
     let mut t = [[0.0f32; 4]; 256];
 

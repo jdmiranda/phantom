@@ -11,7 +11,9 @@
 pub mod agent;
 pub mod api;
 pub mod audit;
+pub mod lifecycle;
 pub mod correlation;
+pub mod policy;
 pub mod handoff;
 pub mod chat;
 pub mod chat_tools;
@@ -38,6 +40,7 @@ pub mod speech;
 pub mod spawn_rules;
 pub mod suggest;
 pub mod supervisor;
+pub mod skill_registry;
 pub mod system_prompt;
 pub mod taint;
 pub mod tools;
@@ -45,6 +48,7 @@ pub mod tools;
 pub use agent::*;
 pub use correlation::CorrelationId;
 pub use dispatch::Disposition;
+pub use policy::AgentPolicy;
 pub use chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
     OpenAiChatBackend, build_backend,
@@ -59,6 +63,9 @@ pub use quarantine::{
     AgentRuntime, AutoQuarantinePolicy, QuarantineRegistry, QuarantineState,
     DEFAULT_QUARANTINE_THRESHOLD,
 };
+pub use lifecycle::{LifecycleEvent, LifecycleHook, LifecycleHooks};
 pub use semantic_context::SemanticContext;
+pub use skill_registry::SkillRegistry;
+pub use system_prompt::SkillInjection;
 pub use taint::TaintLevel;
 pub use tools::*;
