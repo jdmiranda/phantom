@@ -35,8 +35,32 @@ impl AgentPaneStyle {
         match status {
             AgentStatus::Working | AgentStatus::WaitingForTool => Self::working(),
             AgentStatus::Queued => Self::queued(),
+            AgentStatus::Planning => Self::planning(),
+            AgentStatus::AwaitingApproval => Self::awaiting_approval(),
             AgentStatus::Done => Self::done(),
             AgentStatus::Failed | AgentStatus::Flatline => Self::failed(),
+        }
+    }
+
+    /// Slow amber pulse — the agent is building its execution plan.
+    fn planning() -> Self {
+        Self {
+            border_color: [0.95, 0.65, 0.0, 1.0],     // amber
+            header_bg: [0.12, 0.09, 0.02, 1.0],        // dark amber-brown
+            header_fg: [1.0, 0.85, 0.45, 1.0],         // light amber
+            status_color: [0.95, 0.65, 0.0, 1.0],      // amber
+            pulse_speed: 1.5,                           // slow gentle pulse
+        }
+    }
+
+    /// Steady amber — plan is ready, waiting for user approval badge.
+    fn awaiting_approval() -> Self {
+        Self {
+            border_color: [0.95, 0.75, 0.1, 1.0],     // bright amber
+            header_bg: [0.14, 0.10, 0.02, 1.0],        // dark amber-brown
+            header_fg: [1.0, 0.90, 0.55, 1.0],         // light amber-yellow
+            status_color: [0.95, 0.75, 0.1, 1.0],      // bright amber
+            pulse_speed: 0.0,                           // no pulse — static badge
         }
     }
 
@@ -137,6 +161,8 @@ pub fn agent_header(agent: &Agent) -> String {
 
     let status = match agent.status {
         AgentStatus::Queued => "QUEUED".to_string(),
+        AgentStatus::Planning => format!("PLANNING {:.1}s", agent.elapsed().as_secs_f32()),
+        AgentStatus::AwaitingApproval => "PENDING APPROVAL".to_string(),
         AgentStatus::Working => format!("WORKING {:.1}s", agent.elapsed().as_secs_f32()),
         AgentStatus::WaitingForTool => "TOOL CALL".to_string(),
         AgentStatus::Done => format!("DONE {:.1}s", agent.elapsed().as_secs_f32()),
@@ -431,5 +457,79 @@ mod tests {
     fn truncate_long_string_adds_ellipsis() {
         let result = truncate("hello world", 5);
         assert_eq!(result, "hello...");
+    }
+
+    // -- FSM #34: Planning + AwaitingApproval styles --------------------------
+
+    #[test]
+    fn style_planning_has_nonzero_pulse() {
+        let style = AgentPaneStyle::for_status(AgentStatus::Planning);
+        assert!(style.pulse_speed > 0.0, "planning style must animate (slow amber pulse)");
+    }
+
+    #[test]
+    fn style_planning_is_amber() {
+        let style = AgentPaneStyle::for_status(AgentStatus::Planning);
+        // Amber = high red, high green, low blue.
+        assert!(
+            style.border_color[0] > style.border_color[2],
+            "planning border red channel must exceed blue (amber)"
+        );
+        assert!(
+            style.border_color[1] > style.border_color[2],
+            "planning border green channel must exceed blue (amber)"
+        );
+    }
+
+    #[test]
+    fn style_awaiting_approval_has_no_pulse() {
+        // AwaitingApproval shows a static badge — no animation.
+        let style = AgentPaneStyle::for_status(AgentStatus::AwaitingApproval);
+        assert_eq!(style.pulse_speed, 0.0, "awaiting_approval style must not animate");
+    }
+
+    #[test]
+    fn style_awaiting_approval_is_amber_family() {
+        let style = AgentPaneStyle::for_status(AgentStatus::AwaitingApproval);
+        // AwaitingApproval uses bright amber (same color family as Planning).
+        assert!(
+            style.border_color[0] > style.border_color[2],
+            "awaiting_approval border red must exceed blue"
+        );
+        assert!(
+            style.border_color[1] > style.border_color[2],
+            "awaiting_approval border green must exceed blue"
+        );
+    }
+
+    #[test]
+    fn style_awaiting_approval_brighter_than_planning() {
+        // The approval badge is intentionally brighter than the planning pulse.
+        let planning = AgentPaneStyle::for_status(AgentStatus::Planning);
+        let awaiting = AgentPaneStyle::for_status(AgentStatus::AwaitingApproval);
+        let planning_lum = planning.border_color[0] + planning.border_color[1];
+        let awaiting_lum = awaiting.border_color[0] + awaiting.border_color[1];
+        assert!(
+            awaiting_lum >= planning_lum,
+            "awaiting_approval border must be at least as bright as planning"
+        );
+    }
+
+    #[test]
+    fn header_planning_status_shows_elapsed() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "test".into() });
+        agent.begin_planning();
+        let hdr = agent_header(&agent);
+        assert!(hdr.contains("PLANNING"), "header must show PLANNING status");
+        assert!(hdr.contains('s'), "header must show elapsed seconds");
+    }
+
+    #[test]
+    fn header_awaiting_approval_status() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "test".into() });
+        agent.begin_planning();
+        agent.submit_plan_for_approval();
+        let hdr = agent_header(&agent);
+        assert!(hdr.contains("PENDING APPROVAL"), "header must show PENDING APPROVAL status");
     }
 }

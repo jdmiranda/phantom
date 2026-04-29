@@ -21,10 +21,29 @@ pub type AgentId = u32;
 // ---------------------------------------------------------------------------
 
 /// Agent lifecycle state.
+///
+/// The full FSM (see issue #34):
+///
+/// ```text
+/// Queued → Planning → AwaitingApproval → Working → Done
+///                   ↘ (revision)  ↗         ↓
+///                                          Failed → Queued (retry)
+///                                            ↓
+///                                         Flatline → Queued (manual retry)
+/// ```
+///
+/// `Queued` may also skip straight to `Working` when there is no plan gate
+/// in effect (the existing fast path for non-gated tasks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStatus {
     /// Waiting to start (queued behind concurrency limit).
     Queued,
+    /// Generating an execution plan before requesting user approval.
+    /// Entered from `Queued` when the Plan Gate is active.
+    Planning,
+    /// Plan produced; waiting for the user (or policy) to approve it before
+    /// the agent starts executing tools. Entered from `Planning`.
+    AwaitingApproval,
     /// Actively processing / reasoning.
     Working,
     /// Called a tool, waiting for the result.
@@ -38,13 +57,38 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    /// Returns true iff transitioning from `self` to `next` is a valid
+    /// Returns `true` iff transitioning from `self` to `next` is a valid
     /// lifecycle move. Invalid transitions indicate a bug in the caller.
+    ///
+    /// Full valid-transition table:
+    ///
+    /// | From              | To                |
+    /// |-------------------|-------------------|
+    /// | Queued            | Planning          |
+    /// | Queued            | Working           | (no-gate fast path)
+    /// | Planning          | AwaitingApproval  |
+    /// | Planning          | Working           | (plan auto-approved)
+    /// | AwaitingApproval  | Working           | (approved by user/policy)
+    /// | AwaitingApproval  | Planning          | (revision requested)
+    /// | Working           | WaitingForTool    |
+    /// | Working           | Done              |
+    /// | Working           | Failed            |
+    /// | Working           | Flatline          |
+    /// | WaitingForTool    | Working           |
+    /// | WaitingForTool    | Failed            |
+    /// | WaitingForTool    | Flatline          |
+    /// | Failed            | Queued            | (retry)
+    /// | Flatline          | Queued            | (manual retry)
     pub fn can_transition_to(self, next: AgentStatus) -> bool {
         use AgentStatus::*;
         matches!(
             (self, next),
-            (Queued, Working)
+            (Queued, Planning)                        // plan gate enters planning phase
+                | (Queued, Working)                   // no-gate fast path
+                | (Planning, AwaitingApproval)        // plan ready, awaiting user sign-off
+                | (Planning, Working)                 // plan auto-approved (policy/test)
+                | (AwaitingApproval, Working)         // user/policy approved
+                | (AwaitingApproval, Planning)        // revision requested — re-plan
                 | (Working, WaitingForTool)
                 | (Working, Done)
                 | (Working, Failed)
@@ -52,9 +96,24 @@ impl AgentStatus {
                 | (WaitingForTool, Working)
                 | (WaitingForTool, Failed)
                 | (WaitingForTool, Flatline)
-                | (Failed, Queued)    // retry
-                | (Flatline, Queued)  // manual retry
+                | (Failed, Queued)                    // retry
+                | (Flatline, Queued)                  // manual retry
         )
+    }
+
+    /// Returns `true` if the agent is in a terminal state that cannot advance
+    /// without an explicit external trigger (retry, user action, etc.).
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(self, AgentStatus::Done | AgentStatus::Failed | AgentStatus::Flatline)
+    }
+
+    /// Returns `true` if the status represents active forward progress (working
+    /// or waiting for a tool result). Used by the concurrency gate in
+    /// [`crate::manager::AgentManager`].
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        matches!(self, AgentStatus::Working | AgentStatus::WaitingForTool)
     }
 }
 
@@ -180,6 +239,58 @@ impl Agent {
     /// Append visible output text (shown in the agent pane).
     pub fn log(&mut self, text: &str) {
         self.output_log.push(text.to_owned());
+    }
+
+    /// Transition into the `Planning` state.
+    ///
+    /// Valid only from `Queued`. Returns `true` on success, `false` if the
+    /// current state does not permit this transition (no-op on failure so the
+    /// caller can decide how to handle the invalid sequence).
+    pub fn begin_planning(&mut self) -> bool {
+        if self.status.can_transition_to(AgentStatus::Planning) {
+            self.status = AgentStatus::Planning;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Transition into `AwaitingApproval` once the plan has been generated.
+    ///
+    /// Valid only from `Planning`. Returns `true` on success.
+    pub fn submit_plan_for_approval(&mut self) -> bool {
+        if self.status.can_transition_to(AgentStatus::AwaitingApproval) {
+            self.status = AgentStatus::AwaitingApproval;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Approve the plan and transition to `Working`.
+    ///
+    /// Valid from `Planning` (auto-approve) or `AwaitingApproval` (user/policy
+    /// approve). Returns `true` on success.
+    pub fn approve_plan(&mut self) -> bool {
+        if self.status.can_transition_to(AgentStatus::Working) {
+            self.status = AgentStatus::Working;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Request plan revision — transitions from `AwaitingApproval` back to
+    /// `Planning` so the agent can regenerate the plan.
+    ///
+    /// Returns `true` on success.
+    pub fn request_revision(&mut self) -> bool {
+        if self.status.can_transition_to(AgentStatus::Planning) {
+            self.status = AgentStatus::Planning;
+            true
+        } else {
+            false
+        }
     }
 
     /// Mark the agent as completed.
@@ -358,6 +469,8 @@ impl Agent {
 
         let status_tag = match self.status {
             AgentStatus::Queued => "QUEUED",
+            AgentStatus::Planning => "PLANNING",
+            AgentStatus::AwaitingApproval => "PENDING APPROVAL",
             AgentStatus::Working => "WORKING",
             AgentStatus::WaitingForTool => "WAITING",
             AgentStatus::Done => "DONE",
@@ -851,5 +964,226 @@ mod tests {
 
         let chain = agent.source_chain_for_last_call(0);
         assert!(chain.is_empty());
+    }
+
+    // -- FSM #34: Planning + AwaitingApproval states --------------------------
+
+    #[test]
+    fn can_transition_to_planning_from_queued() {
+        assert!(AgentStatus::Queued.can_transition_to(AgentStatus::Planning));
+    }
+
+    #[test]
+    fn can_transition_to_awaiting_approval_from_planning() {
+        assert!(AgentStatus::Planning.can_transition_to(AgentStatus::AwaitingApproval));
+    }
+
+    #[test]
+    fn can_transition_to_working_from_awaiting_approval() {
+        assert!(AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Working));
+    }
+
+    #[test]
+    fn can_transition_to_working_from_planning_auto_approve() {
+        // The plan gate may auto-approve without going through AwaitingApproval.
+        assert!(AgentStatus::Planning.can_transition_to(AgentStatus::Working));
+    }
+
+    #[test]
+    fn can_transition_awaiting_approval_back_to_planning_on_revision() {
+        // A user may reject the plan and request revision — agent re-plans.
+        assert!(AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Planning));
+    }
+
+    #[test]
+    fn invalid_transition_planning_to_done() {
+        assert!(!AgentStatus::Planning.can_transition_to(AgentStatus::Done));
+    }
+
+    #[test]
+    fn invalid_transition_awaiting_approval_to_done() {
+        assert!(!AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Done));
+    }
+
+    #[test]
+    fn invalid_transition_awaiting_approval_to_failed_directly() {
+        // Cannot jump straight to Failed from AwaitingApproval — must go Working first.
+        assert!(!AgentStatus::AwaitingApproval.can_transition_to(AgentStatus::Failed));
+    }
+
+    #[test]
+    fn invalid_transition_done_to_planning() {
+        assert!(!AgentStatus::Done.can_transition_to(AgentStatus::Planning));
+    }
+
+    #[test]
+    fn begin_planning_transitions_from_queued() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        let ok = agent.begin_planning();
+        assert!(ok, "begin_planning() must succeed from Queued");
+        assert_eq!(agent.status, AgentStatus::Planning);
+    }
+
+    #[test]
+    fn begin_planning_fails_from_working() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.status = AgentStatus::Working;
+        let ok = agent.begin_planning();
+        assert!(!ok, "begin_planning() must fail from Working");
+        assert_eq!(agent.status, AgentStatus::Working, "status must not change");
+    }
+
+    #[test]
+    fn submit_plan_for_approval_transitions_from_planning() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.begin_planning();
+        let ok = agent.submit_plan_for_approval();
+        assert!(ok, "submit_plan_for_approval() must succeed from Planning");
+        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+    }
+
+    #[test]
+    fn submit_plan_for_approval_fails_from_queued() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        let ok = agent.submit_plan_for_approval();
+        assert!(!ok, "submit_plan_for_approval() must fail from Queued");
+        assert_eq!(agent.status, AgentStatus::Queued);
+    }
+
+    #[test]
+    fn approve_plan_from_awaiting_transitions_to_working() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.begin_planning();
+        agent.submit_plan_for_approval();
+        let ok = agent.approve_plan();
+        assert!(ok, "approve_plan() must succeed from AwaitingApproval");
+        assert_eq!(agent.status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn approve_plan_from_planning_auto_approve() {
+        // Planning → Working directly (auto-approve path, no user interaction).
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.begin_planning();
+        let ok = agent.approve_plan();
+        assert!(ok, "approve_plan() must succeed from Planning (auto-approve)");
+        assert_eq!(agent.status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn approve_plan_fast_path_from_queued() {
+        // Queued → Working is the no-gate fast path and a valid transition,
+        // so approve_plan() from Queued succeeds (it routes through the same
+        // can_transition_to(Working) guard).
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        let ok = agent.approve_plan();
+        assert!(ok, "approve_plan() must succeed from Queued via the fast path");
+        assert_eq!(agent.status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn approve_plan_fails_from_done() {
+        // Done is a terminal state — cannot transition to Working.
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.complete(true); // → Done
+        let ok = agent.approve_plan();
+        assert!(!ok, "approve_plan() must fail from Done");
+        assert_eq!(agent.status, AgentStatus::Done, "status must not change");
+    }
+
+    #[test]
+    fn request_revision_transitions_awaiting_approval_back_to_planning() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.begin_planning();
+        agent.submit_plan_for_approval();
+        let ok = agent.request_revision();
+        assert!(ok, "request_revision() must succeed from AwaitingApproval");
+        assert_eq!(agent.status, AgentStatus::Planning);
+    }
+
+    #[test]
+    fn request_revision_fails_from_working() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.status = AgentStatus::Working;
+        let ok = agent.request_revision();
+        assert!(!ok, "request_revision() must fail from Working");
+        assert_eq!(agent.status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn full_plan_gate_happy_path() {
+        // Queued → Planning → AwaitingApproval → Working → Done
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        assert_eq!(agent.status, AgentStatus::Queued);
+        assert!(agent.begin_planning());
+        assert_eq!(agent.status, AgentStatus::Planning);
+        assert!(agent.submit_plan_for_approval());
+        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+        assert!(agent.approve_plan());
+        assert_eq!(agent.status, AgentStatus::Working);
+        agent.complete(true);
+        assert_eq!(agent.status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn full_plan_gate_with_revision() {
+        // Queued → Planning → AwaitingApproval → Planning → AwaitingApproval → Working
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "p".into() });
+        agent.begin_planning();
+        agent.submit_plan_for_approval();
+        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+        // User rejects, requests revision.
+        assert!(agent.request_revision());
+        assert_eq!(agent.status, AgentStatus::Planning);
+        // Agent replans, resubmits.
+        assert!(agent.submit_plan_for_approval());
+        assert_eq!(agent.status, AgentStatus::AwaitingApproval);
+        // User approves.
+        assert!(agent.approve_plan());
+        assert_eq!(agent.status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn is_terminal_for_done_failed_flatline() {
+        assert!(AgentStatus::Done.is_terminal());
+        assert!(AgentStatus::Failed.is_terminal());
+        assert!(AgentStatus::Flatline.is_terminal());
+        assert!(!AgentStatus::Queued.is_terminal());
+        assert!(!AgentStatus::Planning.is_terminal());
+        assert!(!AgentStatus::AwaitingApproval.is_terminal());
+        assert!(!AgentStatus::Working.is_terminal());
+        assert!(!AgentStatus::WaitingForTool.is_terminal());
+    }
+
+    #[test]
+    fn is_active_for_working_and_waiting_for_tool() {
+        assert!(AgentStatus::Working.is_active());
+        assert!(AgentStatus::WaitingForTool.is_active());
+        assert!(!AgentStatus::Queued.is_active());
+        assert!(!AgentStatus::Planning.is_active());
+        assert!(!AgentStatus::AwaitingApproval.is_active());
+        assert!(!AgentStatus::Done.is_active());
+        assert!(!AgentStatus::Failed.is_active());
+        assert!(!AgentStatus::Flatline.is_active());
+    }
+
+    #[test]
+    fn status_line_shows_planning_tag() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.begin_planning();
+        let line = agent.status_line();
+        assert!(line.contains("PLANNING"), "status line must show PLANNING tag");
+    }
+
+    #[test]
+    fn status_line_shows_pending_approval_tag() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.begin_planning();
+        agent.submit_plan_for_approval();
+        let line = agent.status_line();
+        assert!(
+            line.contains("PENDING APPROVAL"),
+            "status line must show PENDING APPROVAL tag"
+        );
     }
 }

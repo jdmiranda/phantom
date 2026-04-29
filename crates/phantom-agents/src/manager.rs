@@ -97,12 +97,12 @@ impl AgentManager {
     }
 
     /// Kill (force-complete) an agent by ID. Returns `true` if the agent existed and was killed.
+    ///
+    /// Killable states include all non-terminal states: `Queued`, `Planning`,
+    /// `AwaitingApproval`, `Working`, and `WaitingForTool`.
     pub fn kill(&mut self, id: AgentId) -> bool {
         if let Some(agent) = self.agents.iter_mut().find(|a| a.id == id) {
-            if matches!(
-                agent.status,
-                AgentStatus::Queued | AgentStatus::Working | AgentStatus::WaitingForTool
-            ) {
+            if !agent.status.is_terminal() {
                 agent.complete(false);
                 agent.log("[killed by user]");
                 self.promote_queued();
@@ -112,14 +112,14 @@ impl AgentManager {
         false
     }
 
-    /// Kill all active agents. Returns the number of agents killed.
+    /// Kill all non-terminal agents. Returns the number of agents killed.
+    ///
+    /// Killable states include `Queued`, `Planning`, `AwaitingApproval`,
+    /// `Working`, and `WaitingForTool`.
     pub fn kill_all(&mut self) -> usize {
         let mut count = 0;
         for agent in &mut self.agents {
-            if matches!(
-                agent.status,
-                AgentStatus::Queued | AgentStatus::Working | AgentStatus::WaitingForTool
-            ) {
+            if !agent.status.is_terminal() {
                 agent.complete(false);
                 agent.log("[killed by user]");
                 count += 1;
@@ -279,5 +279,76 @@ mod tests {
 
         // Agent 2 should now be promoted.
         assert_eq!(mgr.get(id2).unwrap().status, AgentStatus::Working);
+    }
+
+    // -- FSM #34: kill() covers Planning + AwaitingApproval ------------------
+
+    #[test]
+    fn kill_planning_agent_sets_failed() {
+        // Use capacity=0 so the agent starts as Queued, then begin_planning().
+        let mut mgr = AgentManager::new(0);
+        let id = mgr.spawn(free_task("plan me")); // stays Queued (no capacity)
+        assert!(mgr.get_mut(id).unwrap().begin_planning(), "begin_planning must succeed from Queued");
+        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Planning);
+
+        let killed = mgr.kill(id);
+        assert!(killed, "kill() must succeed for Planning agent");
+        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Failed);
+    }
+
+    #[test]
+    fn kill_awaiting_approval_agent_sets_failed() {
+        let mut mgr = AgentManager::new(0); // no capacity → stays Queued
+        let id = mgr.spawn(free_task("approve me"));
+        {
+            let a = mgr.get_mut(id).unwrap();
+            assert!(a.begin_planning());
+            assert!(a.submit_plan_for_approval());
+        }
+        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::AwaitingApproval);
+
+        let killed = mgr.kill(id);
+        assert!(killed, "kill() must succeed for AwaitingApproval agent");
+        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Failed);
+    }
+
+    #[test]
+    fn kill_all_includes_planning_and_awaiting_approval() {
+        // Use capacity=0 so spawned agents start as Queued and can be
+        // transitioned to Planning / AwaitingApproval via the FSM helpers.
+        let mut mgr = AgentManager::new(0);
+        let id1 = mgr.spawn(free_task("a")); // Queued → Working (forced below)
+        let id2 = mgr.spawn(free_task("b")); // Queued → Planning
+        let id3 = mgr.spawn(free_task("c")); // Queued → Planning → AwaitingApproval
+        let id4 = mgr.spawn(free_task("d")); // Queued → Done (terminal, not killed)
+
+        // Force id1 into Working directly for coverage of the original kill_all path.
+        mgr.get_mut(id1).unwrap().status = AgentStatus::Working;
+
+        assert!(mgr.get_mut(id2).unwrap().begin_planning());
+        {
+            let a = mgr.get_mut(id3).unwrap();
+            assert!(a.begin_planning());
+            assert!(a.submit_plan_for_approval());
+        }
+        // id4: Queued → Done via complete (skip Working — complete() is unconditional)
+        mgr.get_mut(id4).unwrap().complete(true);
+
+        let killed = mgr.kill_all();
+        // id1 (Working), id2 (Planning), id3 (AwaitingApproval) → 3 killed
+        // id4 is Done (terminal) → not killed
+        assert_eq!(killed, 3, "kill_all() must kill Working, Planning, and AwaitingApproval agents");
+        assert_eq!(mgr.get(id4).unwrap().status, AgentStatus::Done, "terminal agent must not be killed");
+    }
+
+    #[test]
+    fn kill_done_agent_is_no_op() {
+        let mut mgr = AgentManager::new(4);
+        let id = mgr.spawn(free_task("a"));
+        mgr.get_mut(id).unwrap().complete(true);
+
+        let killed = mgr.kill(id);
+        assert!(!killed, "kill() must not affect a Done agent");
+        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Done);
     }
 }
