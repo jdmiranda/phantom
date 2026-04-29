@@ -722,8 +722,8 @@ fn b226_command_complete_with_real_output_yields_nonzero_fix_score() {
     let raw_output = "error[E0308]: mismatched types\n  --> src/main.rs:5:9\n   |\n5  |     return \"hello\";\n   |            ^^^^^^^ expected `i32`, found `&str`";
     let parsed = phantom_semantic::parser::SemanticParser::parse(
         "cargo build",
-        "",          // stdout: empty — mirrors production call
-        raw_output,  // stderr slot: PTY buffer — mirrors production call
+        "",         // stdout: empty — mirrors production call
+        raw_output, // stderr slot: PTY buffer — mirrors production call
         Some(1),
     );
 
@@ -731,10 +731,17 @@ fn b226_command_complete_with_real_output_yields_nonzero_fix_score() {
     assert!(
         !parsed.errors.is_empty(),
         "SemanticParser must detect errors in real compiler output; got errors={:?}, raw_output={:?}",
-        parsed.errors, parsed.raw_output
+        parsed.errors,
+        parsed.raw_output
     );
-    assert_eq!(parsed.command, "cargo build", "ParsedOutput must carry the command string");
-    assert!(!parsed.raw_output.is_empty(), "ParsedOutput must carry the raw output");
+    assert_eq!(
+        parsed.command, "cargo build",
+        "ParsedOutput must carry the command string"
+    );
+    assert!(
+        !parsed.raw_output.is_empty(),
+        "ParsedOutput must carry the raw output"
+    );
 
     // Confirm the brain scorer produces a non-zero fix score for this event.
     let mut scorer = UtilityScorer::new();

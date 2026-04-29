@@ -84,6 +84,14 @@ pub enum AgentRole {
     /// writes to the user's filesystem; `mark_in_progress` and `mark_done`
     /// only call the `gh` CLI to label/close issues.
     Dispatcher,
+    /// Conversational DAG navigator. Spawned on user queries about the
+    /// execution graph ("what's blocking X?", "show me the critical path").
+    /// Reads the DAG state (`Sense`) and sends commands to the DAG viewer
+    /// surface (`Coordinate`). Cannot make code edits or run commands —
+    /// `Act` is absent from the manifest by design.
+    ///
+    /// Issue #67.
+    Cartographer,
 }
 
 impl AgentRole {
@@ -101,6 +109,7 @@ impl AgentRole {
             Self::Fixer => "Fixer",
             Self::Defender => "Defender",
             Self::Dispatcher => "Dispatcher",
+            Self::Cartographer => "Cartographer",
         }
     }
 
@@ -204,6 +213,20 @@ impl AgentRole {
                               matching the requester's capability set. Sense for reading issue \
                               data; Coordinate for steering agent assignments. No Act, Compute, \
                               or Reflect.",
+            },
+            Self::Cartographer => RoleManifest {
+                role: *self,
+                // Issue #67: Cartographer holds Sense (read the execution DAG and
+                // issue tracker) and Coordinate (send commands to the DAG viewer
+                // surface to highlight, annotate, and restructure the displayed
+                // graph). No Act — the Cartographer never writes files, runs shell
+                // commands, or mutates the user's world directly.
+                classes: &[CapabilityClass::Sense, CapabilityClass::Coordinate],
+                description: "Conversational DAG navigator. Reads the execution plan graph \
+                              (Sense) and drives the DAG viewer surface — highlighting subgraphs, \
+                              annotating nodes, marking statuses, and adding child goals \
+                              (Coordinate). Cannot make code edits or run commands. Spawned when \
+                              the user asks questions about the execution graph topology.",
             },
         }
     }
@@ -319,7 +342,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender, AgentRole::Dispatcher,
+            AgentRole::Defender, AgentRole::Dispatcher, AgentRole::Cartographer,
         ] {
             assert!(
                 !role.manifest().classes.is_empty(),
@@ -355,7 +378,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender, AgentRole::Dispatcher,
+            AgentRole::Defender, AgentRole::Dispatcher, AgentRole::Cartographer,
         ]
         .into_iter()
         .filter(|r| r.has(CapabilityClass::Act))
@@ -370,7 +393,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender, AgentRole::Dispatcher,
+            AgentRole::Defender, AgentRole::Dispatcher, AgentRole::Cartographer,
         ] {
             assert!(seen.insert(role.label()), "duplicate label for {role:?}");
         }
@@ -382,7 +405,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender, AgentRole::Dispatcher,
+            AgentRole::Defender, AgentRole::Dispatcher, AgentRole::Cartographer,
         ] {
             let classes = role.manifest().classes;
             let unique: std::collections::HashSet<_> = classes.iter().collect();
@@ -462,5 +485,53 @@ mod tests {
     #[test]
     fn dispatcher_label_is_dispatcher() {
         assert_eq!(AgentRole::Dispatcher.label(), "Dispatcher");
+    }
+
+    // ---- Cartographer-specific capability assertions (issue #67) ----------------
+
+    #[test]
+    fn cartographer_has_sense_and_coordinate() {
+        assert!(
+            AgentRole::Cartographer.has(CapabilityClass::Sense),
+            "Cartographer must hold Sense to read the DAG"
+        );
+        assert!(
+            AgentRole::Cartographer.has(CapabilityClass::Coordinate),
+            "Cartographer must hold Coordinate to steer the DAG viewer"
+        );
+    }
+
+    #[test]
+    fn cartographer_has_no_act() {
+        // Load-bearing security property (issue #67 acceptance criterion):
+        // the Cartographer cannot mutate the user's filesystem or run commands.
+        assert!(
+            !AgentRole::Cartographer.has(CapabilityClass::Act),
+            "Cartographer must NOT hold Act — it cannot make code edits"
+        );
+    }
+
+    #[test]
+    fn cartographer_has_no_compute() {
+        // The Cartographer navigates the graph; it does not run an LLM itself.
+        // Compute would allow prompt injection via graph annotation content.
+        assert!(
+            !AgentRole::Cartographer.has(CapabilityClass::Compute),
+            "Cartographer must NOT hold Compute"
+        );
+    }
+
+    #[test]
+    fn cartographer_has_no_reflect() {
+        // The Cartographer does not write to memory or the event log directly.
+        assert!(
+            !AgentRole::Cartographer.has(CapabilityClass::Reflect),
+            "Cartographer must NOT hold Reflect"
+        );
+    }
+
+    #[test]
+    fn cartographer_label_is_cartographer() {
+        assert_eq!(AgentRole::Cartographer.label(), "Cartographer");
     }
 }

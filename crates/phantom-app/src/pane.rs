@@ -459,7 +459,12 @@ mod scroll_position_tests {
     const VIEWPORT: usize = 40;
 
     fn track() -> Rect {
-        Rect { x: 494.0, y: 50.0, width: 6.0, height: 400.0 }
+        Rect {
+            x: 494.0,
+            y: 50.0,
+            width: 6.0,
+            height: 400.0,
+        }
     }
 
     // scrollbar_y_to_offset maps a click y position to a display_offset.

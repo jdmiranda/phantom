@@ -73,6 +73,11 @@ use crate::composer_tools::{
     wait_for_agent,
 };
 use crate::correlation::CorrelationId;
+use crate::dag_explorer::{
+    CartographerTool, DagExplorerContext, dag_annotate, dag_clear_annotations, dag_add_child,
+    dag_critical_path, dag_find_blocking, dag_get_node, dag_list_edges, dag_list_nodes,
+    dag_mark_complete, dag_mark_failed, dag_mark_skipped,
+};
 use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
 use crate::dispatcher::{
     DispatcherTool, DispatcherToolContext, GhTicketDispatcher, mark_ticket_done,
@@ -310,6 +315,17 @@ pub struct DispatchContext<'a> {
     /// Legacy and test paths that do not set this field explicitly should use
     /// `RuntimeMode::Normal`.
     pub runtime_mode: RuntimeMode,
+    /// Issue #67: DAG explorer context for the Cartographer role.
+    ///
+    /// When `Some`, the Cartographer role's DAG tools (`dag_list_nodes`,
+    /// `dag_get_node`, `dag_list_edges`, `dag_find_blocking`,
+    /// `dag_critical_path`, `dag_mark_complete`, `dag_mark_failed`,
+    /// `dag_mark_skipped`, `dag_add_child`, `dag_annotate`,
+    /// `dag_clear_annotations`) are routed to [`DagExplorerContext`].
+    ///
+    /// `None` returns an `"unknown tool"` style error for those names —
+    /// correct behaviour for non-Cartographer agents and legacy test paths.
+    pub dag_explorer: Option<DagExplorerContext>,
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +769,38 @@ pub fn dispatch_tool(
                 }
             }
         }
+    } else if let Some(carto_tool) = CartographerTool::from_api_name(name) {
+        // ---- Cartographer tools (issue #67) --------------------------------
+        if let Err(msg) = check_capability(ctx.role, carto_tool.class()) {
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            match ctx.dag_explorer.as_ref() {
+                None => result(
+                    PLACEHOLDER_TOOL,
+                    false,
+                    "DAG explorer not configured".into(),
+                ),
+                Some(dag_ctx) => {
+                    let r = match carto_tool {
+                        CartographerTool::DagListNodes => dag_list_nodes(dag_ctx),
+                        CartographerTool::DagGetNode => dag_get_node(args, dag_ctx),
+                        CartographerTool::DagListEdges => dag_list_edges(dag_ctx),
+                        CartographerTool::DagFindBlocking => dag_find_blocking(args, dag_ctx),
+                        CartographerTool::DagCriticalPath => dag_critical_path(args, dag_ctx),
+                        CartographerTool::DagMarkComplete => dag_mark_complete(args, dag_ctx),
+                        CartographerTool::DagMarkFailed => dag_mark_failed(args, dag_ctx),
+                        CartographerTool::DagMarkSkipped => dag_mark_skipped(args, dag_ctx),
+                        CartographerTool::DagAddChild => dag_add_child(args, dag_ctx),
+                        CartographerTool::DagAnnotate => dag_annotate(args, dag_ctx),
+                        CartographerTool::DagClearAnnotations => dag_clear_annotations(dag_ctx),
+                    };
+                    match r {
+                        Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                    }
+                }
+            }
+        }
     } else {
         // ---- Unknown -------------------------------------------------------
         result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
@@ -875,7 +923,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        }
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        }
     }
 
     // ---- File/git surface --------------------------------------------------
@@ -925,7 +974,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let result = dispatch_tool(
             "send_to_agent",
@@ -1060,7 +1110,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let result = dispatch_tool(
             "send_to_agent",
@@ -1231,7 +1282,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         // Act.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1283,7 +1335,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         // Act.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1346,7 +1399,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         // Act.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1411,7 +1465,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         // This call must return — any infinite loop would cause the test to hang
         // and be caught by the test harness timeout.
@@ -1471,7 +1526,8 @@ mod tests {
             quarantine: Some(quarantine),
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         // A normal file-read that would otherwise succeed must be denied.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1553,7 +1609,8 @@ mod tests {
                 quarantine: Some(Arc::clone(&quarantine)),
                 correlation_id: None,
                 ticket_dispatcher: None,
-                runtime_mode: RuntimeMode::Normal,            };
+                runtime_mode: RuntimeMode::Normal,
+                dag_explorer: None,            };
             let blocked = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
             assert!(
                 !blocked.success,
@@ -1598,7 +1655,8 @@ mod tests {
             quarantine: Some(Arc::clone(&quarantine)),
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
 
@@ -1645,7 +1703,8 @@ mod tests {
             quarantine: Some(quarantine),
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
 
@@ -1681,7 +1740,8 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
 
@@ -1721,7 +1781,8 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let ctx_b = DispatchContext {
             self_ref: AgentRef::new(2, AgentRole::Conversational, "agent-b", SpawnSource::User),
@@ -1734,7 +1795,8 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
         let res_b = dispatch_tool("read_file", &json!({"path": "b.txt"}), &ctx_b);
@@ -1796,7 +1858,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
 
@@ -1847,7 +1910,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         // Attempt to invoke run_command — Act-class tool.
         let res = dispatch_tool(
@@ -1921,7 +1985,8 @@ mod tests {
             quarantine: None,
             correlation_id: Some(cid),
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
 
         // Act — dispatch a normal read_file tool.
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1974,7 +2039,8 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-            runtime_mode: RuntimeMode::Normal,        };
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,        };
         let res2 = dispatch_tool("read_file", &json!({"path": "probe2.txt"}), &ctx_no_corr);
         assert!(res2.success, "no-corr dispatch must succeed: {}", res2.output);
 
@@ -2213,6 +2279,7 @@ mod tests {
             correlation_id: None,
             ticket_dispatcher: None,
             runtime_mode: RuntimeMode::SpawnOnly,
+            dag_explorer: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -2244,6 +2311,7 @@ mod tests {
             correlation_id: None,
             ticket_dispatcher: None,
             runtime_mode: RuntimeMode::SpawnOnly,
+            dag_explorer: None,
         };
 
         // Empty args — handler may fail on validation but must not be
@@ -2280,6 +2348,7 @@ mod tests {
             correlation_id: None,
             ticket_dispatcher: None,
             runtime_mode: RuntimeMode::SpawnOnly,
+            dag_explorer: None,
         };
 
         let res = dispatch_tool("write_file", &json!({"path": "x.txt", "content": "boom"}), &ctx);
@@ -2311,6 +2380,7 @@ mod tests {
             correlation_id: None,
             ticket_dispatcher: None,
             runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "visible.txt"}), &ctx);

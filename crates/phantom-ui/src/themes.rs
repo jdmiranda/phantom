@@ -594,8 +594,14 @@ mod tests {
             builtin_by_name("nonexistent").is_none(),
             "unknown theme must return None",
         );
-        assert!(builtin_by_name("").is_none(), "empty string must return None");
-        assert!(builtin_by_name("NEON").is_none(), "unregistered name must return None");
+        assert!(
+            builtin_by_name("").is_none(),
+            "empty string must return None"
+        );
+        assert!(
+            builtin_by_name("NEON").is_none(),
+            "unregistered name must return None"
+        );
     }
 
     /// Foreground colors must differ between themes.
@@ -604,7 +610,7 @@ mod tests {
     #[test]
     fn qa_169_themes_have_distinct_foreground_colors() {
         let amber_fg = amber().colors.foreground;
-        let ice_fg   = ice().colors.foreground;
+        let ice_fg = ice().colors.foreground;
         let blood_fg = blood().colors.foreground;
         let vapor_fg = vapor().colors.foreground;
 
@@ -613,8 +619,8 @@ mod tests {
             ("amber", amber_fg, "ice", ice_fg),
             ("amber", amber_fg, "blood", blood_fg),
             ("amber", amber_fg, "vapor", vapor_fg),
-            ("ice",   ice_fg,   "blood", blood_fg),
-            ("ice",   ice_fg,   "vapor", vapor_fg),
+            ("ice", ice_fg, "blood", blood_fg),
+            ("ice", ice_fg, "vapor", vapor_fg),
             ("blood", blood_fg, "vapor", vapor_fg),
         ];
 
@@ -631,14 +637,14 @@ mod tests {
     #[test]
     fn qa_169_themes_have_distinct_background_colors() {
         let amber_bg = amber().colors.background;
-        let ice_bg   = ice().colors.background;
+        let ice_bg = ice().colors.background;
         let blood_bg = blood().colors.background;
         let vapor_bg = vapor().colors.background;
 
         let pairs = [
             ("amber", amber_bg, "ice", ice_bg),
             ("amber", amber_bg, "blood", blood_bg),
-            ("ice",   ice_bg,   "vapor", vapor_bg),
+            ("ice", ice_bg, "vapor", vapor_bg),
         ];
 
         for (na, ca, nb, cb) in pairs {
@@ -667,14 +673,14 @@ mod tests {
     #[test]
     fn qa_169_themes_have_distinct_shader_params() {
         let amber_sp = amber().shader_params;
-        let ice_sp   = ice().shader_params;
+        let ice_sp = ice().shader_params;
         let blood_sp = blood().shader_params;
         let vapor_sp = vapor().shader_params;
 
         // Bloom intensity alone differs enough to prove distinct appearance.
         let blooms = [
             ("amber", amber_sp.bloom_intensity),
-            ("ice",   ice_sp.bloom_intensity),
+            ("ice", ice_sp.bloom_intensity),
             ("blood", blood_sp.bloom_intensity),
             ("vapor", vapor_sp.bloom_intensity),
         ];

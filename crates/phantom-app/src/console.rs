@@ -386,7 +386,11 @@ mod history_tests {
         c.submit();
         c.input = "build".into();
         c.submit();
-        assert_eq!(c.command_history.len(), 1, "identical adjacent commands must not be duplicated");
+        assert_eq!(
+            c.command_history.len(),
+            1,
+            "identical adjacent commands must not be duplicated"
+        );
     }
 
     // submit() returns the trimmed command string.
