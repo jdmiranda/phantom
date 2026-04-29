@@ -74,6 +74,10 @@ use crate::composer_tools::{
 };
 use crate::correlation::CorrelationId;
 use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
+use crate::dispatcher::{
+    DispatcherTool, DispatcherToolContext, GhTicketDispatcher, mark_ticket_done,
+    mark_ticket_in_progress, request_next_ticket,
+};
 use crate::inbox::{AgentRegistry, AgentStatus};
 use crate::quarantine::QuarantineRegistry;
 use crate::role::{AgentId, AgentRef, AgentRole, CapabilityClass};
@@ -180,6 +184,14 @@ pub struct DispatchContext<'a> {
     /// `None` means the dispatch was not initiated from a tracked user action
     /// (legacy / test path) — this is never an error.
     pub correlation_id: Option<CorrelationId>,
+    /// Issue #24: ticket dispatcher.
+    ///
+    /// When `Some`, the Dispatcher role's three tools (`request_next_ticket`,
+    /// `mark_ticket_in_progress`, `mark_ticket_done`) are routed to
+    /// [`GhTicketDispatcher`]. `None` returns an `"unknown tool"` style error
+    /// for those names — the correct behaviour for non-Dispatcher agents and
+    /// legacy test paths.
+    pub ticket_dispatcher: Option<Arc<GhTicketDispatcher>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +510,47 @@ pub fn dispatch_tool(
                 },
             }
         }
+    } else if let Some(dispatcher_tool) = DispatcherTool::from_api_name(name) {
+        // ---- Dispatcher tools (issue #24) ----------------------------------
+        if let Err(msg) = check_capability(ctx.role, dispatcher_tool.class()) {
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            match ctx.ticket_dispatcher.as_ref() {
+                None => result(
+                    PLACEHOLDER_TOOL,
+                    false,
+                    "ticket dispatcher not configured".into(),
+                ),
+                Some(d) => {
+                    let disp_ctx = DispatcherToolContext::new(Arc::clone(d));
+                    match dispatcher_tool {
+                        DispatcherTool::RequestNextTicket => {
+                            match request_next_ticket(args, &disp_ctx) {
+                                Ok(Some(ticket)) => {
+                                    let body = serde_json::to_string(&ticket)
+                                        .unwrap_or_else(|e| format!("encode error: {e}"));
+                                    result(PLACEHOLDER_TOOL, true, body)
+                                }
+                                Ok(None) => result(PLACEHOLDER_TOOL, true, "null".into()),
+                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                            }
+                        }
+                        DispatcherTool::MarkTicketInProgress => {
+                            match mark_ticket_in_progress(args, &disp_ctx) {
+                                Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                            }
+                        }
+                        DispatcherTool::MarkTicketDone => {
+                            match mark_ticket_done(args, &disp_ctx) {
+                                Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } else {
         // ---- Unknown -------------------------------------------------------
         result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
@@ -588,6 +641,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         }
     }
 
@@ -637,6 +691,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let result = dispatch_tool(
@@ -771,6 +826,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let result = dispatch_tool(
@@ -830,6 +886,7 @@ mod tests {
             source_event_id: Some(upstream_id),
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // Act.
@@ -881,6 +938,7 @@ mod tests {
             source_event_id: Some(denied_event_id),
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // Act.
@@ -943,6 +1001,7 @@ mod tests {
             source_event_id: Some(upstream_id),
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // Act.
@@ -1007,6 +1066,7 @@ mod tests {
             source_event_id: Some(event_id),
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // This call must return — any infinite loop would cause the test to hang
@@ -1066,6 +1126,7 @@ mod tests {
             source_event_id: None,
             quarantine: Some(quarantine),
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         // A normal file-read that would otherwise succeed must be denied.
@@ -1118,6 +1179,7 @@ mod tests {
             source_event_id: None,
             quarantine: Some(quarantine),
             correlation_id: None,
+            ticket_dispatcher: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1153,6 +1215,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: Some(cid),
+            ticket_dispatcher: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
@@ -1192,6 +1255,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: Some(cid),
+            ticket_dispatcher: None,
         };
 
         let ctx_b = DispatchContext {
@@ -1204,6 +1268,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: Some(cid),
+            ticket_dispatcher: None,
         };
 
         let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);

@@ -19,6 +19,7 @@ pub mod composer_tools;
 pub mod defender;
 pub mod defender_tools;
 pub mod dispatch;
+pub mod dispatcher;
 pub mod fixer;
 pub mod inbox;
 pub mod inspector;

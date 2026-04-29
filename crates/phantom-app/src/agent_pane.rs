@@ -542,6 +542,7 @@ impl AgentPane {
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
+            ticket_dispatcher: None,
         })
     }
 

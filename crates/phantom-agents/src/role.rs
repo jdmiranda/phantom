@@ -75,6 +75,15 @@ pub enum AgentRole {
     /// `Sense` for source-chain inspection and `Coordinate` for the
     /// challenge route — and nothing else.
     Defender,
+    /// Ticket-handout coordinator. Queries open GitHub issues, walks the
+    /// `Blocked by:` DAG to find the highest-priority unblocked ticket
+    /// matching a requester's capability set, and hands it out atomically.
+    ///
+    /// Holds `Sense` (reads issue data from GH API) and `Coordinate` (steers
+    /// which agent works on which issue). No `Act` — the Dispatcher never
+    /// writes to the user's filesystem; `mark_in_progress` and `mark_done`
+    /// only call the `gh` CLI to label/close issues.
+    Dispatcher,
 }
 
 impl AgentRole {
@@ -91,6 +100,7 @@ impl AgentRole {
             Self::Composer => "Composer",
             Self::Fixer => "Fixer",
             Self::Defender => "Defender",
+            Self::Dispatcher => "Dispatcher",
         }
     }
 
@@ -180,6 +190,20 @@ impl AgentRole {
                               for another agent. Observes the denial / source chain (Sense) and \
                               confronts the offending agent via the `challenge_agent` tool \
                               (Coordinate). Cannot act, compute, or reflect.",
+            },
+            Self::Dispatcher => RoleManifest {
+                role: *self,
+                // Issue #24: Dispatcher holds Sense (reads GH issue data) and
+                // Coordinate (steers which agent works on which ticket). No Act,
+                // Compute, or Reflect — it calls the `gh` CLI to label/close
+                // issues but never writes to the user's filesystem or invokes an
+                // LLM.
+                classes: &[CapabilityClass::Sense, CapabilityClass::Coordinate],
+                description: "Ticket-handout coordinator. Queries open GH issues, walks the \
+                              Blocked-by DAG, and hands out the highest-priority unblocked ticket \
+                              matching the requester's capability set. Sense for reading issue \
+                              data; Coordinate for steering agent assignments. No Act, Compute, \
+                              or Reflect.",
             },
         }
     }
@@ -295,7 +319,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender,
+            AgentRole::Defender, AgentRole::Dispatcher,
         ] {
             assert!(
                 !role.manifest().classes.is_empty(),
@@ -331,7 +355,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender,
+            AgentRole::Defender, AgentRole::Dispatcher,
         ]
         .into_iter()
         .filter(|r| r.has(CapabilityClass::Act))
@@ -346,7 +370,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender,
+            AgentRole::Defender, AgentRole::Dispatcher,
         ] {
             assert!(seen.insert(role.label()), "duplicate label for {role:?}");
         }
@@ -358,7 +382,7 @@ mod tests {
             AgentRole::Conversational, AgentRole::Watcher, AgentRole::Capturer,
             AgentRole::Transcriber, AgentRole::Reflector, AgentRole::Indexer,
             AgentRole::Actor, AgentRole::Composer, AgentRole::Fixer,
-            AgentRole::Defender,
+            AgentRole::Defender, AgentRole::Dispatcher,
         ] {
             let classes = role.manifest().classes;
             let unique: std::collections::HashSet<_> = classes.iter().collect();
@@ -398,5 +422,45 @@ mod tests {
             SpawnSource::Agent(p) => assert_eq!(p, parent),
             other => panic!("expected Agent({parent}), got {other:?}"),
         }
+    }
+
+    // ---- Dispatcher-specific capability assertions (issue #24) ----------------
+
+    #[test]
+    fn dispatcher_has_sense_and_coordinate() {
+        assert!(
+            AgentRole::Dispatcher.has(CapabilityClass::Sense),
+            "Dispatcher must hold Sense to read GH issue data"
+        );
+        assert!(
+            AgentRole::Dispatcher.has(CapabilityClass::Coordinate),
+            "Dispatcher must hold Coordinate to steer agent assignments"
+        );
+    }
+
+    #[test]
+    fn dispatcher_has_no_act() {
+        // Load-bearing security property: the Dispatcher cannot mutate the
+        // user's filesystem. It calls `gh` to label/close issues but that is
+        // scoped to the GH API surface, not the user's world.
+        assert!(
+            !AgentRole::Dispatcher.has(CapabilityClass::Act),
+            "Dispatcher must NOT hold Act"
+        );
+    }
+
+    #[test]
+    fn dispatcher_has_no_compute() {
+        // The Dispatcher never runs an LLM — it only queries the GH API and
+        // applies topological ordering.
+        assert!(
+            !AgentRole::Dispatcher.has(CapabilityClass::Compute),
+            "Dispatcher must NOT hold Compute"
+        );
+    }
+
+    #[test]
+    fn dispatcher_label_is_dispatcher() {
+        assert_eq!(AgentRole::Dispatcher.label(), "Dispatcher");
     }
 }
