@@ -1,5 +1,25 @@
+use std::sync::OnceLock;
+
 use phantom_context::ProjectContext;
 use regex::Regex;
+
+// ---------------------------------------------------------------------------
+// Static regex patterns — compiled once via OnceLock — safe to call on the hot path
+// ---------------------------------------------------------------------------
+
+static RE_BINARY_TOKEN: OnceLock<Regex> = OnceLock::new();
+static RE_TEST: OnceLock<Regex> = OnceLock::new();
+static RE_RUN: OnceLock<Regex> = OnceLock::new();
+static RE_LINT: OnceLock<Regex> = OnceLock::new();
+static RE_FMT: OnceLock<Regex> = OnceLock::new();
+static RE_CHANGES: OnceLock<Regex> = OnceLock::new();
+static RE_STATUS: OnceLock<Regex> = OnceLock::new();
+static RE_DEPLOY: OnceLock<Regex> = OnceLock::new();
+static RE_FIX: OnceLock<Regex> = OnceLock::new();
+static RE_EXPLAIN: OnceLock<Regex> = OnceLock::new();
+static RE_PERF: OnceLock<Regex> = OnceLock::new();
+static RE_SHOW: OnceLock<Regex> = OnceLock::new();
+static RE_CI: OnceLock<Regex> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -186,7 +206,9 @@ fn is_shell_command(input: &str) -> bool {
 /// intended as executable binaries, not natural language requests.
 fn is_known_binary(word: &str) -> bool {
     // Must be a single token of lowercase alpha (maybe with hyphens/underscores).
-    let re = Regex::new(r"^[a-z][a-z0-9_-]*$").unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let re = RE_BINARY_TOKEN
+        .get_or_init(|| Regex::new(r"^[a-z][a-z0-9_-]*$").expect("RE_BINARY_TOKEN: invalid pattern"));
     if !re.is_match(word) {
         return false;
     }
@@ -226,8 +248,11 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
             .map(|cmd| ResolvedAction::RunCommand(cmd.clone()));
     }
 
-    // Test
-    let test_re = Regex::new(r"^(?:test|tests|run\s+(?:the\s+)?tests?)$").unwrap();
+    // Test — compiled once via OnceLock — safe to call on the hot path
+    let test_re = RE_TEST.get_or_init(|| {
+        Regex::new(r"^(?:test|tests|run\s+(?:the\s+)?tests?)$")
+            .expect("RE_TEST: invalid pattern")
+    });
     if test_re.is_match(lower) {
         return ctx
             .commands
@@ -236,11 +261,13 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
             .map(|cmd| ResolvedAction::RunCommand(cmd.clone()));
     }
 
-    // Run / start
-    let run_re = Regex::new(
-        r"^(?:run|start|run\s+it|start\s+it|run\s+the\s+(?:app|project|server)|start\s+the\s+(?:app|project|server))$",
-    )
-    .unwrap();
+    // Run / start — compiled once via OnceLock — safe to call on the hot path
+    let run_re = RE_RUN.get_or_init(|| {
+        Regex::new(
+            r"^(?:run|start|run\s+it|start\s+it|run\s+the\s+(?:app|project|server)|start\s+the\s+(?:app|project|server))$",
+        )
+        .expect("RE_RUN: invalid pattern")
+    });
     if run_re.is_match(lower) {
         return ctx
             .commands
@@ -249,8 +276,11 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
             .map(|cmd| ResolvedAction::RunCommand(cmd.clone()));
     }
 
-    // Lint / check
-    let lint_re = Regex::new(r"^(?:lint|check|run\s+(?:the\s+)?linter?)$").unwrap();
+    // Lint / check — compiled once via OnceLock — safe to call on the hot path
+    let lint_re = RE_LINT.get_or_init(|| {
+        Regex::new(r"^(?:lint|check|run\s+(?:the\s+)?linter?)$")
+            .expect("RE_LINT: invalid pattern")
+    });
     if lint_re.is_match(lower) {
         return ctx
             .commands
@@ -259,10 +289,11 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
             .map(|cmd| ResolvedAction::RunCommand(cmd.clone()));
     }
 
-    // Format
-    let fmt_re =
+    // Format — compiled once via OnceLock — safe to call on the hot path
+    let fmt_re = RE_FMT.get_or_init(|| {
         Regex::new(r"^(?:format|fmt|format\s+(?:the\s+)?code|run\s+(?:the\s+)?formatter)$")
-            .unwrap();
+            .expect("RE_FMT: invalid pattern")
+    });
     if fmt_re.is_match(lower) {
         return ctx
             .commands
@@ -277,10 +308,13 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
 /// Match git and VCS related patterns.
 fn match_git_patterns(lower: &str) -> Option<ResolvedAction> {
     // "what changed" / "what changed today" / "recent changes"
-    let changes_re = Regex::new(
-        r"^(?:what(?:'s|\s+has)?\s+changed(?:\s+today|\s+recently|\s+lately)?|recent\s+changes|show\s+(?:recent\s+)?changes)$",
-    )
-    .unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let changes_re = RE_CHANGES.get_or_init(|| {
+        Regex::new(
+            r"^(?:what(?:'s|\s+has)?\s+changed(?:\s+today|\s+recently|\s+lately)?|recent\s+changes|show\s+(?:recent\s+)?changes)$",
+        )
+        .expect("RE_CHANGES: invalid pattern")
+    });
     if changes_re.is_match(lower) {
         return Some(ResolvedAction::RunCommand(
             "git log --oneline -10".to_string(),
@@ -288,8 +322,11 @@ fn match_git_patterns(lower: &str) -> Option<ResolvedAction> {
     }
 
     // "status" / "git status" / "what's the status"
-    let status_re =
-        Regex::new(r"^(?:status|git\s+status|what(?:'s|\s+is)\s+the\s+status)$").unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let status_re = RE_STATUS.get_or_init(|| {
+        Regex::new(r"^(?:status|git\s+status|what(?:'s|\s+is)\s+the\s+status)$")
+            .expect("RE_STATUS: invalid pattern")
+    });
     if status_re.is_match(lower) {
         return Some(ResolvedAction::RunCommand("git status".to_string()));
     }
@@ -299,8 +336,11 @@ fn match_git_patterns(lower: &str) -> Option<ResolvedAction> {
 
 /// Match deploy patterns, returning Ambiguous when there's no clear target.
 fn match_deploy_patterns(lower: &str, _original: &str) -> Option<ResolvedAction> {
-    let deploy_re =
-        Regex::new(r"^deploy(?:\s+(?:to\s+)?(staging|production|prod|dev|preview))?$").unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let deploy_re = RE_DEPLOY.get_or_init(|| {
+        Regex::new(r"^deploy(?:\s+(?:to\s+)?(staging|production|prod|dev|preview))?$")
+            .expect("RE_DEPLOY: invalid pattern")
+    });
 
     if let Some(caps) = deploy_re.captures(lower) {
         if let Some(target) = caps.get(1) {
@@ -326,8 +366,11 @@ fn match_deploy_patterns(lower: &str, _original: &str) -> Option<ResolvedAction>
 /// Match patterns that should delegate to an AI agent.
 fn match_agent_patterns(lower: &str) -> Option<ResolvedAction> {
     // "fix it" / "fix the error" / "fix this"
-    let fix_re =
-        Regex::new(r"^fix\s+(?:it|this|the\s+(?:error|bug|issue|problem|failure))$").unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let fix_re = RE_FIX.get_or_init(|| {
+        Regex::new(r"^fix\s+(?:it|this|the\s+(?:error|bug|issue|problem|failure))$")
+            .expect("RE_FIX: invalid pattern")
+    });
     if fix_re.is_match(lower) {
         return Some(ResolvedAction::SpawnAgent(
             "fix the last error".to_string(),
@@ -335,8 +378,11 @@ fn match_agent_patterns(lower: &str) -> Option<ResolvedAction> {
     }
 
     // "explain" / "explain this" / "what happened"
-    let explain_re =
-        Regex::new(r"^(?:explain(?:\s+(?:this|it|that))?|what\s+happened)$").unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let explain_re = RE_EXPLAIN.get_or_init(|| {
+        Regex::new(r"^(?:explain(?:\s+(?:this|it|that))?|what\s+happened)$")
+            .expect("RE_EXPLAIN: invalid pattern")
+    });
     if explain_re.is_match(lower) {
         return Some(ResolvedAction::SpawnAgent(
             "explain the last output".to_string(),
@@ -344,10 +390,13 @@ fn match_agent_patterns(lower: &str) -> Option<ResolvedAction> {
     }
 
     // "something feels slow" / "it's slow" / "performance" / "why is it slow"
-    let perf_re = Regex::new(
-        r"(?:feels?\s+slow|it(?:'s|\s+is)\s+slow|performance|why\s+is\s+it\s+slow|diagnose\s+performance)",
-    )
-    .unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let perf_re = RE_PERF.get_or_init(|| {
+        Regex::new(
+            r"(?:feels?\s+slow|it(?:'s|\s+is)\s+slow|performance|why\s+is\s+it\s+slow|diagnose\s+performance)",
+        )
+        .expect("RE_PERF: invalid pattern")
+    });
     if perf_re.is_match(lower) {
         return Some(ResolvedAction::SpawnAgent(
             "diagnose performance".to_string(),
@@ -355,14 +404,22 @@ fn match_agent_patterns(lower: &str) -> Option<ResolvedAction> {
     }
 
     // "show me X" / "what is X" — general agent delegation.
-    let show_re = Regex::new(r"^(?:show\s+me|what\s+is|tell\s+me\s+about)\s+(.+)$").unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let show_re = RE_SHOW.get_or_init(|| {
+        Regex::new(r"^(?:show\s+me|what\s+is|tell\s+me\s+about)\s+(.+)$")
+            .expect("RE_SHOW: invalid pattern")
+    });
     if let Some(caps) = show_re.captures(lower) {
-        let topic = caps.get(1).unwrap().as_str().to_string();
+        let topic = caps.get(1).expect("RE_SHOW capture group 1").as_str().to_string();
         return Some(ResolvedAction::SpawnAgent(topic));
     }
 
     // "is CI green" / "CI status" / "check CI"
-    let ci_re = Regex::new(r"^(?:is\s+ci\s+green|ci\s+status|check\s+ci)$").unwrap();
+    // Compiled once via OnceLock — safe to call on the hot path
+    let ci_re = RE_CI.get_or_init(|| {
+        Regex::new(r"^(?:is\s+ci\s+green|ci\s+status|check\s+ci)$")
+            .expect("RE_CI: invalid pattern")
+    });
     if ci_re.is_match(lower) {
         return Some(ResolvedAction::ShowInfo("CI status check".to_string()));
     }
