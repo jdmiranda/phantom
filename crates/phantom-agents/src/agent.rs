@@ -611,12 +611,12 @@ pub struct AgentSpawnOpts {
     /// default (`DEFAULT_AGENT_PANE_ROLE`, currently `Conversational`).
     ///
     /// Previously silently dropped from `SpawnSubagentRequest` — wired in for #224.
-    pub role: Option<crate::role::AgentRole>,
+    role: Option<crate::role::AgentRole>,
     /// User-visible display label for the agent. `None` falls back to the
     /// generic `"agent-pane"` label assigned at substrate-handle wiring time.
     ///
     /// Previously silently dropped from `SpawnSubagentRequest` — wired in for #224.
-    pub label: Option<String>,
+    label: Option<String>,
 }
 
 impl AgentSpawnOpts {
@@ -659,6 +659,18 @@ impl AgentSpawnOpts {
     pub fn with_spawn_tag(mut self, tag: u64) -> Self {
         self.spawn_tag = Some(tag);
         self
+    }
+
+    /// Return the role override, if any.
+    #[must_use]
+    pub fn role(&self) -> Option<crate::role::AgentRole> {
+        self.role
+    }
+
+    /// Return the label override, if any.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
     }
 
     /// Resolve the effective chat model for this spawn.

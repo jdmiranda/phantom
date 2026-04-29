@@ -419,7 +419,7 @@ impl AgentPane {
     ) -> Self {
         let task = opts.task.clone();
         // Capture the requested role before opts fields are consumed.
-        let initial_role = opts.role.unwrap_or(DEFAULT_AGENT_PANE_ROLE);
+        let initial_role = opts.role().unwrap_or(DEFAULT_AGENT_PANE_ROLE);
 
         // Resolve the chat model (explicit > env-var > default Claude).
         let resolved = opts.resolve_model();
@@ -1394,8 +1394,8 @@ impl App {
         // Extract metadata before opts is moved into spawn_with_opts.
         let spawn_tag = opts.spawn_tag;
         // role/label carry Composer spawn_subagent metadata (#224).
-        let spawn_role = opts.role.unwrap_or(DEFAULT_AGENT_PANE_ROLE);
-        let spawn_label = opts.label.clone().unwrap_or_else(|| "agent-pane".to_string());
+        let spawn_role = opts.role().unwrap_or(DEFAULT_AGENT_PANE_ROLE);
+        let spawn_label = opts.label().unwrap_or("agent-pane").to_string();
         let Some(claude_config) = ClaudeConfig::from_env() else {
             warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
             return false;
