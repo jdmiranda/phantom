@@ -238,7 +238,7 @@ impl ReconcilerState {
             // Advance step to Active before emitting SpawnAgent so that a
             // synchronous ledger inspection sees the correct state.
             // `agent_id` fits in u32 for the ledger field; saturate rather
-            // than truncate so corrupt IDs are visible (#221).
+            // than truncate so corrupt IDs are visible (#221, #272).
             if let Some(s) = ledger.plan.get_mut(idx) {
                 s.status = StepStatus::Active;
                 s.agent_id = Some(agent_id_u32);

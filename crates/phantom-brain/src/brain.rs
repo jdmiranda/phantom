@@ -11,9 +11,12 @@ use phantom_agents::AgentId;
 use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
 
+use crate::attention::Attention;
 use crate::events::{AiAction, AiEvent};
 use crate::proactive::ProactiveSuggester;
-use crate::router::{BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier, TaskComplexity};
+use crate::router::{
+    BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier, TaskComplexity,
+};
 use crate::scoring::UtilityScorer;
 
 // ---------------------------------------------------------------------------
@@ -118,7 +121,10 @@ pub fn spawn_brain(config: BrainConfig) -> BrainHandle {
         })
         .expect("failed to spawn brain thread");
 
-    BrainHandle { event_tx, action_rx }
+    BrainHandle {
+        event_tx,
+        action_rx,
+    }
 }
 
 /// Supervisor loop: run `brain_loop` inside `catch_unwind`; restart on panic.
@@ -215,7 +221,9 @@ fn brain_supervised(
         // Drain any actions the iteration emitted before it exited / panicked.
         loop {
             match iter_action_rx.try_recv() {
-                Ok(action) => { let _ = action_tx.send(action); }
+                Ok(action) => {
+                    let _ = action_tx.send(action);
+                }
                 Err(_) => break,
             }
         }
@@ -270,18 +278,21 @@ fn brain_loop(
     action_tx: mpsc::Sender<AiAction>,
 ) {
     let context = ProjectContext::detect(std::path::Path::new(&config.project_dir));
-    let memory = MemoryStore::open(&config.project_dir)
-        .unwrap_or_else(|e| {
-            log::warn!("failed to open memory store: {e}, using fallback");
-            // Create a fallback in-memory-only store by using /tmp.
-            MemoryStore::open_in(&config.project_dir, std::path::Path::new("/tmp/phantom-brain-fallback"))
-                .expect("failed to create fallback memory store")
-        });
+    let memory = MemoryStore::open(&config.project_dir).unwrap_or_else(|e| {
+        log::warn!("failed to open memory store: {e}, using fallback");
+        // Create a fallback in-memory-only store by using /tmp.
+        MemoryStore::open_in(
+            &config.project_dir,
+            std::path::Path::new("/tmp/phantom-brain-fallback"),
+        )
+        .expect("failed to create fallback memory store")
+    });
     let mut scorer = UtilityScorer::new();
     let mut proactive = ProactiveSuggester::default_triggers();
     let mut router = BrainRouter::new(config.router.unwrap_or_default());
     let mut active_ledger: Option<crate::orchestrator::TaskLedger> = None;
     let mut reconciler = crate::reconciler::ReconcilerState::new();
+    let attention = Attention::new();
     // Sec.7: consecutive CapabilityDenied counter per agent.
     // Reset on any non-denial event for the same agent (or on quarantine).
     let mut denial_counters: HashMap<AgentId, usize> = HashMap::new();
@@ -311,11 +322,13 @@ fn brain_loop(
         let event = match event_rx.recv_timeout(std::time::Duration::from_secs(3)) {
             Ok(e) => e,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // ATTENTION: rank live panes to decide which one is worth watching.
+                let ranked_panes = attention.rank(&[]);
+                log::trace!("attention head ranked {} panes on tick", ranked_panes.len());
+
                 // Proactive tick: if we have accumulated output and enough
                 // time has passed, send it to Claude for commentary.
-                if !output_buffer.is_empty()
-                    && last_output_time.elapsed().as_secs() >= 2
-                {
+                if !output_buffer.is_empty() && last_output_time.elapsed().as_secs() >= 2 {
                     let batch = std::mem::take(&mut output_buffer);
                     let reply = observe_terminal_output(&batch, &context, &mut router);
                     if let Some(action) = reply {
@@ -344,7 +357,11 @@ fn brain_loop(
         }
 
         // Handle goal-setting: activate goal pursuit mode.
-        if let AiEvent::GoalSet { ref objective, ref initial_task } = event {
+        if let AiEvent::GoalSet {
+            ref objective,
+            ref initial_task,
+        } = event
+        {
             log::info!("Brain goal set: {objective}");
             let _ = action_tx.send(AiAction::ConsoleReply(format!(
                 "Goal accepted: {objective}. Starting work."
@@ -354,7 +371,9 @@ fn brain_loop(
             let mut ledger = crate::orchestrator::TaskLedger::new(objective);
             ledger.set_plan(vec![crate::orchestrator::PlanStep::new(
                 initial_task,
-                phantom_agents::AgentTask::FreeForm { prompt: initial_task.clone() },
+                phantom_agents::AgentTask::FreeForm {
+                    prompt: initial_task.clone(),
+                },
             )]);
             active_ledger = Some(ledger);
             reconciler.reset();
@@ -370,7 +389,13 @@ fn brain_loop(
         }
 
         // Forward AgentComplete to the reconciler to advance the task ledger.
-        if let AiEvent::AgentComplete { id, success, ref summary, spawn_tag } = event {
+        if let AiEvent::AgentComplete {
+            id,
+            success,
+            ref summary,
+            spawn_tag,
+        } = event
+        {
             if let Some(ref mut l) = active_ledger {
                 reconciler.on_agent_complete(l, id, success, summary, spawn_tag);
             }
@@ -383,7 +408,11 @@ fn brain_loop(
         // threshold, emit QuarantineAgent so the app can apply it to the
         // QuarantineRegistry. The counter is reset when the agent is quarantined
         // (prevents double-emission on subsequent denials from a quarantined agent).
-        if let AiEvent::CapabilityDenied { agent_id, ref tool_name } = event {
+        if let AiEvent::CapabilityDenied {
+            agent_id,
+            ref tool_name,
+        } = event
+        {
             let count = denial_counters.entry(agent_id).or_insert(0);
             *count += 1;
             log::debug!(
@@ -397,7 +426,10 @@ fn brain_loop(
                     "Brain: agent {agent_id} quarantined after {denial_count} consecutive denials"
                 );
                 if action_tx
-                    .send(AiAction::QuarantineAgent { agent_id, denial_count })
+                    .send(AiAction::QuarantineAgent {
+                        agent_id,
+                        denial_count,
+                    })
                     .is_err()
                 {
                     break;
@@ -443,7 +475,10 @@ fn brain_loop(
         // event.
         if config.enable_suggestions {
             if let Some(proactive_action) = proactive.observe(&event) {
-                log::debug!("AI brain: proactive trigger fired — {}", action_name(&proactive_action));
+                log::debug!(
+                    "AI brain: proactive trigger fired — {}",
+                    action_name(&proactive_action)
+                );
                 if action_tx.send(proactive_action).is_err() {
                     break;
                 }
@@ -454,7 +489,8 @@ fn brain_loop(
         // CLASSIFY: determine task complexity and select backend cascade.
         let complexity = TaskClassifier::classify(&event);
         // Clone the first Ollama backend info so we can release the router borrow.
-        let ollama_backend: Option<ModelBackend> = router.route(complexity)
+        let ollama_backend: Option<ModelBackend> = router
+            .route(complexity)
             .iter()
             .find(|b| matches!(b.kind, BackendKind::Ollama { .. }))
             .cloned()
@@ -472,8 +508,10 @@ fn brain_loop(
 
         // ACT: only emit if score exceeds threshold and suggestions are enabled.
         let dominated_by_quiet = best.score <= config.quiet_threshold;
-        let suppressed = !config.enable_suggestions && matches!(best.action, AiAction::ShowSuggestion { .. });
-        let memory_suppressed = !config.enable_memory && matches!(best.action, AiAction::UpdateMemory { .. });
+        let suppressed =
+            !config.enable_suggestions && matches!(best.action, AiAction::ShowSuggestion { .. });
+        let memory_suppressed =
+            !config.enable_memory && matches!(best.action, AiAction::UpdateMemory { .. });
 
         if dominated_by_quiet || suppressed || memory_suppressed {
             continue;
@@ -481,19 +519,24 @@ fn brain_loop(
 
         // ENHANCE: if the winning action is a suggestion and we have an
         // error event, try to upgrade it with Ollama's local model.
-        let action = enhance_with_ollama(
-            best.action, &event, &context, &ollama_backend, &mut router,
-        );
+        let action =
+            enhance_with_ollama(best.action, &event, &context, &ollama_backend, &mut router);
 
         // ESCALATE: for Complex tasks, if Ollama didn't enhance (still heuristic)
         // and Claude is available, escalate to the frontier model.
-        let claude_backend: Option<ModelBackend> = router.route(complexity)
+        let claude_backend: Option<ModelBackend> = router
+            .route(complexity)
             .iter()
             .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
             .cloned()
             .cloned();
         let action = enhance_with_claude(
-            action, &event, &context, complexity, &claude_backend, &mut router,
+            action,
+            &event,
+            &context,
+            complexity,
+            &claude_backend,
+            &mut router,
         );
 
         // INVESTIGATE: for Complex tasks, run tool-augmented investigation.
@@ -509,10 +552,14 @@ fn brain_loop(
 
 /// Read source files referenced by errors for richer diagnosis.
 fn diagnose_build_failure(parsed: &phantom_semantic::ParsedOutput) -> Option<String> {
-    let files: Vec<&str> = parsed.errors.iter()
+    let files: Vec<&str> = parsed
+        .errors
+        .iter()
         .filter_map(|e| e.file.as_deref())
         .collect();
-    if files.is_empty() { return None; }
+    if files.is_empty() {
+        return None;
+    }
 
     let working_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -535,10 +582,18 @@ fn enhance_with_investigation(
     event: &AiEvent,
     complexity: TaskComplexity,
 ) -> AiAction {
-    if complexity != TaskComplexity::Complex { return current_action; }
-    if !matches!(current_action, AiAction::ShowSuggestion { .. }) { return current_action; }
-    let AiEvent::CommandComplete(parsed) = event else { return current_action; };
-    if parsed.errors.len() < 3 { return current_action; }
+    if complexity != TaskComplexity::Complex {
+        return current_action;
+    }
+    if !matches!(current_action, AiAction::ShowSuggestion { .. }) {
+        return current_action;
+    }
+    let AiEvent::CommandComplete(parsed) = event else {
+        return current_action;
+    };
+    if parsed.errors.len() < 3 {
+        return current_action;
+    }
 
     let working_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -549,7 +604,13 @@ fn enhance_with_investigation(
         "Investigate this build failure. Read the relevant source files and suggest a fix.\n\
          Command: {}\nErrors:\n{}\n{file_context}",
         parsed.command,
-        parsed.errors.iter().take(5).map(|e| format!("- {}", e.message)).collect::<Vec<_>>().join("\n"),
+        parsed
+            .errors
+            .iter()
+            .take(5)
+            .map(|e| format!("- {}", e.message))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 
     match crate::claude::investigate(&prompt, &working_dir, 5) {
@@ -559,12 +620,27 @@ fn enhance_with_investigation(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    crate::events::SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FixError {
-                        error_summary: parsed.errors.first().map(|e| e.message.clone()).unwrap_or_default(),
-                        file: parsed.errors.first().and_then(|e| e.file.clone()),
-                        context,
-                    }, spawn_tag: None })) },
-                    crate::events::SuggestionOption { key: 'd', label: "Dismiss".into(), action: None },
+                    crate::events::SuggestionOption {
+                        key: 'f',
+                        label: "Fix it".into(),
+                        action: Some(Box::new(AiAction::SpawnAgent {
+                            task: phantom_agents::AgentTask::FixError {
+                                error_summary: parsed
+                                    .errors
+                                    .first()
+                                    .map(|e| e.message.clone())
+                                    .unwrap_or_default(),
+                                file: parsed.errors.first().and_then(|e| e.file.clone()),
+                                context,
+                            },
+                            spawn_tag: None,
+                        })),
+                    },
+                    crate::events::SuggestionOption {
+                        key: 'd',
+                        label: "Dismiss".into(),
+                        action: None,
+                    },
                 ],
             }
         }
@@ -642,11 +718,8 @@ fn enhance_with_ollama(
     }
 
     let proj_type = format!("{:?}", context.project_type);
-    let prompt = crate::ollama::build_error_triage_prompt(
-        &parsed.command,
-        &parsed.errors,
-        &proj_type,
-    );
+    let prompt =
+        crate::ollama::build_error_triage_prompt(&parsed.command, &parsed.errors, &proj_type);
 
     match crate::ollama::generate(model_name, &prompt, 150) {
         Ok((text, latency_ms)) => {
@@ -655,8 +728,21 @@ fn enhance_with_ollama(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }, spawn_tag: None })) },
-                    crate::events::SuggestionOption { key: 'n', label: "Dismiss".into(), action: None },
+                    crate::events::SuggestionOption {
+                        key: 'y',
+                        label: "Fix it".into(),
+                        action: Some(Box::new(AiAction::SpawnAgent {
+                            task: phantom_agents::AgentTask::FreeForm {
+                                prompt: "Fix it".into(),
+                            },
+                            spawn_tag: None,
+                        })),
+                    },
+                    crate::events::SuggestionOption {
+                        key: 'n',
+                        label: "Dismiss".into(),
+                        action: None,
+                    },
                 ],
             }
         }
@@ -709,11 +795,8 @@ fn enhance_with_claude(
     }
 
     let proj_type = format!("{:?}", context.project_type);
-    let prompt = crate::claude::build_error_analysis_prompt(
-        &parsed.command,
-        &parsed.errors,
-        &proj_type,
-    );
+    let prompt =
+        crate::claude::build_error_analysis_prompt(&parsed.command, &parsed.errors, &proj_type);
 
     match crate::claude::generate(model_name, &prompt, 300) {
         Ok((text, latency_ms)) => {
@@ -722,8 +805,21 @@ fn enhance_with_claude(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }, spawn_tag: None })) },
-                    crate::events::SuggestionOption { key: 'n', label: "Dismiss".into(), action: None },
+                    crate::events::SuggestionOption {
+                        key: 'y',
+                        label: "Fix it".into(),
+                        action: Some(Box::new(AiAction::SpawnAgent {
+                            task: phantom_agents::AgentTask::FreeForm {
+                                prompt: "Fix it".into(),
+                            },
+                            spawn_tag: None,
+                        })),
+                    },
+                    crate::events::SuggestionOption {
+                        key: 'n',
+                        label: "Dismiss".into(),
+                        action: None,
+                    },
                 ],
             }
         }
@@ -767,7 +863,9 @@ fn observe_terminal_output(
                 && !t.ends_with("% ")
                 && !t.ends_with("> ")
                 && !t.ends_with("# ")
-                && t != "$" && t != "%" && t != ">"
+                && t != "$"
+                && t != "%"
+                && t != ">"
         })
         .collect();
 
@@ -883,7 +981,9 @@ fn handle_console_query(
     }
 
     // Fallback: acknowledge the query without LLM.
-    AiAction::ConsoleReply(format!("Received: \"{query}\" (no LLM backend available for query)"))
+    AiAction::ConsoleReply(format!(
+        "Received: \"{query}\" (no LLM backend available for query)"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -952,13 +1052,22 @@ mod tests {
             action_name(&AiAction::ShowNotification("n".into())),
             "notify"
         );
-        assert_eq!(action_name(&AiAction::RunCommand("ls".into())), "run_command");
         assert_eq!(
-            action_name(&AiAction::QuarantineAgent { agent_id: 1, denial_count: 3 }),
+            action_name(&AiAction::RunCommand("ls".into())),
+            "run_command"
+        );
+        assert_eq!(
+            action_name(&AiAction::QuarantineAgent {
+                agent_id: 1,
+                denial_count: 3
+            }),
             "quarantine_agent",
         );
         assert_eq!(
-            action_name(&AiAction::AgentQuarantined { agent_id: 1, denial_count: 3 }),
+            action_name(&AiAction::AgentQuarantined {
+                agent_id: 1,
+                denial_count: 3
+            }),
             "agent_quarantined",
         );
     }
@@ -987,7 +1096,12 @@ mod tests {
             if *count >= BRAIN_DENIAL_THRESHOLD {
                 let denial_count = *count;
                 denial_counters.remove(&agent_id);
-                action_tx.send(AiAction::QuarantineAgent { agent_id, denial_count }).unwrap();
+                action_tx
+                    .send(AiAction::QuarantineAgent {
+                        agent_id,
+                        denial_count,
+                    })
+                    .unwrap();
             }
             let _ = tool_name; // suppress unused warning
         }
@@ -1017,12 +1131,19 @@ mod tests {
             if *count >= BRAIN_DENIAL_THRESHOLD {
                 let denial_count = *count;
                 denial_counters.remove(&agent_id);
-                action_tx.send(AiAction::QuarantineAgent { agent_id, denial_count }).unwrap();
+                action_tx
+                    .send(AiAction::QuarantineAgent {
+                        agent_id,
+                        denial_count,
+                    })
+                    .unwrap();
             }
         }
 
         // Exactly one QuarantineAgent must have been emitted.
-        let action = action_rx.try_recv().expect("QuarantineAgent must be emitted on 3rd denial");
+        let action = action_rx
+            .try_recv()
+            .expect("QuarantineAgent must be emitted on 3rd denial");
         match action {
             AiAction::QuarantineAgent {
                 agent_id: id,
@@ -1125,7 +1246,9 @@ mod tests {
     fn parsed_many_errors() -> phantom_semantic::ParsedOutput {
         phantom_semantic::ParsedOutput {
             command: "cargo build".into(),
-            command_type: phantom_semantic::CommandType::Cargo(phantom_semantic::CargoCommand::Build),
+            command_type: phantom_semantic::CommandType::Cargo(
+                phantom_semantic::CargoCommand::Build,
+            ),
             exit_code: Some(1),
             content_type: phantom_semantic::ContentType::CompilerOutput,
             errors: vec![make_error("e1"), make_error("e2"), make_error("e3")],
@@ -1138,7 +1261,9 @@ mod tests {
     fn parsed_few_errors() -> phantom_semantic::ParsedOutput {
         phantom_semantic::ParsedOutput {
             command: "cargo build".into(),
-            command_type: phantom_semantic::CommandType::Cargo(phantom_semantic::CargoCommand::Build),
+            command_type: phantom_semantic::CommandType::Cargo(
+                phantom_semantic::CargoCommand::Build,
+            ),
             exit_code: Some(1),
             content_type: phantom_semantic::ContentType::CompilerOutput,
             errors: vec![make_error("e1")],
@@ -1163,9 +1288,12 @@ mod tests {
         let event = AiEvent::CommandComplete(parsed_many_errors());
 
         let action = enhance_with_claude(
-            suggestion_action(), &event, &ctx,
+            suggestion_action(),
+            &event,
+            &ctx,
             TaskComplexity::Simple, // not Complex
-            &backend, &mut router,
+            &backend,
+            &mut router,
         );
         // Should return original action unchanged.
         if let AiAction::ShowSuggestion { text, .. } = &action {
@@ -1183,9 +1311,12 @@ mod tests {
         let event = AiEvent::CommandComplete(parsed_many_errors());
 
         let action = enhance_with_claude(
-            AiAction::DoNothing, &event, &ctx,
+            AiAction::DoNothing,
+            &event,
+            &ctx,
             TaskComplexity::Complex,
-            &backend, &mut router,
+            &backend,
+            &mut router,
         );
         assert!(matches!(action, AiAction::DoNothing));
     }
@@ -1197,7 +1328,9 @@ mod tests {
         let event = AiEvent::CommandComplete(parsed_many_errors());
 
         let action = enhance_with_claude(
-            suggestion_action(), &event, &ctx,
+            suggestion_action(),
+            &event,
+            &ctx,
             TaskComplexity::Complex,
             &None, // no Claude backend
             &mut router,
@@ -1217,9 +1350,12 @@ mod tests {
         let event = AiEvent::CommandComplete(parsed_few_errors()); // only 1 error
 
         let action = enhance_with_claude(
-            suggestion_action(), &event, &ctx,
+            suggestion_action(),
+            &event,
+            &ctx,
             TaskComplexity::Complex,
-            &backend, &mut router,
+            &backend,
+            &mut router,
         );
         // Should NOT escalate — fewer than 3 errors.
         if let AiAction::ShowSuggestion { text, .. } = &action {
@@ -1237,9 +1373,12 @@ mod tests {
         let event = AiEvent::UserIdle { seconds: 30.0 };
 
         let action = enhance_with_claude(
-            suggestion_action(), &event, &ctx,
+            suggestion_action(),
+            &event,
+            &ctx,
             TaskComplexity::Complex,
-            &backend, &mut router,
+            &backend,
+            &mut router,
         );
         if let AiAction::ShowSuggestion { text, .. } = &action {
             assert_eq!(text, "heuristic suggestion");
@@ -1266,8 +1405,8 @@ mod tests {
     /// supervisor machinery directly with a synthetic panic-injecting loop.
     #[test]
     fn brain_supervisor_restarts_after_panic() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         let restart_counter = Arc::new(AtomicU32::new(0));
 
@@ -1310,7 +1449,9 @@ mod tests {
                     // Drain actions.
                     loop {
                         match iter_action_rx.try_recv() {
-                            Ok(a) => { let _ = action_tx.send(a); }
+                            Ok(a) => {
+                                let _ = action_tx.send(a);
+                            }
                             Err(_) => break,
                         }
                     }
@@ -1322,13 +1463,17 @@ mod tests {
                             iteration += 1;
                         }
                     }
-                    if iteration >= 3 { break; } // Safety guard.
+                    if iteration >= 3 {
+                        break;
+                    } // Safety guard.
                 }
             })
             .expect("failed to spawn test supervisor");
 
         // First event causes a panic.
-        event_tx.send(AiEvent::Interrupt("__test_panic__".into())).unwrap();
+        event_tx
+            .send(AiEvent::Interrupt("__test_panic__".into()))
+            .unwrap();
 
         // Give the supervisor time to catch the panic and restart.
         std::thread::sleep(std::time::Duration::from_millis(200));
