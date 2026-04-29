@@ -11,6 +11,12 @@ anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
+thiserror = "2"
+ureq = { version = "3", features = ["json", "platform-verifier"] }
+
+[dev-dependencies]
+# Derive `Default` for test fixtures without touching production code.
+tempfile = "3"
 
 [lints]
 workspace = true
