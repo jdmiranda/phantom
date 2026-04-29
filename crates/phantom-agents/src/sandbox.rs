@@ -12,7 +12,7 @@
 //! |----------|--------------------------------------------------------|
 //! | macOS    | `sandbox-exec(1)` with a deny-by-default SBPL profile  |
 //! | Linux    | `setrlimit(2)` for resource limits (seccomp deferred)  |
-//! | Windows  | `TODO` (labeled below)                                 |
+//! | Windows  | Pending: #87 (deferred — Windows Job Objects)          |
 //!
 //! # Policy variants
 //!
@@ -182,14 +182,15 @@ fn run_strict(
     #[cfg(target_os = "linux")]
     return run_strict_linux(command_str, cwd, timeout);
 
-    // Windows and everything else: fall back to permissive with a TODO marker.
+    // Windows and everything else: fall back to permissive.
     // We intentionally do NOT silently drop to bare — that would be a silent
     // security regression. Permissive at least keeps rlimits.
+    // Pending: #87 — Windows Job Objects for full sandboxing.
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         log::warn!(
             "sandbox: Strict policy requested but platform is unsupported; \
-             falling back to Permissive (TODO: Windows job objects)"
+             falling back to Permissive (see #87 for Windows job objects)"
         );
         run_permissive(command_str, cwd, timeout)
     }
