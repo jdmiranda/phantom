@@ -8,7 +8,6 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{debug, info, warn};
 
-use phantom_adapter::BusMessage;
 use phantom_brain::events::{AiAction, AiEvent};
 use phantom_protocol::Event;
 use phantom_context::ProjectContext;
@@ -106,8 +105,10 @@ impl App {
         }
 
         // AI Brain: send idle events + drain actions.
-        // Collect agent spawn tasks separately to avoid borrow conflict.
-        let mut tasks_to_spawn = Vec::new();
+        // Collect agent spawn opts separately to avoid borrow conflict.
+        // Using `AgentSpawnOpts` rather than bare `AgentTask` so the
+        // reconciler-issued `spawn_tag` is threaded through to the adapter.
+        let mut tasks_to_spawn: Vec<phantom_agents::AgentSpawnOpts> = Vec::new();
         if let Some(ref brain) = self.brain {
             let idle_secs = now.duration_since(self.last_input_time).as_secs_f32();
             if idle_secs > 5.0 && (idle_secs % 5.0) < dt {
@@ -134,8 +135,8 @@ impl App {
         }
 
         // Spawn agent panes (deferred from brain action loop to avoid borrow conflict).
-        for task in tasks_to_spawn {
-            let _ = self.spawn_agent_pane(task);
+        for opts in tasks_to_spawn {
+            let _ = self.spawn_agent_pane_with_opts(opts);
         }
 
         // Drain Composer-side `spawn_subagent` requests. The Composer's tool
@@ -232,9 +233,6 @@ impl App {
             }
         }
 
-        // Poll agent panes for streaming output and emit bus events on completion.
-        self.poll_agent_panes();
-
         // Lars fix-thread consumer (Phase 2.G): drain any `EventKind::AgentBlocked`
         // substrate events that agent panes pushed into `App.blocked_event_sink`
         // during this frame's tool-result processing, and forward each into the
@@ -300,42 +298,6 @@ impl App {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         self.notifications.tick(now_ms_tick);
-
-        for pane in &mut self.agent_panes {
-            if !pane.event_emitted
-                && matches!(pane.status, crate::agent_pane::AgentPaneStatus::Done | crate::agent_pane::AgentPaneStatus::Failed)
-            {
-                pane.event_emitted = true;
-
-                // Voyager pattern: save completed agent's approach as a reusable skill.
-                if pane.status == crate::agent_pane::AgentPaneStatus::Done {
-                    if let Some(skill) = pane.extract_skill_summary() {
-                        let key = format!("skill:{}", pane.task.chars().take(50).collect::<String>());
-                        if let Some(ref mut mem) = self.memory {
-                            let _ = mem.set(
-                                &key,
-                                &skill,
-                                phantom_memory::MemoryCategory::Context,
-                                phantom_memory::MemorySource::Auto,
-                            );
-                            info!("Saved skill: {key}");
-                        }
-                    }
-                }
-
-                self.coordinator.bus_mut().emit(BusMessage {
-                    topic_id: self.topic_agent_event,
-                    sender: 0,
-                    event: Event::AgentTaskComplete {
-                        agent_id: 0,
-                        success: pane.status == crate::agent_pane::AgentPaneStatus::Done,
-                        summary: pane.task.clone(),
-                    },
-                    frame: 0,
-                    timestamp: now.duration_since(self.start_time).as_secs(),
-                });
-            }
-        }
 
         // Drain completed jobs from the worker pool.
         if let Some(ref pool) = self.job_pool {
@@ -406,7 +368,10 @@ impl App {
                 self.watchdog_frame,
                 uptime,
                 self.coordinator.adapter_count(),
-                self.agent_panes.len(),
+                self.coordinator.registry().all_running().into_iter()
+                    .filter_map(|id| self.coordinator.registry().get(id))
+                    .filter(|e| e.app_type == "agent")
+                    .count(),
             );
             self.watchdog_last = now;
         }
@@ -463,11 +428,12 @@ impl App {
                             },
                         ))
                     }
-                    Event::AgentTaskComplete { agent_id, success, summary } => {
+                    Event::AgentTaskComplete { agent_id, success, summary, spawn_tag } => {
                         Some(AiEvent::AgentComplete {
                             id: *agent_id,
                             success: *success,
                             summary: summary.clone(),
+                            spawn_tag: *spawn_tag,
                         })
                     }
                     Event::AgentError { agent_id, error } => {
@@ -475,6 +441,7 @@ impl App {
                             id: *agent_id,
                             success: false,
                             summary: error.clone(),
+                            spawn_tag: None,
                         })
                     }
                     _ => None,
@@ -511,7 +478,7 @@ impl App {
         coordinator: &mut crate::coordinator::AppCoordinator,
         layout: &mut phantom_ui::layout::LayoutEngine,
         scene: &mut phantom_scene::tree::SceneTree,
-        tasks_to_spawn: &mut Vec<phantom_agents::AgentTask>,
+        tasks_to_spawn: &mut Vec<phantom_agents::AgentSpawnOpts>,
     ) {
         match action {
             AiAction::ShowSuggestion { text, options } => {
@@ -526,9 +493,11 @@ impl App {
                     let _ = mem.set(&key, &value, phantom_memory::MemoryCategory::Context, phantom_memory::MemorySource::Auto);
                 }
             }
-            AiAction::SpawnAgent(task) => {
-                info!("[PHANTOM]: Spawning agent...");
-                tasks_to_spawn.push(task);
+            AiAction::SpawnAgent { task, spawn_tag } => {
+                info!("[PHANTOM]: Spawning agent (spawn_tag={spawn_tag:?})...");
+                let mut opts = phantom_agents::AgentSpawnOpts::new(task);
+                opts.spawn_tag = spawn_tag;
+                tasks_to_spawn.push(opts);
             }
             AiAction::ConsoleReply(reply) => {
                 info!("[PHANTOM]: {reply}");

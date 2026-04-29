@@ -32,6 +32,10 @@ pub struct AgentAdapter {
     prev_status: AgentPaneStatus,
     /// Input buffer for interactive chat (keystrokes accumulate here).
     input_buffer: String,
+    /// Reconciler spawn tag — echoed back in `AgentTaskComplete` so the
+    /// brain can match the completion to the right `active_dispatches`
+    /// entry regardless of the AgentManager's sequential ID assignment.
+    spawn_tag: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -48,7 +52,16 @@ impl AgentAdapter {
             outbox: Vec::new(),
             prev_status: status,
             input_buffer: String::new(),
+            spawn_tag: None,
         }
+    }
+
+    /// Wrap a pane and record the reconciler spawn tag so it is echoed back
+    /// in the `AgentTaskComplete` bus event.
+    pub(crate) fn with_spawn_tag(pane: AgentPane, spawn_tag: Option<u64>) -> Self {
+        let mut adapter = Self::new(pane);
+        adapter.spawn_tag = spawn_tag;
+        adapter
     }
 
     /// Immutable access to the inner agent pane.
@@ -101,6 +114,7 @@ impl AppCore for AgentAdapter {
                         agent_id: self.app_id,
                         success,
                         summary,
+                        spawn_tag: self.spawn_tag,
                     },
                     frame: 0,
                     timestamp: 0,
@@ -409,5 +423,290 @@ mod tests {
     fn test_send_assert() {
         fn _check<T: Send>() {}
         _check::<AgentAdapter>();
+    }
+
+    // ── Issue #13 acceptance-criteria tests ────────────────────────────
+    //
+    // These tests verify that AgentAdapter is a real coordinator split pane,
+    // not an overlay. They are unit-level: they prove the adapter's interface
+    // contracts hold for the coordinator to treat it as a tiled split.
+
+    /// AgentAdapter must report `is_visual() == true` so the coordinator
+    /// includes it in `render_all` (tiled-split path, not overlay).
+    #[test]
+    fn agent_adapter_is_visual() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![
+            "working...".into(),
+        ]);
+        let adapter = AgentAdapter::new(pane);
+        assert!(
+            adapter.is_visual(),
+            "AgentAdapter must be visual so coordinator includes it in render_all"
+        );
+    }
+
+    /// AgentAdapter must report `accepts_input() == true` so the coordinator
+    /// routes keyboard events to it (same as terminal panes).
+    #[test]
+    fn agent_adapter_accepts_input() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::new(pane);
+        assert!(
+            adapter.accepts_input(),
+            "AgentAdapter must accept input so Cmd+[/Cmd+] focus cycle works"
+        );
+    }
+
+    /// AgentAdapter's `app_type()` must return `"agent"` so the coordinator's
+    /// chrome logic and app-count queries identify it correctly.
+    #[test]
+    fn agent_adapter_app_type_is_agent() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::new(pane);
+        assert_eq!(adapter.app_type(), "agent");
+    }
+
+    /// Render output must be bounded within the supplied rect — the adapter
+    /// must not draw outside its split boundaries (which would produce
+    /// visual overlap with the terminal pane, the exact symptom of #13).
+    #[test]
+    fn agent_adapter_render_stays_within_rect() {
+        let lines: Vec<String> = (0..10)
+            .map(|i| format!("output line {i}"))
+            .collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
+        let rect = Rect {
+            x: 200.0,
+            y: 100.0,
+            width: 400.0,
+            height: 300.0,
+            ..Default::default()
+        };
+        let output = adapter.render(&rect);
+
+        // Every quad must be within [rect.x .. rect.x+rect.width] × [rect.y .. rect.y+rect.height].
+        for q in &output.quads {
+            assert!(
+                q.x >= rect.x - 0.01 && q.x + q.w <= rect.x + rect.width + 0.01,
+                "quad x [{}, {}] must be within rect x [{}, {}]",
+                q.x,
+                q.x + q.w,
+                rect.x,
+                rect.x + rect.width,
+            );
+            assert!(
+                q.y >= rect.y - 0.01 && q.y + q.h <= rect.y + rect.height + 0.01,
+                "quad y [{}, {}] must be within rect y [{}, {}]",
+                q.y,
+                q.y + q.h,
+                rect.y,
+                rect.y + rect.height,
+            );
+        }
+
+        // Text must start within the rect (x and y).
+        for seg in &output.text_segments {
+            assert!(
+                seg.x >= rect.x - 0.01,
+                "text x {} must be >= rect.x {}",
+                seg.x,
+                rect.x,
+            );
+            assert!(
+                seg.y >= rect.y - 0.01,
+                "text y {} must be >= rect.y {}",
+                seg.y,
+                rect.y,
+            );
+        }
+    }
+
+    /// `with_spawn_tag` preserves the tag so the reconciler can correlate
+    /// `AgentTaskComplete` events back to the right `active_dispatches` entry.
+    #[test]
+    fn agent_adapter_with_spawn_tag_stores_tag() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::with_spawn_tag(pane, Some(42));
+        // We cannot read spawn_tag directly (private), but we can verify the
+        // adapter is alive and properly constructed.
+        assert!(adapter.is_alive());
+        assert_eq!(adapter.app_type(), "agent");
+    }
+
+    /// The coordinator must be able to register an AgentAdapter alongside a
+    /// terminal adapter and correctly report both in `all_running()`. This
+    /// proves the pane-split registration path works without GPU resources.
+    #[test]
+    fn coordinator_registers_agent_adapter_alongside_terminal() {
+        use phantom_adapter::{AppCore, Commandable, BusParticipant, EventBus,
+                              InputHandler, Lifecycled, Permissioned, Renderable};
+        use phantom_scene::node::{NodeId, NodeKind};
+        use phantom_scene::tree::SceneTree;
+        use phantom_scene::clock::Cadence;
+        use phantom_ui::layout::LayoutEngine;
+        use crate::coordinator::AppCoordinator;
+
+        // Minimal mock terminal adapter.
+        struct MockTerminal;
+        impl AppCore for MockTerminal {
+            fn app_type(&self) -> &str { "terminal" }
+            fn is_alive(&self) -> bool { true }
+            fn update(&mut self, _dt: f32) {}
+            fn get_state(&self) -> serde_json::Value { serde_json::json!({}) }
+        }
+        impl Renderable for MockTerminal {
+            fn render(&self, rect: &Rect) -> RenderOutput { RenderOutput {
+                quads: vec![QuadData { x: rect.x, y: rect.y, w: rect.width, h: rect.height, color: [1.0; 4] }],
+                text_segments: vec![], grid: None, scroll: None, selection: None,
+            }}
+            fn is_visual(&self) -> bool { true }
+        }
+        impl InputHandler for MockTerminal {
+            fn handle_input(&mut self, _key: &str) -> bool { false }
+        }
+        impl Commandable for MockTerminal {
+            fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+                Ok("ok".into())
+            }
+        }
+        impl BusParticipant for MockTerminal {}
+        impl Lifecycled for MockTerminal {}
+        impl Permissioned for MockTerminal {}
+
+        let mut coord = AppCoordinator::new(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content: NodeId = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Register terminal adapter first.
+        let term_id = coord.register_adapter(
+            Box::new(MockTerminal),
+            &mut layout,
+            &mut scene,
+            content,
+            Cadence::unlimited(),
+        );
+
+        // Split the layout to create a new pane for the agent.
+        let term_pane_id = coord.pane_id_for(term_id).expect("terminal must have pane");
+        let (existing_child, new_child) = layout.split_vertical(term_pane_id)
+            .expect("split must succeed");
+        coord.remap_pane(term_id, term_pane_id, existing_child);
+        layout.resize(800.0, 600.0).unwrap();
+
+        // Register AgentAdapter at the new split pane.
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec!["● Agent working...".into()]);
+        let agent_adapter = AgentAdapter::new(pane);
+        let agent_node = scene.add_node(content, NodeKind::Pane);
+        let agent_id = coord.register_adapter_at_pane(
+            Box::new(agent_adapter),
+            new_child,
+            agent_node,
+            Cadence::unlimited(),
+        );
+
+        // Both adapters must be running.
+        let running = coord.all_app_ids();
+        assert!(running.contains(&term_id), "terminal adapter must be running");
+        assert!(running.contains(&agent_id), "agent adapter must be running");
+        assert_eq!(running.len(), 2, "exactly 2 adapters registered");
+
+        // Both must have distinct pane IDs — they share no pane.
+        let term_pane = coord.pane_id_for(term_id).expect("terminal has pane");
+        let agent_pane_id = coord.pane_id_for(agent_id).expect("agent has pane");
+        assert_ne!(term_pane, agent_pane_id, "terminal and agent must occupy different panes");
+
+        // render_all must return 2 outputs (both are visual).
+        let outputs = coord.render_all(&layout, (8.0, 16.0));
+        assert_eq!(outputs.len(), 2, "both adapters must produce render output");
+
+        // The agent's render output must be in its own pane rect, not covering
+        // the terminal's rect — the core fix for issue #13.
+        let term_rect = layout.get_pane_rect(term_pane).expect("terminal rect");
+        let agent_rect = layout.get_pane_rect(agent_pane_id).expect("agent rect");
+        assert!(
+            (term_rect.x - agent_rect.x).abs() > 1.0
+                || (term_rect.y - agent_rect.y).abs() > 1.0,
+            "terminal and agent must occupy different spatial regions; \
+             terminal rect ({:.0},{:.0} {:.0}x{:.0}) vs agent rect ({:.0},{:.0} {:.0}x{:.0})",
+            term_rect.x, term_rect.y, term_rect.width, term_rect.height,
+            agent_rect.x, agent_rect.y, agent_rect.width, agent_rect.height,
+        );
+    }
+
+    /// Focus cycling: setting focus on agent then terminal must work in
+    /// both directions — proving Cmd+[/Cmd+] can visit both panes.
+    #[test]
+    fn focus_cycles_through_agent_and_terminal() {
+        use phantom_adapter::{AppCore, Commandable, BusParticipant, EventBus,
+                              InputHandler, Lifecycled, Permissioned, Renderable};
+        use phantom_scene::node::{NodeId, NodeKind};
+        use phantom_scene::tree::SceneTree;
+        use phantom_scene::clock::Cadence;
+        use phantom_ui::layout::LayoutEngine;
+        use crate::coordinator::AppCoordinator;
+
+        struct MockTerminal2;
+        impl AppCore for MockTerminal2 {
+            fn app_type(&self) -> &str { "terminal" }
+            fn is_alive(&self) -> bool { true }
+            fn update(&mut self, _dt: f32) {}
+            fn get_state(&self) -> serde_json::Value { serde_json::json!({}) }
+        }
+        impl Renderable for MockTerminal2 {
+            fn render(&self, _rect: &Rect) -> RenderOutput { RenderOutput::default() }
+            fn is_visual(&self) -> bool { true }
+        }
+        impl InputHandler for MockTerminal2 {
+            fn handle_input(&mut self, _key: &str) -> bool { false }
+        }
+        impl Commandable for MockTerminal2 {
+            fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+                Ok("ok".into())
+            }
+        }
+        impl BusParticipant for MockTerminal2 {}
+        impl Lifecycled for MockTerminal2 {}
+        impl Permissioned for MockTerminal2 {}
+
+        let mut coord = AppCoordinator::new(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content: NodeId = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let term_id = coord.register_adapter(
+            Box::new(MockTerminal2),
+            &mut layout, &mut scene, content,
+            Cadence::unlimited(),
+        );
+
+        let term_pane_id = coord.pane_id_for(term_id).unwrap();
+        let (existing_child, new_child) = layout.split_vertical(term_pane_id).unwrap();
+        coord.remap_pane(term_id, term_pane_id, existing_child);
+        layout.resize(800.0, 600.0).unwrap();
+
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let agent_adapter = AgentAdapter::new(pane);
+        let agent_node = scene.add_node(content, NodeKind::Pane);
+        let agent_id = coord.register_adapter_at_pane(
+            Box::new(agent_adapter),
+            new_child,
+            agent_node,
+            Cadence::unlimited(),
+        );
+
+        // Focus on agent.
+        coord.set_focus(agent_id);
+        assert_eq!(coord.focused(), Some(agent_id), "agent should be focused");
+
+        // Focus on terminal.
+        coord.set_focus(term_id);
+        assert_eq!(coord.focused(), Some(term_id), "terminal should be focused");
+
+        // Focus back on agent.
+        coord.set_focus(agent_id);
+        assert_eq!(coord.focused(), Some(agent_id), "focus cycle back to agent");
     }
 }

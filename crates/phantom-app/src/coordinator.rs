@@ -1481,4 +1481,54 @@ mod tests {
         assert!((rect_a.width - layout_rect.width).abs() < 0.01);
         assert!((rect_a.height - layout_rect.height).abs() < 0.01);
     }
+
+    // ── Layout memory-leak regression (Issue #15) ──────────────────────────
+    //
+    // Every `register_adapter` call allocates a new Taffy node; the matching
+    // `remove_adapter` call must free it.  If the two are not perfectly
+    // balanced the Taffy tree grows without bound, causing heap pressure
+    // proportional to the number of spawn-close cycles.
+    //
+    // This test drives 1 000 spawn-close cycles and asserts that the total
+    // Taffy node count returns to the pre-cycle baseline after each removal,
+    // proving that no orphaned nodes accumulate.
+
+    /// 1 000 spawn-close cycles must not grow the Taffy tree.
+    ///
+    /// Arrange: record the node count after the layout engine is created
+    ///          (chrome nodes only: root, tab_bar, content, status_bar = 4).
+    /// Act:     register an adapter (creates 1 pane node) then immediately
+    ///          remove it (must free that pane node) — repeat 1 000 times.
+    /// Assert:  after every removal the total node count equals the baseline.
+    #[test]
+    fn taffy_node_count_stable_across_spawn_close_cycles() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Baseline: chrome nodes only (root + tab_bar + content + status_bar).
+        let baseline = layout.total_node_count();
+
+        for cycle in 0..1_000 {
+            // Register creates one new Taffy node.
+            let id = coord.register_adapter(
+                Box::new(MockAdapter::new("cycle")),
+                &mut layout,
+                &mut scene,
+                content,
+                Cadence::unlimited(),
+            );
+
+            // Remove must free that node — tree must shrink back to baseline.
+            coord.remove_adapter(id, &mut layout, &mut scene);
+
+            let after = layout.total_node_count();
+            assert_eq!(
+                after,
+                baseline,
+                "cycle {cycle}: Taffy node count leaked — expected {baseline}, got {after}",
+            );
+        }
+    }
 }

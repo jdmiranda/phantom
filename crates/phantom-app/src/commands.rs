@@ -216,9 +216,10 @@ impl App {
                     // and the codebase map. Don't route through the brain's
                     // chat client.
                     self.pending_brain_actions.push(
-                        phantom_brain::events::AiAction::SpawnAgent(
-                            phantom_agents::AgentTask::FreeForm { prompt: objective }
-                        )
+                        phantom_brain::events::AiAction::SpawnAgent {
+                            task: phantom_agents::AgentTask::FreeForm { prompt: objective },
+                            spawn_tag: None,
+                        }
                     );
                 }
             }
@@ -290,9 +291,10 @@ impl App {
                         ResolvedAction::SpawnAgent(desc) => {
                             self.console.system(format!("Spawning agent: {desc}"));
                             self.pending_brain_actions.push(
-                                phantom_brain::events::AiAction::SpawnAgent(
-                                    phantom_agents::AgentTask::FreeForm { prompt: desc }
-                                )
+                                phantom_brain::events::AiAction::SpawnAgent {
+                                    task: phantom_agents::AgentTask::FreeForm { prompt: desc },
+                                    spawn_tag: None,
+                                }
                             );
                         }
                         ResolvedAction::ShowInfo(info_text) => {
@@ -307,11 +309,12 @@ impl App {
                             // Don't use the brain's dumb chat client.
                             self.console.system(format!("Spawning agent: {other}"));
                             self.pending_brain_actions.push(
-                                phantom_brain::events::AiAction::SpawnAgent(
-                                    phantom_agents::AgentTask::FreeForm {
+                                phantom_brain::events::AiAction::SpawnAgent {
+                                    task: phantom_agents::AgentTask::FreeForm {
                                         prompt: input.trim().to_string(),
-                                    }
-                                )
+                                    },
+                                    spawn_tag: None,
+                                }
                             );
                         }
                     }
@@ -319,11 +322,12 @@ impl App {
                     // No context — spawn agent directly.
                     self.console.system(format!("Spawning agent: {other}"));
                     self.pending_brain_actions.push(
-                        phantom_brain::events::AiAction::SpawnAgent(
-                            phantom_agents::AgentTask::FreeForm {
+                        phantom_brain::events::AiAction::SpawnAgent {
+                            task: phantom_agents::AgentTask::FreeForm {
                                 prompt: input.trim().to_string(),
-                            }
-                        )
+                            },
+                            spawn_tag: None,
+                        }
                     );
                 }
             }

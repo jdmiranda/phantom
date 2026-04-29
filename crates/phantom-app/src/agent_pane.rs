@@ -168,8 +168,6 @@ pub(crate) struct AgentPane {
     pub(crate) cached_lines: Vec<String>,
     /// Output length at last cache rebuild.
     cached_len: usize,
-    /// Whether a completion bus event has been emitted for this agent.
-    pub(crate) event_emitted: bool,
     /// The agent's conversation state (owns the message history).
     agent: Agent,
     /// Tool calls pending execution: (api_id, call).
@@ -288,7 +286,6 @@ impl AgentPane {
             pending_spawn: None,
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
-            event_emitted: false,
             agent: Agent::new(0, task),
             pending_tools: Vec::new(),
             working_dir: ".".into(),
@@ -477,7 +474,6 @@ impl AgentPane {
             tool_use_ids: Vec::new(),
             cached_lines: Vec::new(),
             cached_len: 0,
-            event_emitted: false,
             agent,
             pending_tools: Vec::new(),
             working_dir,
@@ -1062,19 +1058,6 @@ impl AgentPane {
         }
     }
 
-    /// Extract a skill summary from a completed agent (Voyager pattern).
-    pub(crate) fn extract_skill_summary(&self) -> Option<String> {
-        if self.status != AgentPaneStatus::Done { return None; }
-        let text = self.agent.messages.iter().rev()
-            .find_map(|m| if let AgentMessage::Assistant(t) = m { Some(t.clone()) } else { None })?;
-        let cleaned = text.trim_end_matches("Agent finished.").trim();
-        if cleaned.is_empty() { return None; }
-        if cleaned.len() > 500 {
-            Some(format!("...{}", &cleaned[cleaned.len()-500..]))
-        } else {
-            Some(cleaned.to_string())
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1153,8 @@ impl App {
         &mut self,
         opts: AgentSpawnOpts,
     ) -> bool {
+        // Extract spawn_tag before opts is moved into spawn_with_opts.
+        let spawn_tag = opts.spawn_tag;
         let Some(claude_config) = ClaudeConfig::from_env() else {
             warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
             return false;
@@ -1256,7 +1241,7 @@ impl App {
             DEFAULT_AGENT_PANE_ROLE,
         );
 
-        let adapter = crate::adapters::agent::AgentAdapter::new(agent_pane);
+        let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
 
         let scene_node = self.scene.add_node(
             self.scene_content_node,
@@ -1318,49 +1303,6 @@ impl App {
         }
     }
 
-    /// Poll all active agent panes for new output. Call from update().
-    /// Streams new text deltas and status changes into the console.
-    pub(crate) fn poll_agent_panes(&mut self) {
-        let mut events: Vec<(String, Option<String>, AgentPaneStatus, AgentPaneStatus)> = Vec::new();
-        for pane in &mut self.agent_panes {
-            let prev_status = pane.status;
-            let prev_len = pane.output.len();
-            pane.poll();
-            // Capture new text added this frame.
-            let new_text = if pane.output.len() > prev_len {
-                Some(pane.output[prev_len..].to_string())
-            } else {
-                None
-            };
-            if new_text.is_some() || pane.status != prev_status {
-                events.push((pane.task.clone(), new_text, prev_status, pane.status));
-            }
-        }
-        for (task, new_text, prev, current) in events {
-            // Stream new text lines into the console.
-            if let Some(text) = new_text {
-                for line in text.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        self.console.output(trimmed.to_string());
-                    }
-                }
-            }
-            // Status transitions.
-            if current != prev {
-                let short: String = task.chars().take(60).collect();
-                match current {
-                    AgentPaneStatus::Done => {
-                        self.console.system(format!("Agent finished: {short}"));
-                    }
-                    AgentPaneStatus::Failed => {
-                        self.console.error(format!("Agent failed: {short}"));
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,7 +1333,6 @@ mod tests {
             tool_use_ids: Vec::new(),
             cached_lines: Vec::new(),
             cached_len: 0,
-            event_emitted: false,
             agent: test_agent(),
             pending_tools: Vec::new(),
             working_dir: ".".into(),
@@ -1481,7 +1422,6 @@ mod tests {
             tool_use_ids: Vec::new(),
             cached_lines: Vec::new(),
             cached_len: 0,
-            event_emitted: false,
             agent: test_agent(),
             pending_tools: Vec::new(),
             working_dir: ".".into(),

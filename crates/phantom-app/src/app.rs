@@ -203,9 +203,6 @@ pub struct App {
     // -- Fullscreen pane toggle (stores AppId of the fullscreen adapter) --
     pub(crate) fullscreen_pane: Option<u32>,
 
-    // -- Agent panes (AI workers running in visible panes) --
-    pub(crate) agent_panes: Vec<crate::agent_pane::AgentPane>,
-
     // -- Inspector snapshot (shared with InspectorAdapter when a pane is open).
     //    `None` when no inspector pane has ever been spawned; `Some(Arc<RwLock<…>>)`
     //    once the user runs `inspect` and stays present so the adapter and the
@@ -244,6 +241,7 @@ pub struct App {
     pub(crate) topic_terminal_output: TopicId,
     #[allow(dead_code)]
     pub(crate) topic_terminal_error: TopicId,
+    #[allow(dead_code)]
     pub(crate) topic_agent_event: TopicId,
 
     // -- Plugin registry --
@@ -720,7 +718,6 @@ impl App {
             pool_chrome_quads: Vec::with_capacity(32),
             pool_chrome_glyphs: Vec::with_capacity(256),
             fullscreen_pane: None,
-            agent_panes: Vec::new(),
             inspector_snapshot: None,
             blocked_event_sink: crate::agent_pane::new_blocked_event_sink(),
             denied_event_sink: crate::agent_pane::new_denied_event_sink(),
@@ -781,7 +778,10 @@ impl App {
             self.watchdog_frame,
             state,
             self.coordinator.adapter_count(),
-            self.agent_panes.len(),
+            self.coordinator.registry().all_running().into_iter()
+                .filter_map(|id| self.coordinator.registry().get(id))
+                .filter(|e| e.app_type == "agent")
+                .count(),
         ))
     }
 

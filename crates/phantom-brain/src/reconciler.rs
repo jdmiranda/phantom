@@ -129,20 +129,37 @@ impl ReconcilerState {
     /// Updates the corresponding TaskLedger step — success marks it done,
     /// failure decrements retries (re-queues or marks Failed per policy).
     ///
-    /// Note: reconciler IDs (10_000+) differ from AgentManager's sequential IDs.
-    /// Since execution is strictly sequential (one active step at a time), we
-    /// match against the single active dispatch rather than by exact ID.
+    /// `spawn_tag` is the reconciler-issued synthetic ID stamped on the
+    /// `SpawnAgent` action and echoed back by the agent adapter. When it is
+    /// `Some`, we perform an exact lookup in `active_dispatches`; when it is
+    /// `None` (non-reconciler agent), the event is a no-op for the ledger.
     pub fn on_agent_complete(
         &mut self,
         ledger: &mut TaskLedger,
         _agent_id: AgentId,
         success: bool,
         summary: &str,
+        spawn_tag: Option<u64>,
     ) {
-        // Sequential execution: at most one active dispatch exists at any time.
-        let Some((&idx, _)) = self.active_dispatches.iter().next() else {
-            // No active dispatch — spurious completion (from a non-reconciler agent).
+        // Without a spawn_tag we cannot safely identify which ledger step
+        // this completion belongs to — treat it as a non-reconciler event.
+        let Some(tag) = spawn_tag else {
             return;
+        };
+
+        // Find the dispatch entry whose stored synthetic ID matches the tag.
+        let idx = match self
+            .active_dispatches
+            .iter()
+            .find(|&(_, &(stored_id, _))| stored_id as u64 == tag)
+            .map(|(&idx, _)| idx)
+        {
+            Some(i) => i,
+            None => {
+                // Stale or cancelled dispatch — ignore.
+                log::debug!("Reconciler: ignoring AgentComplete with unknown spawn_tag={tag}");
+                return;
+            }
         };
 
         self.active_dispatches.remove(&idx);
@@ -212,7 +229,10 @@ impl ReconcilerState {
             "Reconciler: dispatching step {idx} (agent_id={agent_id}) — {description}"
         );
 
-        let _ = action_tx.send(AiAction::SpawnAgent(task));
+        let _ = action_tx.send(AiAction::SpawnAgent {
+            task,
+            spawn_tag: Some(agent_id as u64),
+        });
     }
 
     /// Detect dispatches that have been running longer than `stall_timeout`.
@@ -288,6 +308,21 @@ mod tests {
         ledger
     }
 
+    /// Helper: dispatch one step and return the spawn_tag from the emitted action.
+    fn dispatch_and_capture_tag(
+        state: &mut ReconcilerState,
+        ledger: &mut TaskLedger,
+        tx: &mpsc::Sender<AiAction>,
+        rx: &mpsc::Receiver<AiAction>,
+    ) -> u64 {
+        state.tick(ledger, tx);
+        let action = rx.try_recv().expect("expected SpawnAgent action");
+        let AiAction::SpawnAgent { spawn_tag, .. } = action else {
+            panic!("expected SpawnAgent variant");
+        };
+        spawn_tag.expect("spawn_tag must be Some for reconciler-dispatched steps")
+    }
+
     #[test]
     fn tick_dispatches_first_pending_step() {
         let (tx, rx) = mpsc::channel();
@@ -296,9 +331,9 @@ mod tests {
 
         state.tick(&mut ledger, &tx);
 
-        // Should have emitted a SpawnAgent.
+        // Should have emitted a SpawnAgent with a spawn_tag.
         let action = rx.try_recv().expect("expected SpawnAgent action");
-        assert!(matches!(action, AiAction::SpawnAgent(_)));
+        assert!(matches!(action, AiAction::SpawnAgent { .. }));
 
         // Step should now be Active.
         assert_eq!(ledger.plan[0].status, StepStatus::Active);
@@ -321,14 +356,13 @@ mod tests {
 
     #[test]
     fn on_agent_complete_success_marks_step_done() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let mut state = ReconcilerState::new();
         let mut ledger = make_ledger(&["step one"]);
 
-        state.tick(&mut ledger, &tx); // dispatch step 0
-        let agent_id = state.active_dispatches[&0].0;
+        let tag = dispatch_and_capture_tag(&mut state, &mut ledger, &tx, &rx);
 
-        state.on_agent_complete(&mut ledger, agent_id, true, "done");
+        state.on_agent_complete(&mut ledger, 1, true, "done", Some(tag));
 
         assert_eq!(ledger.plan[0].status, StepStatus::Done);
         assert!(state.active_dispatches.is_empty());
@@ -336,15 +370,14 @@ mod tests {
 
     #[test]
     fn on_agent_complete_failure_requeues_when_retries_remain() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let mut state = ReconcilerState::new();
         let mut ledger = make_ledger(&["step one"]);
         ledger.plan[0].max_attempts = 3;
 
-        state.tick(&mut ledger, &tx); // dispatch
-        let agent_id = state.active_dispatches[&0].0;
+        let tag = dispatch_and_capture_tag(&mut state, &mut ledger, &tx, &rx);
 
-        state.on_agent_complete(&mut ledger, agent_id, false, "error");
+        state.on_agent_complete(&mut ledger, 1, false, "error", Some(tag));
 
         // Step re-queued (Pending) since attempts=1 < max_attempts=3.
         assert_eq!(ledger.plan[0].status, StepStatus::Pending);
@@ -353,15 +386,14 @@ mod tests {
 
     #[test]
     fn on_agent_complete_exhausted_marks_failed() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let mut state = ReconcilerState::new();
         let mut ledger = make_ledger(&["step one"]);
         ledger.plan[0].max_attempts = 1;
 
-        state.tick(&mut ledger, &tx);
-        let agent_id = state.active_dispatches[&0].0;
+        let tag = dispatch_and_capture_tag(&mut state, &mut ledger, &tx, &rx);
 
-        state.on_agent_complete(&mut ledger, agent_id, false, "error");
+        state.on_agent_complete(&mut ledger, 1, false, "error", Some(tag));
 
         assert_eq!(ledger.plan[0].status, StepStatus::Failed);
     }
@@ -393,18 +425,16 @@ mod tests {
         let mut state = ReconcilerState::new();
         let mut ledger = make_ledger(&["step one", "step two"]);
 
-        // Tick 1: dispatch step 0.
-        state.tick(&mut ledger, &tx);
-        let _ = rx.try_recv();
-        let agent_id = state.active_dispatches[&0].0;
+        // Tick 1: dispatch step 0 and capture tag.
+        let tag0 = dispatch_and_capture_tag(&mut state, &mut ledger, &tx, &rx);
 
-        // Complete step 0.
-        state.on_agent_complete(&mut ledger, agent_id, true, "ok");
+        // Complete step 0 via spawn_tag.
+        state.on_agent_complete(&mut ledger, 1, true, "ok", Some(tag0));
 
         // Tick 2: should now dispatch step 1.
         state.tick(&mut ledger, &tx);
         let action = rx.try_recv().expect("expected second SpawnAgent");
-        assert!(matches!(action, AiAction::SpawnAgent(_)));
+        assert!(matches!(action, AiAction::SpawnAgent { .. }));
         assert_eq!(ledger.plan[1].status, StepStatus::Active);
     }
 
@@ -419,5 +449,104 @@ mod tests {
 
         state.reset();
         assert!(state.active_dispatches.is_empty());
+    }
+
+    // -- spawn_tag tests (Issue #99) -----------------------------------------
+
+    /// The SpawnAgent action emitted by `dispatch_pending` must carry a
+    /// non-None `spawn_tag` that matches the reconciler's synthetic agent ID
+    /// stored in `active_dispatches`.
+    #[test]
+    fn dispatch_stamps_spawn_tag_on_action() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        state.tick(&mut ledger, &tx);
+
+        let action = rx.try_recv().expect("expected SpawnAgent");
+        let AiAction::SpawnAgent { spawn_tag, .. } = action else {
+            panic!("expected SpawnAgent variant");
+        };
+
+        // The tag must be Some and must equal the synthetic id in active_dispatches.
+        let tag = spawn_tag.expect("spawn_tag must be Some after dispatch");
+        let (&idx, &(stored_id, _)) = state.active_dispatches.iter().next()
+            .expect("active_dispatches must have one entry");
+        assert_eq!(idx, 0, "step 0 should be active");
+        assert_eq!(tag, stored_id as u64, "spawn_tag must match stored synthetic id");
+    }
+
+    /// `on_agent_complete` must route by `spawn_tag`, not by sequential
+    /// assumption. If we pass the wrong AgentManager ID but the correct
+    /// `spawn_tag`, the step must still be completed.
+    #[test]
+    fn on_agent_complete_routes_by_spawn_tag_not_by_manager_id() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        state.tick(&mut ledger, &tx);
+
+        // Capture the spawn_tag from the dispatched action.
+        let action = rx.try_recv().expect("expected SpawnAgent");
+        let AiAction::SpawnAgent { spawn_tag, .. } = action else {
+            panic!("expected SpawnAgent variant");
+        };
+        let tag = spawn_tag.expect("spawn_tag must be Some");
+
+        // Simulate AgentManager assigning a completely different ID (e.g. 7).
+        // The old workaround would still work here (single entry), but with the
+        // correct spawn_tag the reconciler must use an exact match.
+        state.on_agent_complete(&mut ledger, 7, true, "done", Some(tag));
+
+        assert_eq!(
+            ledger.plan[0].status,
+            StepStatus::Done,
+            "step must be Done even when AgentManager id (7) differs from synthetic id"
+        );
+        assert!(state.active_dispatches.is_empty());
+    }
+
+    /// If `spawn_tag` is `None` (non-reconciler agent), `on_agent_complete`
+    /// must be a no-op — it must not corrupt the ledger.
+    #[test]
+    fn on_agent_complete_ignores_events_without_spawn_tag() {
+        let (tx, _rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        state.tick(&mut ledger, &tx); // dispatch step 0
+
+        // A completion event with no spawn_tag (from an unrelated agent).
+        state.on_agent_complete(&mut ledger, 42, true, "unrelated", None);
+
+        // Step must remain Active — not erroneously advanced.
+        assert_eq!(
+            ledger.plan[0].status,
+            StepStatus::Active,
+            "step must remain Active when spawn_tag is None"
+        );
+        assert_eq!(state.active_dispatches.len(), 1, "dispatch must remain registered");
+    }
+
+    /// `on_agent_complete` with a spawn_tag that doesn't match any active
+    /// dispatch (e.g. for a previously cancelled step) must be a no-op.
+    #[test]
+    fn on_agent_complete_ignores_unknown_spawn_tag() {
+        let (tx, _rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = make_ledger(&["step one"]);
+
+        state.tick(&mut ledger, &tx); // dispatch step 0
+
+        // A completion event with a spawn_tag that was never issued.
+        state.on_agent_complete(&mut ledger, 5, true, "stale", Some(99_999));
+
+        assert_eq!(
+            ledger.plan[0].status,
+            StepStatus::Active,
+            "step must remain Active when spawn_tag is unknown"
+        );
     }
 }

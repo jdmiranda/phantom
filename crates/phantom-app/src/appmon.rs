@@ -29,8 +29,9 @@ impl App {
         let frame_time_ms = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
         let fps = if frame_time_ms > 0.0 { 1000.0 / frame_time_ms } else { 0.0 };
 
-        let agent_working = self.agent_panes.iter()
-            .filter(|p| p.status == crate::agent_pane::AgentPaneStatus::Working)
+        let agent_count = self.coordinator.registry().all_running().into_iter()
+            .filter_map(|id| self.coordinator.registry().get(id))
+            .filter(|e| e.app_type == "agent")
             .count();
 
         let pty_buf_bytes: usize = 0; // Legacy pane buffers removed; adapters manage their own
@@ -43,8 +44,8 @@ impl App {
             fps,
             frame_time_ms,
             pane_count: self.coordinator.adapter_count(),
-            agent_count: self.agent_panes.len(),
-            agent_working,
+            agent_count,
+            agent_working: agent_count,
             scene_nodes: self.scene.node_count(),
             bus_queue_depth: self.coordinator.bus().queue_len(),
             memory_entries,

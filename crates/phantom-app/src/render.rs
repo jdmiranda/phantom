@@ -537,12 +537,7 @@ impl App {
         }
 
         // -- Monitor panels: hstack (sysmon left, appmon right) --
-        let monitor_height = self.render_monitor_hstack(screen_size, quads, glyphs);
-        // -- Agent panels below monitors --
-        let agent_height = self.render_agent_panels_offset(
-            screen_size, quads, glyphs, monitor_height,
-        );
-        let _panels_height = monitor_height + agent_height;
+        self.render_monitor_hstack(screen_size, quads, glyphs);
 
         // -- Tab bar --
         if let Ok(tab_rect) = self.layout.get_tab_bar_rect() {
