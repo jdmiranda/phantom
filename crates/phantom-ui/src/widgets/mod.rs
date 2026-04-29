@@ -26,7 +26,7 @@ pub use status_strip::{StatusStrip, STATUS_STRIP_HEIGHT};
 
 // Issue #22 — chat-style message block for agent panes.
 pub mod message_block;
-pub use message_block::{MessageBlock, MessageRole, AVATAR_GAP, AVATAR_W};
+pub use message_block::{MessageBlock, MessageRole};
 
 // Issue #20 — generic bordered panel with optional title bar.
 pub mod panel;
