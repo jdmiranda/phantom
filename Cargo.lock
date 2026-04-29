@@ -5563,6 +5563,8 @@ dependencies = [
  "libc",
  "log",
  "phantom-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
