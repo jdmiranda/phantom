@@ -156,6 +156,9 @@ pub struct App {
     // -- Memory store (persistent per-project) --
     pub(crate) memory: Option<MemoryStore>,
 
+    // -- Notification store (persistent per-project JSONL, survives restarts) --
+    pub(crate) notification_store: Option<phantom_memory::notifications::NotificationStore>,
+
     // -- Session manager --
     pub(crate) session_manager: Option<SessionManager>,
 
@@ -450,6 +453,21 @@ impl App {
             }
         };
 
+        // -- Notification store (persistent per-project) --
+        let notification_store = match phantom_memory::notifications::NotificationStore::open(&project_dir) {
+            Ok(s) => {
+                info!(
+                    "Notification store ready ({} existing notifications)",
+                    s.count()
+                );
+                Some(s)
+            }
+            Err(e) => {
+                warn!("Failed to open notification store: {e}");
+                None
+            }
+        };
+
         // -- AI Brain thread --
         let brain = spawn_brain(BrainConfig {
             project_dir: project_dir.clone(),
@@ -740,6 +758,7 @@ impl App {
             runtime,
             context: Some(context),
             memory,
+            notification_store,
             session_manager,
             last_input_time: now,
             suggestion: None,

@@ -119,6 +119,7 @@ impl App {
             while let Some(action) = brain.try_recv_action() {
                 Self::execute_brain_action(
                     action, now, &mut self.suggestion, &mut self.memory,
+                    &mut self.notification_store,
                     &mut self.console, &mut self.coordinator, &mut self.layout,
                     &mut self.scene, &mut tasks_to_spawn,
                 );
@@ -150,6 +151,7 @@ impl App {
             for action in ooda_actions {
                 Self::execute_brain_action(
                     action, now, &mut self.suggestion, &mut self.memory,
+                    &mut self.notification_store,
                     &mut self.console, &mut self.coordinator, &mut self.layout,
                     &mut self.scene, &mut tasks_to_spawn,
                 );
@@ -161,6 +163,7 @@ impl App {
         for action in pending {
             Self::execute_brain_action(
                 action, now, &mut self.suggestion, &mut self.memory,
+                &mut self.notification_store,
                 &mut self.console, &mut self.coordinator, &mut self.layout,
                 &mut self.scene, &mut tasks_to_spawn,
             );
@@ -505,6 +508,7 @@ impl App {
         now: Instant,
         suggestion: &mut Option<SuggestionOverlay>,
         memory: &mut Option<phantom_memory::MemoryStore>,
+        notification_store: &mut Option<phantom_memory::notifications::NotificationStore>,
         console: &mut crate::console::Console,
         coordinator: &mut crate::coordinator::AppCoordinator,
         layout: &mut phantom_ui::layout::LayoutEngine,
@@ -518,6 +522,16 @@ impl App {
             }
             AiAction::ShowNotification(msg) => {
                 info!("[PHANTOM]: {msg}");
+                if let Some(store) = notification_store {
+                    if let Err(e) = store.push(
+                        phantom_memory::notifications::NotificationKind::PlanReady,
+                        "Phantom",
+                        &msg,
+                        None,
+                    ) {
+                        warn!("NotificationStore::push failed: {e}");
+                    }
+                }
             }
             AiAction::UpdateMemory { key, value } => {
                 if let Some(mem) = memory {
