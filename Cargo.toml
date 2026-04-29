@@ -24,6 +24,8 @@ members = [
     "crates/phantom-bundles",
     "crates/phantom-bundle-store",
     "crates/phantom-embeddings",
+    # Voice synthesis (TTS) — OpenAI backend + mock.
+    "crates/phantom-voice",
 ]
 resolver = "2"
 
