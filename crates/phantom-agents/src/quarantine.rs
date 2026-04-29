@@ -306,6 +306,121 @@ impl QuarantineRegistry {
             slot.state = QuarantineState::Clean;
         }
     }
+
+    /// Return the current consecutive denial count for `id`.
+    ///
+    /// Returns `0` for unknown agents (they are implicitly `Clean`).
+    #[must_use]
+    pub fn denial_count(&self, id: AgentId) -> usize {
+        self.slots
+            .get(&id)
+            .map(|slot| slot.consecutive_tainted)
+            .unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AgentRuntime
+// ---------------------------------------------------------------------------
+
+/// High-level quarantine runtime for a single agent.
+///
+/// `AgentRuntime` wraps an [`Arc<Mutex<QuarantineRegistry>>`] and exposes the
+/// two runtime operations callers need most:
+///
+/// - [`record_denial`](Self::record_denial): record a `CapabilityDenied` event
+///   for an agent; returns `Some(denial_count)` when the agent is newly
+///   quarantined on that call, `None` otherwise.
+/// - [`release_quarantine`](Self::release_quarantine): release the agent back
+///   to `Clean` and reset its consecutive denial counter.
+///
+/// ## Thread safety
+///
+/// `AgentRuntime` is `Send + Sync` — it holds only an `Arc<Mutex<…>>`.
+/// Clone it freely to fan out to multiple call sites.
+#[derive(Debug, Clone)]
+pub struct AgentRuntime {
+    registry: std::sync::Arc<std::sync::Mutex<QuarantineRegistry>>,
+}
+
+impl AgentRuntime {
+    /// Create a new runtime backed by the given registry.
+    #[must_use]
+    pub fn new(registry: std::sync::Arc<std::sync::Mutex<QuarantineRegistry>>) -> Self {
+        Self { registry }
+    }
+
+    /// Create a new runtime with a freshly-allocated registry using the
+    /// default policy ([`DEFAULT_QUARANTINE_THRESHOLD`] = 3).
+    #[must_use]
+    pub fn with_default_registry() -> Self {
+        Self::new(std::sync::Arc::new(std::sync::Mutex::new(
+            QuarantineRegistry::new(),
+        )))
+    }
+
+    /// Record a `CapabilityDenied` event for `agent_id`.
+    ///
+    /// Internally calls [`QuarantineRegistry::check_and_escalate`] with
+    /// `TaintLevel::Tainted` (each capability denial is a tainted observation).
+    ///
+    /// ## Returns
+    ///
+    /// `Some(denial_count)` iff this call caused a transition to
+    /// `QuarantineState::Quarantined` — i.e., the agent was just quarantined.
+    /// The returned `denial_count` is the consecutive tainted count that
+    /// triggered the quarantine (always equal to the policy threshold).
+    ///
+    /// Returns `None` when the agent is already quarantined, or when the
+    /// threshold has not yet been reached, or when the registry lock is
+    /// poisoned.
+    pub fn record_denial(
+        &self,
+        agent_id: AgentId,
+        now_ms: u64,
+        reason: impl Into<String>,
+    ) -> Option<usize> {
+        let Ok(mut guard) = self.registry.lock() else {
+            return None;
+        };
+        let newly_quarantined =
+            guard.check_and_escalate(agent_id, TaintLevel::Tainted, now_ms, reason);
+        if newly_quarantined {
+            Some(guard.denial_count(agent_id))
+        } else {
+            None
+        }
+    }
+
+    /// Release the quarantine for `agent_id`, resetting it to `Clean`.
+    ///
+    /// The consecutive denial counter is also reset. Has no effect if the agent
+    /// is not currently quarantined or if the registry lock is poisoned.
+    pub fn release_quarantine(&self, agent_id: AgentId) {
+        if let Ok(mut guard) = self.registry.lock() {
+            guard.release(agent_id);
+        }
+    }
+
+    /// Returns `true` iff `agent_id` is currently quarantined.
+    ///
+    /// Returns `false` for unknown agents and when the registry lock is
+    /// poisoned (safe default).
+    #[must_use]
+    pub fn is_quarantined(&self, agent_id: AgentId) -> bool {
+        self.registry
+            .lock()
+            .map(|g| g.agent_is_quarantined(agent_id))
+            .unwrap_or(false)
+    }
+
+    /// Expose the underlying registry handle for use in [`crate::dispatch::DispatchContext`].
+    #[must_use]
+    pub fn registry_handle(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<QuarantineRegistry>> {
+        self.registry.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -632,5 +747,236 @@ mod tests {
             }
             other => panic!("must remain Quarantined, got {:?}", other),
         }
+    }
+
+    // ==========================================================================
+    // AgentRuntime tests (Sec.7 issue requirements)
+    // ==========================================================================
+
+    /// Sec.7 test 1: 2 denials (N-1) → no quarantine.
+    ///
+    /// With the default threshold of 3, two consecutive `record_denial` calls
+    /// must return `None` — the agent is not yet quarantined.
+    #[test]
+    fn two_denials_do_not_quarantine() {
+        let rt = AgentRuntime::with_default_registry();
+        let agent_id = 100u64;
+
+        // First denial: returns None (below threshold).
+        let result = rt.record_denial(agent_id, NOW, "denial 1");
+        assert!(result.is_none(), "first denial must not quarantine: got {result:?}");
+
+        // Second denial: still below threshold.
+        let result = rt.record_denial(agent_id, NOW, "denial 2");
+        assert!(result.is_none(), "second denial must not quarantine: got {result:?}");
+
+        assert!(
+            !rt.is_quarantined(agent_id),
+            "agent must NOT be quarantined after 2 denials (threshold=3)"
+        );
+    }
+
+    /// Sec.7 test 2: 3 denials (N) → quarantine triggered.
+    ///
+    /// The third `record_denial` call must return `Some(3)` — the agent is
+    /// newly quarantined with a denial count of 3 (matching the threshold).
+    #[test]
+    fn three_denials_trigger_quarantine() {
+        let rt = AgentRuntime::with_default_registry();
+        let agent_id = 101u64;
+
+        // Two denials below threshold.
+        assert!(rt.record_denial(agent_id, NOW, "denial 1").is_none());
+        assert!(rt.record_denial(agent_id, NOW, "denial 2").is_none());
+
+        // Third denial must quarantine.
+        let result = rt.record_denial(agent_id, NOW, "denial 3");
+        assert!(
+            result.is_some(),
+            "third denial must quarantine (threshold=3); got None"
+        );
+        let denial_count = result.unwrap();
+        assert_eq!(denial_count, 3, "denial_count must equal the threshold; got {denial_count}");
+
+        assert!(
+            rt.is_quarantined(agent_id),
+            "agent must be quarantined after N=3 denials"
+        );
+    }
+
+    /// Sec.7 test 3: quarantined agent → all tool dispatch calls blocked.
+    ///
+    /// Once quarantined, `dispatch_tool` must return `success: false` with
+    /// a message mentioning "quarantined" for any tool name.
+    #[test]
+    fn quarantined_agent_tool_calls_blocked() {
+        use crate::composer_tools::new_spawn_subagent_queue;
+        use crate::dispatch::{DispatchContext, dispatch_tool};
+        use crate::inbox::AgentRegistry;
+        use crate::role::{AgentRef, AgentRole, SpawnSource};
+        use std::sync::{Arc, Mutex};
+        #[allow(unused_imports)]
+        use crate::correlation::CorrelationId;
+
+        let rt = AgentRuntime::with_default_registry();
+        let agent_id = 102u64;
+
+        // Quarantine the agent (threshold=3).
+        for i in 1..=3u64 {
+            rt.record_denial(agent_id, NOW, format!("denial {i}"));
+        }
+        assert!(rt.is_quarantined(agent_id), "setup: agent must be quarantined");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("probe.txt"), "content").unwrap();
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(agent_id, AgentRole::Conversational, "offender", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: Some(rt.registry_handle()),
+            correlation_id: None,
+            ticket_dispatcher: None,
+        };
+
+        // A normal read that would otherwise succeed must be blocked.
+        let res = dispatch_tool("read_file", &serde_json::json!({"path": "probe.txt"}), &ctx);
+
+        assert!(
+            !res.success,
+            "quarantined agent must have dispatch denied; got success=true"
+        );
+        assert!(
+            res.output.contains("quarantined"),
+            "denial message must mention 'quarantined'; got: {}",
+            res.output
+        );
+    }
+
+    /// Sec.7 test 4: release → clean state, tool calls succeed again.
+    ///
+    /// After `release_quarantine`, the agent must be `Clean` and dispatch
+    /// must succeed for the same tool that was previously blocked.
+    #[test]
+    fn release_restores_tool_dispatch() {
+        use crate::composer_tools::new_spawn_subagent_queue;
+        use crate::dispatch::{DispatchContext, dispatch_tool};
+        use crate::inbox::AgentRegistry;
+        use crate::role::{AgentRef, AgentRole, SpawnSource};
+        use std::sync::{Arc, Mutex};
+        #[allow(unused_imports)]
+        use crate::correlation::CorrelationId;
+
+        let rt = AgentRuntime::with_default_registry();
+        let agent_id = 103u64;
+
+        // Quarantine the agent.
+        for i in 1..=3u64 {
+            rt.record_denial(agent_id, NOW, format!("denial {i}"));
+        }
+        assert!(rt.is_quarantined(agent_id), "setup: agent must be quarantined");
+
+        // Release the quarantine.
+        rt.release_quarantine(agent_id);
+        assert!(
+            !rt.is_quarantined(agent_id),
+            "agent must be Clean after release_quarantine"
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("probe.txt"), "release-test").unwrap();
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(agent_id, AgentRole::Conversational, "released", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: Some(rt.registry_handle()),
+            correlation_id: None,
+            ticket_dispatcher: None,
+        };
+
+        let res = dispatch_tool("read_file", &serde_json::json!({"path": "probe.txt"}), &ctx);
+
+        assert!(
+            res.success,
+            "tool dispatch must succeed after quarantine release; got: {}",
+            res.output
+        );
+        assert_eq!(res.output, "release-test");
+    }
+
+    /// Sec.7 test 5: `AgentQuarantined` notification emitted on quarantine transition.
+    ///
+    /// `record_denial` returns `Some(denial_count)` on the Nth call, giving
+    /// callers everything they need to construct `AiAction::AgentQuarantined`.
+    /// This test verifies the return value encodes the correct count.
+    #[test]
+    fn record_denial_returns_denial_count_on_quarantine() {
+        let rt = AgentRuntime::with_default_registry();
+        let agent_id = 104u64;
+
+        // Two non-quarantining denials.
+        let r1 = rt.record_denial(agent_id, NOW, "denial 1");
+        let r2 = rt.record_denial(agent_id, NOW, "denial 2");
+        assert!(r1.is_none(), "denial 1 must not quarantine");
+        assert!(r2.is_none(), "denial 2 must not quarantine");
+
+        // Third denial crosses the threshold — returns Some(3).
+        let r3 = rt.record_denial(agent_id, NOW, "denial 3");
+        assert_eq!(
+            r3,
+            Some(3),
+            "Nth denial must return Some(denial_count=3); got {r3:?}"
+        );
+
+        // Callers can now emit AiAction::AgentQuarantined { agent_id, denial_count: 3 }.
+        // We verify the value is correct (not testing the brain channel here).
+    }
+
+    /// Sec.7 test 6: denial counter resets after release.
+    ///
+    /// After `release_quarantine`, subsequent denials must restart the counter
+    /// from zero — requiring another full N denials to re-quarantine.
+    #[test]
+    fn denial_counter_resets_after_release() {
+        let rt = AgentRuntime::with_default_registry();
+        let agent_id = 105u64;
+
+        // Quarantine the agent.
+        for i in 1..=3u64 {
+            rt.record_denial(agent_id, NOW, format!("denial {i}"));
+        }
+        assert!(rt.is_quarantined(agent_id), "setup: must be quarantined");
+
+        // Release.
+        rt.release_quarantine(agent_id);
+        assert!(!rt.is_quarantined(agent_id), "must be Clean after release");
+
+        // Two more denials: must NOT re-quarantine (counter was reset).
+        let r1 = rt.record_denial(agent_id, NOW + 1, "re-denial 1");
+        let r2 = rt.record_denial(agent_id, NOW + 1, "re-denial 2");
+        assert!(r1.is_none(), "re-denial 1 must not quarantine after release");
+        assert!(r2.is_none(), "re-denial 2 must not quarantine after release");
+
+        assert!(
+            !rt.is_quarantined(agent_id),
+            "agent must not be quarantined until threshold reached again"
+        );
+
+        // Third denial after release must quarantine again.
+        let r3 = rt.record_denial(agent_id, NOW + 2, "re-denial 3");
+        assert!(
+            r3.is_some(),
+            "third denial after release must re-quarantine; got None"
+        );
+        assert!(rt.is_quarantined(agent_id), "agent must be quarantined again");
     }
 }

@@ -54,6 +54,10 @@ pub use manager::*;
 pub use role::{
     AgentId as RoleAgentId, AgentRef, AgentRole, CapabilityClass, RoleManifest, SpawnSource,
 };
+pub use quarantine::{
+    AgentRuntime, AutoQuarantinePolicy, QuarantineRegistry, QuarantineState,
+    DEFAULT_QUARANTINE_THRESHOLD,
+};
 pub use semantic_context::SemanticContext;
 pub use taint::TaintLevel;
 pub use tools::*;
