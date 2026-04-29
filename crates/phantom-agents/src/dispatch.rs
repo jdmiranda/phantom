@@ -1215,6 +1215,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: Some(cid),
+            ticket_dispatcher: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
@@ -1254,6 +1255,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: Some(cid),
+            ticket_dispatcher: None,
         };
 
         let ctx_b = DispatchContext {
@@ -1266,6 +1268,7 @@ mod tests {
             source_event_id: None,
             quarantine: None,
             correlation_id: Some(cid),
+            ticket_dispatcher: None,
         };
 
         let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
