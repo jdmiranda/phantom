@@ -112,8 +112,10 @@ impl ReconcilerState {
                 // stall counter and recent-output loop detection.
                 let _assessment = ledger.assess_progress();
                 log::info!("Reconciler: re-plan triggered — {reason}");
-                // TODO(phase-2): spawn a Composer agent to generate a new plan
-                // and call ledger.replan(new_steps). For now we log and wait.
+                // Deferred to #32 (Reconciler: should_replan + dispatch_next_step).
+                // When that lands, spawn a Composer agent here to generate a revised
+                // plan and call ledger.replan(new_steps). For now, log and keep the
+                // ledger alive — the next tick will re-evaluate.
                 true
             }
 
