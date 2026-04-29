@@ -55,38 +55,54 @@ tokio = { version = "1", features = ["full"] }
 
 ## Architecture Overview
 
-Phantom is structured as a Rust workspace with 18 specialized crates:
+Phantom is structured as a Rust workspace with **23 active crates** (4 additional crates exist on disk and compile independently but are not yet wired into the workspace — see "Future / not yet in workspace" below).
+
+Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issues noted)
 
 ### Core System
-- **phantom**: Main binary and application orchestrator
-- **phantom-supervisor**: Erlang/OTP-inspired process monitor with heartbeat
-- **phantom-app**: Application lifecycle and coordination
+- **phantom** ✅ — Main binary: winit event loop, GPU init, panic recovery, supervisor socket handshake
+- **phantom-supervisor** ✅ — Erlang/OTP-style process monitor: heartbeat watch, auto-restart with back-off ([#53](https://github.com/jdmiranda/phantom/issues/53))
+- **phantom-app** ✅ — Application lifecycle: pane management, boot sequence, agent coordination, inspector UI ([#97](https://github.com/jdmiranda/phantom/issues/97), [#44](https://github.com/jdmiranda/phantom/issues/44))
+- **phantom-protocol** ✅ — Unix-socket IPC wire protocol between supervisor and app (heartbeat, events, commands)
 
 ### Rendering Stack
-- **phantom-renderer**: GPU pipeline (wgpu), text atlas, CRT shaders
-- **phantom-ui**: Themes, layout (taffy), widgets, keybinds
-- **phantom-scene**: Retained scene graph with dirty tracking
+- **phantom-renderer** ✅ — wgpu GPU pipeline: text atlas, quad batcher, CRT post-fx, screenshot, video ([#82](https://github.com/jdmiranda/phantom/issues/82), [#83](https://github.com/jdmiranda/phantom/issues/83), [#84](https://github.com/jdmiranda/phantom/issues/84))
+- **phantom-ui** ✅ — Design tokens, themes, Taffy layout, widget primitives, keybinds ([#20](https://github.com/jdmiranda/phantom/issues/20)–[#27](https://github.com/jdmiranda/phantom/issues/27), [#29](https://github.com/jdmiranda/phantom/issues/29)–[#31](https://github.com/jdmiranda/phantom/issues/31))
+- **phantom-scene** ✅ — Retained scene graph with dirty-bit tracking, clock/cadence, frame delta clamp
 
 ### Terminal Emulation
-- **phantom-terminal**: PTY management, alacritty_terminal wrapper
-- **phantom-semantic**: Command output parsing and understanding
+- **phantom-terminal** ✅ — PTY process management, alacritty_terminal VT100 wrapper, input/output routing, Kitty protocol
+- **phantom-semantic** 🔧 — Command classification and output parsing (git, cargo, etc.); stub integration pending ([#74](https://github.com/jdmiranda/phantom/issues/74), [#94](https://github.com/jdmiranda/phantom/issues/94))
 
 ### AI & Intelligence
-- **phantom-agents**: AI agent runtime, tools, Claude API integration
-- **phantom-brain**: Ambient OODA loop, utility AI scoring
-- **phantom-nlp**: Natural language command interpretation
-- **phantom-context**: Project/git/environment awareness
-- **phantom-memory**: Persistent per-project knowledge storage
+- **phantom-agents** ✅ — Agent lifecycle, tool execution, Claude API chat, role system (Defender/Inspector), permission model, taint levels ([#60](https://github.com/jdmiranda/phantom/issues/60), [#87](https://github.com/jdmiranda/phantom/issues/87), [#93](https://github.com/jdmiranda/phantom/issues/93)–[#96](https://github.com/jdmiranda/phantom/issues/96), [#103](https://github.com/jdmiranda/phantom/issues/103)–[#105](https://github.com/jdmiranda/phantom/issues/105))
+- **phantom-brain** ✅ — Ambient OODA loop on a dedicated thread: event scoring, utility AI, action dispatch, autonomous reconciler ([#32](https://github.com/jdmiranda/phantom/issues/32), [#36](https://github.com/jdmiranda/phantom/issues/36)–[#40](https://github.com/jdmiranda/phantom/issues/40), [#45](https://github.com/jdmiranda/phantom/issues/45)–[#47](https://github.com/jdmiranda/phantom/issues/47), [#61](https://github.com/jdmiranda/phantom/issues/61), [#98](https://github.com/jdmiranda/phantom/issues/98)–[#99](https://github.com/jdmiranda/phantom/issues/99))
+- **phantom-nlp** 🔧 — Natural-language command interpreter; LLM call routing is a stub ([#55](https://github.com/jdmiranda/phantom/issues/55))
+- **phantom-context** ✅ — Project/git/environment detection and context assembly for agent prompts
+- **phantom-memory** 🔧 — Per-project knowledge store with event log and memory blocks; schema and event log pending ([#28](https://github.com/jdmiranda/phantom/issues/28), [#33](https://github.com/jdmiranda/phantom/issues/33), [#62](https://github.com/jdmiranda/phantom/issues/62), [#78](https://github.com/jdmiranda/phantom/issues/78))
 
 ### Persistence & History
-- **phantom-history**: Structured command history (JSONL)
-- **phantom-session**: Session save/restore
+- **phantom-history** 🔧 — Structured JSONL command history store; read/write and agent output capture pending ([#75](https://github.com/jdmiranda/phantom/issues/75))
+- **phantom-session** 🔧 — Session save/restore; agent and goal/task state restore pending ([#76](https://github.com/jdmiranda/phantom/issues/76), [#77](https://github.com/jdmiranda/phantom/issues/77))
 
 ### Extensibility
-- **phantom-plugins**: WASM plugin host and marketplace
-- **phantom-mcp**: Model Context Protocol server/client
-- **phantom-protocol**: Supervisor IPC communication
-- **phantom-adapter**: WASM app adapter framework
+- **phantom-plugins** 🔧 — Plugin lifecycle (manifest, host, registry, marketplace); WASM host is a mock, real wasmtime pending ([#48](https://github.com/jdmiranda/phantom/issues/48))
+- **phantom-mcp** 🔧 — Model Context Protocol server (exposes Phantom to external AI) and client (consumes external tools); client impl and registry pending ([#52](https://github.com/jdmiranda/phantom/issues/52), [#54](https://github.com/jdmiranda/phantom/issues/54))
+- **phantom-adapter** ✅ — `AppAdapter` trait, app registry, pub/sub event bus, spatial layout negotiation; the "everything is an app" abstraction layer ([#17](https://github.com/jdmiranda/phantom/issues/17))
+
+### Capture Pipeline (Phase 2.G)
+- **phantom-vision** 🔧 — Perceptual-hash dedup (dHash + SAD gate) for frame deduplication; GPT-4V analysis pipeline pending ([#70](https://github.com/jdmiranda/phantom/issues/70), [#71](https://github.com/jdmiranda/phantom/issues/71), [#79](https://github.com/jdmiranda/phantom/issues/79))
+- **phantom-bundles** 🔧 — Schema-only types for capture bundles (frames, audio, transcript); serialization and capture pipeline integration pending ([#80](https://github.com/jdmiranda/phantom/issues/80), [#81](https://github.com/jdmiranda/phantom/issues/81), [#91](https://github.com/jdmiranda/phantom/issues/91))
+- **phantom-bundle-store** 🔧 — Unified persistence: SQLite/FTS5 metadata + LanceDB vectors + XChaCha20 encrypted blobs; recovery path tests pending ([#10](https://github.com/jdmiranda/phantom/issues/10), [#88](https://github.com/jdmiranda/phantom/issues/88))
+- **phantom-embeddings** 🔧 — Multi-modal embedding trait + OpenAI backend + mock; persistent storage and vector query pending ([#72](https://github.com/jdmiranda/phantom/issues/72), [#73](https://github.com/jdmiranda/phantom/issues/73))
+
+### Future / Not yet in workspace
+These crates have `Cargo.toml` and compile independently but are not yet members of the workspace `Cargo.toml`:
+
+- **phantom-audio** 🔧 — Audio capture backend abstraction (CoreAudio/ScreenCaptureKit traits + mock); real backends pending ([#9](https://github.com/jdmiranda/phantom/issues/9))
+- **phantom-recall** 🔧 — Intent-anchored retrieval API: query rewriting, score fusion, ANN routing; backend wiring pending ([#72](https://github.com/jdmiranda/phantom/issues/72))
+- **phantom-stt** 🔧 — Speech-to-text backend abstraction (Whisper/Deepgram traits + mock); streaming Whisper and OpenAI integration pending ([#56](https://github.com/jdmiranda/phantom/issues/56), [#68](https://github.com/jdmiranda/phantom/issues/68))
+- **phantom-voice** 🔧 — Text-to-speech backend abstraction (ElevenLabs/Piper/system TTS traits + mock); real TTS pending ([#69](https://github.com/jdmiranda/phantom/issues/69))
 
 ## Key Architectural Decisions
 
