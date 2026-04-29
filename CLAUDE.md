@@ -366,4 +366,6 @@ Rules that govern how autonomous agents coordinate within the Phantom multi-agen
 
 5. **Hot-file tracking**: Before spawning an agent on a crate, check `gh pr list -R jdmiranda/phantom --state open` to confirm no other open PR already modifies the same files.
 
-6. **Spec gate**: Before spawning any executor agent, a spec agent must first produce SPEC.md, PLAN.md, and TASKS.md in the worktree. The executor receives only TASKS.md — not the raw issue. Any issue scoring ≥7/10 on the MAST rubric may skip the spec agent; lower-scoring issues must pass through it.
+6. **Branch hygiene**: All agent worktrees MUST branch from the most recent clean baseline tag, not from HEAD of main. Spawn command: `git checkout $(git describe --tags --match 'v*.baseline' --abbrev=0 2>/dev/null || git rev-parse --short origin/main) -b <branch-name>`. Never: `git checkout main -b <branch>`.
+
+7. **Spec gate**: Before spawning any executor agent, a spec agent must first produce SPEC.md, PLAN.md, and TASKS.md in the worktree. The executor receives only TASKS.md — not the raw issue. Any issue scoring ≥7/10 on the MAST rubric may skip the spec agent; lower-scoring issues must pass through it.
