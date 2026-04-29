@@ -5238,6 +5238,7 @@ dependencies = [
  "phantom-terminal",
  "phantom-ui",
  "serde_json",
+ "uuid",
  "winit",
 ]
 

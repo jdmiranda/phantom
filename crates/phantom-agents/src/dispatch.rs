@@ -853,6 +853,117 @@ mod tests {
         Arc::new(Mutex::new(log))
     }
 
+    /// Collect the ordered list of event IDs reachable by walking the
+    /// `source_event_id` chain backwards from `start_id`.
+    ///
+    /// This helper mirrors the walk that [`taint_from_source_chain`] performs
+    /// but returns the event IDs rather than an aggregated [`TaintLevel`],
+    /// making it straightforward to assert which events are (and are not)
+    /// visited in chain-walk tests (#219 — function was referenced in planned
+    /// tests but never defined).
+    fn collect_source_chain(
+        start_id: u64,
+        log: &Arc<Mutex<EventLog>>,
+    ) -> Vec<u64> {
+        let tail = {
+            let g = log.lock().unwrap();
+            g.tail(usize::MAX)
+        };
+        let by_id: std::collections::HashMap<u64, &phantom_memory::event_log::EventEnvelope> =
+            tail.iter().map(|e| (e.id, e)).collect();
+
+        let mut chain = Vec::new();
+        let mut cursor: Option<u64> = Some(start_id);
+        let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+        while let Some(id) = cursor {
+            if !visited.insert(id) {
+                break; // cycle guard
+            }
+            let Some(ev) = by_id.get(&id) else {
+                break; // event not in tail
+            };
+            chain.push(id);
+            cursor = ev.payload.get("source_event_id").and_then(|v| v.as_u64());
+        }
+        chain
+    }
+
+    /// Verify that `collect_source_chain` walks a linear three-event chain
+    /// correctly and returns IDs in traversal order (newest → oldest).
+    #[test]
+    fn collect_source_chain_walks_linear_chain() {
+        let tmp = TempDir::new().unwrap();
+        let log = open_event_log(tmp.path());
+
+        // Build a three-event chain: ev3 → ev2 → ev1 (via source_event_id).
+        let ev1_id = {
+            let mut g = log.lock().unwrap();
+            g.append(LogEventSource::Substrate, "root", json!({}))
+                .unwrap()
+                .id
+        };
+        let ev2_id = {
+            let mut g = log.lock().unwrap();
+            g.append(
+                LogEventSource::Substrate,
+                "middle",
+                json!({ "source_event_id": ev1_id }),
+            )
+            .unwrap()
+            .id
+        };
+        let ev3_id = {
+            let mut g = log.lock().unwrap();
+            g.append(
+                LogEventSource::Substrate,
+                "leaf",
+                json!({ "source_event_id": ev2_id }),
+            )
+            .unwrap()
+            .id
+        };
+
+        let chain = collect_source_chain(ev3_id, &log);
+        assert_eq!(
+            chain,
+            vec![ev3_id, ev2_id, ev1_id],
+            "chain must walk ev3 → ev2 → ev1 in traversal order",
+        );
+    }
+
+    /// `collect_source_chain` must terminate on a self-referential event
+    /// (cycle guard) and return only the event IDs visited before the cycle
+    /// was detected.
+    #[test]
+    fn collect_source_chain_terminates_on_cycle() {
+        let tmp = TempDir::new().unwrap();
+        let log = open_event_log(tmp.path());
+
+        // Create an event that references itself.
+        let ev_id = {
+            let mut g = log.lock().unwrap();
+            // Append placeholder to learn the id.
+            let placeholder = g
+                .append(LogEventSource::Substrate, "self-ref", json!({}))
+                .unwrap();
+            let self_id = placeholder.id;
+            // Append the actual self-referential event (id = self_id + 1).
+            g.append(
+                LogEventSource::Substrate,
+                "self-ref",
+                json!({ "source_event_id": self_id + 1 }),
+            )
+            .unwrap()
+            .id
+        };
+
+        // Must return exactly one element and not loop forever.
+        let chain = collect_source_chain(ev_id, &log);
+        assert_eq!(chain.len(), 1, "self-referential chain must yield exactly one id");
+        assert_eq!(chain[0], ev_id);
+    }
+
     /// Acceptance test 1 (Sec.7.2): clean source chain → result taint is `Clean`.
     ///
     /// When `source_event_id` points to an event with a benign kind (not
