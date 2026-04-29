@@ -799,7 +799,7 @@ fn execute_run_command(root: &Path, args: &serde_json::Value) -> ToolResult {
 pub(crate) fn execute_run_command_with_policy(
     root: &Path,
     args: &serde_json::Value,
-    _policy: SandboxPolicy,
+    policy: SandboxPolicy,
 ) -> ToolResult {
     let tool = ToolType::RunCommand;
 
