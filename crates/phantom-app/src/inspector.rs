@@ -18,6 +18,8 @@ use log::{info, warn};
 use phantom_agents::inspector::{
     DenialEntry, InspectorView, MAX_RECENT_DENIALS,
 };
+use phantom_ui::tokens::Tokens;
+use phantom_ui::RenderCtx;
 
 use crate::adapters::inspector::InspectorAdapter;
 use crate::app::App;
@@ -90,7 +92,19 @@ impl App {
             *guard = view;
         }
 
-        let adapter = InspectorAdapter::new(snapshot);
+        // Build the live tokens arc from the App's current cell size using
+        // the default phosphor palette. The App can write a new `Tokens`
+        // value into this arc whenever the active theme changes, and the
+        // inspector adapter picks it up on the next `render()` call.
+        let inspector_tokens = self
+            .inspector_tokens
+            .get_or_insert_with(|| {
+                let ctx = RenderCtx::new(self.cell_size, self.cell_size.1);
+                Arc::new(RwLock::new(Tokens::phosphor(ctx)))
+            })
+            .clone();
+
+        let adapter = InspectorAdapter::new(snapshot, inspector_tokens);
 
         let scene_node = self.scene.add_node(
             self.scene_content_node,
