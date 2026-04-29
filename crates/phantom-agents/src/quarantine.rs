@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn quarantined_agent_tool_calls_blocked() {
         use crate::composer_tools::new_spawn_subagent_queue;
-        use crate::dispatch::{DispatchContext, dispatch_tool};
+        use crate::dispatch::{DispatchContext, RuntimeMode, dispatch_tool};
         use crate::inbox::AgentRegistry;
         use crate::role::{AgentRef, AgentRole, SpawnSource};
         use std::sync::{Arc, Mutex};
@@ -841,6 +841,7 @@ mod tests {
             quarantine: Some(rt.registry_handle()),
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // A normal read that would otherwise succeed must be blocked.
@@ -864,7 +865,7 @@ mod tests {
     #[test]
     fn release_restores_tool_dispatch() {
         use crate::composer_tools::new_spawn_subagent_queue;
-        use crate::dispatch::{DispatchContext, dispatch_tool};
+        use crate::dispatch::{DispatchContext, RuntimeMode, dispatch_tool};
         use crate::inbox::AgentRegistry;
         use crate::role::{AgentRef, AgentRole, SpawnSource};
         use std::sync::{Arc, Mutex};
@@ -901,6 +902,7 @@ mod tests {
             quarantine: Some(rt.registry_handle()),
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let res = dispatch_tool("read_file", &serde_json::json!({"path": "probe.txt"}), &ctx);

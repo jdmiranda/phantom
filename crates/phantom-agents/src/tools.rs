@@ -1778,7 +1778,7 @@ mod tests {
     /// result. This test pins the one-and-only-one contract.
     #[test]
     fn dispatch_path_produces_exactly_one_capability_denied_result() {
-        use crate::dispatch::{DispatchContext, dispatch_tool};
+        use crate::dispatch::{DispatchContext, RuntimeMode, dispatch_tool};
         use crate::composer_tools::new_spawn_subagent_queue;
         use crate::inbox::AgentRegistry;
         use crate::role::SpawnSource;
@@ -1806,6 +1806,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         // One call → must produce exactly one denial result.

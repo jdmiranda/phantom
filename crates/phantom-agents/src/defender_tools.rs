@@ -273,7 +273,7 @@ pub fn challenge_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::{DispatchContext, dispatch_tool};
+    use crate::dispatch::{DispatchContext, RuntimeMode, dispatch_tool};
     use crate::composer_tools::new_spawn_subagent_queue;
     use crate::inbox::{AgentHandle, AgentStatus};
     use crate::role::{AgentRole, SpawnSource};
@@ -433,6 +433,7 @@ mod tests {
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
         };
 
         let result = dispatch_tool(

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use phantom_agents::defender::defender_spawn_rule;
-use phantom_agents::dispatch::{DispatchContext, dispatch_tool};
+use phantom_agents::dispatch::{DispatchContext, RuntimeMode, dispatch_tool};
 use phantom_agents::inbox::{AgentHandle, AgentRegistry, AgentStatus, InboxMessage};
 use phantom_agents::role::{AgentId, AgentRef, AgentRole, CapabilityClass, SpawnSource};
 use phantom_agents::spawn_rules::{
@@ -93,6 +93,7 @@ async fn defender_challenge_loop_smoke() {
         quarantine: None,
         correlation_id: None,
         ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
     };
 
     let denied_result = dispatch_tool(
@@ -231,6 +232,7 @@ async fn defender_challenge_loop_smoke() {
         quarantine: None,
         correlation_id: None,
         ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
     };
 
     let challenge_result = dispatch_tool(
@@ -355,6 +357,7 @@ fn offender_cannot_call_challenge_agent() {
         quarantine: None,
         correlation_id: None,
         ticket_dispatcher: None,
+        runtime_mode: RuntimeMode::Normal,
     };
 
     let result = dispatch_tool(
