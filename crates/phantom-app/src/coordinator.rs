@@ -1622,4 +1622,193 @@ mod tests {
             "nested-split coordinator scenario leaked nodes: expected {chrome_baseline}, got {after}",
         );
     }
+
+    // ── QA #159: Horizontal split — Cmd+D creates two functional panes ────────
+
+    /// Splitting a single-pane layout horizontally must produce two child
+    /// panes, both with valid IDs, and focus must land on the new pane.
+    #[test]
+    fn qa_159_horizontal_split_yields_two_panes_with_focus() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Start with one pane.
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "original");
+        let p_a = coord.pane_id_for(id_a).expect("original pane must have a PaneId");
+        assert_eq!(coord.adapter_count(), 1);
+        assert_eq!(coord.focused(), Some(id_a));
+
+        // Simulate split_horizontal: ask the layout to split, then wire up a
+        // second adapter into the new child pane (mirrors pane.rs logic).
+        let (existing_child, new_child) = layout.split_horizontal(p_a).unwrap();
+        coord.remap_pane(id_a, p_a, existing_child);
+
+        let scene_node_b = scene.add_node(content, NodeKind::Pane);
+        let id_b = coord.register_adapter_at_pane(
+            Box::new(MockAdapter::new("new")),
+            new_child,
+            scene_node_b,
+            Cadence::unlimited(),
+        );
+        coord.set_focus(id_b);
+
+        // Two adapters now registered.
+        assert_eq!(coord.adapter_count(), 2, "expected 2 adapters after H-split");
+
+        // Both must have unique, valid IDs.
+        assert_ne!(id_a, id_b, "both adapters must have distinct IDs");
+
+        // PaneIds must be distinct.
+        let pane_a = coord.pane_id_for(id_a).expect("original adapter must have a PaneId");
+        let pane_b = coord.pane_id_for(id_b).expect("new adapter must have a PaneId");
+        assert_ne!(pane_a, pane_b, "both adapters must own different PaneIds");
+
+        // Focus must be on the newly created pane.
+        assert_eq!(coord.focused(), Some(id_b), "focus must be on the new pane");
+
+        // Resize and verify both panes have non-zero area.
+        layout.resize(800.0, 600.0).unwrap();
+        let rect_a = layout.get_pane_rect(pane_a).unwrap();
+        let rect_b = layout.get_pane_rect(pane_b).unwrap();
+        assert!(rect_a.width > 0.0 && rect_a.height > 0.0, "original pane must have positive area");
+        assert!(rect_b.width > 0.0 && rect_b.height > 0.0, "new pane must have positive area");
+    }
+
+    // ── QA #160: Vertical split with three panes ──────────────────────────────
+
+    /// Starting with two panes, splitting the focused one vertically must
+    /// produce exactly three panes. The layout must be valid (all non-zero area).
+    #[test]
+    fn qa_160_vertical_split_with_two_panes_yields_three() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Start with two panes (as #159 sets up).
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "A");
+        let p_a = coord.pane_id_for(id_a).unwrap();
+
+        let (existing_child_a, new_child_ab) = layout.split_horizontal(p_a).unwrap();
+        coord.remap_pane(id_a, p_a, existing_child_a);
+        let scene_node_b = scene.add_node(content, NodeKind::Pane);
+        let id_b = coord.register_adapter_at_pane(
+            Box::new(MockAdapter::new("B")),
+            new_child_ab,
+            scene_node_b,
+            Cadence::unlimited(),
+        );
+        coord.set_focus(id_b);
+
+        assert_eq!(coord.adapter_count(), 2);
+
+        // Now split pane B vertically to get a third pane.
+        let p_b = coord.pane_id_for(id_b).unwrap();
+        let (existing_child_b, new_child_bc) = layout.split_vertical(p_b).unwrap();
+        coord.remap_pane(id_b, p_b, existing_child_b);
+
+        let scene_node_c = scene.add_node(content, NodeKind::Pane);
+        let id_c = coord.register_adapter_at_pane(
+            Box::new(MockAdapter::new("C")),
+            new_child_bc,
+            scene_node_c,
+            Cadence::unlimited(),
+        );
+        coord.set_focus(id_c);
+
+        // Three adapters must exist.
+        assert_eq!(coord.adapter_count(), 3, "expected 3 adapters after V-split");
+
+        // All must have distinct IDs and PaneIds.
+        let ids = [id_a, id_b, id_c];
+        let pane_ids: Vec<_> = ids.iter().map(|&id| coord.pane_id_for(id).unwrap()).collect();
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                assert_ne!(ids[i], ids[j], "adapter IDs must be unique");
+                assert_ne!(pane_ids[i], pane_ids[j], "PaneIds must be unique");
+            }
+        }
+
+        // All panes must have positive area after resize.
+        layout.resize(800.0, 600.0).unwrap();
+        for (idx, &pid) in pane_ids.iter().enumerate() {
+            let rect = layout.get_pane_rect(pid).unwrap();
+            assert!(
+                rect.width > 0.0 && rect.height > 0.0,
+                "pane[{idx}] must have positive area: {:?}", rect,
+            );
+        }
+
+        // Focus must be on the third pane.
+        assert_eq!(coord.focused(), Some(id_c));
+    }
+
+    // ── QA #162: Close pane — Cmd+W removes focused pane and moves focus ──────
+
+    /// Close the focused pane when two panes exist. Exactly one pane must
+    /// remain, and it must have focus.
+    #[test]
+    fn qa_162_close_focused_pane_leaves_one_pane_with_focus() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "A");
+        let p_a = coord.pane_id_for(id_a).unwrap();
+
+        // Split to get two panes.
+        let (existing_child, new_child) = layout.split_horizontal(p_a).unwrap();
+        coord.remap_pane(id_a, p_a, existing_child);
+        let scene_node_b = scene.add_node(content, NodeKind::Pane);
+        let id_b = coord.register_adapter_at_pane(
+            Box::new(MockAdapter::new("B")),
+            new_child,
+            scene_node_b,
+            Cadence::unlimited(),
+        );
+        coord.set_focus(id_b);
+
+        assert_eq!(coord.adapter_count(), 2);
+        assert_eq!(coord.focused(), Some(id_b));
+
+        // Close the focused pane (id_b).
+        coord.remove_adapter(id_b, &mut layout, &mut scene);
+
+        // One adapter must remain.
+        let remaining = coord.all_app_ids();
+        assert_eq!(remaining.len(), 1, "expected exactly 1 pane after close");
+
+        // The survivor must have focus.
+        let survivor = remaining[0];
+        assert_eq!(
+            coord.focused(),
+            Some(survivor),
+            "the surviving pane must be focused",
+        );
+
+        // The survivor must be the original adapter.
+        assert_eq!(survivor, id_a, "the surviving pane must be the original pane");
+    }
+
+    /// Closing the last pane must not set focus to a non-existent adapter.
+    /// (In the real app the quit path handles this; here we just verify the
+    /// coordinator's focus state is consistent.)
+    #[test]
+    fn qa_162_close_last_pane_clears_focus() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id = register_mock(&mut coord, &mut layout, &mut scene, content, "only");
+        assert_eq!(coord.focused(), Some(id));
+
+        coord.remove_adapter(id, &mut layout, &mut scene);
+
+        assert_eq!(coord.focused(), None, "focus must be None after closing the last pane");
+        assert!(coord.all_app_ids().is_empty(), "no adapters must remain");
+    }
 }

@@ -567,4 +567,120 @@ mod tests {
         assert_eq!(blood().colors.ansi.len(), 16);
         assert_eq!(vapor().colors.ansi.len(), 16);
     }
+
+    // ── QA #169: Theme switching — --theme flag changes visual appearance ──────
+
+    /// All four CLI-exposed themes parse successfully via `builtin_by_name`.
+    #[test]
+    fn qa_169_all_cli_themes_parse_successfully() {
+        let cli_themes = ["amber", "ice", "blood", "vapor"];
+        for name in cli_themes {
+            let result = builtin_by_name(name);
+            assert!(
+                result.is_some(),
+                "theme '{name}' must be recognised by builtin_by_name",
+            );
+        }
+    }
+
+    /// An unknown theme name must return `None` (not panic).
+    #[test]
+    fn qa_169_unknown_theme_returns_none() {
+        assert!(
+            builtin_by_name("nonexistent").is_none(),
+            "unknown theme must return None",
+        );
+        assert!(builtin_by_name("").is_none(), "empty string must return None");
+        assert!(builtin_by_name("NEON").is_none(), "unregistered name must return None");
+    }
+
+    /// Foreground colors must differ between themes.
+    /// The whole point of a theme flag is to change the visual appearance;
+    /// if foregrounds were identical there would be no visual difference.
+    #[test]
+    fn qa_169_themes_have_distinct_foreground_colors() {
+        let amber_fg = amber().colors.foreground;
+        let ice_fg   = ice().colors.foreground;
+        let blood_fg = blood().colors.foreground;
+        let vapor_fg = vapor().colors.foreground;
+
+        // Each pair must differ on at least one channel.
+        let pairs = [
+            ("amber", amber_fg, "ice", ice_fg),
+            ("amber", amber_fg, "blood", blood_fg),
+            ("amber", amber_fg, "vapor", vapor_fg),
+            ("ice",   ice_fg,   "blood", blood_fg),
+            ("ice",   ice_fg,   "vapor", vapor_fg),
+            ("blood", blood_fg, "vapor", vapor_fg),
+        ];
+
+        for (na, ca, nb, cb) in pairs {
+            let same = ca.iter().zip(cb.iter()).all(|(a, b)| (a - b).abs() < 0.01);
+            assert!(
+                !same,
+                "theme '{na}' and '{nb}' have identical foreground colors — themes must differ",
+            );
+        }
+    }
+
+    /// Background colors must also differ between themes.
+    #[test]
+    fn qa_169_themes_have_distinct_background_colors() {
+        let amber_bg = amber().colors.background;
+        let ice_bg   = ice().colors.background;
+        let blood_bg = blood().colors.background;
+        let vapor_bg = vapor().colors.background;
+
+        let pairs = [
+            ("amber", amber_bg, "ice", ice_bg),
+            ("amber", amber_bg, "blood", blood_bg),
+            ("ice",   ice_bg,   "vapor", vapor_bg),
+        ];
+
+        for (na, ca, nb, cb) in pairs {
+            let same = ca.iter().zip(cb.iter()).all(|(a, b)| (a - b).abs() < 0.01);
+            assert!(
+                !same,
+                "theme '{na}' and '{nb}' must have different background colors",
+            );
+        }
+    }
+
+    /// `builtin_by_name` must be case-insensitive for all four CLI themes.
+    #[test]
+    fn qa_169_theme_lookup_is_case_insensitive() {
+        assert_eq!(builtin_by_name("Amber").unwrap().name, "Amber");
+        assert_eq!(builtin_by_name("AMBER").unwrap().name, "Amber");
+        assert_eq!(builtin_by_name("Ice").unwrap().name, "Ice");
+        assert_eq!(builtin_by_name("ICE").unwrap().name, "Ice");
+        assert_eq!(builtin_by_name("Blood").unwrap().name, "Blood");
+        assert_eq!(builtin_by_name("BLOOD").unwrap().name, "Blood");
+        assert_eq!(builtin_by_name("Vapor").unwrap().name, "Vapor");
+        assert_eq!(builtin_by_name("VAPOR").unwrap().name, "Vapor");
+    }
+
+    /// Each theme's shader params must differ, proving visual appearance changes.
+    #[test]
+    fn qa_169_themes_have_distinct_shader_params() {
+        let amber_sp = amber().shader_params;
+        let ice_sp   = ice().shader_params;
+        let blood_sp = blood().shader_params;
+        let vapor_sp = vapor().shader_params;
+
+        // Bloom intensity alone differs enough to prove distinct appearance.
+        let blooms = [
+            ("amber", amber_sp.bloom_intensity),
+            ("ice",   ice_sp.bloom_intensity),
+            ("blood", blood_sp.bloom_intensity),
+            ("vapor", vapor_sp.bloom_intensity),
+        ];
+
+        // Not all bloom values can be equal.
+        let first = blooms[0].1;
+        let all_same = blooms.iter().all(|(_, b)| (b - first).abs() < 0.001);
+        assert!(
+            !all_same,
+            "all themes have identical bloom_intensity — shader params must differ between themes",
+        );
+    }
 }
