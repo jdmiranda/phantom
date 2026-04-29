@@ -54,7 +54,7 @@ pub use dispatch::Disposition;
 pub use policy::AgentPolicy;
 pub use chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
-    OpenAiChatBackend, build_backend,
+    OpenAiChatBackend, PrivacyGuard, build_backend, build_backend_with_privacy,
 };
 pub use failure_store::{FailureRecord, FailureStore};
 pub use defender::defender_spawn_rule;

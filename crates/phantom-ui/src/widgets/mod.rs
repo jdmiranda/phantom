@@ -196,6 +196,16 @@ impl StatusBar {
         }
     }
 
+    /// Enable or disable the privacy mode lock indicator.
+    pub fn set_privacy_mode(&mut self, enabled: bool) {
+        self.privacy_mode = enabled;
+    }
+
+    /// Whether the privacy mode indicator is currently shown.
+    pub fn privacy_mode(&self) -> bool {
+        self.privacy_mode
+    }
+
     /// Update the displayed working directory.
     pub fn set_cwd(&mut self, path: &str) {
         self.cwd = path.to_owned();

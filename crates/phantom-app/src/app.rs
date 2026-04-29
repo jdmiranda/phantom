@@ -439,6 +439,15 @@ pub struct App {
     // completed and are ready for `remove_adapter`.  Drained by
     // `tick_alt_screen_fade` into `collapse_alt_screen_pane`.
     pub(crate) alt_screen_pending_collapses: Vec<phantom_adapter::AppId>,
+
+    // -- Privacy mode: hard block on cloud API calls.
+    //    Mirrors `PhantomConfig::privacy_mode`. Toggled at runtime by the
+    //    `ghost privacy on/off` command. When `true`:
+    //    - `phantom_agents::PrivacyGuard` returns `ChatError::PrivacyModeViolation`
+    //      on every cloud-backend call.
+    //    - The brain router skips cloud backends (Claude, OpenAI).
+    //    - The status strip shows a lock indicator.
+    pub(crate) privacy_mode: bool,
 }
 
 /// An active suggestion from the AI brain.
@@ -563,6 +572,10 @@ impl App {
         if let Some(ref git) = context.git {
             status_bar.set_branch(&git.branch);
         }
+        // Reflect initial privacy mode in the status bar indicator.
+        if config.privacy_mode {
+            status_bar.set_privacy_mode(true);
+        }
 
         // -- Memory store (persistent per-project) --
         let memory = match MemoryStore::open(&project_dir) {
@@ -622,7 +635,11 @@ impl App {
             quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real evrs
             router: None,
             catalog: None,
+            privacy_mode: config.privacy_mode,
         });
+        if config.privacy_mode {
+            info!("Privacy mode enabled — cloud API calls blocked");
+        }
         info!("AI brain spawned");
 
         // -- NLP translate channel (bounded at 8 outstanding requests) --
@@ -1074,6 +1091,7 @@ impl App {
             prev_detached: std::collections::HashMap::new(),
             alt_screen_fade: std::collections::HashMap::new(),
             alt_screen_pending_collapses: Vec::new(),
+            privacy_mode: config.privacy_mode,
         })
     }
 
