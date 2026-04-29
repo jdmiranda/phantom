@@ -652,9 +652,15 @@ impl App {
                     );
                 }
             }
-            AiAction::SpawnAgent { task, spawn_tag } => {
-                info!("[PHANTOM]: Spawning agent (spawn_tag={spawn_tag:?})...");
-                let mut opts = phantom_agents::AgentSpawnOpts::new(task);
+            AiAction::SpawnAgent { task, spawn_tag, disposition } => {
+                info!(
+                    "[PHANTOM]: Spawning agent \
+                     (spawn_tag={spawn_tag:?}, disposition={disposition:?}, \
+                     auto_approve={})...",
+                    disposition.auto_approve(),
+                );
+                let mut opts = phantom_agents::AgentSpawnOpts::new(task)
+                    .with_disposition(disposition);
                 opts.spawn_tag = spawn_tag;
                 tasks_to_spawn.push(opts);
             }

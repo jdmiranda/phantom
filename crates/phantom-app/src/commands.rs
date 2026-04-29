@@ -339,6 +339,7 @@ impl App {
                         .push(phantom_brain::events::AiAction::SpawnAgent {
                             task: phantom_agents::AgentTask::FreeForm { prompt: objective },
                             spawn_tag: None,
+                            disposition: phantom_agents::dispatch::Disposition::Chat,
                         });
                 }
             }
@@ -458,6 +459,7 @@ impl App {
                                 phantom_brain::events::AiAction::SpawnAgent {
                                     task: phantom_agents::AgentTask::FreeForm { prompt: desc },
                                     spawn_tag: None,
+                                    disposition: phantom_agents::dispatch::Disposition::Chat,
                                 },
                             );
                         }
@@ -633,6 +635,7 @@ impl App {
                                 prompt: input_owned,
                             },
                             spawn_tag: None,
+                            disposition: phantom_agents::dispatch::Disposition::Chat,
                         }
                     );
                 }
@@ -646,6 +649,7 @@ impl App {
                         prompt: input_owned,
                     },
                     spawn_tag: None,
+                    disposition: phantom_agents::dispatch::Disposition::Chat,
                 }
             );
         }
@@ -671,6 +675,7 @@ pub(crate) fn intent_to_translate_result(intent: Intent) -> NlpTranslateResult {
             action: Some(phantom_brain::events::AiAction::SpawnAgent {
                 task: phantom_agents::AgentTask::FreeForm { prompt: goal },
                 spawn_tag: None,
+                disposition: phantom_agents::dispatch::Disposition::Chat,
             }),
         },
         Intent::SearchHistory { query } => {

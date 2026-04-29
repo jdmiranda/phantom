@@ -503,7 +503,7 @@ impl UtilityScorer {
         AiAction::ShowSuggestion {
             text: format!("Fix: {error_summary}"),
             options: vec![
-                SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FreeForm { prompt: error_summary }, spawn_tag: None })) },
+                SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FreeForm { prompt: error_summary }, spawn_tag: None, disposition: phantom_agents::dispatch::Disposition::BugFix })) },
                 SuggestionOption { key: 'e', label: "Explain".into(), action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))) },
                 SuggestionOption { key: 'd', label: "Dismiss".into(), action: None },
             ],
