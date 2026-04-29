@@ -326,15 +326,24 @@ fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let input = block
+                let raw_input = block
                     .get("input")
                     .cloned()
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
+                // Reject non-object `input` fields — the Claude API always
+                // sends an object here; a bare string or null is malformed.
+                if raw_input.as_object().is_none() {
+                    let _ = tx.send(ApiEvent::Error(format!(
+                        "tool_use block for '{name}' has non-object input: {raw_input}"
+                    )));
+                    continue;
+                }
+
                 if let Some(tool) = ToolType::from_api_name(name) {
                     let _ = tx.send(ApiEvent::ToolUse {
                         id,
-                        call: ToolCall { tool, args: input },
+                        call: ToolCall { tool, args: raw_input },
                     });
                 } else {
                     let _ = tx.send(ApiEvent::Error(format!(
@@ -866,8 +875,11 @@ mod tests {
         // Must not panic.
         parse_response(&response, &tx);
         let events: Vec<_> = rx.try_iter().collect();
-        // At minimum one event must be emitted (error or tool use).
-        assert!(!events.is_empty(), "parse_response must emit at least one event");
+        // A bare-string input is malformed — the parser must emit an Error event.
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(_))),
+            "bare-string tool_use input must produce an Error event, got: {events:?}"
+        );
     }
 
     /// A `tool_use` block with `input: null` must not panic.
@@ -892,7 +904,11 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         parse_response(&response, &tx);
         let events: Vec<_> = rx.try_iter().collect();
-        assert!(!events.is_empty(), "parse_response must emit at least one event");
+        // A null input is malformed — the parser must emit an Error event.
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(_))),
+            "null tool_use input must produce an Error event, got: {events:?}"
+        );
     }
 
     /// When the `content` field is a JSON string instead of an array, the parser
@@ -934,8 +950,16 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         // Must not panic — non-object entries are silently skipped.
         parse_response(&response, &tx);
-        let _events: Vec<_> = rx.try_iter().collect();
-        // No assertion on content — just verifying no panic occurred.
+        let events: Vec<_> = rx.try_iter().collect();
+        // Non-object entries are skipped; the parser must still emit Done.
+        assert!(
+            !events.is_empty(),
+            "parse_response must emit at least one event, got empty"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Done)),
+            "non-object content entries must be skipped and Done emitted, got: {events:?}"
+        );
     }
 
     /// An empty `content` array must emit `Done` without panicking.
