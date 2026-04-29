@@ -263,4 +263,145 @@ mod tests {
         let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
         assert_eq!(parts[0], "inspect");
     }
+
+    // =========================================================================
+    // Issue #179 — Inspector denial log: record count, ordering, query
+    // =========================================================================
+
+    use phantom_agents::inspector::{DenialEntry, InspectorBuilder, MAX_RECENT_DENIALS};
+
+    fn denial(agent_id: u32, ts_ms: u64) -> DenialEntry {
+        DenialEntry {
+            role: format!("agent-{agent_id}"),
+            attempted_tool: "run_command".into(),
+            attempted_class: "Act".into(),
+            source_chain: vec![],
+            timestamp_ms: ts_ms,
+        }
+    }
+
+    #[test]
+    fn denial_log_count_is_three_after_three_entries() {
+        let view = InspectorBuilder::new()
+            .with_denial(denial(1, 1_000))
+            .with_denial(denial(2, 2_000))
+            .with_denial(denial(3, 3_000))
+            .build();
+        assert_eq!(view.denials.len(), 3);
+    }
+
+    // Records pushed chronologically must appear oldest-first in the vec
+    // (the builder preserves insertion order; newest-on-top rendering is the
+    // renderer's responsibility).
+    #[test]
+    fn denial_records_ordered_oldest_first_when_pushed_chronologically() {
+        let view = InspectorBuilder::new()
+            .with_denial(denial(1, 1_000))
+            .with_denial(denial(2, 2_000))
+            .with_denial(denial(3, 3_000))
+            .build();
+        // Oldest (smallest ts) must be at index 0; or the builder keeps push order.
+        // Verify monotone ordering from front to back by checking the last is newest.
+        // The builder pushes via `with_denial` in order, so we just check order preserved.
+        assert!(
+            view.denials[0].timestamp_ms <= view.denials[2].timestamp_ms,
+            "denials must be in insertion (oldest-first) order"
+        );
+    }
+
+    // The builder must preserve insertion order regardless of timestamp values.
+    #[test]
+    fn denial_insertion_order_is_preserved_regardless_of_timestamp() {
+        // Out-of-order timestamps: 3000, 1000, 2000.
+        let view = InspectorBuilder::new()
+            .with_denial(denial(10, 3_000))
+            .with_denial(denial(20, 1_000))
+            .with_denial(denial(30, 2_000))
+            .build();
+        assert_eq!(view.denials[0].role, "agent-10");
+        assert_eq!(view.denials[1].role, "agent-20");
+        assert_eq!(view.denials[2].role, "agent-30");
+    }
+
+    // Filter by agent id by matching role label.
+    #[test]
+    fn query_by_agent_id_returns_only_matching_records() {
+        let view = InspectorBuilder::new()
+            .with_denial(denial(1, 1_000))
+            .with_denial(denial(2, 2_000))
+            .with_denial(denial(1, 3_000))
+            .build();
+        let agent1_denials: Vec<_> = view.denials.iter()
+            .filter(|d| d.role == "agent-1")
+            .collect();
+        assert_eq!(agent1_denials.len(), 2, "expected exactly 2 denials for agent-1");
+        for d in &agent1_denials {
+            assert_eq!(d.role, "agent-1");
+        }
+    }
+
+    // Querying an unknown agent must return an empty slice.
+    #[test]
+    fn query_by_unknown_agent_returns_empty() {
+        let view = InspectorBuilder::new()
+            .with_denial(denial(1, 1_000))
+            .build();
+        let unknown: Vec<_> = view.denials.iter()
+            .filter(|d| d.role == "agent-999")
+            .collect();
+        assert!(unknown.is_empty());
+    }
+
+    // Adding MAX+5 denials must cap at MAX_RECENT_DENIALS.
+    #[test]
+    fn denial_log_capped_at_max_recent_denials() {
+        let mut builder = InspectorBuilder::new();
+        for i in 0..(MAX_RECENT_DENIALS + 5) as u64 {
+            builder = builder.with_denial(denial(0, i * 1_000));
+        }
+        let view = builder.build();
+        assert_eq!(view.denials.len(), MAX_RECENT_DENIALS);
+    }
+
+    // When the log is capped the most recent (latest-pushed) entries must be kept.
+    #[test]
+    fn cap_drops_oldest_entries_keeps_most_recent() {
+        let mut builder = InspectorBuilder::new();
+        let total = MAX_RECENT_DENIALS + 5;
+        for i in 0..total as u64 {
+            builder = builder.with_denial(denial(0, i * 1_000));
+        }
+        let view = builder.build();
+        // The kept entries must be the last MAX_RECENT_DENIALS pushed.
+        let first_kept_ts = (5 * 1_000) as u64; // first 5 dropped
+        assert!(
+            view.denials[0].timestamp_ms >= first_kept_ts,
+            "oldest entries must be dropped when cap is exceeded"
+        );
+    }
+
+    #[test]
+    fn empty_inspector_view_has_no_denials() {
+        let view = InspectorBuilder::new().build();
+        assert!(view.denials.is_empty());
+    }
+
+    // A DenialEntry must round-trip through InspectorView with no field loss.
+    #[test]
+    fn denial_entry_fields_round_trip_through_view() {
+        let entry = DenialEntry {
+            role: "Watcher".into(),
+            attempted_tool: "write_file".into(),
+            attempted_class: "Act".into(),
+            source_chain: vec![1, 2, 3],
+            timestamp_ms: 42_000,
+        };
+        let view = InspectorBuilder::new().with_denial(entry).build();
+        let got = &view.denials[0];
+        assert_eq!(got.role, "Watcher");
+        assert_eq!(got.attempted_tool, "write_file");
+        assert_eq!(got.attempted_class, "Act");
+        assert_eq!(got.source_chain, vec![1, 2, 3]);
+        assert_eq!(got.timestamp_ms, 42_000);
+    }
 }

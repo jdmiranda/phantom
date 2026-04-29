@@ -910,4 +910,121 @@ mod tests {
             "missing session dir must return false without panicking"
         );
     }
+
+    // =======================================================================
+    // Issue #171 — Session restore: crash & restart recovers pane layout
+    // =======================================================================
+
+    fn pane(title: &str, focused: bool, split: Option<SplitDirection>) -> PaneState {
+        PaneState {
+            working_dir: "/home/dev/phantom".into(),
+            is_focused: focused,
+            cols: 120,
+            rows: 40,
+            title: title.into(),
+            split,
+        }
+    }
+
+    #[test]
+    fn restore_preserves_pane_count() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+        let mut state = sample_state(project_dir, "phantom", 1_700_001_000);
+        state.panes = vec![
+            pane("editor", true, None),
+            pane("tests", false, Some(SplitDirection::Vertical)),
+            pane("logs", false, Some(SplitDirection::Horizontal)),
+        ];
+        mgr.save(&state).unwrap();
+        let restored = mgr.load_latest(project_dir).unwrap().unwrap();
+        assert_eq!(restored.panes.len(), 3, "pane count must survive save/restore");
+    }
+
+    #[test]
+    fn restore_preserves_pane_titles_as_ids() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+        let mut state = sample_state(project_dir, "phantom", 1_700_001_001);
+        state.panes = vec![
+            pane("alpha", true, None),
+            pane("beta", false, Some(SplitDirection::Vertical)),
+            pane("gamma", false, Some(SplitDirection::Horizontal)),
+        ];
+        mgr.save(&state).unwrap();
+        let restored = mgr.load_latest(project_dir).unwrap().unwrap();
+        assert_eq!(restored.panes[0].title, "alpha");
+        assert_eq!(restored.panes[1].title, "beta");
+        assert_eq!(restored.panes[2].title, "gamma");
+    }
+
+    #[test]
+    fn restore_preserves_focus_state() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+        let mut state = sample_state(project_dir, "phantom", 1_700_001_002);
+        state.panes = vec![
+            pane("editor", false, None),
+            pane("tests", true, Some(SplitDirection::Vertical)),
+            pane("logs", false, Some(SplitDirection::Horizontal)),
+        ];
+        mgr.save(&state).unwrap();
+        let restored = mgr.load_latest(project_dir).unwrap().unwrap();
+        let focused_count = restored.panes.iter().filter(|p| p.is_focused).count();
+        assert_eq!(focused_count, 1, "exactly one pane must be focused after restore");
+        assert!(restored.panes[1].is_focused, "pane 'tests' (index 1) must retain focus");
+        assert!(!restored.panes[0].is_focused, "pane 'editor' must not be focused");
+        assert!(!restored.panes[2].is_focused, "pane 'logs' must not be focused");
+    }
+
+    #[test]
+    fn restore_preserves_split_directions() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+        let mut state = sample_state(project_dir, "phantom", 1_700_001_003);
+        state.panes = vec![
+            pane("root", true, None),
+            pane("right", false, Some(SplitDirection::Vertical)),
+            pane("bottom", false, Some(SplitDirection::Horizontal)),
+        ];
+        mgr.save(&state).unwrap();
+        let restored = mgr.load_latest(project_dir).unwrap().unwrap();
+        assert_eq!(restored.panes[0].split, None);
+        assert_eq!(restored.panes[1].split, Some(SplitDirection::Vertical));
+        assert_eq!(restored.panes[2].split, Some(SplitDirection::Horizontal));
+    }
+
+    #[test]
+    fn restore_preserves_pane_terminal_size() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/phantom";
+        let mut state = sample_state(project_dir, "phantom", 1_700_001_004);
+        state.panes = vec![
+            PaneState { working_dir: project_dir.into(), is_focused: true, cols: 220, rows: 55, title: "wide".into(), split: None },
+            PaneState { working_dir: project_dir.into(), is_focused: false, cols: 80, rows: 24, title: "narrow".into(), split: Some(SplitDirection::Vertical) },
+        ];
+        mgr.save(&state).unwrap();
+        let restored = mgr.load_latest(project_dir).unwrap().unwrap();
+        assert_eq!(restored.panes[0].cols, 220);
+        assert_eq!(restored.panes[0].rows, 55);
+        assert_eq!(restored.panes[1].cols, 80);
+        assert_eq!(restored.panes[1].rows, 24);
+    }
+
+    #[test]
+    fn crash_and_restart_recovers_last_saved_layout() {
+        let (mgr, _dir) = test_manager();
+        let project_dir = "/home/dev/crash-test";
+        let mut before_crash = sample_state(project_dir, "crash-test", 1_700_002_000);
+        before_crash.panes = vec![
+            pane("main", true, None),
+            pane("build", false, Some(SplitDirection::Vertical)),
+        ];
+        mgr.save(&before_crash).unwrap();
+        let recovered = mgr.load_latest(project_dir).unwrap().unwrap();
+        assert_eq!(recovered.panes.len(), 2, "crash recovery must restore both panes");
+        assert_eq!(recovered.panes[0].title, "main");
+        assert_eq!(recovered.panes[1].title, "build");
+        assert!(recovered.panes[0].is_focused, "'main' pane must be focused after recovery");
+    }
 }

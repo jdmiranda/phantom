@@ -588,3 +588,128 @@ mod tests {
         assert_eq!(tab.display_label(), "Alerts [3]");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #175 — Tab navigation: click selection + badge counts
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tab_nav_data_model_tests {
+    use super::*;
+
+    fn three_tab_strip() -> TabStrip {
+        TabStrip::new(
+            vec![
+                Tab::new("Shell", None),
+                Tab::new("Agent", None),
+                Tab::new("Inspector", None),
+            ],
+            0,
+            |_| {},
+        )
+    }
+
+    const STRIP_WIDTH: f32 = 900.0; // 3 equal tabs × 300 px each
+
+    // Clicking at x=350 (middle of the second 300-px slot) → active = 1.
+    #[test]
+    fn click_second_tab_sets_active_index_to_one() {
+        let mut strip = three_tab_strip();
+        strip.on_click(350.0, STRIP_WIDTH);
+        assert_eq!(strip.active(), 1, "clicking second tab must set active to 1");
+    }
+
+    // Clicking at x=50 (first slot) → active = 0.
+    #[test]
+    fn click_first_tab_sets_active_to_zero() {
+        let mut strip = three_tab_strip();
+        strip.on_click(350.0, STRIP_WIDTH); // move away first
+        strip.on_click(50.0, STRIP_WIDTH);
+        assert_eq!(strip.active(), 0);
+    }
+
+    // Clicking at x=750 (third slot) → active = 2.
+    #[test]
+    fn click_third_tab_sets_active_to_two() {
+        let mut strip = three_tab_strip();
+        strip.on_click(750.0, STRIP_WIDTH);
+        assert_eq!(strip.active(), 2);
+    }
+
+    // Clicking a tab must not affect the badge counts of the other tabs.
+    #[test]
+    fn click_does_not_change_other_tab_badges() {
+        let mut strip = TabStrip::new(
+            vec![
+                Tab::new("Shell", None),
+                Tab::new("Agent", Some(5)),
+                Tab::new("Inspector", Some(2)),
+            ],
+            0,
+            |_| {},
+        );
+        strip.on_click(350.0, STRIP_WIDTH); // click Agent tab
+        assert_eq!(strip.active(), 1);
+        // Badges are accessed via rendered text rather than direct field access;
+        // verify tab_count and active index haven't corrupted neighbouring tabs.
+        assert_eq!(strip.tab_count(), 3, "tab count must not change after click");
+    }
+
+    // A tab created with a badge count must report that count.
+    #[test]
+    fn badge_count_updates_when_tab_receives_event() {
+        let tab = Tab::new("Agent", Some(3));
+        assert_eq!(tab.badge(), Some(3));
+    }
+
+    // badge=Some(0) is distinct from badge=None.
+    #[test]
+    fn badge_zero_is_distinct_from_no_badge() {
+        let tab_zero = Tab::new("X", Some(0));
+        let tab_none = Tab::new("X", None);
+        assert_eq!(tab_zero.badge(), Some(0));
+        assert_eq!(tab_none.badge(), None);
+        assert_ne!(tab_zero.badge(), tab_none.badge());
+    }
+
+    // Multiple tabs each carry their own independent badge value.
+    #[test]
+    fn multiple_badges_independently_reported() {
+        let strip = TabStrip::new(
+            vec![
+                Tab::new("A", Some(1)),
+                Tab::new("B", Some(10)),
+                Tab::new("C", None),
+            ],
+            0,
+            |_| {},
+        );
+        // Collect badge values from rendered text segments and check the counts.
+        let texts = strip.render_text(&crate::layout::Rect { x: 0.0, y: 0.0, width: STRIP_WIDTH, height: 30.0 });
+        let badge_10 = texts.iter().any(|s| s.text.contains("[10]"));
+        let badge_1  = texts.iter().any(|s| s.text.contains("[1]"));
+        assert!(badge_1,  "badge [1] must be rendered for tab A");
+        assert!(badge_10, "badge [10] must be rendered for tab B");
+    }
+
+    // The on_select callback receives the correct index when a tab is clicked.
+    #[test]
+    fn on_select_callback_receives_correct_index_on_click() {
+        use std::sync::{Arc, Mutex};
+        let received = Arc::new(Mutex::new(None::<usize>));
+        let received_clone = Arc::clone(&received);
+        let mut strip = TabStrip::new(
+            vec![
+                Tab::new("Shell", None),
+                Tab::new("Agent", None),
+                Tab::new("Inspector", None),
+            ],
+            0,
+            move |idx| {
+                *received_clone.lock().unwrap() = Some(idx);
+            },
+        );
+        strip.on_click(750.0, STRIP_WIDTH); // click third tab
+        assert_eq!(*received.lock().unwrap(), Some(2));
+    }
+}

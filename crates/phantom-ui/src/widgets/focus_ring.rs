@@ -403,3 +403,116 @@ mod tests {
         assert_eq!(ring.opacity(), 1.0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #178 — Focus ring: single-focus invariant across 3 panes
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pane_focus_state_tests {
+    use super::*;
+
+    const PANE_A: AppId = 1;
+    const PANE_B: AppId = 2;
+    const PANE_C: AppId = 3;
+
+    // Focusing PANE_B must be reported by focused().
+    #[test]
+    fn focus_pane_b_is_reported() {
+        let mut ring = FocusRing::new();
+        ring.set_focused(Some(PANE_B));
+        assert_eq!(ring.focused(), Some(PANE_B));
+    }
+
+    // After focusing A then C, only C must be the focused pane.
+    #[test]
+    fn focus_transfers_from_a_to_c() {
+        let mut ring = FocusRing::new();
+        ring.set_focused(Some(PANE_A));
+        ring.set_focused(Some(PANE_C));
+        assert_eq!(ring.focused(), Some(PANE_C));
+        assert_ne!(ring.focused(), Some(PANE_A));
+    }
+
+    // Cycling through A → B → C: at each step exactly one pane is focused.
+    #[test]
+    fn only_one_pane_is_focused_at_a_time() {
+        let mut ring = FocusRing::new();
+
+        ring.set_focused(Some(PANE_A));
+        assert_eq!(ring.focused(), Some(PANE_A));
+
+        ring.set_focused(Some(PANE_B));
+        assert_eq!(ring.focused(), Some(PANE_B));
+        assert_ne!(ring.focused(), Some(PANE_A));
+        assert_ne!(ring.focused(), Some(PANE_C));
+
+        ring.set_focused(Some(PANE_C));
+        assert_eq!(ring.focused(), Some(PANE_C));
+        assert_ne!(ring.focused(), Some(PANE_A));
+        assert_ne!(ring.focused(), Some(PANE_B));
+    }
+
+    // A → B → C navigation: each step yields the correct pane.
+    #[test]
+    fn navigate_focus_a_to_b_to_c() {
+        let mut ring = FocusRing::new();
+        let panes = [PANE_A, PANE_B, PANE_C];
+        for &pane in &panes {
+            ring.set_focused(Some(pane));
+            assert_eq!(ring.focused(), Some(pane), "after focusing {pane}");
+        }
+    }
+
+    // Clearing focus (None) leaves no pane focused.
+    #[test]
+    fn clear_focus_leaves_no_pane_focused() {
+        let mut ring = FocusRing::new();
+        ring.set_focused(Some(PANE_A));
+        ring.set_focused(None);
+        assert_eq!(ring.focused(), None);
+    }
+
+    // Re-focusing the same pane is idempotent.
+    #[test]
+    fn refocus_same_pane_is_idempotent() {
+        let mut ring = FocusRing::new();
+        ring.set_focused(Some(PANE_B));
+        ring.tick(FADE_DURATION_MS); // fully opaque
+        ring.set_focused(Some(PANE_B)); // same pane again
+        ring.tick(0.0);
+        assert_eq!(ring.focused(), Some(PANE_B));
+        assert_eq!(ring.opacity(), 1.0);
+    }
+
+    // When focus moves from one pane to another, opacity stays at 1.0 because
+    // a pane is still focused — only the identity changes.
+    #[test]
+    fn opacity_stays_high_when_focus_moves_between_panes() {
+        let mut ring = FocusRing::new();
+        ring.set_focused(Some(PANE_A));
+        ring.tick(FADE_DURATION_MS); // fade fully in
+        assert_eq!(ring.opacity(), 1.0);
+
+        ring.set_focused(Some(PANE_B)); // different pane
+        ring.tick(0.0);                 // one zero-dt tick
+        // Should not drop opacity since something is still focused.
+        assert_eq!(ring.opacity(), 1.0, "opacity must not fade when focus merely moves");
+    }
+
+    // When focus is cleared, ticking must gradually reduce opacity toward 0.
+    #[test]
+    fn opacity_fades_when_focus_cleared() {
+        let mut ring = FocusRing::new();
+        ring.set_focused(Some(PANE_A));
+        ring.tick(FADE_DURATION_MS); // fully opaque
+
+        ring.set_focused(None);
+        ring.tick(FADE_DURATION_MS / 2.0); // half fade-out
+        assert!(ring.opacity() < 1.0, "opacity must decrease after focus cleared");
+        assert!(ring.opacity() >= 0.0, "opacity must be non-negative");
+
+        ring.tick(FADE_DURATION_MS * 2.0); // complete fade-out
+        assert_eq!(ring.opacity(), 0.0, "opacity must reach zero after full fade-out");
+    }
+}
