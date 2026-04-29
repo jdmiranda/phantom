@@ -778,6 +778,16 @@ impl AppCoordinator {
         &mut self.registry
     }
 
+    /// Snapshot of the PTY output buffer for the adapter registered under
+    /// `app_id`, or `None` if the adapter does not expose one (e.g. agent
+    /// panes, inspector, headless adapters).
+    ///
+    /// Used by the bus-drain loop to populate `ParsedOutput::raw_output`
+    /// when a `CommandComplete` event fires (issue #226).
+    pub fn terminal_output_buf(&self, app_id: AppId) -> Option<String> {
+        self.registry.get_adapter(app_id)?.output_buf_snapshot()
+    }
+
     /// Test-only constructor that skips layout/scene requirements.
     #[cfg(test)]
     fn new_test(bus: EventBus) -> Self {

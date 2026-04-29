@@ -233,6 +233,12 @@ impl AppCore for TerminalAdapter {
             "mouse_mode": mouse_mode,
         })
     }
+
+    /// Return the raw PTY output buffer so the OODA brain can populate
+    /// `ParsedOutput::raw_output` when a `CommandComplete` event fires (#226).
+    fn output_buf_snapshot(&self) -> Option<String> {
+        Some(self.output_buf.clone())
+    }
 }
 
 impl Renderable for TerminalAdapter {
