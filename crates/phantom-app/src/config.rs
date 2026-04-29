@@ -31,7 +31,7 @@ pub struct PhantomConfig {
     /// Claude API for structured intent extraction. Set to `false` (or
     /// `nlp_llm = false` / `nlp_llm = 0` in the config file) to disable the
     /// network call and fall back directly to spawning an agent.
-    pub nlp_llm_enabled: bool,
+    pub(crate) nlp_llm_enabled: bool,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -180,6 +180,14 @@ impl PhantomConfig {
         }
 
         theme
+    }
+
+    /// Returns whether the LLM-backed NLP translate fallback is enabled.
+    ///
+    /// Use this accessor instead of accessing `nlp_llm_enabled` directly from
+    /// outside the crate.
+    pub fn nlp_llm_enabled(&self) -> bool {
+        self.nlp_llm_enabled
     }
 
     /// Write a default config file to the standard path.

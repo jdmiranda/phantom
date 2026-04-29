@@ -185,7 +185,11 @@ impl App {
                         );
                     }
                 }
-                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    warn!("NLP translate channel disconnected unexpectedly");
+                    break;
+                }
             }
         }
 

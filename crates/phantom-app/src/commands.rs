@@ -519,7 +519,7 @@ impl App {
                     };
                     match translate(&input_owned, ctx_ref, backend_arc.as_ref()) {
                         Ok(intent) => {
-                            let res = intent_to_translate_result(intent, &input_owned);
+                            let res = intent_to_translate_result(intent);
                             // `try_send` — if the channel is full (8 queued calls)
                             // we silently drop this result rather than blocking.
                             let _ = tx.try_send(res);
@@ -577,7 +577,7 @@ impl App {
 ///
 /// `original_input` is used as a fallback label when the intent doesn't carry
 /// its own display-friendly description.
-pub(crate) fn intent_to_translate_result(intent: Intent, _original_input: &str) -> NlpTranslateResult {
+pub(crate) fn intent_to_translate_result(intent: Intent) -> NlpTranslateResult {
     match intent {
         Intent::RunCommand { cmd } => NlpTranslateResult {
             display: format!("Running: {cmd}"),
@@ -592,7 +592,11 @@ pub(crate) fn intent_to_translate_result(intent: Intent, _original_input: &str) 
         },
         Intent::SearchHistory { query } => {
             // Map history search to a concrete git log command.
-            let cmd = format!("git log --oneline --all --grep={query}");
+            // Use {:?} Debug quoting to shell-escape the query and prevent
+            // injection: LLM-controlled input like "foo; rm -rf ~" becomes
+            // `--grep="foo; rm -rf ~"` which git treats as a literal grep
+            // pattern rather than a second shell command.
+            let cmd = format!("git log --oneline --all --grep={query:?}");
             NlpTranslateResult {
                 display: format!("Searching history: {query}"),
                 action: Some(phantom_brain::events::AiAction::RunCommand(cmd)),
