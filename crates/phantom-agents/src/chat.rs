@@ -164,6 +164,15 @@ impl ChatModel {
         }
     }
 
+    /// Read `PHANTOM_AGENT_MODEL` from the environment and parse it.
+    ///
+    /// Returns `None` when the variable is unset or its value is not
+    /// recognized — callers fall through to [`Self::default()`].
+    pub fn from_env() -> Option<Self> {
+        let raw = std::env::var("PHANTOM_AGENT_MODEL").ok()?;
+        Self::from_env_str(&raw)
+    }
+
     /// Parse a `PHANTOM_AGENT_MODEL` env-var value.
     ///
     /// Recognized shapes:
@@ -326,6 +335,12 @@ impl ChatBackend for OpenAiChatBackend {
     }
 
     fn complete(&self, request: ChatRequest<'_>) -> Result<ChatResponse, ChatError> {
+        // Pending: #55 — streaming (SSE) support for OpenAI.
+        // The current implementation reads the full response body before
+        // emitting any events, which adds latency and prevents incremental
+        // TextDelta delivery to the agent pane. Enabling `"stream": true`
+        // requires parsing the `data: {...}` SSE lines and flushing
+        // `content_block_delta`-equivalent events as they arrive.
         let body = build_openai_request_body(
             &self.model,
             request.max_tokens,
@@ -424,6 +439,22 @@ fn build_openai_request_body(
 ///   `tool_calls` array; the function arguments are JSON-encoded as a string.
 /// * `tool_result` blocks become messages with `role: "tool"` and a
 ///   `tool_call_id` (one message per result, no grouping).
+///
+/// # ID alignment
+///
+/// `tool_use_ids` is positionally aligned across both tool calls *and* tool
+/// results — the *n*-th tool call and the *n*-th tool result share the same
+/// ID at index *n*. Both `tool_idx` and `result_idx` draw from the same
+/// underlying slice; they must never exceed each other in a well-formed
+/// conversation because every call is eventually matched by one result.
+///
+/// # Vision / image content
+///
+/// Pending: #70 — multi-modal vision input blocks are not yet supported.
+/// When an `AgentMessage::User` payload contains an embedded image, it should
+/// be serialised as an OpenAI `content` array with a `type: "image_url"` entry
+/// rather than a bare string. For now all user messages are forwarded as plain
+/// text; callers must not place raw binary data in message strings.
 fn build_openai_messages(agent: &Agent, tool_use_ids: &[String]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
 
@@ -433,6 +464,9 @@ fn build_openai_messages(agent: &Agent, tool_use_ids: &[String]) -> Vec<Value> {
         "content": agent.system_prompt(),
     }));
 
+    // Both tool calls and tool results share the same positional ID pool.
+    // The n-th ToolCall entry and the n-th ToolResult entry correspond to the
+    // same API-assigned `tool_call_id`; they must advance the same counter.
     let mut tool_idx: usize = 0;
     let mut result_idx: usize = 0;
     let mut i = 0;
@@ -489,6 +523,8 @@ fn build_openai_messages(agent: &Agent, tool_use_ids: &[String]) -> Vec<Value> {
                 }));
             }
             AgentMessage::ToolResult(tr) => {
+                // ToolResult IDs are drawn from the same positional slice as
+                // ToolCall IDs: the n-th result must use tool_use_ids[n].
                 let id = tool_use_ids
                     .get(result_idx)
                     .cloned()
@@ -574,25 +610,58 @@ fn parse_openai_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
     // Tool calls.
     if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
         for call in tool_calls {
-            let id = call
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned();
+            // A missing or empty `id` would make it impossible to correlate the
+            // tool_result in the follow-up turn — surface this as an explicit error
+            // rather than silently forwarding an unusable empty string.
+            let id = match call.get("id").and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => s.to_owned(),
+                _ => {
+                    let _ = tx.send(ApiEvent::Error(
+                        "OpenAI tool_call missing or empty id field".into(),
+                    ));
+                    continue;
+                }
+            };
+
+            // A missing `function` object is a malformed response — emit an
+            // error and skip this entry rather than continuing silently.
             let function = match call.get("function") {
                 Some(f) => f,
-                None => continue,
+                None => {
+                    let _ = tx.send(ApiEvent::Error(format!(
+                        "OpenAI tool_call {id} missing function object"
+                    )));
+                    continue;
+                }
             };
+
             let name = function
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let arguments_str = function
-                .get("arguments")
-                .and_then(|v| v.as_str())
-                .unwrap_or("{}");
-            let args: Value = serde_json::from_str(arguments_str)
-                .unwrap_or(Value::Object(serde_json::Map::new()));
+
+            // `arguments` must be a JSON-encoded string per the OpenAI spec.
+            // A missing field, a non-string value, or invalid JSON all indicate
+            // a malformed response — emit an error rather than silently defaulting
+            // to an empty object, which would produce a confusing tool execution.
+            let arguments_str = match function.get("arguments").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    let _ = tx.send(ApiEvent::Error(format!(
+                        "OpenAI tool_call {id} ({name}): arguments field is missing or not a string"
+                    )));
+                    continue;
+                }
+            };
+            let args: Value = match serde_json::from_str(arguments_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!(
+                        "OpenAI tool_call {id} ({name}): failed to parse arguments as JSON: {e}"
+                    )));
+                    continue;
+                }
+            };
 
             if let Some(tool) = ToolType::from_api_name(name) {
                 let _ = tx.send(ApiEvent::ToolUse {
@@ -964,6 +1033,157 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, ApiEvent::Error(m) if m.contains("nonexistent_tool"))
         ));
+    }
+
+    // -- ChatModel::from_env --------------------------------------------------
+
+    #[test]
+    fn chat_model_from_env_str_parses_all_known_shapes() {
+        assert_eq!(
+            ChatModel::from_env_str("claude"),
+            Some(ChatModel::Claude("claude-opus-4-7".into()))
+        );
+        assert_eq!(
+            ChatModel::from_env_str("anthropic"),
+            Some(ChatModel::Claude("claude-opus-4-7".into()))
+        );
+        assert_eq!(
+            ChatModel::from_env_str("openai"),
+            Some(ChatModel::OpenAi("gpt-4o".into()))
+        );
+        assert_eq!(
+            ChatModel::from_env_str("gpt"),
+            Some(ChatModel::OpenAi("gpt-4o".into()))
+        );
+        assert_eq!(
+            ChatModel::from_env_str("claude:claude-3-5-haiku"),
+            Some(ChatModel::Claude("claude-3-5-haiku".into()))
+        );
+        assert_eq!(
+            ChatModel::from_env_str("openai:gpt-4o-mini"),
+            Some(ChatModel::OpenAi("gpt-4o-mini".into()))
+        );
+        assert_eq!(ChatModel::from_env_str("unknown"), None);
+        assert_eq!(ChatModel::from_env_str(""), None);
+        // Leading/trailing whitespace and case are ignored.
+        assert_eq!(
+            ChatModel::from_env_str("  CLAUDE  "),
+            Some(ChatModel::Claude("claude-opus-4-7".into()))
+        );
+    }
+
+    // -- OpenAI response error cases (no silent fallback) -------------------
+
+    #[test]
+    fn openai_response_missing_tool_id_emits_error() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        // deliberately omit "id"
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"x\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let (tx, rx) = mpsc::channel();
+        parse_openai_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        // Must get an explicit error, not a ToolUse with empty id.
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing or empty id"))),
+            "expected missing-id error, got: {events:?}",
+        );
+        assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
+    }
+
+    #[test]
+    fn openai_response_missing_function_object_emits_error() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_nofn",
+                        "type": "function"
+                        // deliberately omit "function"
+                    }]
+                }
+            }]
+        });
+        let (tx, rx) = mpsc::channel();
+        parse_openai_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing function object"))),
+            "expected missing-function error, got: {events:?}",
+        );
+        assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
+    }
+
+    #[test]
+    fn openai_response_malformed_arguments_emits_error() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_badjson",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            // not valid JSON
+                            "arguments": "{broken"
+                        }
+                    }]
+                }
+            }]
+        });
+        let (tx, rx) = mpsc::channel();
+        parse_openai_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("failed to parse arguments"))),
+            "expected parse-arguments error, got: {events:?}",
+        );
+        assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
+    }
+
+    #[test]
+    fn openai_response_arguments_not_string_emits_error() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_notstr",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            // object instead of JSON-encoded string
+                            "arguments": {"path": "x"}
+                        }
+                    }]
+                }
+            }]
+        });
+        let (tx, rx) = mpsc::channel();
+        parse_openai_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing or not a string"))),
+            "expected arguments-not-string error, got: {events:?}",
+        );
+        assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
     }
 
     // -- Live integration test (requires OPENAI_API_KEY) -------------------
