@@ -2259,8 +2259,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         let ctx = DispatchContext {
-            self_ref: AgentRef::new(2, AgentRole::Orchestrator, "harness-orch", SpawnSource::User),
-            role: AgentRole::Orchestrator,
+            self_ref: AgentRef::new(2, AgentRole::Composer, "harness-orch", SpawnSource::User),
+            role: AgentRole::Composer,
             working_dir: tmp.path(),
             registry: Arc::new(Mutex::new(AgentRegistry::new())),
             event_log: None,
