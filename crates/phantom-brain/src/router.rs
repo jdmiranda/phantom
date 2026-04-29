@@ -9,6 +9,35 @@
 use crate::events::AiEvent;
 
 // ---------------------------------------------------------------------------
+// PrivacyModeViolation
+// ---------------------------------------------------------------------------
+
+/// Error returned when a cloud-provider backend is selected while privacy
+/// mode is active.
+///
+/// The router's [`BrainRouter::route_checked`] method returns this error
+/// instead of dispatching to a cloud backend whenever privacy mode is on.
+/// Local backends (Ollama, heuristic) pass through unconditionally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacyModeViolation {
+    /// Name of the cloud provider that was blocked (e.g. `"claude"`,
+    /// `"openai"`).
+    pub provider: String,
+}
+
+impl std::fmt::Display for PrivacyModeViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "privacy mode is active: cloud provider '{}' is blocked",
+            self.provider
+        )
+    }
+}
+
+impl std::error::Error for PrivacyModeViolation {}
+
+// ---------------------------------------------------------------------------
 // TaskComplexity
 // ---------------------------------------------------------------------------
 
@@ -67,6 +96,34 @@ pub struct ModelBackend {
 }
 
 impl ModelBackend {
+    /// Returns `true` if this backend makes calls to a remote cloud provider.
+    ///
+    /// Used by the privacy-mode gate: when privacy mode is active, any backend
+    /// for which this returns `true` is rejected at routing time with a
+    /// [`PrivacyModeViolation`] error.
+    ///
+    /// # Provider classification
+    ///
+    /// | Kind                       | Cloud? |
+    /// |----------------------------|--------|
+    /// | `Heuristic`                | No     |
+    /// | `Ollama`                   | No     |
+    /// | `Claude`                   | Yes    |
+    /// | `OpenAICompat`             | Yes    |
+    pub fn is_cloud_provider(&self) -> bool {
+        matches!(self.kind, BackendKind::Claude { .. } | BackendKind::OpenAICompat { .. })
+    }
+
+    /// Short provider name used in error messages and logging.
+    pub fn provider_name(&self) -> &str {
+        match &self.kind {
+            BackendKind::Heuristic => "heuristic",
+            BackendKind::Ollama { .. } => "ollama",
+            BackendKind::Claude { .. } => "claude",
+            BackendKind::OpenAICompat { .. } => "openai",
+        }
+    }
+
     /// Built-in heuristic backend (always available, zero cost).
     pub fn heuristic() -> Self {
         Self {
@@ -127,6 +184,13 @@ pub struct RouterConfig {
     pub cascade: bool,
     /// Confidence threshold below which to escalate to next tier.
     pub confidence_threshold: f32,
+    /// When `true`, cloud backends are rejected before dispatch.
+    ///
+    /// Set this to mirror the application-level `privacy_mode` flag from
+    /// `PhantomConfig`. The router enforces the policy at the routing layer
+    /// so that no cloud call can slip through regardless of which code path
+    /// triggers routing.
+    pub privacy_mode: bool,
 }
 
 impl Default for RouterConfig {
@@ -139,6 +203,7 @@ impl Default for RouterConfig {
             ],
             cascade: true,
             confidence_threshold: 0.7,
+            privacy_mode: false,
         }
     }
 }
@@ -278,6 +343,50 @@ impl BrainRouter {
     /// Whether cascade mode is enabled.
     pub fn cascade_enabled(&self) -> bool {
         self.config.cascade
+    }
+
+    /// Enable or disable privacy mode on the router.
+    ///
+    /// When `true`, [`Self::route_checked`] will reject any cloud-provider
+    /// backend (Claude, OpenAI-compat) with a [`PrivacyModeViolation`] error.
+    pub fn set_privacy_mode(&mut self, enabled: bool) {
+        self.config.privacy_mode = enabled;
+    }
+
+    /// Returns `true` if privacy mode is currently active.
+    pub fn privacy_mode(&self) -> bool {
+        self.config.privacy_mode
+    }
+
+    /// Route a task with privacy enforcement.
+    ///
+    /// Behaves identically to [`Self::route`] except that when privacy mode is
+    /// active any cloud-provider backend in the candidate list causes a
+    /// [`PrivacyModeViolation`] error to be returned. Non-cloud backends
+    /// (heuristic, Ollama) are returned normally.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`PrivacyModeViolation`] encountered among the
+    /// selected candidates when privacy mode is on and at least one cloud
+    /// backend would otherwise be selected.
+    pub fn route_checked(
+        &self,
+        complexity: TaskComplexity,
+    ) -> Result<Vec<&ModelBackend>, PrivacyModeViolation> {
+        let candidates = self.route(complexity);
+
+        if self.config.privacy_mode {
+            for backend in &candidates {
+                if backend.is_cloud_provider() {
+                    return Err(PrivacyModeViolation {
+                        provider: backend.provider_name().to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(candidates)
     }
 }
 

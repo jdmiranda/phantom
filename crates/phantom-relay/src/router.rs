@@ -102,6 +102,13 @@ impl Router {
             };
         }
 
+        // --- capability check (integration point) ---
+        // TODO: Once phantom-relay has access to the PeerGrantRegistry from the
+        // AgentManager, call `registry.check(&sender, CapabilityClass::Coordinate)`
+        // to ensure the sending peer has permission to forward envelopes.
+        // For now this is a documentation stub; the relay is currently not integrated
+        // with the agents crate's capability system.
+
         // --- destination lookup ---
         let nonce = envelope.nonce;
         let to = envelope.to.clone();

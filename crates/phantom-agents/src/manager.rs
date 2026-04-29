@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use crate::agent::{Agent, AgentId, AgentStatus, AgentTask};
+use crate::peer_grants::PeerGrantRegistry;
 
 // ---------------------------------------------------------------------------
 // AgentManager
@@ -16,6 +17,7 @@ pub struct AgentManager {
     agents: Vec<Agent>,
     next_id: AgentId,
     max_concurrent: usize,
+    peer_grants: PeerGrantRegistry,
 }
 
 impl AgentManager {
@@ -25,6 +27,7 @@ impl AgentManager {
             agents: Vec::new(),
             next_id: 1,
             max_concurrent,
+            peer_grants: PeerGrantRegistry::new(),
         }
     }
 
@@ -140,6 +143,16 @@ impl AgentManager {
                 active += 1;
             }
         }
+    }
+
+    /// Get the peer grant registry (immutable).
+    pub fn grants(&self) -> &PeerGrantRegistry {
+        &self.peer_grants
+    }
+
+    /// Get the peer grant registry (mutable).
+    pub fn grants_mut(&mut self) -> &mut PeerGrantRegistry {
+        &mut self.peer_grants
     }
 }
 
