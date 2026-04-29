@@ -1,0 +1,14 @@
+{
+  "id": "00000000-0000-0000-0000-000000000001",
+  "t_start_ns": 0,
+  "t_wall_unix_ms": 0,
+  "source_pane_id": 1,
+  "frames": [],
+  "audio_chunks": [],
+  "transcript_words": [],
+  "intent": null,
+  "tags": [],
+  "importance": 0.0,
+  "sealed": false,
+  "schema_version": 1
+}

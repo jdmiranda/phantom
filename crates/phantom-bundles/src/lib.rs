@@ -2,9 +2,17 @@
 //!
 //! A bundle groups a temporal slice of pane activity — frames, audio, and
 //! transcript — under a stable id so storage and retrieval layers can be
-//! implemented independently. This crate intentionally contains schema
-//! definitions only: no persistence, no indexing.
+//! implemented independently.  The crate provides:
+//!
+//! * **Schema types** ([`Bundle`], [`FrameRef`], [`AudioRef`], [`TranscriptWord`])
+//!   — all derive `serde::{Serialize, Deserialize}` so they can be persisted as
+//!   JSON or any serde-compatible format.
+//! * **[`assembler::BundleAssembler`]** — staged builder that collects raw
+//!   capture events and seals them into a [`Bundle`] at a command boundary.
+//! * **[`events`]** — canonical event types for the capture pipeline, with both
+//!   JSON and `bincode` serialization.
 
+pub mod assembler;
 pub mod events;
 
 use serde::{Deserialize, Serialize};

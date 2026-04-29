@@ -1,0 +1,46 @@
+{
+  "id": "00000000-0000-0000-0000-000000000003",
+  "t_start_ns": 5000000000,
+  "t_wall_unix_ms": 1700000001000,
+  "source_pane_id": 3,
+  "frames": [
+    {
+      "t_offset_ns": 0,
+      "sha": "deadbeef12345678",
+      "blob_path": "frames/00000000-0000-0000-0000-000000000003-0.png",
+      "dhash": 11111111111111,
+      "width": 1280,
+      "height": 720
+    }
+  ],
+  "audio_chunks": [
+    {
+      "t_offset_ns": 0,
+      "duration_ns": 20000000,
+      "blob_path": "audio/00000000-0000-0000-0000-000000000003-0.opus",
+      "sample_rate": 48000,
+      "channels": 2
+    }
+  ],
+  "transcript_words": [
+    {
+      "t_offset_ns": 0,
+      "t_end_ns": 500000000,
+      "text": "cargo",
+      "speaker": "user",
+      "confidence": 0.95
+    },
+    {
+      "t_offset_ns": 500000001,
+      "t_end_ns": 1000000000,
+      "text": "test",
+      "speaker": "user",
+      "confidence": 0.97
+    }
+  ],
+  "intent": "ci-check",
+  "tags": ["rust", "test", "green"],
+  "importance": 0.85,
+  "sealed": true,
+  "schema_version": 1
+}

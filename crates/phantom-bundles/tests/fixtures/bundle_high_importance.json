@@ -1,0 +1,39 @@
+{
+  "id": "00000000-0000-0000-0000-000000000005",
+  "t_start_ns": 9999999999,
+  "t_wall_unix_ms": 1700000099999,
+  "source_pane_id": 0,
+  "frames": [
+    {
+      "t_offset_ns": 0,
+      "sha": "ffffffffffffffff",
+      "blob_path": "frames/00000000-0000-0000-0000-000000000005-0.png",
+      "dhash": 0,
+      "width": 3840,
+      "height": 2160
+    }
+  ],
+  "audio_chunks": [
+    {
+      "t_offset_ns": 0,
+      "duration_ns": 5000000000,
+      "blob_path": "audio/00000000-0000-0000-0000-000000000005-0.opus",
+      "sample_rate": 44100,
+      "channels": 1
+    }
+  ],
+  "transcript_words": [
+    {
+      "t_offset_ns": 0,
+      "t_end_ns": 1000000000,
+      "text": "critical",
+      "speaker": "agent",
+      "confidence": 1.0
+    }
+  ],
+  "intent": "critical-failure",
+  "tags": ["urgent", "error", "pane-boundary"],
+  "importance": 1.0,
+  "sealed": true,
+  "schema_version": 1
+}
