@@ -22,6 +22,7 @@
 //! assert!(matches!(ev, AdapterEvent::Spawned { .. }));
 //! ```
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -51,6 +52,23 @@ impl AdapterId {
     #[inline]
     pub const fn get(self) -> u64 {
         self.0
+    }
+
+    /// Returns `true` if this is the sentinel value (`0`).
+    ///
+    /// `AdapterId(0)` is the reserved sentinel returned by
+    /// [`AppCore::adapter_id`]'s default implementation before the coordinator
+    /// calls [`Lifecycled::set_adapter_id`]. Callers that need to distinguish
+    /// "not yet assigned" from a real id should check this predicate rather
+    /// than comparing against a raw `0`.
+    ///
+    /// # Note
+    ///
+    /// Real ids start at `1` (see [`AdapterIdGen::new`]). `0` is permanently
+    /// reserved as the sentinel and is never emitted by the generator.
+    #[inline]
+    pub const fn is_sentinel(self) -> bool {
+        self.0 == 0
     }
 }
 
@@ -95,7 +113,7 @@ impl AdapterIdGen {
     ///
     /// Panics if the counter overflows `u64::MAX`. Not realistic in practice.
     pub fn next(&self) -> AdapterId {
-        let raw = self.counter.fetch_add(1, Ordering::Relaxed);
+        let raw = self.counter.fetch_add(1, Ordering::AcqRel);
         // Guard against overflow (theoretical).
         assert!(raw < u64::MAX, "AdapterId overflow");
         AdapterId::new(raw)
@@ -207,14 +225,14 @@ const MAX_STREAM_CAPACITY: usize = 1024;
 /// assert!(matches!(events[0], AdapterEvent::Spawned { .. }));
 /// ```
 pub struct EventStream {
-    buf: Vec<AdapterEvent>,
+    buf: VecDeque<AdapterEvent>,
 }
 
 impl EventStream {
     /// Create an empty stream.
     pub fn new() -> Self {
         Self {
-            buf: Vec::with_capacity(32),
+            buf: VecDeque::with_capacity(32),
         }
     }
 
@@ -222,14 +240,14 @@ impl EventStream {
     /// at capacity.
     pub fn push(&mut self, event: AdapterEvent) {
         if self.buf.len() >= MAX_STREAM_CAPACITY {
-            self.buf.remove(0);
+            self.buf.pop_front();
         }
-        self.buf.push(event);
+        self.buf.push_back(event);
     }
 
     /// Drain all queued events in FIFO order. The internal buffer is cleared.
     pub fn drain(&mut self) -> Vec<AdapterEvent> {
-        std::mem::take(&mut self.buf)
+        std::mem::take(&mut self.buf).into_iter().collect()
     }
 
     /// Number of buffered events.
@@ -343,6 +361,41 @@ mod tests {
         let a = AdapterIdGen::default();
         let b = AdapterIdGen::new();
         assert_eq!(a.next().get(), b.next().get());
+    }
+
+    /// Verify that concurrent calls to `AdapterIdGen::next()` across multiple
+    /// threads never produce duplicate ids.
+    ///
+    /// Spawns `N_THREADS` threads, each calling `next()` `IDS_PER_THREAD`
+    /// times, then asserts the union of all collected ids contains no
+    /// duplicates.
+    #[test]
+    fn id_gen_concurrent_uniqueness() {
+        use std::sync::Arc;
+
+        const N_THREADS: usize = 8;
+        const IDS_PER_THREAD: usize = 1_000;
+
+        let id_gen = Arc::new(AdapterIdGen::new());
+        let handles: Vec<_> = (0..N_THREADS)
+            .map(|_| {
+                let id_gen = Arc::clone(&id_gen);
+                std::thread::spawn(move || {
+                    (0..IDS_PER_THREAD).map(|_| id_gen.next().get()).collect::<Vec<u64>>()
+                })
+            })
+            .collect();
+
+        let all_ids: std::collections::HashSet<u64> = handles
+            .into_iter()
+            .flat_map(|h: std::thread::JoinHandle<Vec<u64>>| h.join().expect("thread panicked"))
+            .collect();
+
+        assert_eq!(
+            all_ids.len(),
+            N_THREADS * IDS_PER_THREAD,
+            "concurrent AdapterIdGen::next() produced duplicate ids",
+        );
     }
 
     // =======================================================================
