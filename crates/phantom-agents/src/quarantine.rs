@@ -979,4 +979,86 @@ mod tests {
         );
         assert!(rt.is_quarantined(agent_id), "agent must be quarantined again");
     }
+
+    // ---- Issue #168: auto-quarantine after 3 consecutive CapabilityDenied ----
+    //
+    // Security property: an agent that trips 3 consecutive CapabilityDenied
+    // events (modelled as TaintLevel::Tainted observations — the taint level
+    // the dispatch gate emits on each denial) must be automatically quarantined.
+    //
+    // One or two consecutive denials put the agent in Suspect, not Quarantined.
+    // Only the third (threshold = DEFAULT_QUARANTINE_THRESHOLD = 3) event
+    // triggers the state transition to Quarantined.
+
+    /// Three consecutive CapabilityDenied events must auto-quarantine the agent.
+    ///
+    /// Issue #168 — auto-quarantine policy: `check_and_escalate` called three
+    /// times with `TaintLevel::Tainted` (the level emitted by the dispatch gate
+    /// on a `CapabilityDenied` event) must transition the agent to
+    /// `QuarantineState::Quarantined`.  The first and second calls must leave
+    /// the agent in `Suspect`; only the third (threshold) call escalates.
+    #[test]
+    fn three_consecutive_capability_denied_auto_quarantines() {
+        let mut reg = QuarantineRegistry::new(); // default threshold = 3
+        let agent_id = 42u64;
+
+        // First denial — below threshold.
+        let escalated = reg.check_and_escalate(
+            agent_id,
+            TaintLevel::Tainted,
+            NOW,
+            "capability denied: Act not in Watcher manifest",
+        );
+        assert!(!escalated, "issue #168: 1st denial must not quarantine (below threshold)");
+        assert!(
+            matches!(
+                reg.state_of(agent_id),
+                QuarantineState::Suspect { consecutive_tainted: 1 }
+            ),
+            "after 1st denial: expected Suspect{{consecutive_tainted: 1}}, got {:?}",
+            reg.state_of(agent_id),
+        );
+
+        // Second denial — still below threshold.
+        let escalated = reg.check_and_escalate(
+            agent_id,
+            TaintLevel::Tainted,
+            NOW,
+            "capability denied: Act not in Watcher manifest",
+        );
+        assert!(!escalated, "issue #168: 2nd denial must not quarantine (below threshold)");
+        assert!(
+            matches!(
+                reg.state_of(agent_id),
+                QuarantineState::Suspect { consecutive_tainted: 2 }
+            ),
+            "after 2nd denial: expected Suspect{{consecutive_tainted: 2}}, got {:?}",
+            reg.state_of(agent_id),
+        );
+        assert!(
+            !reg.agent_is_quarantined(agent_id),
+            "issue #168: agent must not be quarantined after 2 consecutive denials"
+        );
+
+        // Third denial — threshold reached; must quarantine.
+        let escalated = reg.check_and_escalate(
+            agent_id,
+            TaintLevel::Tainted,
+            NOW,
+            "capability denied: Act not in Watcher manifest",
+        );
+        assert!(
+            escalated,
+            "issue #168: 3rd consecutive CapabilityDenied must auto-quarantine (return true)"
+        );
+        assert!(
+            reg.agent_is_quarantined(agent_id),
+            "issue #168: agent must be Quarantined after 3 consecutive CapabilityDenied events"
+        );
+        assert!(
+            reg.state_of(agent_id).is_quarantined(),
+            "issue #168: QuarantineState must be Quarantined; got {:?}",
+            reg.state_of(agent_id),
+        );
+    }
 }
