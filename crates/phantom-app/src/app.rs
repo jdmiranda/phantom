@@ -352,6 +352,13 @@ pub struct App {
     //    jobs can hold their own handle without an extra clone-of-clone.
     pub(crate) bundle_store: Option<std::sync::Arc<phantom_bundle_store::BundleStore>>,
     pub(crate) capture_state: crate::capture::CaptureState,
+
+    // -- Per-pane last-command tracking (issue #226).
+    //    Populated from `Event::CommandStarted` so that the subsequent
+    //    `Event::CommandComplete` handler in `drain_bus_to_brain` can feed
+    //    a real command string into `ParsedOutput::command` instead of the
+    //    empty string that made OODA fix/explain scoring always return 0.
+    pub(crate) pane_last_command: std::collections::HashMap<u32, String>,
 }
 
 /// An active suggestion from the AI brain.
@@ -880,6 +887,7 @@ impl App {
             bundle_store,
             capture_state: crate::capture::CaptureState::new(),
             ticket_dispatcher,
+            pane_last_command: std::collections::HashMap::new(),
         })
     }
 

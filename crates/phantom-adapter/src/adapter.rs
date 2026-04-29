@@ -55,6 +55,18 @@ pub trait AppCore: Send {
     ///
     /// The default is a no-op so existing adapters compile without changes.
     fn tick(&mut self, _dt_ms: u64) {}
+
+    /// Snapshot of the adapter's raw PTY/stdout output buffer (last ~8 KiB).
+    ///
+    /// Terminal adapters return `Some(text)` so the OODA brain can populate
+    /// `ParsedOutput::raw_output` when a `CommandComplete` event fires.
+    /// Non-terminal adapters return `None` (the default) and are silently
+    /// skipped.
+    ///
+    /// The returned string may contain ANSI escape sequences.
+    fn output_buf_snapshot(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Visual adapters that render into a rect.

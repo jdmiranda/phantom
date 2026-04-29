@@ -472,25 +472,39 @@ impl App {
         }
 
         for msg in msgs {
+            // Track the last command text per pane so CommandComplete can
+            // populate ParsedOutput::command with a real value (issue #226).
+            if let Event::CommandStarted { app_id, command } = &msg.event {
+                self.pane_last_command.insert(*app_id, command.clone());
+            }
+
             // 1) Forward into the brain (if running) as an AiEvent.
             if let Some(ref brain) = self.brain {
                 let ai_event = match &msg.event {
                     Event::TerminalOutput { bytes, .. } => {
                         Some(AiEvent::OutputChunk(format!("[{bytes} bytes]")))
                     }
-                    Event::CommandComplete { exit_code, .. } => {
-                        Some(AiEvent::CommandComplete(
-                            phantom_semantic::ParsedOutput {
-                                command: String::new(),
-                                command_type: phantom_semantic::CommandType::Unknown,
-                                exit_code: Some(*exit_code),
-                                content_type: phantom_semantic::ContentType::PlainText,
-                                errors: vec![],
-                                warnings: vec![],
-                                duration_ms: None,
-                                raw_output: String::new(),
-                            },
-                        ))
+                    Event::CommandComplete { app_id, exit_code } => {
+                        // Populate the ParsedOutput from the actual terminal
+                        // output buffer and tracked command text so the OODA
+                        // scorer's fix/explain curves have real signal to work
+                        // with (issue #226 — was always blind due to empty strings).
+                        let command = self
+                            .pane_last_command
+                            .get(app_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        let raw_output = self
+                            .coordinator
+                            .terminal_output_buf(*app_id)
+                            .unwrap_or_default();
+                        let parsed = phantom_semantic::parser::SemanticParser::parse(
+                            &command,
+                            &raw_output,
+                            "",
+                            Some(*exit_code),
+                        );
+                        Some(AiEvent::CommandComplete(parsed))
                     }
                     Event::AgentTaskComplete { agent_id, success, summary, spawn_tag } => {
                         Some(AiEvent::AgentComplete {
@@ -515,15 +529,12 @@ impl App {
                 }
             }
 
-            // 2) Route command-boundary events into the capture pipeline.
-            //    `app_id` on the event is the pane that completed a
-            //    command — it maps 1:1 to the `AppId` keyed in the capture
-            //    state map. No transcript text is carried on the bus event
-            //    itself, so `intent` is `None` here; future PTY-side
-            //    wiring (shell prompt detection) can route the actual
-            //    command text through `App::on_command_boundary`.
+            // 2) Route command-boundary events into the capture pipeline,
+            //    now passing the tracked command intent so bundle metadata
+            //    records the actual command that ran.
             if let Event::CommandComplete { app_id, .. } = &msg.event {
-                let _ = self.on_command_boundary(*app_id, None);
+                let intent = self.pane_last_command.get(app_id).cloned();
+                let _ = self.on_command_boundary(*app_id, intent);
             }
         }
     }
