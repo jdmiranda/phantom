@@ -90,21 +90,56 @@ impl Goal {
 #[derive(Debug, Clone)]
 pub struct Step {
     /// Human-readable description of what this step should do.
-    pub description: String,
+    description: String,
     /// Maximum number of agent attempts before this step is marked failed.
-    pub max_attempts: u8,
+    max_attempts: u8,
     /// Optional hint naming which tool or agent type should handle this step.
     ///
     /// Examples: `"ReadFile"`, `"RunCommand"`, `"WriteFile"`.
     /// `None` means the reconciler should use a generic `FreeForm` agent.
-    pub tool_hint: Option<String>,
+    tool_hint: Option<String>,
     /// 0-based indices of steps that must complete before this one starts.
     ///
     /// An empty vec means this step has no dependencies and can run immediately.
-    pub dependencies: Vec<usize>,
+    dependencies: Vec<usize>,
 }
 
 impl Step {
+    /// Create a new [`Step`].
+    pub fn new(
+        description: String,
+        max_attempts: u8,
+        tool_hint: Option<String>,
+        dependencies: Vec<usize>,
+    ) -> Self {
+        Self {
+            description,
+            max_attempts,
+            tool_hint,
+            dependencies,
+        }
+    }
+
+    /// The human-readable description of what this step should do.
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Maximum number of agent attempts before this step is marked failed.
+    pub fn max_attempts(&self) -> u8 {
+        self.max_attempts
+    }
+
+    /// Optional hint naming which tool or agent type should handle this step.
+    pub fn tool_hint(&self) -> Option<&str> {
+        self.tool_hint.as_deref()
+    }
+
+    /// 0-based indices of steps that must complete before this one starts.
+    pub fn dependencies(&self) -> &[usize] {
+        &self.dependencies
+    }
+
     /// Convert this [`Step`] into a [`PlanStep`] suitable for a [`TaskLedger`].
     fn into_plan_step(self) -> PlanStep {
         use phantom_agents::AgentTask;
@@ -297,12 +332,7 @@ pub fn parse_steps(response: &str) -> Vec<Step> {
             continue;
         }
 
-        steps.push(Step {
-            description,
-            max_attempts: 3,
-            tool_hint,
-            dependencies,
-        });
+        steps.push(Step::new(description, 3, tool_hint, dependencies));
     }
 
     steps
@@ -466,11 +496,11 @@ mod tests {
         let steps = parse_steps(response);
         assert_eq!(steps.len(), 3);
         assert_eq!(
-            steps[0].description,
+            steps[0].description(),
             "Run `cargo test` to identify failures"
         );
-        assert_eq!(steps[1].description, "Read the failing test file");
-        assert_eq!(steps[2].description, "Apply the fix");
+        assert_eq!(steps[1].description(), "Read the failing test file");
+        assert_eq!(steps[2].description(), "Apply the fix");
     }
 
     #[test]
@@ -478,8 +508,8 @@ mod tests {
         let response = "1. [tool: RunCommand] Run `cargo test`\n";
         let steps = parse_steps(response);
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].tool_hint.as_deref(), Some("RunCommand"));
-        assert_eq!(steps[0].description, "Run `cargo test`");
+        assert_eq!(steps[0].tool_hint(), Some("RunCommand"));
+        assert_eq!(steps[0].description(), "Run `cargo test`");
     }
 
     #[test]
@@ -487,8 +517,8 @@ mod tests {
         let response = "1. First step\n2. Second step [depends: 1]\n";
         let steps = parse_steps(response);
         assert_eq!(steps.len(), 2);
-        assert!(steps[0].dependencies.is_empty());
-        assert_eq!(steps[1].dependencies, vec![0usize]); // 1-based 1 → 0-based 0
+        assert!(steps[0].dependencies().is_empty());
+        assert_eq!(steps[1].dependencies(), &[0usize]); // 1-based 1 → 0-based 0
     }
 
     #[test]
@@ -496,7 +526,7 @@ mod tests {
         let response = "1. Step A\n2. Step B\n3. Step C [depends: 1, 2]\n";
         let steps = parse_steps(response);
         assert_eq!(steps.len(), 3);
-        assert_eq!(steps[2].dependencies, vec![0usize, 1usize]);
+        assert_eq!(steps[2].dependencies(), &[0usize, 1usize]);
     }
 
     #[test]
@@ -504,8 +534,8 @@ mod tests {
         let response = "1. [tool: ReadFile] Read the file [depends: 2]\n";
         let steps = parse_steps(response);
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].tool_hint.as_deref(), Some("ReadFile"));
-        assert_eq!(steps[0].dependencies, vec![1usize]); // 1-based 2 → 0-based 1
+        assert_eq!(steps[0].tool_hint(), Some("ReadFile"));
+        assert_eq!(steps[0].dependencies(), &[1usize]); // 1-based 2 → 0-based 1
     }
 
     #[test]
@@ -513,8 +543,8 @@ mod tests {
         let response = "Here is the plan:\n1. Step one\nSome prose\n2. Step two\n";
         let steps = parse_steps(response);
         assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].description, "Step one");
-        assert_eq!(steps[1].description, "Step two");
+        assert_eq!(steps[0].description(), "Step one");
+        assert_eq!(steps[1].description(), "Step two");
     }
 
     #[test]
@@ -534,7 +564,7 @@ mod tests {
     fn parse_steps_default_max_attempts_is_three() {
         let response = "1. Do something\n";
         let steps = parse_steps(response);
-        assert_eq!(steps[0].max_attempts, 3);
+        assert_eq!(steps[0].max_attempts(), 3);
     }
 
     // -----------------------------------------------------------------------
