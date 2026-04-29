@@ -1028,6 +1028,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::AgentFlatlined { .. } => "flatline",
         AiAction::QuarantineAgent { .. } => "quarantine_agent",
         AiAction::AgentQuarantined { .. } => "agent_quarantined",
+        AiAction::CheckpointReached { .. } => "checkpoint_reached",
         AiAction::DoNothing => "quiet",
     }
 }
