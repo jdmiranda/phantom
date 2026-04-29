@@ -8,6 +8,7 @@
 pub mod adapter;
 pub mod bus;
 pub mod lifecycle;
+pub mod protocol;
 pub mod registry;
 pub mod spatial;
 
@@ -20,6 +21,7 @@ pub use adapter::{AppId, CursorData, CursorShape, GridData, QuadData, Rect, Rend
 pub use bus::{BusMessage, DataType, EventBus, Topic, TopicDeclaration, TopicId};
 pub use phantom_protocol::Event;
 pub use lifecycle::AppState;
+pub use protocol::{AdapterId, AdapterEvent, AdapterIdGen, EventStream};
 pub use registry::{AppRegistry, RegisteredApp};
 pub use spatial::{
     Direction, InternalLayout, NegotiationResult, ResizeResult, SpatialPreference,
@@ -750,5 +752,86 @@ mod tests {
 
         // Permissioned
         assert!(!app.permissions().is_empty());
+    }
+
+    // =======================================================================
+    // Issue #17: AppCore protocol methods (title, adapter_id, tick)
+    // =======================================================================
+
+    /// `title()` default returns `app_type()`.
+    #[test]
+    fn app_core_title_default_returns_app_type() {
+        let app = MockApp::new("terminal");
+        assert_eq!(app.title(), "terminal");
+    }
+
+    /// `adapter_id()` default returns the sentinel `AdapterId::new(0)`.
+    #[test]
+    fn app_core_adapter_id_default_is_sentinel() {
+        let app = MockApp::new("terminal");
+        assert_eq!(app.adapter_id(), AdapterId::new(0));
+    }
+
+    /// `tick()` default is a no-op — must not panic.
+    #[test]
+    fn app_core_tick_default_is_noop() {
+        let mut app = MockApp::new("terminal");
+        // Should not panic for any dt_ms value.
+        app.tick(0);
+        app.tick(16);
+        app.tick(u64::MAX);
+    }
+
+    /// `set_adapter_id()` default is a no-op — must not panic.
+    #[test]
+    fn lifecycled_set_adapter_id_default_is_noop() {
+        let mut app = MockApp::new("terminal");
+        // Default implementation must not panic.
+        app.set_adapter_id(AdapterId::new(42));
+    }
+
+    // =======================================================================
+    // Issue #17: AdapterId + AdapterEvent protocol
+    // =======================================================================
+
+    /// Coordinator pattern: assign id via `set_adapter_id`, observe via stream.
+    #[test]
+    fn coordinator_assigns_adapter_id_and_emits_event() {
+        use crate::protocol::{AdapterIdGen, EventStream};
+
+        let id_gen = AdapterIdGen::new();
+        let mut stream = EventStream::new();
+
+        // Simulate coordinator registration.
+        let id = id_gen.next();
+        stream.push(AdapterEvent::Spawned { id });
+
+        let events = stream.drain();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], AdapterEvent::Spawned { id: ev_id } if ev_id == id));
+    }
+
+    /// `AdapterId` is `Copy` — can be stored in both `MockApp` and the registry
+    /// at the same time without cloning.
+    #[test]
+    fn adapter_id_is_copy_at_registration_boundary() {
+        let id = AdapterId::new(7);
+        let stored = id;     // copy #1 — coordinator stores this
+        let returned = id;   // copy #2 — adapter returns from adapter_id()
+        assert_eq!(stored, returned);
+    }
+
+    /// `AdapterEvent::adapter_id()` is consistent across all four variants.
+    #[test]
+    fn adapter_event_adapter_id_all_variants() {
+        let id = AdapterId::new(55);
+        for ev in [
+            AdapterEvent::Spawned { id },
+            AdapterEvent::Closed { id },
+            AdapterEvent::Focused { id },
+            AdapterEvent::ContentChanged { id },
+        ] {
+            assert_eq!(ev.adapter_id(), id);
+        }
     }
 }
