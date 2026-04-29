@@ -72,6 +72,7 @@ pub struct KeyEvent {
 }
 
 /// Encode a key event into the byte sequence expected by a VT100/xterm PTY.
+#[must_use]
 pub fn encode_key(event: &KeyEvent) -> Vec<u8> {
     let KeyEvent { key, mods } = event;
 
@@ -119,6 +120,7 @@ pub fn encode_key(event: &KeyEvent) -> Vec<u8> {
 }
 
 /// Encode a paste payload using bracketed paste mode.
+#[must_use]
 pub fn encode_paste(text: &str) -> Vec<u8> {
     let mut buf = Vec::with_capacity(text.len() + 12);
     buf.extend_from_slice(b"\x1b[200~");
@@ -156,6 +158,7 @@ impl MouseButton {
 ///
 /// Format: `\x1b[<{button};{col+1};{row+1}{M|m}`
 /// where M = press, m = release. Coordinates are 1-based.
+#[must_use]
 pub fn encode_mouse_sgr(button: MouseButton, col: usize, row: usize, pressed: bool) -> Vec<u8> {
     let btn = button.sgr_code();
     let suffix = if pressed { 'M' } else { 'm' };
@@ -165,6 +168,7 @@ pub fn encode_mouse_sgr(button: MouseButton, col: usize, row: usize, pressed: bo
 /// Encode a mouse motion event as SGR 1006 sequence.
 ///
 /// Motion events add 32 to the button code.
+#[must_use]
 pub fn encode_mouse_motion_sgr(button: MouseButton, col: usize, row: usize) -> Vec<u8> {
     let btn = button.sgr_code() + 32;
     format!("\x1b[<{};{};{}M", btn, col + 1, row + 1).into_bytes()
