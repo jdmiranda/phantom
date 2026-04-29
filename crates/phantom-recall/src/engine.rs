@@ -1,7 +1,7 @@
 //! Vector query execution backend for intent-anchored retrieval.
 //!
 //! Provides:
-//! * [`RecallQuery`] — structured query with text, top-k, min-score, and
+//! * [`VectorQuery`] — structured query with text, top-k, min-score, and
 //!   optional session filter.
 //! * [`RecallEngine`] — async trait that search backends implement.
 //! * [`RecallResult`] — a single retrieval hit with private fields and public
@@ -28,18 +28,18 @@ use crate::RecallError;
 /// (`u32`) without introducing a heavyweight dependency.
 pub type SessionId = u32;
 
-// ── RecallQuery ──────────────────────────────────────────────────────────────
+// ── VectorQuery ──────────────────────────────────────────────────────────────
 
 /// A structured vector retrieval query.
 #[derive(Debug, Clone)]
-pub struct RecallQuery {
+pub struct VectorQuery {
     text: String,
     top_k: usize,
     min_score: f32,
     session_filter: Option<SessionId>,
 }
 
-impl RecallQuery {
+impl VectorQuery {
     /// Create a new query.
     ///
     /// * `text` — natural-language or keyword query to embed and search.
@@ -128,7 +128,7 @@ pub trait RecallEngine: Send + Sync {
     ///
     /// Results are returned sorted by score descending. Ties (same score) are
     /// broken by insertion order (earlier entries rank higher).
-    async fn query(&self, q: RecallQuery) -> Result<Vec<RecallResult>, RecallError>;
+    async fn query(&self, q: VectorQuery) -> Result<Vec<RecallResult>, RecallError>;
 }
 
 // ── mock_embed ────────────────────────────────────────────────────────────────
@@ -276,7 +276,7 @@ impl InMemoryRecallEngine {
 
 #[async_trait]
 impl RecallEngine for InMemoryRecallEngine {
-    async fn query(&self, q: RecallQuery) -> Result<Vec<RecallResult>, RecallError> {
+    async fn query(&self, q: VectorQuery) -> Result<Vec<RecallResult>, RecallError> {
         let query_vec = mock_embed(q.text());
 
         // Score every entry, collecting (insertion_index, score, entry).
@@ -354,7 +354,7 @@ mod tests {
     #[tokio::test]
     async fn empty_corpus_returns_empty_results() {
         let engine = InMemoryRecallEngine::new();
-        let q = RecallQuery::new("anything", 10, 0.0, None);
+        let q = VectorQuery::new("anything", 10, 0.0, None);
         let results = engine.query(q).await.expect("query should not fail");
         assert!(results.is_empty(), "expected empty results, got {}", results.len());
     }
@@ -367,7 +367,7 @@ mod tests {
         // Use mock_embed so query and corpus embedding are identical → score 1.0.
         engine.add_text("hello world", None, no_meta());
 
-        let q = RecallQuery::new("hello world", 10, 0.0, None);
+        let q = VectorQuery::new("hello world", 10, 0.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text(), "hello world");
@@ -396,7 +396,7 @@ mod tests {
             );
         }
 
-        let q = RecallQuery::new("anything", 3, -1.0, None);
+        let q = VectorQuery::new("anything", 3, -1.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 3, "expected exactly 3 results due to top_k");
     }
@@ -412,7 +412,7 @@ mod tests {
         // Entry B: completely different embedding (all 0.5) → low score.
         engine.add("unrelated document", uniform_vec(0.5), None, meta("label", "B"));
 
-        let q = RecallQuery::new(query_text, 10, 0.9, None);
+        let q = VectorQuery::new(query_text, 10, 0.9, None);
         let results = engine.query(q).await.expect("query");
         // Only entry A (score ≈ 1.0) should survive the 0.9 threshold.
         assert_eq!(results.len(), 1);
@@ -429,7 +429,7 @@ mod tests {
         engine.add_text("no session doc", None, meta("session", "none"));
 
         // Filter to session 1.
-        let q = RecallQuery::new("doc", 10, 0.0, Some(1));
+        let q = VectorQuery::new("doc", 10, 0.0, Some(1));
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 1, "only session-1 entry should be returned");
         assert_eq!(results[0].metadata()["session"], "1");
@@ -444,7 +444,7 @@ mod tests {
 
         // Use min_score = -1.0 so cosine scores anywhere in [-1, 1] pass the
         // threshold — this test is about session scoping, not score filtering.
-        let q = RecallQuery::new("doc", 10, -1.0, None);
+        let q = VectorQuery::new("doc", 10, -1.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 3, "no filter should include all entries");
     }
@@ -463,7 +463,7 @@ mod tests {
         engine.add("second", uniform_vec(1.0), None, meta("rank", "1"));
         engine.add("third", uniform_vec(1.0), None, meta("rank", "2"));
 
-        let q = RecallQuery::new("query", 3, -1.0, None);
+        let q = VectorQuery::new("query", 3, -1.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].text(), "first");
@@ -485,7 +485,7 @@ mod tests {
         engine.add("beta content", mock_embed("beta"), None, meta("label", "beta"));
         engine.add("gamma content", mock_embed("gamma"), None, meta("label", "gamma"));
 
-        let q = RecallQuery::new("alpha", 10, -1.0, None);
+        let q = VectorQuery::new("alpha", 10, -1.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 3);
         // The first result should be the exact match (score = 1.0).
@@ -514,7 +514,7 @@ mod tests {
         // Identical embedding → score exactly 1.0; set min_score = 1.0.
         engine.add_text("exact match", None, no_meta());
 
-        let q = RecallQuery::new("exact match", 10, 1.0, None);
+        let q = VectorQuery::new("exact match", 10, 1.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 1, "exact min_score boundary should be inclusive");
     }
@@ -526,7 +526,7 @@ mod tests {
         let mut engine = InMemoryRecallEngine::new();
         engine.add_text("documented entry", None, meta("author", "alice"));
 
-        let q = RecallQuery::new("documented entry", 1, 0.0, None);
+        let q = VectorQuery::new("documented entry", 1, 0.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 1);
         let r = &results[0];
@@ -538,17 +538,17 @@ mod tests {
         assert_eq!(r.metadata().get("author").map(String::as_str), Some("alice"));
     }
 
-    // ── 10. RecallQuery accessors ─────────────────────────────────────────────
+    // ── 10. VectorQuery accessors ─────────────────────────────────────────────
 
     #[test]
     fn recall_query_accessors_round_trip() {
-        let q = RecallQuery::new("some text", 5, 0.3, Some(42));
+        let q = VectorQuery::new("some text", 5, 0.3, Some(42));
         assert_eq!(q.text(), "some text");
         assert_eq!(q.top_k(), 5);
         assert!((q.min_score() - 0.3).abs() < f32::EPSILON);
         assert_eq!(q.session_filter(), Some(42));
 
-        let q2 = RecallQuery::new("other", 1, 0.0, None);
+        let q2 = VectorQuery::new("other", 1, 0.0, None);
         assert_eq!(q2.session_filter(), None);
     }
 
@@ -578,7 +578,7 @@ mod tests {
         // Use min_score = -1.0 so the entry is returned regardless of cosine sign.
         engine.add("short dim entry", vec![1.0_f32; 10], None, no_meta());
 
-        let q = RecallQuery::new("query", 10, -1.0, None);
+        let q = VectorQuery::new("query", 10, -1.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 1, "short embedding should still be queried");
         // Score should be finite and in range.
@@ -593,7 +593,7 @@ mod tests {
         // Use min_score = -1.0 so the entry is returned regardless of cosine sign.
         engine.add("long dim entry", vec![0.5_f32; 1000], None, no_meta());
 
-        let q = RecallQuery::new("query", 10, -1.0, None);
+        let q = VectorQuery::new("query", 10, -1.0, None);
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 1, "long embedding should still be queried");
         assert!(results[0].score().is_finite());
