@@ -839,7 +839,7 @@ impl AgentPane {
             // `"capability denied: …"` prefix so we catch denials from both
             // `execute_tool` and `dispatch_tool` without coupling to the
             // DispatchError type.
-            self.maybe_emit_capability_denied_event(call.tool, &call.args, &result);
+            self.maybe_emit_capability_denied_event(call.tool, &call.args, &result, None);
 
             // Lars fix-thread instrumentation (Phase 2.E producer).
             //
@@ -990,6 +990,7 @@ impl AgentPane {
         tool: ToolType,
         args: &serde_json::Value,
         result: &ToolResult,
+        _source_event_id: Option<u64>,
     ) {
         // The dispatch gate's denial message is a contract: we match on the
         // exact prefix the model sees. This keeps us in sync with the
@@ -2009,7 +2010,7 @@ mod tests {
         // `execute_pending_tools`. The sink must end up with exactly one
         // SubstrateEvent of kind CapabilityDenied carrying the role,
         // class, and tool name.
-        pane.maybe_emit_capability_denied_event(ToolType::RunCommand, &args, &result);
+        pane.maybe_emit_capability_denied_event(ToolType::RunCommand, &args, &result, None);
 
         let drained = sink.lock().unwrap();
         assert_eq!(drained.len(), 1, "expected one CapabilityDenied event");
@@ -2075,7 +2076,7 @@ mod tests {
             ..phantom_agents::tools::ToolResult::default()
         };
 
-        pane.maybe_emit_capability_denied_event(ToolType::RunCommand, &args, &result);
+        pane.maybe_emit_capability_denied_event(ToolType::RunCommand, &args, &result, None);
 
         // Drop the writer to flush the non-blocking audit appender.
         drop(writer);

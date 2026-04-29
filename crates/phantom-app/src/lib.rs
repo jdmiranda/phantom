@@ -34,3 +34,4 @@ mod sysmon;
 pub mod supervisor_client;
 pub mod resources;
 mod update;
+pub mod stt;
