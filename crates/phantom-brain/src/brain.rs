@@ -14,6 +14,7 @@ use phantom_memory::MemoryStore;
 use crate::attention::Attention;
 use crate::events::{AiAction, AiEvent};
 use crate::proactive::ProactiveSuggester;
+use crate::provider_catalog::ProviderCatalog;
 use crate::router::{
     BackendKind, BrainRouter, ModelBackend, RouterConfig, TaskClassifier, TaskComplexity,
 };
@@ -80,6 +81,14 @@ pub struct BrainConfig {
     pub quiet_threshold: f32,
     /// Router configuration. If `None`, uses default (heuristic + ollama + claude).
     pub router: Option<RouterConfig>,
+    /// Provider catalog for named model-routing profiles (Issue #61).
+    ///
+    /// Each [`crate::orchestrator::PlanStep`] can declare a `preferred_provider`
+    /// ID; the dispatch layer resolves that ID against this catalog to select
+    /// the concrete backend. Unknown IDs fall back to `"claude-default"`.
+    ///
+    /// Defaults to [`ProviderCatalog::with_builtins`] when `None`.
+    pub catalog: Option<ProviderCatalog>,
 }
 
 impl Default for BrainConfig {
@@ -90,6 +99,7 @@ impl Default for BrainConfig {
             enable_memory: true,
             quiet_threshold: 0.5,
             router: None,
+            catalog: None,
         }
     }
 }
@@ -159,6 +169,11 @@ fn brain_supervised(
     let quiet_threshold = config.quiet_threshold;
     // RouterConfig is not Clone, so we consume it on the first iteration only.
     let mut router: Option<crate::router::RouterConfig> = config.router;
+    // ProviderCatalog is Clone; use the configured catalog or fall back to
+    // the default set of built-in profiles.
+    let catalog: ProviderCatalog = config
+        .catalog
+        .unwrap_or_else(ProviderCatalog::with_builtins);
 
     // Shared slot: the supervisor writes a fresh `iter_tx` here after each
     // restart; the bridge thread reads it to redirect events.
@@ -211,6 +226,8 @@ fn brain_supervised(
             enable_memory,
             quiet_threshold,
             router: router.take(), // `None` on second and subsequent restarts.
+            // Clone the catalog for each iteration — it is cheaply clonable.
+            catalog: Some(catalog.clone()),
         };
 
         // Run brain_loop under catch_unwind.
@@ -290,6 +307,10 @@ fn brain_loop(
     let mut scorer = UtilityScorer::new();
     let mut proactive = ProactiveSuggester::default_triggers();
     let mut router = BrainRouter::new(config.router.unwrap_or_default());
+    // Provider catalog: resolve named model-routing profiles for PlanStep dispatch.
+    let _catalog: ProviderCatalog = config
+        .catalog
+        .unwrap_or_else(ProviderCatalog::with_builtins);
     let mut active_ledger: Option<crate::orchestrator::TaskLedger> = None;
     let mut reconciler = crate::reconciler::ReconcilerState::new();
     let attention = Attention::new();
