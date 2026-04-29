@@ -628,6 +628,9 @@ impl App {
             AiAction::AgentFlatlined { id, reason } => {
                 info!("[PHANTOM]: Agent {id} flatlined: {reason}");
             }
+            AiAction::Suggest { action, rationale, confidence } => {
+                info!("[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}");
+            }
             AiAction::DoNothing => {}
         }
     }
