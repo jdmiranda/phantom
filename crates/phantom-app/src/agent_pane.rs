@@ -249,6 +249,10 @@ pub(crate) struct AgentPane {
     /// shutdown and persists the snapshots via [`phantom_session::AgentStateFile`].
     /// `None` for legacy/test callers that do not have a wired App.
     snapshot_sink: Option<AgentSnapshotQueue>,
+    /// Capability class of the last failing tool call.  Used to populate the
+    /// `suggested_capability` field of `AgentBlocked` events so the Fixer can
+    /// request the correct class instead of hardcoding `"Sense"`.
+    last_failing_capability: Option<CapabilityClass>,
     /// Shared registry handle used by chat-tool dispatch (`send_to_agent`,
     /// `broadcast_to_role`, `request_critique`). Cloned from the runtime at
     /// spawn time so dispatch contexts can read/write the same directory the
@@ -337,6 +341,7 @@ impl AgentPane {
             denied_event_sink: None,
             last_tool_error: None,
             snapshot_sink: None,
+            last_failing_capability: None,
             ticket_dispatcher: None,
             journal: None,
         }
@@ -536,6 +541,7 @@ impl AgentPane {
             denied_event_sink,
             last_tool_error: None,
             snapshot_sink: None,
+            last_failing_capability: None,
             registry: None,
             event_log: None,
             pending_spawn: None,
@@ -893,6 +899,7 @@ impl AgentPane {
             if result.success {
                 self.consecutive_tool_failures = 0;
                 self.last_tool_error = None;
+                self.last_failing_capability = None;
             } else {
                 self.consecutive_tool_failures =
                     self.consecutive_tool_failures.saturating_add(1);
@@ -900,6 +907,7 @@ impl AgentPane {
                 // doesn't drag a multi-KB tool error into the spawn payload.
                 let excerpt: String = result.output.chars().take(160).collect();
                 self.last_tool_error = Some(excerpt);
+                self.last_failing_capability = Some(call.tool.capability_class());
             }
 
             // Push structured semantic output into the agent's ring-buffer so
@@ -954,6 +962,7 @@ impl AgentPane {
             // a fresh failure starts a fresh count.
             self.consecutive_tool_failures = 0;
             self.last_tool_error = None;
+            self.last_failing_capability = None;
             return;
         };
 
@@ -973,24 +982,31 @@ impl AgentPane {
             self.output.clone()
         };
 
+        // Use the actual role and the capability class of the last failing
+        // tool so the Fixer knows which permission to request.
+        let role_label = self.role.label();
+        let suggested_cap = self
+            .last_failing_capability
+            .map(class_label)
+            .unwrap_or("Sense");
+
         let payload = build_blocked_payload(
             self.agent.id as u64,
-            "Conversational",
+            role_label,
             &reason,
             now_unix_ms(),
             &context_excerpt,
-            "Sense",
+            suggested_cap,
         );
 
+        let role = self.role;
         let event = SubstrateEvent {
             kind: EventKind::AgentBlocked {
                 agent_id: self.agent.id as u64,
                 reason: reason.clone(),
             },
             payload,
-            source: EventSource::Agent {
-                role: phantom_agents::role::AgentRole::Conversational,
-            },
+            source: EventSource::Agent { role },
         };
 
         if let Ok(mut q) = sink.lock() {
@@ -1001,6 +1017,7 @@ impl AgentPane {
 
         self.consecutive_tool_failures = 0;
         self.last_tool_error = None;
+        self.last_failing_capability = None;
     }
 
     /// Emit an [`EventKind::CapabilityDenied`] substrate event whenever the
@@ -1152,10 +1169,14 @@ impl AgentPane {
         if success {
             self.consecutive_tool_failures = 0;
             self.last_tool_error = None;
+            self.last_failing_capability = None;
         } else {
             self.consecutive_tool_failures =
                 self.consecutive_tool_failures.saturating_add(1);
             self.last_tool_error = Some(error_excerpt.to_string());
+            // Tests that only exercise the streak logic (not capability routing)
+            // leave `last_failing_capability` unset — `maybe_emit_blocked_event`
+            // will fall back to `"Sense"` which is acceptable for those tests.
         }
         self.maybe_emit_blocked_event();
     }
@@ -1578,6 +1599,7 @@ mod tests {
             denied_event_sink: None,
             last_tool_error: None,
             snapshot_sink: None,
+            last_failing_capability: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -1670,6 +1692,7 @@ mod tests {
             denied_event_sink: None,
             last_tool_error: None,
             snapshot_sink: None,
+            last_failing_capability: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -2303,6 +2326,61 @@ mod tests {
             ctx.ticket_dispatcher.is_none(),
             "DispatchContext for a non-Dispatcher-role pane must have \
              ticket_dispatcher = None regardless of what was set on the pane"
+        );
+    }
+
+    // ---- #230: AgentBlocked payload reflects actual role and capability ----
+
+    /// A `Defender`-role pane whose last failing tool was `RunCommand` (Act)
+    /// must produce an `AgentBlocked` payload with `agent_role = "Defender"`
+    /// and `suggested_capability = "Act"` — not the old hardcoded
+    /// `"Conversational"` / `"Sense"` strings.
+    #[test]
+    fn blocked_payload_reflects_actual_role_and_capability() {
+        let (mut pane, _tx) = agent_with_handle();
+        pane.set_role_for_test(AgentRole::Defender);
+        let sink = new_blocked_event_sink();
+        pane.set_blocked_event_sink_for_test(sink.clone());
+
+        // Simulate two consecutive failures where the denied tool is RunCommand
+        // (capability class = Act). We wire `last_failing_capability` directly
+        // via the production field path: set it before calling the test helper
+        // so `maybe_emit_blocked_event` sees the correct class.
+        pane.consecutive_tool_failures = 1;
+        pane.last_tool_error = Some("run_command denied".into());
+        pane.last_failing_capability = Some(phantom_agents::role::CapabilityClass::Act);
+        // Second failure crosses the threshold.
+        pane.consecutive_tool_failures = 2;
+        pane.maybe_emit_blocked_event();
+
+        let drained = sink.lock().unwrap();
+        assert_eq!(drained.len(), 1, "expected exactly one AgentBlocked event");
+
+        let ev = &drained[0];
+
+        // The source must attribute the event to the Defender role, not Conversational.
+        match ev.source {
+            phantom_agents::spawn_rules::EventSource::Agent { role } => {
+                assert_eq!(
+                    role,
+                    AgentRole::Defender,
+                    "source role must be Defender, not Conversational"
+                );
+            }
+            other => panic!("expected EventSource::Agent, got {other:?}"),
+        }
+
+        // The payload must carry the actual role and capability strings.
+        let payload = &ev.payload;
+        assert_eq!(
+            payload.get("agent_role").and_then(|v| v.as_str()),
+            Some("Defender"),
+            "payload agent_role must be 'Defender', not hardcoded 'Conversational'",
+        );
+        assert_eq!(
+            payload.get("suggested_capability").and_then(|v| v.as_str()),
+            Some("Act"),
+            "payload suggested_capability must be 'Act' (RunCommand class), not hardcoded 'Sense'",
         );
     }
 }
