@@ -272,12 +272,26 @@ impl AgentStateFile {
 
     // -- I/O -----------------------------------------------------------------
 
-    /// Write this file to `path`.
+    /// Write this file to `path` atomically (write temp file, then rename).
     pub fn save(&self, path: &Path) -> Result<()> {
         let json =
             serde_json::to_string_pretty(self).context("failed to serialize agent state")?;
-        fs::write(path, json)
-            .with_context(|| format!("failed to write agent state: {}", path.display()))
+
+        // Atomic write: temp file in same directory, then rename.
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let tmp = parent.join(format!(
+            ".agents_tmp_{}.json",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        fs::write(&tmp, &json)
+            .with_context(|| format!("failed to write agent state temp: {}", tmp.display()))?;
+
+        fs::rename(&tmp, path)
+            .with_context(|| format!("failed to rename agent state to: {}", path.display()))
     }
 
     /// Load from `path`, returning `None` if the file does not exist.
@@ -612,6 +626,29 @@ mod tests {
         assert_eq!(loaded.agent_count(), 2);
         assert_eq!(loaded.agents()[0].id(), 1);
         assert_eq!(loaded.agents()[1].id(), 2);
+    }
+
+    #[test]
+    fn atomic_write_creates_no_temp_file_after_success() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("agents.json");
+        let agent = free_agent(1, "atomic test");
+        let file = AgentStateFile::new(vec![AgentSnapshot::from_agent(&agent)]);
+        file.save(&path).unwrap();
+
+        // The final file must exist.
+        assert!(path.exists());
+        // No `.agents_tmp_*.json` should remain.
+        let temps: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(".agents_tmp_"))
+            })
+            .collect();
+        assert!(temps.is_empty(), "temp files must be cleaned up");
     }
 
     #[test]
