@@ -1529,7 +1529,7 @@ mod tests {
             // Remove must free that node — tree must shrink back to baseline.
             coord.remove_adapter(id, &mut layout, &mut scene);
 
-            let after = layout.total_node_count();
+            let after = layout.pane_count();
             assert_eq!(
                 after,
                 baseline,

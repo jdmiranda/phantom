@@ -366,6 +366,32 @@ pub mod testing {
     pub fn open_at(root: &Path, master: MasterKey) -> Result<BundleStore, StoreError> {
         BundleStore::open(StoreConfig { root: root.to_path_buf(), master_key: master })
     }
+
+    /// Run [`recovery::sweep_leaked_rows`] against the SQLite database at
+    /// `db_path` (keyed by `master`) and a caller-supplied in-memory vector
+    /// index. Intended for integration tests that need to exercise the sweep
+    /// path without going through a full `BundleStore::open`.
+    pub fn run_sweep(
+        db_path: &std::path::Path,
+        master: &MasterKey,
+        vectors: &InMemoryVectorIndex,
+    ) -> Result<usize, StoreError> {
+        let conn = sqlite::Connection::open_encrypted(db_path, master.bytes())?;
+        recovery::sweep_leaked_rows(&conn, vectors)
+    }
+
+    /// Inject a row into the `leaked_rows` scratchpad table. Used by tests to
+    /// simulate the state after a process crash between the vector and SQLite
+    /// write phases.
+    pub fn inject_leaked_row(
+        db_path: &std::path::Path,
+        master: &MasterKey,
+        bundle_id: BundleId,
+        modality: &str,
+    ) -> Result<(), StoreError> {
+        let conn = sqlite::Connection::open_encrypted(db_path, master.bytes())?;
+        sqlite::record_leaked_row(&conn, bundle_id, modality)
+    }
 }
 
 // ---------------------------------------------------------------------------

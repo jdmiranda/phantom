@@ -120,6 +120,12 @@ impl PhantomConfig {
                             config.shader_overrides.noise_intensity = Some(v);
                         }
                     }
+                    "skip_boot" => {
+                        config.skip_boot = matches!(value, "true" | "1" | "yes");
+                    }
+                    "demo_mode" => {
+                        config.demo_mode = matches!(value, "true" | "1" | "yes");
+                    }
                     _ => {
                         warn!("Unknown config key: {key}");
                     }
@@ -204,4 +210,63 @@ font_size = 14.0
 # curvature = 0.06
 # vignette_intensity = 0.20
 # noise_intensity = 0.02
+
+# Boot animation (also auto-skipped on session restore)
+# skip_boot = false
 "#;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_skip_boot_is_false() {
+        let config = PhantomConfig::default();
+        assert!(!config.skip_boot, "cold-launch default must not skip boot");
+    }
+
+    #[test]
+    fn parse_skip_boot_true() {
+        let config = PhantomConfig::parse("skip_boot = true").unwrap();
+        assert!(config.skip_boot);
+    }
+
+    #[test]
+    fn parse_skip_boot_one() {
+        let config = PhantomConfig::parse("skip_boot = 1").unwrap();
+        assert!(config.skip_boot);
+    }
+
+    #[test]
+    fn parse_skip_boot_false() {
+        let config = PhantomConfig::parse("skip_boot = false").unwrap();
+        assert!(!config.skip_boot);
+    }
+
+    #[test]
+    fn parse_empty_config_yields_defaults() {
+        let config = PhantomConfig::parse("").unwrap();
+        assert!(!config.skip_boot);
+        assert!(!config.demo_mode);
+        assert_eq!(config.theme_name, "phosphor");
+    }
+
+    #[test]
+    fn parse_ignores_comments_and_blank_lines() {
+        let toml = "# This is a comment\n\nskip_boot = true\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert!(config.skip_boot);
+    }
+
+    #[test]
+    fn parse_theme_and_font_size() {
+        let toml = "theme = \"amber\"\nfont_size = 16.0\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.theme_name, "amber");
+        assert!((config.font_size - 16.0).abs() < f32::EPSILON);
+    }
+}
