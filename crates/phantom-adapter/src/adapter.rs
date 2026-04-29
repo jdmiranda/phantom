@@ -6,6 +6,7 @@
 
 use crate::bus::{BusMessage, TopicDeclaration};
 use crate::lifecycle::AppState;
+use crate::protocol::AdapterId;
 use crate::spatial::{NegotiationResult, SpatialPreference};
 
 /// Opaque app identifier assigned by the registry.
@@ -28,6 +29,32 @@ pub trait AppCore: Send {
 
     /// Current state as structured JSON (the AI brain reads this).
     fn get_state(&self) -> serde_json::Value;
+
+    /// Human-readable title for the pane chrome (e.g. tab label, window title).
+    ///
+    /// The default implementation returns the `app_type()` string so existing
+    /// adapters do not need to implement this immediately.
+    fn title(&self) -> &str {
+        self.app_type()
+    }
+
+    /// The stable [`AdapterId`] for this adapter instance.
+    ///
+    /// The coordinator calls [`Lifecycled::set_adapter_id`] immediately after
+    /// registration; the default returns [`AdapterId::new(0)`] (sentinel) until
+    /// the adapter stores the assigned id.
+    fn adapter_id(&self) -> AdapterId {
+        AdapterId::new(0)
+    }
+
+    /// Fine-grained time update called by the frame loop.
+    ///
+    /// `dt_ms` is the elapsed time in milliseconds since the previous tick.
+    /// Unlike `update(dt_f32)`, this tick uses integer milliseconds so
+    /// animation state machines can use cheap integer arithmetic.
+    ///
+    /// The default is a no-op so existing adapters compile without changes.
+    fn tick(&mut self, _dt_ms: u64) {}
 }
 
 /// Visual adapters that render into a rect.
@@ -118,6 +145,13 @@ pub trait Lifecycled {
     /// the adapter of its assigned AppId. Override to store the ID for
     /// use in outbox messages.
     fn set_app_id(&mut self, _id: AppId) {}
+
+    /// Called by the coordinator immediately after registration to inform
+    /// the adapter of its stable [`AdapterId`].
+    ///
+    /// Adapters that want to expose `adapter_id()` from [`AppCore`] should
+    /// store this value and return it from that method.
+    fn set_adapter_id(&mut self, _id: AdapterId) {}
 }
 
 /// Permission declarations (WASM sandbox boundary).
