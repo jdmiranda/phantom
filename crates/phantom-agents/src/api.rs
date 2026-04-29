@@ -839,6 +839,126 @@ mod tests {
         assert!(matches!(&events[0], ApiEvent::Error(msg) if msg.contains("content")));
     }
 
+    // -- Issue #185: malformed Claude API responses must not panic ------------
+
+    /// A `tool_use` block whose `input` field is a bare JSON string (not an
+    /// object) must not panic. The agent must recover and emit at least one
+    /// event rather than crashing.
+    #[test]
+    fn parse_response_tool_use_bare_string_input_does_not_panic() {
+        let response = serde_json::json!({
+            "id": "msg_bad_input",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_bad",
+                    "name": "read_file",
+                    "input": "not_an_object"
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 5}
+        });
+
+        let (tx, rx) = mpsc::channel();
+        // Must not panic.
+        parse_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        // At minimum one event must be emitted (error or tool use).
+        assert!(!events.is_empty(), "parse_response must emit at least one event");
+    }
+
+    /// A `tool_use` block with `input: null` must not panic.
+    #[test]
+    fn parse_response_tool_use_null_input_does_not_panic() {
+        let response = serde_json::json!({
+            "id": "msg_null_input",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_null",
+                    "name": "read_file",
+                    "input": null
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 5}
+        });
+
+        let (tx, rx) = mpsc::channel();
+        parse_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(!events.is_empty(), "parse_response must emit at least one event");
+    }
+
+    /// When the `content` field is a JSON string instead of an array, the parser
+    /// must emit an `Error` event and not panic.
+    #[test]
+    fn parse_response_content_not_array_emits_error_not_panic() {
+        let response = serde_json::json!({
+            "id": "msg_str_content",
+            "type": "message",
+            "role": "assistant",
+            "content": "this should be an array",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 5}
+        });
+
+        let (tx, rx) = mpsc::channel();
+        parse_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ApiEvent::Error(_)),
+            "content-not-array must produce an Error event, got: {events:?}"
+        );
+    }
+
+    /// A `content` array containing non-object entries (numbers, booleans,
+    /// strings) must be skipped gracefully — no panic.
+    #[test]
+    fn parse_response_content_array_non_object_entries_no_panic() {
+        let response = serde_json::json!({
+            "id": "msg_garbage_content",
+            "type": "message",
+            "role": "assistant",
+            "content": [42, "hello", true, null],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 5}
+        });
+
+        let (tx, rx) = mpsc::channel();
+        // Must not panic — non-object entries are silently skipped.
+        parse_response(&response, &tx);
+        let _events: Vec<_> = rx.try_iter().collect();
+        // No assertion on content — just verifying no panic occurred.
+    }
+
+    /// An empty `content` array must emit `Done` without panicking.
+    #[test]
+    fn parse_response_empty_content_array_emits_done_not_panic() {
+        let response = serde_json::json!({
+            "id": "msg_empty_content",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 0}
+        });
+
+        let (tx, rx) = mpsc::channel();
+        parse_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Done)),
+            "empty content must still emit Done, got: {events:?}"
+        );
+    }
+
     // -- ApiHandle ----------------------------------------------------------
 
     #[test]
