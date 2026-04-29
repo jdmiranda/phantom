@@ -56,7 +56,9 @@ pub struct ReconcilerState {
     active_dispatches: HashMap<usize, (AgentId, Instant)>,
     /// Monotonically increasing agent ID namespace for reconciler-dispatched
     /// agents. Starts high to avoid collision with AgentManager's IDs.
-    next_agent_id: AgentId,
+    /// Stored as `u64` so the counter never wraps; narrowed to `AgentId`
+    /// (`u32`) via `u32::try_from(...).unwrap_or(u32::MAX)` at dispatch time.
+    next_agent_id: u64,
     /// Configurable stall timeout (overrideable in tests).
     pub stall_timeout: Duration,
 }
@@ -65,7 +67,7 @@ impl ReconcilerState {
     pub fn new() -> Self {
         Self {
             active_dispatches: HashMap::new(),
-            next_agent_id: 10_000,
+            next_agent_id: 10_000_u64,
             stall_timeout: DEFAULT_STALL_TIMEOUT,
         }
     }
@@ -227,16 +229,17 @@ impl ReconcilerState {
         for (idx, task, description) in eligible {
             let agent_id = self.next_agent_id;
             self.next_agent_id += 1;
+            let agent_id_u32 = u32::try_from(agent_id).unwrap_or(u32::MAX);
 
             // Advance step to Active before emitting SpawnAgent so that a
             // synchronous ledger inspection sees the correct state.
             if let Some(s) = ledger.plan.get_mut(idx) {
                 s.status = StepStatus::Active;
-                s.agent_id = Some(agent_id as u32);
+                s.agent_id = Some(agent_id_u32);
                 s.attempts += 1;
             }
 
-            self.active_dispatches.insert(idx, (agent_id, Instant::now()));
+            self.active_dispatches.insert(idx, (agent_id_u32, Instant::now()));
 
             log::info!(
                 "Reconciler: dispatching step {idx} (agent_id={agent_id}) — {description}"
@@ -244,7 +247,7 @@ impl ReconcilerState {
 
             let _ = action_tx.send(AiAction::SpawnAgent {
                 task,
-                spawn_tag: Some(agent_id as u64),
+                spawn_tag: Some(agent_id),
             });
         }
     }
@@ -797,6 +800,50 @@ mod tests {
         state.tick(&mut ledger, &tx);
         assert!(rx.try_recv().is_err(), "must not re-dispatch an Active step");
         assert_eq!(state.active_dispatches.len(), 1, "dispatch count must not grow");
+    }
+
+    // -- Issue #272: agent_id u64 → u32 saturating cast ---------------------------
+
+    /// When `next_agent_id` is at `u32::MAX as u64 + 1` (i.e. it has overflowed
+    /// the u32 range), `dispatch_pending` must saturate to `u32::MAX` in
+    /// `active_dispatches` rather than silently truncating to 0.
+    ///
+    /// The `spawn_tag` on the emitted `SpawnAgent` action carries the full u64
+    /// value so `on_agent_complete` can still match the step correctly via
+    /// exact tag comparison.
+    #[test]
+    fn dispatch_pending_agent_id_near_u32_max_uses_saturation() {
+        let (tx, rx) = mpsc::channel();
+        // Set next_agent_id just above u32::MAX so the first dispatch overflows.
+        let mut state = ReconcilerState {
+            next_agent_id: u32::MAX as u64 + 1,
+            ..ReconcilerState::new()
+        };
+        let mut ledger = make_ledger(&["overflow step"]);
+
+        state.tick(&mut ledger, &tx);
+
+        // Must have emitted a SpawnAgent.
+        let action = rx.try_recv().expect("expected SpawnAgent action");
+        let AiAction::SpawnAgent { spawn_tag, .. } = action else {
+            panic!("expected SpawnAgent variant");
+        };
+
+        // spawn_tag carries the full u64 value (u32::MAX + 1).
+        let tag = spawn_tag.expect("spawn_tag must be Some");
+        assert_eq!(tag, u32::MAX as u64 + 1, "spawn_tag must be the raw u64 counter value");
+
+        // The stored AgentId in active_dispatches must be u32::MAX (saturated), not 0.
+        let &(stored_id, _) = state
+            .active_dispatches
+            .values()
+            .next()
+            .expect("active_dispatches must have one entry");
+        assert_eq!(
+            stored_id,
+            u32::MAX,
+            "active_dispatches must store u32::MAX (saturated), not 0 (truncated)"
+        );
     }
 
 }
