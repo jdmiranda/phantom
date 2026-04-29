@@ -539,9 +539,9 @@ pub trait CurriculumHook: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ProgressiveCurriculum {
     /// Minimum success rate `[0.0, 1.0]` required to advance.
-    pub threshold: f64,
+    threshold: f64,
     /// Number of most-recent outcomes to consider.
-    pub window: usize,
+    window: usize,
 }
 
 impl ProgressiveCurriculum {
