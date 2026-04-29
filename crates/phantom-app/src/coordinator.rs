@@ -1499,7 +1499,11 @@ mod tests {
     ///          (chrome nodes only: root, tab_bar, content, status_bar = 4).
     /// Act:     register an adapter (creates 1 pane node) then immediately
     ///          remove it (must free that pane node) — repeat 1 000 times.
-    /// Assert:  after every removal the total node count equals the baseline.
+    /// Assert:  after every removal the total node count equals the baseline,
+    ///          measured via `total_node_count()` (full Taffy tree) rather
+    ///          than `pane_count()` (direct children of content only) so that
+    ///          orphaned grandchild nodes from nested-split scenarios are also
+    ///          caught.
     #[test]
     fn taffy_node_count_stable_across_spawn_close_cycles() {
         let mut coord = AppCoordinator::new_test(EventBus::new());
@@ -1508,6 +1512,8 @@ mod tests {
         let content = scene.add_node(scene.root(), NodeKind::ContentArea);
 
         // Baseline: chrome nodes only (root + tab_bar + content + status_bar).
+        // Using total_node_count() rather than pane_count() so that orphaned
+        // grandchild nodes from nested splits are captured in the assertion.
         let baseline = layout.total_node_count();
 
         for cycle in 0..1_000 {
@@ -1530,5 +1536,87 @@ mod tests {
                 "cycle {cycle}: Taffy node count leaked — expected {baseline}, got {after}",
             );
         }
+    }
+
+    /// Nested splits at the coordinator level must not leak grandchild nodes.
+    ///
+    /// Arrange:
+    ///   1. Register adapter A → layout pane P_A.
+    ///   2. Register adapter B → layout pane P_B.
+    ///   3. Split P_A horizontally to create two leaves (P_A_L, P_A_R).
+    ///      Remap adapter A to P_A_L; wire a third adapter C to P_A_R.
+    ///   4. Split P_A_L vertically → (P_A_T, P_A_B). Remap A to P_A_T,
+    ///      wire a fourth adapter D to P_A_B.
+    ///
+    /// Tree (content children): [P_A(container→[P_A_L(container→[P_A_T, P_A_B]), P_A_R]), P_B]
+    ///   Total leaves: A(P_A_T), D(P_A_B), C(P_A_R), B(P_B) = 4 adapters
+    ///
+    /// Act: remove all four adapters via `remove_adapter`.
+    ///
+    /// Assert: `total_node_count()` returns to the chrome-only baseline.
+    ///   `pane_count()` would return 0 (content has no direct children) but
+    ///   would miss the two orphaned container nodes P_A and P_A_L. Using
+    ///   `total_node_count()` catches those leaks.
+    #[test]
+    fn taffy_node_count_stable_after_nested_split_spawn_close() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content_node = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Chrome-only baseline.
+        let chrome_baseline = layout.total_node_count();
+
+        // Register adapter A (gets pane P_A) and adapter B (gets pane P_B).
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content_node, "A");
+        let id_b = register_mock(&mut coord, &mut layout, &mut scene, content_node, "B");
+
+        let p_a = coord.pane_id_for(id_a).unwrap();
+
+        // Split P_A horizontally: P_A becomes a container, P_A_L and P_A_R are leaves.
+        let (p_a_l, p_a_r) = layout.split_horizontal(p_a).unwrap();
+
+        // Remap adapter A from P_A (now a container) to P_A_L.
+        coord.remap_pane(id_a, p_a, p_a_l);
+
+        // Register adapter C at P_A_R directly (pane already exists in layout).
+        let scene_node_c = scene.add_node(content_node, NodeKind::Pane);
+        let id_c = coord.register_adapter_at_pane(
+            Box::new(MockAdapter::new("C")),
+            p_a_r,
+            scene_node_c,
+            Cadence::unlimited(),
+        );
+
+        // Split P_A_L vertically: P_A_L becomes a container, P_A_T and P_A_B are leaves.
+        let (p_a_t, p_a_b) = layout.split_vertical(p_a_l).unwrap();
+
+        // Remap adapter A from P_A_L to P_A_T.
+        coord.remap_pane(id_a, p_a_l, p_a_t);
+
+        // Register adapter D at P_A_B directly.
+        let scene_node_d = scene.add_node(content_node, NodeKind::Pane);
+        let id_d = coord.register_adapter_at_pane(
+            Box::new(MockAdapter::new("D")),
+            p_a_b,
+            scene_node_d,
+            Cadence::unlimited(),
+        );
+
+        layout.resize(800.0, 600.0).unwrap();
+
+        // Remove all four adapters. Each `remove_adapter` call invokes
+        // `layout.remove_pane` which must prune now-empty container ancestors.
+        coord.remove_adapter(id_a, &mut layout, &mut scene); // removes P_A_T
+        coord.remove_adapter(id_d, &mut layout, &mut scene); // removes P_A_B → P_A_L container pruned
+        coord.remove_adapter(id_c, &mut layout, &mut scene); // removes P_A_R → P_A container pruned
+        coord.remove_adapter(id_b, &mut layout, &mut scene); // removes P_B
+
+        let after = layout.total_node_count();
+        assert_eq!(
+            after,
+            chrome_baseline,
+            "nested-split coordinator scenario leaked nodes: expected {chrome_baseline}, got {after}",
+        );
     }
 }

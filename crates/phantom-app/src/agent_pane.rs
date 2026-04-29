@@ -539,7 +539,6 @@ impl AgentPane {
             registry,
             event_log: self.event_log.clone(),
             pending_spawn,
-            source_event_id: None,
         })
     }
 

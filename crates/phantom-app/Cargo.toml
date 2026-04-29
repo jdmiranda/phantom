@@ -52,6 +52,7 @@ phantom-profile = []
 [dev-dependencies]
 png = "0.17"
 tempfile = "3"
+phantom-ui = { path = "../phantom-ui", features = ["test-utils"] }
 
 [lints]
 workspace = true

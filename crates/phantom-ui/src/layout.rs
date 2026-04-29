@@ -187,7 +187,7 @@ impl LayoutEngine {
 
         // Prune empty non-chrome ancestors (split containers left behind
         // when both halves of a split have been closed).
-        self.prune_empty_containers(parent_before);
+        self.prune_empty_containers(parent_before)?;
 
         Ok(())
     }
@@ -245,6 +245,7 @@ impl LayoutEngine {
     /// This includes the fixed chrome nodes (root, tab bar, content area,
     /// status bar) as well as all live pane nodes. Use this to assert that
     /// spawn-close cycles do not permanently grow the tree.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn total_node_count(&self) -> usize {
         self.tree.total_node_count()
     }
@@ -318,7 +319,7 @@ impl LayoutEngine {
     ///
     /// Chrome nodes (root, tab_bar, content, status_bar) are never pruned —
     /// they must remain even when empty to preserve the chrome structure.
-    fn prune_empty_containers(&mut self, start: Option<NodeId>) {
+    fn prune_empty_containers(&mut self, start: Option<NodeId>) -> Result<()> {
         let chrome = [self.root, self.tab_bar, self.content, self.status_bar];
         let mut cursor = start;
         while let Some(node) = cursor {
@@ -332,12 +333,12 @@ impl LayoutEngine {
             }
             // Record the grandparent before removing so we can continue upward.
             let grandparent = self.tree.parent(node);
-            if let Err(e) = self.tree.remove(node) {
-                log::warn!("prune_empty_containers: failed to remove orphaned container: {e}");
-                break;
-            }
+            self.tree
+                .remove(node)
+                .map_err(|e| anyhow::anyhow!("prune_empty_containers: failed to remove orphaned container: {e}"))?;
             cursor = grandparent;
         }
+        Ok(())
     }
 
     /// Compute the absolute pixel rectangle for a node by walking up the
@@ -550,5 +551,65 @@ mod tests {
                 "cycle {cycle}: node count grew from {baseline} to {after}",
             );
         }
+    }
+
+    /// Nested splits (split a leaf that is itself a split child) must not leak
+    /// intermediate container nodes when all three leaves are closed.
+    ///
+    /// Arrange:
+    ///   1. `add_pane` → 1 leaf (A)
+    ///   2. `split_horizontal(A)` → container A promoted, leaves L and R
+    ///   3. `split_vertical(L)` → L promoted to container, leaves T and B
+    ///   Result: 3 leaves (T, B, R) and 2 container nodes (A, L)
+    ///
+    /// Act: close all three leaves (T, B, R).
+    ///
+    /// Assert: `total_node_count()` returns to the chrome-only baseline.
+    ///   `prune_empty_containers` must walk the full ancestor chain — after
+    ///   removing T the inner container (L) becomes empty and must be pruned,
+    ///   which then makes the outer container (A) empty so it too must be
+    ///   pruned. A single-level walk would miss the second prune step.
+    #[test]
+    fn taffy_node_count_stable_after_nested_split_then_close_all() {
+        let mut engine = LayoutEngine::new().unwrap();
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+
+        // Baseline: chrome nodes only (root + tab_bar + content + status_bar = 4).
+        let chrome_baseline = engine.total_node_count();
+
+        // Step 1: single leaf A added to the content area.
+        let a = engine.add_pane().unwrap();
+
+        // Step 2: split A horizontally → A becomes a row container, L and R are leaves.
+        let (l, r) = engine.split_horizontal(a).unwrap();
+
+        // Step 3: split L vertically → L becomes a column container, T and B are leaves.
+        // Tree is now: content → [A(container) → [L(container) → [T, B], R]]
+        let (t, b) = engine.split_vertical(l).unwrap();
+
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+
+        // All three leaves must have positive area.
+        assert!(engine.get_pane_rect(t).unwrap().height > 0.0, "T must have positive height");
+        assert!(engine.get_pane_rect(b).unwrap().height > 0.0, "B must have positive height");
+        assert!(engine.get_pane_rect(r).unwrap().width > 0.0, "R must have positive width");
+
+        // Close T: L still has B, nothing pruned yet.
+        engine.remove_pane(t).unwrap();
+
+        // Close B: L is now empty → L is pruned; A still has R, not pruned.
+        engine.remove_pane(b).unwrap();
+
+        // Close R: A is now empty → A is pruned; content is a chrome node, stop.
+        engine.remove_pane(r).unwrap();
+
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+
+        let after = engine.total_node_count();
+        assert_eq!(
+            after,
+            chrome_baseline,
+            "nested split leaked container nodes: expected {chrome_baseline} nodes, got {after}",
+        );
     }
 }

@@ -11,5 +11,10 @@ taffy.workspace = true
 log.workspace = true
 anyhow.workspace = true
 
+[features]
+## Exposes test-only helpers (e.g. `LayoutEngine::total_node_count`) for
+## integration tests in downstream crates.  Never enable in production builds.
+test-utils = []
+
 [lints]
 workspace = true
