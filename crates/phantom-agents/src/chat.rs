@@ -458,10 +458,17 @@ fn build_openai_request_body(
 fn build_openai_messages(agent: &Agent, tool_use_ids: &[String]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
 
-    // Lead with a system message.
+    // Lead with a system message. Append the semantic context section when
+    // the agent's ring-buffer is non-empty so the model sees structured
+    // command history on continuation turns.
+    let mut system_content = agent.system_prompt();
+    if let Some(semantic_section) = agent.semantic_prompt_section() {
+        system_content.push_str("\n\n");
+        system_content.push_str(&semantic_section);
+    }
     out.push(serde_json::json!({
         "role": "system",
-        "content": agent.system_prompt(),
+        "content": system_content,
     }));
 
     // Both tool calls and tool results share the same positional ID pool.

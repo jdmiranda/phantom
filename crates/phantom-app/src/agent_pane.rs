@@ -853,6 +853,14 @@ impl AgentPane {
                 self.last_tool_error = Some(excerpt);
             }
 
+            // Push structured semantic output into the agent's ring-buffer so
+            // the model can reason about structured command results on the next
+            // turn. Only `RunCommand` results carry a `semantic_output`; all
+            // other tool types leave it `None`.
+            if let Some(ref parsed) = result.semantic_output {
+                self.agent.push_semantic_output(*parsed.clone());
+            }
+
             self.agent.push_message(AgentMessage::ToolResult(result));
         }
 
