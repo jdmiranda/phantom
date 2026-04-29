@@ -42,6 +42,7 @@ pub const DEFAULT_PERIOD_MS: u64 = 530;
 ///
 /// let mut blink = CursorBlink::default();
 /// assert!(blink.is_visible());       // starts visible
+/// assert!(blink.visible());          // alias also works
 ///
 /// let v = blink.tick(530);
 /// assert!(!v);                       // first period elapsed → hidden
@@ -62,6 +63,10 @@ pub struct CursorBlink {
 impl CursorBlink {
     /// Construct a blink timer with a custom period, anchored to `t = 0`.
     ///
+    /// The timer always starts at timestamp zero so that callers can simply
+    /// pass wall-clock milliseconds to [`tick`](CursorBlink::tick) without
+    /// needing to supply the construction time.
+    ///
     /// # Panics
     ///
     /// Panics if `period_ms` is zero, as a zero period would cause a
@@ -71,6 +76,23 @@ impl CursorBlink {
         Self {
             period_ms,
             last_toggle_ms: 0,
+            visible: true,
+        }
+    }
+
+    /// Construct a blink timer with a custom period, anchored to `now_ms`.
+    ///
+    /// `now_ms` is the current wall-clock timestamp in milliseconds; it anchors
+    /// the first toggle so the cursor is never immediately hidden on creation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `period_ms` is zero.
+    pub fn new_at(period_ms: u64, now_ms: u64) -> Self {
+        assert!(period_ms > 0, "period_ms must be greater than zero");
+        Self {
+            period_ms,
+            last_toggle_ms: now_ms,
             visible: true,
         }
     }
@@ -85,9 +107,17 @@ impl CursorBlink {
         self.visible
     }
 
+    /// Return the current visibility without advancing the timer.
+    ///
+    /// Alias for [`is_visible`](CursorBlink::is_visible) kept for
+    /// backward compatibility with call sites not yet updated.
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+
     /// Advance the timer to `now_ms` and return the current visibility.
     ///
-    /// Toggles [`visible`](CursorBlink::is_visible) each time a full `period_ms`
+    /// Toggles the internal visible state each time a full `period_ms`
     /// has elapsed since the last toggle. Multiple periods elapsed in one call
     /// are folded correctly — only the parity of elapsed periods matters.
     ///
@@ -111,14 +141,6 @@ impl CursorBlink {
             self.last_toggle_ms += periods * self.period_ms;
         }
 
-        self.visible
-    }
-
-    /// Return the current visibility without advancing the timer.
-    ///
-    /// Deprecated in favour of [`is_visible`](CursorBlink::is_visible); kept
-    /// for backward compatibility with call sites not yet updated.
-    pub fn visible(&self) -> bool {
         self.visible
     }
 
@@ -191,6 +213,7 @@ mod tests {
     fn default_starts_visible() {
         let b = CursorBlink::default();
         assert!(b.is_visible());
+        assert!(b.visible());
     }
 
     // -- Zero-period guard --
@@ -357,11 +380,22 @@ mod tests {
 
     #[test]
     fn new_anchors_to_zero() {
-        // Timer starts at t=0; a tick at t=529 is sub-period → no toggle.
+        // Timer always starts at t=0; a tick at t=529 is sub-period → no toggle.
         let mut b = CursorBlink::new(DEFAULT_PERIOD_MS);
         assert!(b.tick(529));
         // Tick at t=530 (exactly one period from anchor) → hidden.
         assert!(!b.tick(530));
+    }
+
+    // -- new_at() anchoring --
+
+    #[test]
+    fn new_at_anchors_to_provided_timestamp() {
+        // Timer starts at t=1000; a tick at t=1529 is sub-period → no toggle.
+        let mut b = CursorBlink::new_at(DEFAULT_PERIOD_MS, 1000);
+        assert!(b.tick(1529));
+        // Tick at t=1530 (exactly one period from anchor) → hidden.
+        assert!(!b.tick(1530));
     }
 
     // -- period_ms accessor --
