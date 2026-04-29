@@ -28,6 +28,8 @@ members = [
     "crates/phantom-embeddings",
     # Voice synthesis (TTS) — OpenAI backend + mock.
     "crates/phantom-voice",
+    # Code dependency graph — DAG extraction + .planning/dag.json schema.
+    "crates/phantom-dag",
 ]
 resolver = "2"
 

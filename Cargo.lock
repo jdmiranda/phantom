@@ -5386,6 +5386,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-dag"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "phantom-embeddings"
 version = "0.1.0"
 dependencies = [
