@@ -363,6 +363,9 @@ impl App {
             .unwrap_or(0);
         self.notifications.tick(now_ms_tick);
 
+        // Poll the live shader reloader (no-op in release builds).
+        self.poll_shader_reload(now_ms_tick);
+
         // Drain completed jobs from the worker pool.
         if let Some(ref pool) = self.job_pool {
             for (job_id, result) in pool.drain_completed() {
@@ -806,6 +809,61 @@ impl App {
             "focused_adapter": self.coordinator.focused(),
             "theme": self.theme.name,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Live shader reload — #84
+    // -----------------------------------------------------------------------
+
+    /// Poll the background shader watcher and act on any events.
+    ///
+    /// * `ShaderEvent::Reloaded { name: "crt", .. }` → rebuilds the CRT
+    ///   post-processing pipeline in-place via PostFxPipeline::reload_shader.
+    ///   On wgpu failure the error is surfaced as a Severity::Warn banner
+    ///   and the last-good pipeline stays active.
+    /// * `ShaderEvent::Reloaded { name: other }` → logged at DEBUG, no action.
+    /// * `ShaderEvent::Error { .. }` → WGSL parse failed; last-good pipeline
+    ///   stays active and the error is shown as a banner.
+    ///
+    /// This method is a no-op in release builds (the stub always returns None).
+    fn poll_shader_reload(&mut self, now_ms: u64) {
+        use phantom_renderer::shader_loader::ShaderEvent;
+
+        loop {
+            let Some(event) = self.shader_reloader.poll() else { break };
+            match event {
+                ShaderEvent::Reloaded { ref name, ref source } if name == "crt" => {
+                    match self.postfx.reload_shader(&self.gpu.device, source) {
+                        Ok(()) => log::info!("live-reload: crt.wgsl pipeline swapped"),
+                        Err(msg) => {
+                            let message = format!(
+                                "crt.wgsl hot-swap failed — {msg}. Last-good shader active."
+                            );
+                            self.push_shader_error_banner(message, now_ms);
+                        }
+                    }
+                }
+                ShaderEvent::Reloaded { name, .. } => {
+                    log::debug!("live-reload: {name}.wgsl reloaded (no pipeline swap yet)");
+                }
+                ShaderEvent::Error { name, message } => {
+                    let banner_msg = format!(
+                        "Shader error in {name}.wgsl — {message}. Last-good shader still active."
+                    );
+                    self.push_shader_error_banner(banner_msg, now_ms);
+                }
+            }
+        }
+    }
+
+    /// Push a Severity::Warn banner from a shader reload failure.
+    fn push_shader_error_banner(&mut self, message: String, now_ms: u64) {
+        use crate::notifications::{Banner, Severity, DEFAULT_BANNER_TTL_MS};
+        self.notifications.push_banner(Banner {
+            message,
+            severity: Severity::Warn,
+            expires_at_ms: now_ms.saturating_add(DEFAULT_BANNER_TTL_MS),
+        });
     }
 }
 

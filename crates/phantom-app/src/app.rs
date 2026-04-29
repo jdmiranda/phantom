@@ -359,6 +359,10 @@ pub struct App {
     //    a real command string into `ParsedOutput::command` instead of the
     //    empty string that made OODA fix/explain scoring always return 0.
     pub(crate) pane_last_command: std::collections::HashMap<u32, String>,
+
+    // -- Live shader reloader (debug + `live-reload` feature only).
+    //    No-op stub in release builds; zero overhead on the hot path.
+    pub(crate) shader_reloader: phantom_renderer::shader_loader::ShaderReloader,
 }
 
 /// An active suggestion from the AI brain.
@@ -888,6 +892,7 @@ impl App {
             capture_state: crate::capture::CaptureState::new(),
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
+            shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),
         })
     }
 
