@@ -5,7 +5,8 @@
 
 use log::{debug, info, warn};
 
-use phantom_agents::AgentTask;
+use phantom_agents::{AgentSpawnOpts, AgentTask};
+use phantom_agents::cli::{AgentCommand, parse_agent_command};
 use phantom_protocol::{AppMessage, SupervisorCommand};
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
@@ -133,22 +134,100 @@ impl App {
                 self.theme.shader_params.noise_intensity = 0.0;
                 self.console.output("All CRT effects disabled");
             }
-            cmd if cmd == "agent" || cmd.starts_with("agent ") => {
-                let prompt = if cmd == "agent" {
-                    // No prompt — open interactive agent pane.
-                    "You are an interactive AI assistant in the Phantom terminal. \
-                     The user opened an agent pane to chat with you. Help them with \
-                     whatever they need. You have tools to read files, edit code, \
-                     run commands, and search the project.".to_string()
-                } else {
-                    input[6..].trim().to_string()
-                };
-                if self.spawn_agent_pane(AgentTask::FreeForm { prompt: prompt.clone() }) {
-                    self.console.system("Agent pane opened.");
-                    self.console.open = false; // Close console so the pane is visible.
-                } else {
-                    self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
-                    self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
+            cmd if cmd == "agent" || cmd.starts_with("agent ") || cmd == "agents" => {
+                // Route through the structured CLI parser so --model / --role /
+                // --ttl / --capability flags are honoured end-to-end.
+                match parse_agent_command(input) {
+                    None | Some(AgentCommand::Help) => {
+                        // Bare `agent` with no flags → open interactive pane.
+                        let prompt = "You are an interactive AI assistant in the Phantom terminal. \
+                             The user opened an agent pane to chat with you. Help them with \
+                             whatever they need. You have tools to read files, edit code, \
+                             run commands, and search the project.".to_string();
+                        if self.spawn_agent_pane(AgentTask::FreeForm { prompt }) {
+                            self.console.system("Agent pane opened.");
+                            self.console.open = false;
+                        } else {
+                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                            self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
+                        }
+                    }
+                    Some(AgentCommand::Spawn { prompt }) => {
+                        if self.spawn_agent_pane(AgentTask::FreeForm { prompt: prompt.clone() }) {
+                            self.console.system("Agent pane opened.");
+                            self.console.open = false;
+                        } else {
+                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                            self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
+                        }
+                    }
+                    Some(AgentCommand::SpawnWithFlags { prompt, flags }) => {
+                        // Wire --model through AgentSpawnOpts so it reaches the
+                        // ChatBackend selector (the core of issue #85).
+                        let task = AgentTask::FreeForm { prompt: prompt.clone() };
+                        let mut opts = AgentSpawnOpts::new(task);
+                        opts.chat_model = flags.model.clone();
+                        // Surface warnings to the user.
+                        for warn_msg in &flags.warnings {
+                            self.console.output(format!("  warning: {warn_msg}"));
+                        }
+                        if let Some(ref m) = flags.model {
+                            self.console.output(format!("  model: {}", m.backend_name()));
+                        }
+                        if self.spawn_agent_pane_with_opts(opts) {
+                            self.console.system("Agent pane opened.");
+                            self.console.open = false;
+                        } else {
+                            self.console.error("Cannot spawn agent: API key not set");
+                            self.console.error("Set ANTHROPIC_API_KEY or OPENAI_API_KEY");
+                        }
+                    }
+                    Some(AgentCommand::SpawnFix { target }) => {
+                        let task = AgentTask::FixError {
+                            error_summary: format!("fix {target}"),
+                            file: Some(target.clone()),
+                            context: "user-initiated fix".into(),
+                        };
+                        if self.spawn_agent_pane(task) {
+                            self.console.system(format!("Fix agent opened for {target}."));
+                            self.console.open = false;
+                        } else {
+                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                        }
+                    }
+                    Some(AgentCommand::SpawnReview) => {
+                        let task = AgentTask::ReviewCode {
+                            files: Vec::new(),
+                            context: "user-initiated review".into(),
+                        };
+                        if self.spawn_agent_pane(task) {
+                            self.console.system("Review agent opened.");
+                            self.console.open = false;
+                        } else {
+                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                        }
+                    }
+                    Some(AgentCommand::SpawnWatch { description }) => {
+                        let task = AgentTask::WatchAndNotify { description: description.clone() };
+                        if self.spawn_agent_pane(task) {
+                            self.console.system(format!("Watch agent opened: {description}."));
+                            self.console.open = false;
+                        } else {
+                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                        }
+                    }
+                    Some(AgentCommand::List) => {
+                        self.console.system("(agent list: use the agents panel)");
+                    }
+                    Some(AgentCommand::Show { id }) => {
+                        self.console.system(format!("(agent show #{id}: use the agents panel)"));
+                    }
+                    Some(AgentCommand::Kill { id }) => {
+                        self.console.system(format!("(agent kill #{id}: use the agents panel)"));
+                    }
+                    Some(AgentCommand::KillAll) => {
+                        self.console.system("(agent kill-all: use the agents panel)");
+                    }
                 }
             }
             "sysmon" | "monitor" | "stats" => {
