@@ -35,6 +35,21 @@ const BOUNDARY_LINE: &str =
     "If you need a capability you don't have, say so and request escalation \
      — do NOT invent tool calls.";
 
+/// Planning-disposition sentinel instruction. Injected for agents whose
+/// disposition `requires_plan_gate()` (Feature, BugFix, Refactor). The
+/// downstream approval gate and [`crate::plan::extract_section`] both key on
+/// these exact headings, so the wording must not be paraphrased.
+const PLANNING_SENTINEL_INSTRUCTION: &str = "\
+Structure your response with these two sentinel sections so the approval gate \
+can parse and display your plan:\n\
+\n\
+## Tech Spec\n\
+Describe the technical design: data structures, interfaces, invariants, \
+and any trade-offs.\n\
+\n\
+## Implementation Plan\n\
+List the concrete steps you will take, in order, to complete the task.";
+
 /// Composer-only protocol addendum. Pinned verbatim — the dispatcher,
 /// recipient agents, and the user-facing report all parse for the
 /// AGREE/DISAGREE/PARTIAL tokens, so paraphrasing this paragraph would
@@ -87,6 +102,10 @@ pub struct SystemPromptBuilder {
     /// rendered under `## Recent command output` so the agent can reason
     /// about prior command results without re-reading raw terminal text.
     pub semantic_context: Option<String>,
+    /// When `true`, the planning-disposition sentinel instruction is appended
+    /// so the model knows to produce `## Tech Spec` and `## Implementation
+    /// Plan` sections. Set via [`SystemPromptBuilder::with_planning_sentinels`].
+    pub planning_sentinels: bool,
 }
 
 impl SystemPromptBuilder {
@@ -101,6 +120,7 @@ impl SystemPromptBuilder {
             tool_summary: None,
             other_agents: None,
             semantic_context: None,
+            planning_sentinels: false,
         }
     }
 
@@ -156,6 +176,18 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Enable the planning-disposition sentinel instruction.
+    ///
+    /// Call this for agents whose [`crate::dispatch::Disposition`] returns
+    /// `true` from `requires_plan_gate()` (i.e. Feature, BugFix, Refactor).
+    /// The instruction tells the model to emit `## Tech Spec` and
+    /// `## Implementation Plan` sections that [`crate::plan::extract_section`]
+    /// can parse at the approval gate.
+    pub fn with_planning_sentinels(mut self) -> Self {
+        self.planning_sentinels = true;
+        self
+    }
+
     /// Materialize the final system prompt.
     ///
     /// Sections are emitted in this fixed order, separated by blank lines:
@@ -167,7 +199,10 @@ impl SystemPromptBuilder {
     /// 5. `## Workspace inventory` (if set).
     /// 6. `## Tools you can call` (if set).
     /// 7. `## Recent command output` (if semantic context is set and non-empty).
-    /// 8. Closing pane-id citation rule (always present).
+    /// 8. Planning sentinel instruction (if [`with_planning_sentinels`] was called).
+    /// 9. Closing pane-id citation rule (always present).
+    ///
+    /// [`with_planning_sentinels`]: SystemPromptBuilder::with_planning_sentinels
     ///
     /// When `agent.role == AgentRole::Composer`, the role-specific
     /// debate/critique protocol is appended after the boundary line so it
@@ -241,7 +276,16 @@ impl SystemPromptBuilder {
             sections.push(ctx_section.clone());
         }
 
-        // 8. Closing line.
+        // 8. Planning-disposition sentinel instruction.
+        // Injected when the disposition requires a plan gate (Feature /
+        // BugFix / Refactor) so the model structures its response with the
+        // ## Tech Spec and ## Implementation Plan sections that the approval
+        // gate and `plan::extract_section` expect.
+        if self.planning_sentinels {
+            sections.push(PLANNING_SENTINEL_INSTRUCTION.to_string());
+        }
+
+        // 9. Closing line.
         sections.push(CLOSING_LINE.to_string());
 
         sections.join("\n\n")
@@ -537,5 +581,64 @@ mod tests {
         let task_idx = prompt.find("## Task").expect("task heading");
         assert!(boundary_idx < peers_idx, "peers must follow boundary");
         assert!(peers_idx < task_idx, "peers must precede task");
+    }
+
+    // --- planning sentinels -----------------------------------------------
+
+    #[test]
+    fn planning_sentinels_absent_by_default() {
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Actor, "act", 1)).build();
+        assert!(
+            !prompt.contains("## Tech Spec"),
+            "sentinel ## Tech Spec must not appear without with_planning_sentinels; got:\n{prompt}",
+        );
+        assert!(
+            !prompt.contains("## Implementation Plan"),
+            "sentinel ## Implementation Plan must not appear without with_planning_sentinels; \
+             got:\n{prompt}",
+        );
+    }
+
+    #[test]
+    fn planning_sentinels_present_when_enabled() {
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Actor, "act", 1))
+            .with_planning_sentinels()
+            .build();
+        assert!(
+            prompt.contains("## Tech Spec"),
+            "## Tech Spec sentinel must appear when with_planning_sentinels is set; got:\n{prompt}",
+        );
+        assert!(
+            prompt.contains("## Implementation Plan"),
+            "## Implementation Plan sentinel must appear when with_planning_sentinels is set; \
+             got:\n{prompt}",
+        );
+    }
+
+    #[test]
+    fn planning_sentinels_appear_before_closing_line() {
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Actor, "act", 1))
+            .with_planning_sentinels()
+            .build();
+        let sentinel_idx = prompt.find("## Tech Spec").expect("Tech Spec sentinel");
+        let closing_idx = prompt.find(CLOSING_LINE).expect("closing line");
+        assert!(
+            sentinel_idx < closing_idx,
+            "planning sentinel instruction must precede the closing line",
+        );
+    }
+
+    #[test]
+    fn planning_sentinels_appear_after_task_section() {
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Actor, "act", 1))
+            .with_task("Implement the feature".to_string())
+            .with_planning_sentinels()
+            .build();
+        let task_idx = prompt.find("## Task").expect("## Task heading");
+        let sentinel_idx = prompt.find("## Tech Spec").expect("Tech Spec sentinel");
+        assert!(
+            task_idx < sentinel_idx,
+            "planning sentinel instruction must follow the task section",
+        );
     }
 }
