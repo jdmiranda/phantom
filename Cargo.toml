@@ -34,6 +34,8 @@ members = [
     "crates/phantom-stt",
     # Stateless WebSocket message broker (issue #4).
     "crates/phantom-relay",
+    # Network identity bootstrap, relay client, and signed message envelope (issue #5).
+    "crates/phantom-net",
 ]
 resolver = "2"
 

@@ -1,0 +1,43 @@
+[package]
+name = "phantom-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Identity bootstrap, relay handshake, opaque message envelope, and heartbeat keepalive for Phantom federation (Phase 9)."
+
+[dependencies]
+log.workspace = true
+anyhow.workspace = true
+
+# Async runtime
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+
+# WebSocket transport (tokio-tungstenite).
+# QUIC upgrade path: replace with quinn once a relay server supports it.
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Ed25519 identity keypair — deterministic, fast, compact signatures.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+
+# PeerId display: SHA-256(pubkey) encoded as base58.
+sha2 = "0.10"
+bs58 = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Keyring: OS-level credential store (Keychain / libsecret / wincred).
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
+# Lightweight in-process WebSocket server for mock relay tests.
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+
+[lints]
+workspace = true
