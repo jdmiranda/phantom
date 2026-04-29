@@ -53,6 +53,7 @@ phantom-profile = []
 png = "0.17"
 tempfile = "3"
 phantom-ui = { path = "../phantom-ui", features = ["test-utils"] }
+phantom-bundle-store = { path = "../phantom-bundle-store", features = ["testing"] }
 
 [lints]
 workspace = true
