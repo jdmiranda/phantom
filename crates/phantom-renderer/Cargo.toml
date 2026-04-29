@@ -4,6 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+## Enable live WGSL shader reloading (debug builds only).
+##
+## Activates a background `notify` watcher that detects changes to
+## `shaders/*.wgsl` and hot-swaps the GPU pipeline within ~500 ms.
+## WGSL parse errors are surfaced as NotificationCenter banners so the
+## last-good shader stays active.
+##
+## Usage: `PHANTOM_HOT_SHADERS=1 cargo run -p phantom --features phantom-renderer/live-reload`
+live-reload = ["dep:notify", "dep:naga"]
+
 [dependencies]
 wgpu.workspace = true
 winit.workspace = true
@@ -17,6 +28,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 etagere = "0.2"
 png = "0.17"
+
+# Optional: live shader reload (debug builds, `live-reload` feature)
+notify = { version = "6", optional = true }
+naga   = { version = "25", features = ["wgsl-in"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

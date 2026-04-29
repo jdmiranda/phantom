@@ -286,6 +286,11 @@ pub struct App {
     // -- Git refresh tracking (bounded: only one thread at a time) --
     pub(crate) git_refresh_last: Instant,
     pub(crate) git_refresh_handle: Option<std::thread::JoinHandle<()>>,
+    /// Wall-clock instant at which the current `git_refresh_handle` was
+    /// spawned.  Used to detect hung git threads (#223): if the handle has not
+    /// finished within `GIT_REFRESH_TIMEOUT` we log a warning and drop it so
+    /// the next 30-second tick can spawn a fresh one.
+    pub(crate) git_refresh_spawned_at: Option<Instant>,
 
     // -- Reusable overlay text buffer (avoids per-frame alloc in console render) --
     pub(crate) overlay_line_buf: Vec<(String, [f32; 4])>,
@@ -778,6 +783,7 @@ impl App {
             watchdog_frame: 0,
             git_refresh_last: now,
             git_refresh_handle: None,
+            git_refresh_spawned_at: None,
             overlay_line_buf: Vec::with_capacity(128),
             video_renderer,
             video_playback: None,
