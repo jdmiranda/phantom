@@ -39,6 +39,7 @@ use phantom_plugins::PluginRegistry;
 use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
 use phantom_session::session::{is_session_restore, SessionManager, SessionState, PaneState};
+use phantom_session::{AgentStatePersister, GoalStatePersister};
 use phantom_mcp::{spawn_listener, AppCommand, McpListener};
 
 use crate::boot::BootSequence;
@@ -161,6 +162,20 @@ pub struct App {
 
     // -- Session manager --
     pub(crate) session_manager: Option<SessionManager>,
+
+    // -- Agent-state and goal-state persisters (sidecar files derived from the
+    //    session file path). Both are initialized alongside `session_manager`
+    //    on boot and updated at shutdown / whenever a goal changes. `None`
+    //    when no session path could be determined (e.g. $HOME unset). --
+    pub(crate) agent_persister: Option<AgentStatePersister>,
+    pub(crate) goal_persister: Option<GoalStatePersister>,
+
+    // -- Shared queue that agent panes push an AgentSnapshot into whenever
+    //    they reach a terminal state (Done / Failed). The App drains this at
+    //    shutdown and persists via AgentStatePersister. Shared via Arc<Mutex>
+    //    so each spawned pane gets a clone without holding a reference back
+    //    to the App (same pattern as blocked_event_sink).
+    pub(crate) agent_snapshot_queue: crate::agent_pane::AgentSnapshotQueue,
 
     // -- Idle tracking (seconds since last user keypress) --
     pub(crate) last_input_time: Instant,
@@ -570,6 +585,12 @@ impl App {
         }
 
         // Try to restore the most recent session for this project.
+        // Also derive the agent/goal persister sidecar paths from the latest
+        // session file — they live next to the session JSON so they are
+        // automatically co-located.
+        let mut agent_persister: Option<AgentStatePersister> = None;
+        let mut goal_persister: Option<GoalStatePersister> = None;
+
         if let Some(ref sm) = session_manager {
             match sm.load_latest(&project_dir) {
                 Ok(Some(prev)) => {
@@ -597,6 +618,42 @@ impl App {
                     let welcome = SessionManager::welcome_message(&prev);
                     info!("{welcome}");
                     status_bar.set_activity(&welcome);
+
+                    // Initialise persister pair from the latest session file
+                    // path so agent / goal sidecar files land next to it.
+                    if let Ok(Some(session_path)) = sm.latest_path(&project_dir) {
+                        let ap = AgentStatePersister::new(
+                            AgentStatePersister::sidecar_path(&session_path),
+                        );
+                        match ap.load() {
+                            Ok(Some(ref file)) => {
+                                let n = file.agent_count();
+                                info!(
+                                    "Agent state restored: {n} snapshot{} available",
+                                    if n == 1 { "" } else { "s" },
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => warn!("Failed to load agent state: {e}"),
+                        }
+                        agent_persister = Some(ap);
+
+                        let gp = GoalStatePersister::new(
+                            GoalStatePersister::sidecar_path(&session_path),
+                        );
+                        match gp.load() {
+                            Ok(Some(ref file)) => {
+                                let n = file.goal_count();
+                                info!(
+                                    "Goal state restored: {n} goal{} available",
+                                    if n == 1 { "" } else { "s" },
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => warn!("Failed to load goal state: {e}"),
+                        }
+                        goal_persister = Some(gp);
+                    }
                 }
                 Ok(None) => {
                     info!("No previous session for this project");
@@ -765,6 +822,9 @@ impl App {
             memory,
             notification_store,
             session_manager,
+            agent_persister,
+            goal_persister,
+            agent_snapshot_queue: crate::agent_pane::new_agent_snapshot_queue(),
             last_input_time: now,
             suggestion: None,
             suggestion_history: VecDeque::with_capacity(10),
@@ -866,7 +926,63 @@ impl App {
         if let Some(ref sm) = self.session_manager {
             let state = self.build_session_state();
             match sm.save(&state) {
-                Ok(path) => info!("Session saved to {}", path.display()),
+                Ok(session_path) => {
+                    info!("Session saved to {}", session_path.display());
+
+                    // Persist agent snapshots alongside the session file.
+                    // Drain all snapshots collected in the queue during this
+                    // session (panes push into it on Done/Failed) and also
+                    // snapshot any agents still alive (e.g. long-running tasks
+                    // interrupted by the user). De-duplicate by agent id so we
+                    // don't write the same agent twice.
+                    let agent_sidecar = AgentStatePersister::sidecar_path(&session_path);
+                    let ap = AgentStatePersister::new(agent_sidecar);
+                    let queue_snaps: Vec<phantom_session::AgentSnapshot> =
+                        match self.agent_snapshot_queue.lock() {
+                            Ok(mut q) => std::mem::take(&mut *q),
+                            Err(_) => {
+                                warn!("agent_snapshot_queue mutex poisoned");
+                                Vec::new()
+                            }
+                        };
+                    // Build a slice of &Agent references from the queue.
+                    // `save_agents` takes `&[&Agent]`; the queue holds `AgentSnapshot`
+                    // values so we write them directly via `AgentStateFile`.
+                    if !queue_snaps.is_empty() {
+                        let file = phantom_session::AgentStateFile::new(queue_snaps);
+                        match file.save(ap.path()) {
+                            Ok(()) => info!("Agent state saved ({} snapshot(s))", file.agent_count()),
+                            Err(e) => warn!("Failed to save agent state: {e}"),
+                        }
+                    } else {
+                        info!("Agent state: no snapshots to persist this session");
+                    }
+                    self.agent_persister = Some(ap);
+
+                    // Persist goal state alongside the session file.
+                    // The goal persister is updated in-place by update.rs whenever
+                    // AiEvent::GoalSet fires. On shutdown we just re-point the
+                    // persister at the new session sidecar path so the next boot
+                    // derives from the correct file.
+                    let goal_sidecar = GoalStatePersister::sidecar_path(&session_path);
+                    let gp = GoalStatePersister::new(goal_sidecar);
+                    // Copy over whatever the existing persister holds, if any.
+                    if let Some(ref existing_gp) = self.goal_persister {
+                        match existing_gp.load() {
+                            Ok(Some(file)) => {
+                                let goals: Vec<_> = file.goals().to_vec();
+                                let n = goals.len();
+                                match gp.save_goals(goals) {
+                                    Ok(()) => info!("Goal state flushed at shutdown ({n} goal(s))"),
+                                    Err(e) => warn!("Failed to flush goal state: {e}"),
+                                }
+                            }
+                            Ok(None) => {} // Nothing to flush.
+                            Err(e) => warn!("Failed to read goal state for flush: {e}"),
+                        }
+                    }
+                    self.goal_persister = Some(gp);
+                }
                 Err(e) => warn!("Failed to save session: {e}"),
             }
         }
@@ -944,6 +1060,61 @@ impl App {
                 vignette_intensity: sp.vignette_intensity,
                 noise_intensity: sp.noise_intensity,
             }),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Goal persistence (issue #206)
+    // -----------------------------------------------------------------------
+
+    /// Snapshot the current goal and persist it via the goal-state persister.
+    ///
+    /// Called from `commands.rs` whenever the user issues a `goal <objective>`
+    /// command.  Builds a minimal [`GoalSnapshot`] from the objective string
+    /// and writes it to the sidecar file co-located with the current session.
+    ///
+    /// No-op when no `goal_persister` is initialised (first boot with no
+    /// previous session file) — the goal will be persisted at next shutdown
+    /// once a session file exists and the persister has been created.
+    pub(crate) fn persist_goal(&mut self, objective: &str) {
+        use phantom_session::{
+            GoalSnapshot, PlanStepBuilder, SavedFactConfidence, SavedFact, SavedStepStatus,
+        };
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let Some(ref gp) = self.goal_persister else {
+            log::debug!("goal_persister not yet initialised; goal will be persisted at shutdown");
+            return;
+        };
+
+        let created_at_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let initial_step = PlanStepBuilder::new(
+            objective,
+            phantom_agents::AgentTask::FreeForm { prompt: objective.to_owned() },
+        )
+        .status(SavedStepStatus::Pending)
+        .build();
+
+        let snapshot = GoalSnapshot::new(
+            objective.to_owned(),
+            vec![SavedFact::new("goal set by user", SavedFactConfidence::Verified, "commands")],
+            vec![initial_step],
+            vec![],   // plan_history: no prior plans yet
+            0,        // stall_counter
+            2,        // stall_threshold (matches brain default)
+            0,        // replan_count
+            5,        // max_replans (matches brain default)
+            created_at_secs,
+            None,     // last_replan_at_secs
+        );
+
+        match gp.save_goals(vec![snapshot]) {
+            Ok(()) => info!("Goal state persisted: {objective}"),
+            Err(e) => warn!("Failed to persist goal state: {e}"),
         }
     }
 
