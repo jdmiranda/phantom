@@ -70,6 +70,7 @@ impl SavedMessage {
     ///   `CompletedToolUse` entry.
     /// - Any buffered (unmatched) calls at the end are dropped — these are
     ///   the in-flight calls the issue asks us to discard.
+    #[must_use]
     pub fn from_agent_messages(messages: &[AgentMessage]) -> Vec<Self> {
         use phantom_agents::tools::ToolCall;
 
@@ -164,6 +165,7 @@ impl AgentSnapshot {
     ///
     /// In-flight tool calls are stripped.  In-progress status is normalised to
     /// `Queued` so the agent can restart from a clean state.
+    #[must_use]
     pub fn from_agent(agent: &phantom_agents::Agent) -> Self {
         let status = match agent.status {
             AgentStatus::Working
@@ -200,6 +202,7 @@ impl AgentSnapshot {
     // -- Accessors -----------------------------------------------------------
 
     /// The agent's numeric identifier.
+    #[must_use]
     pub fn id(&self) -> u32 {
         self.id
     }
@@ -210,6 +213,7 @@ impl AgentSnapshot {
     /// exists in the current `AgentTask` enum (forward-compatibility gap).
     /// Callers that encounter `None` should treat the agent as unrestorable and
     /// skip it — [`partial_restore`] does this automatically.
+    #[must_use]
     pub fn task(&self) -> Option<AgentTask> {
         serde_json::from_value(self.task.clone()).ok()
     }
@@ -217,37 +221,44 @@ impl AgentSnapshot {
     /// The raw task JSON as written to disk.
     ///
     /// Useful for diagnostics when [`AgentSnapshot::task`] returns `None`.
+    #[must_use]
     pub fn raw_task(&self) -> &serde_json::Value {
         &self.task
     }
 
     /// The normalised lifecycle status (never `Working`, `WaitingForTool`,
     /// `Planning`, or `AwaitingApproval`).
+    #[must_use]
     pub fn status(&self) -> AgentStatus {
         self.status
     }
 
     /// Saved conversation messages (in-flight tool calls stripped).
+    #[must_use]
     pub fn messages(&self) -> &[SavedMessage] {
         &self.messages
     }
 
     /// Approximate creation timestamp (unix epoch seconds).
+    #[must_use]
     pub fn created_at_secs(&self) -> u64 {
         self.created_at_secs
     }
 
     /// Flatline reason if the agent was in Flatline state at shutdown.
+    #[must_use]
     pub fn flatline_reason(&self) -> Option<&str> {
         self.flatline_reason.as_deref()
     }
 
     /// Visible output lines at the time of save.
+    #[must_use]
     pub fn output_log(&self) -> &[String] {
         &self.output_log
     }
 
     /// Number of non-system messages in the saved history.
+    #[must_use]
     pub fn conversation_depth(&self) -> usize {
         self.messages
             .iter()
@@ -273,6 +284,7 @@ pub struct AgentStateFile {
 
 impl AgentStateFile {
     /// Create a new agent state file from a collection of snapshots.
+    #[must_use]
     pub fn new(agents: Vec<AgentSnapshot>) -> Self {
         let saved_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -288,21 +300,25 @@ impl AgentStateFile {
     // -- Accessors -----------------------------------------------------------
 
     /// Schema version.
+    #[must_use]
     pub fn version(&self) -> u32 {
         self.version
     }
 
     /// When this file was saved (unix epoch seconds).
+    #[must_use]
     pub fn saved_at(&self) -> u64 {
         self.saved_at
     }
 
     /// All saved agent snapshots.
+    #[must_use]
     pub fn agents(&self) -> &[AgentSnapshot] {
         &self.agents
     }
 
     /// Number of saved agents.
+    #[must_use]
     pub fn agent_count(&self) -> usize {
         self.agents.len()
     }
@@ -366,6 +382,7 @@ impl AgentStatePersister {
     /// Derive the agent-state sidecar path from a session file path.
     ///
     /// Given `{hash}_{ts}.json`, returns `{hash}_{ts}_agents.json`.
+    #[must_use]
     pub fn sidecar_path(session_path: &Path) -> PathBuf {
         let stem = session_path
             .file_stem()
@@ -379,6 +396,7 @@ impl AgentStatePersister {
     }
 
     /// Create a persister for the given sidecar path.
+    #[must_use]
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -423,6 +441,7 @@ impl AgentStatePersister {
     }
 
     /// The path this persister writes to.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -453,6 +472,7 @@ pub enum RestoreOutcome<T> {
 /// Returns a vec of `RestoreOutcome`, one per saved snapshot.  Callers can
 /// count `Ok` entries to decide whether to show the "resume" prompt and can
 /// log `Skipped`/`Corrupt` entries for diagnostics.
+#[must_use]
 pub fn partial_restore(file: &AgentStateFile) -> Vec<RestoreOutcome<AgentSnapshot>> {
     file.agents()
         .iter()

@@ -87,6 +87,7 @@ impl SessionManager {
     /// Return the default session directory path without creating it.
     ///
     /// Falls back to `"."` as an absolute last resort when `HOME` is unset.
+    #[must_use]
     pub fn session_dir_path() -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home)
@@ -257,6 +258,7 @@ impl SessionManager {
     }
 
     /// Build a welcome-back message from a saved session.
+    #[must_use]
     pub fn welcome_message(state: &SessionState) -> String {
         let mut parts = vec![format!(
             "Welcome back. You were working on {}",
@@ -382,6 +384,7 @@ fn now_epoch() -> u64 {
 /// The check is cheap: only filenames are inspected, no JSON is parsed.
 /// Returns `false` on any I/O error so the caller never has to handle an
 /// error just to decide whether to show the boot animation.
+#[must_use]
 pub fn is_session_restore(session_dir: &Path, project_dir: &str) -> bool {
     is_session_restore_with_env(
         session_dir,
