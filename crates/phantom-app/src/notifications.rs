@@ -197,6 +197,15 @@ impl NotificationCenter {
         }
     }
 
+    /// Directly push a pre-formed banner.
+    ///
+    /// Use this for non-denial banner sources (e.g. live shader reload errors)
+    /// that need to surface a Severity::Warn message without going through the
+    /// denial-pattern counter.
+    pub fn push_banner(&mut self, banner: Banner) {
+        self.banners.push(banner);
+    }
+
     /// Drop banners whose `expires_at_ms` has passed.
     ///
     /// Called once per frame from `App::update`. Linear in the banner count,

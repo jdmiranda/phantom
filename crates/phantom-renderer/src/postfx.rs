@@ -354,6 +354,62 @@ impl PostFxPipeline {
         &self.offscreen_texture
     }
 
+    /// Hot-swap the CRT render pipeline with a new WGSL shader source.
+    ///
+    /// Called by the shader live-reload path in App::poll_shader_reload when
+    /// ShaderEvent::Reloaded { name: "crt", .. } arrives from the background
+    /// watcher. On success the old pipeline is dropped and self.pipeline is
+    /// replaced atomically (from the main thread's perspective).
+    ///
+    /// Returns Err(String) if wgpu rejects the shader module so the caller
+    /// can surface it as a NotificationCenter banner and keep the last-good
+    /// pipeline alive.
+    pub fn reload_shader(&mut self, device: &Device, source: &str) -> Result<(), String> {
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("postfx-shader-hot"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source)),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("postfx-pipeline-layout-hot"),
+            bind_group_layouts: &[&self.bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("postfx-pipeline-hot"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(ColorTargetState {
+                    format: self.format,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        self.pipeline = pipeline;
+        log::info!("postfx: CRT pipeline hot-swapped successfully");
+        Ok(())
+    }
+
     /// Update uniforms and draw the CRT post-processing pass.
     ///
     /// Renders a full-screen triangle that samples the offscreen scene texture
