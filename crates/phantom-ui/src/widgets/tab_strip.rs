@@ -28,8 +28,8 @@
 //!
 //! let mut strip = TabStrip::new(
 //!     vec![
-//!         Tab { label: "Terminal".into(), badge: None },
-//!         Tab { label: "Agent".into(),    badge: Some(2) },
+//!         Tab::new("Terminal", None),
+//!         Tab::new("Agent", Some(2)),
 //!     ],
 //!     0,
 //!     |idx| println!("selected tab {idx}"),
@@ -63,13 +63,28 @@ const ACCENT_BAR_H: f32 = 2.0;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
     /// Display label rendered inside the tab cell.
-    pub label: String,
+    label: String,
     /// Optional badge count (unread messages, error count, etc.).
     /// Rendered as `[N]` appended to the label in `status_warn` color.
-    pub badge: Option<u32>,
+    badge: Option<u32>,
 }
 
 impl Tab {
+    /// Create a [`Tab`] with the given label and optional badge count.
+    pub fn new(label: impl Into<String>, badge: Option<u32>) -> Self {
+        Self { label: label.into(), badge }
+    }
+
+    /// The display label of this tab.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The optional badge count for this tab.
+    pub fn badge(&self) -> Option<u32> {
+        self.badge
+    }
+
     /// Compose the rendered label string: `"Label"` or `"Label [N]"`.
     ///
     /// Used in tests to verify the full display string without going through
@@ -98,12 +113,12 @@ impl Tab {
 /// selection, and [`TabStrip::next`] / [`TabStrip::prev`] for keyboard nav.
 pub struct TabStrip {
     /// Ordered list of tabs.
-    pub tabs: Vec<Tab>,
+    tabs: Vec<Tab>,
     /// Index of the currently active tab. Always `< tabs.len()` when
     /// `!tabs.is_empty()`, and `0` when empty.
-    pub active: usize,
+    active: usize,
     /// Called whenever the active tab changes. Receives the new index.
-    pub on_select: Box<dyn FnMut(usize)>,
+    on_select: Box<dyn FnMut(usize)>,
     /// Live render metrics (cell width drives truncation math).
     ctx: RenderCtx,
 }
@@ -127,6 +142,11 @@ impl TabStrip {
     /// Update the live render context (call once per frame before rendering).
     pub fn set_render_ctx(&mut self, ctx: RenderCtx) {
         self.ctx = ctx;
+    }
+
+    /// Index of the currently active tab.
+    pub fn active(&self) -> usize {
+        self.active
     }
 
     /// Number of tabs in the strip.
@@ -326,7 +346,7 @@ mod tests {
 
     fn make_tabs(n: usize) -> Vec<Tab> {
         (0..n)
-            .map(|i| Tab { label: format!("Tab{i}"), badge: None })
+            .map(|i| Tab::new(format!("Tab{i}"), None))
             .collect()
     }
 
@@ -336,19 +356,19 @@ mod tests {
     fn new_stores_tabs_and_active() {
         let strip = TabStrip::new(make_tabs(3), 1, |_| {});
         assert_eq!(strip.tab_count(), 3);
-        assert_eq!(strip.active, 1);
+        assert_eq!(strip.active(), 1);
     }
 
     #[test]
     fn new_clamps_active_to_last_tab() {
         let strip = TabStrip::new(make_tabs(2), 99, |_| {});
-        assert_eq!(strip.active, 1);
+        assert_eq!(strip.active(), 1);
     }
 
     #[test]
     fn new_empty_tabs_active_is_zero() {
         let strip = TabStrip::new(vec![], 5, |_| {});
-        assert_eq!(strip.active, 0);
+        assert_eq!(strip.active(), 0);
         assert_eq!(strip.tab_count(), 0);
     }
 
@@ -358,7 +378,7 @@ mod tests {
     fn next_advances_active() {
         let mut strip = TabStrip::new(make_tabs(3), 0, |_| {});
         assert_eq!(strip.next(), 1);
-        assert_eq!(strip.active, 1);
+        assert_eq!(strip.active(), 1);
     }
 
     #[test]
@@ -427,14 +447,14 @@ mod tests {
     fn click_on_first_tab_selects_zero() {
         let mut strip = TabStrip::new(make_tabs(3), 0, |_| {});
         strip.on_click(10.0, 960.0);
-        assert_eq!(strip.active, 0);
+        assert_eq!(strip.active(), 0);
     }
 
     #[test]
     fn click_on_last_tab_selects_last() {
         let mut strip = TabStrip::new(make_tabs(3), 0, |_| {});
         strip.on_click(900.0, 960.0);
-        assert_eq!(strip.active, 2);
+        assert_eq!(strip.active(), 2);
     }
 
     #[test]
@@ -505,7 +525,7 @@ mod tests {
         let ctx = RenderCtx::fallback();
         let t = Tokens::phosphor(ctx);
         let strip = TabStrip::new(
-            vec![Tab { label: "Alpha".into(), badge: None }],
+            vec![Tab::new("Alpha", None)],
             0,
             |_| {},
         );
@@ -520,8 +540,8 @@ mod tests {
         let t = Tokens::phosphor(ctx);
         let strip = TabStrip::new(
             vec![
-                Tab { label: "A".into(), badge: None },
-                Tab { label: "B".into(), badge: None },
+                Tab::new("A", None),
+                Tab::new("B", None),
             ],
             0,
             |_| {},
@@ -537,7 +557,7 @@ mod tests {
         let ctx = RenderCtx::fallback();
         let t = Tokens::phosphor(ctx);
         let strip = TabStrip::new(
-            vec![Tab { label: "Errors".into(), badge: Some(5) }],
+            vec![Tab::new("Errors", Some(5))],
             0,
             |_| {},
         );
@@ -558,13 +578,13 @@ mod tests {
 
     #[test]
     fn tab_display_label_no_badge() {
-        let tab = Tab { label: "Inspector".into(), badge: None };
+        let tab = Tab::new("Inspector", None);
         assert_eq!(tab.display_label(), "Inspector");
     }
 
     #[test]
     fn tab_display_label_with_badge() {
-        let tab = Tab { label: "Alerts".into(), badge: Some(3) };
+        let tab = Tab::new("Alerts", Some(3));
         assert_eq!(tab.display_label(), "Alerts [3]");
     }
 }

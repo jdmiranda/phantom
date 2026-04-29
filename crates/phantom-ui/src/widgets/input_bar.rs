@@ -80,17 +80,17 @@ pub enum InputKey {
 /// Single-line text input widget with prompt, cursor, blink, and history.
 ///
 /// The widget is non-`Clone` because `on_submit` is a heap-allocated closure.
-/// Snapshot `buffer` and `cursor_pos` individually if you need serialisable
+/// Snapshot `buffer()` and `cursor_pos()` individually if you need serialisable
 /// state.
 pub struct InputBar {
     /// Current text content of the input field.
-    pub buffer: String,
+    buffer: String,
     /// Cursor position as a **char** index into `buffer` (not byte offset).
-    pub cursor_pos: usize,
+    cursor_pos: usize,
     /// Optional prompt rendered before the user input (e.g. `"> "`).
-    pub prompt: Option<String>,
+    prompt: Option<String>,
     /// Called when the user presses Enter. Receives the buffer contents.
-    pub on_submit: Box<dyn FnMut(&str)>,
+    on_submit: Box<dyn FnMut(&str)>,
     /// Cursor blink state.
     blink: CursorBlink,
     /// Command history ring (oldest → newest).
@@ -124,6 +124,21 @@ impl InputBar {
     /// Update the live render context.
     pub fn set_render_ctx(&mut self, ctx: RenderCtx) {
         self.ctx = ctx;
+    }
+
+    /// Current text content of the input field.
+    pub fn buffer(&self) -> &str {
+        &self.buffer
+    }
+
+    /// Cursor position as a char index into the buffer (not byte offset).
+    pub fn cursor_pos(&self) -> usize {
+        self.cursor_pos
+    }
+
+    /// Optional prompt string rendered before the user input.
+    pub fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
     }
 
     /// Advance the cursor-blink timer. Call once per frame with the current
@@ -385,14 +400,14 @@ mod tests {
     #[test]
     fn new_buffer_is_empty() {
         let bar = bare_bar();
-        assert!(bar.buffer.is_empty());
-        assert_eq!(bar.cursor_pos, 0);
+        assert!(bar.buffer().is_empty());
+        assert_eq!(bar.cursor_pos(), 0);
     }
 
     #[test]
     fn prompt_stored_correctly() {
         let bar = InputBar::new(Some("$ ".into()), |_| {});
-        assert_eq!(bar.prompt.as_deref(), Some("$ "));
+        assert_eq!(bar.prompt(), Some("$ "));
     }
 
     // ── Char input ────────────────────────────────────────────────────────────
@@ -402,8 +417,8 @@ mod tests {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::Char('h'));
         bar.handle_key(InputKey::Char('i'));
-        assert_eq!(bar.buffer, "hi");
-        assert_eq!(bar.cursor_pos, 2);
+        assert_eq!(bar.buffer(), "hi");
+        assert_eq!(bar.cursor_pos(), 2);
     }
 
     #[test]
@@ -413,8 +428,8 @@ mod tests {
         bar.handle_key(InputKey::Char('c'));
         bar.handle_key(InputKey::Left);
         bar.handle_key(InputKey::Char('b'));
-        assert_eq!(bar.buffer, "abc");
-        assert_eq!(bar.cursor_pos, 2);
+        assert_eq!(bar.buffer(), "abc");
+        assert_eq!(bar.cursor_pos(), 2);
     }
 
     // ── Backspace / Delete ────────────────────────────────────────────────────
@@ -425,15 +440,15 @@ mod tests {
         bar.handle_key(InputKey::Char('a'));
         bar.handle_key(InputKey::Char('b'));
         bar.handle_key(InputKey::Backspace);
-        assert_eq!(bar.buffer, "a");
-        assert_eq!(bar.cursor_pos, 1);
+        assert_eq!(bar.buffer(), "a");
+        assert_eq!(bar.cursor_pos(), 1);
     }
 
     #[test]
     fn backspace_at_start_is_no_op() {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::Backspace); // must not panic
-        assert!(bar.buffer.is_empty());
+        assert!(bar.buffer().is_empty());
     }
 
     #[test]
@@ -443,8 +458,8 @@ mod tests {
         bar.handle_key(InputKey::Char('b'));
         bar.handle_key(InputKey::Left); // cursor before 'b'
         bar.handle_key(InputKey::Delete);
-        assert_eq!(bar.buffer, "a");
-        assert_eq!(bar.cursor_pos, 1);
+        assert_eq!(bar.buffer(), "a");
+        assert_eq!(bar.cursor_pos(), 1);
     }
 
     #[test]
@@ -452,7 +467,7 @@ mod tests {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::Char('x'));
         bar.handle_key(InputKey::Delete); // cursor at end — no-op
-        assert_eq!(bar.buffer, "x");
+        assert_eq!(bar.buffer(), "x");
     }
 
     // ── Navigation ────────────────────────────────────────────────────────────
@@ -462,14 +477,14 @@ mod tests {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::Char('a'));
         bar.handle_key(InputKey::Left);
-        assert_eq!(bar.cursor_pos, 0);
+        assert_eq!(bar.cursor_pos(), 0);
     }
 
     #[test]
     fn left_at_start_is_clamped() {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::Left); // must not underflow
-        assert_eq!(bar.cursor_pos, 0);
+        assert_eq!(bar.cursor_pos(), 0);
     }
 
     #[test]
@@ -478,7 +493,7 @@ mod tests {
         bar.handle_key(InputKey::Char('a'));
         bar.handle_key(InputKey::Left);
         bar.handle_key(InputKey::Right);
-        assert_eq!(bar.cursor_pos, 1);
+        assert_eq!(bar.cursor_pos(), 1);
     }
 
     #[test]
@@ -486,7 +501,7 @@ mod tests {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::Char('a'));
         bar.handle_key(InputKey::Right); // already at end
-        assert_eq!(bar.cursor_pos, 1);
+        assert_eq!(bar.cursor_pos(), 1);
     }
 
     #[test]
@@ -495,7 +510,7 @@ mod tests {
         bar.handle_key(InputKey::Char('a'));
         bar.handle_key(InputKey::Char('b'));
         bar.handle_key(InputKey::Home);
-        assert_eq!(bar.cursor_pos, 0);
+        assert_eq!(bar.cursor_pos(), 0);
     }
 
     #[test]
@@ -505,7 +520,7 @@ mod tests {
         bar.handle_key(InputKey::Char('b'));
         bar.handle_key(InputKey::Home);
         bar.handle_key(InputKey::End);
-        assert_eq!(bar.cursor_pos, 2);
+        assert_eq!(bar.cursor_pos(), 2);
     }
 
     // ── Enter / submit ────────────────────────────────────────────────────────
@@ -528,8 +543,8 @@ mod tests {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::Char('x'));
         bar.handle_key(InputKey::Enter);
-        assert!(bar.buffer.is_empty());
-        assert_eq!(bar.cursor_pos, 0);
+        assert!(bar.buffer().is_empty());
+        assert_eq!(bar.cursor_pos(), 0);
     }
 
     // ── History ───────────────────────────────────────────────────────────────
@@ -540,7 +555,7 @@ mod tests {
         bar.push_history("first");
         bar.push_history("second");
         bar.handle_key(InputKey::HistoryPrev);
-        assert_eq!(bar.buffer, "second");
+        assert_eq!(bar.buffer(), "second");
     }
 
     #[test]
@@ -550,7 +565,7 @@ mod tests {
         bar.push_history("second");
         bar.handle_key(InputKey::HistoryPrev);
         bar.handle_key(InputKey::HistoryPrev);
-        assert_eq!(bar.buffer, "first");
+        assert_eq!(bar.buffer(), "first");
     }
 
     #[test]
@@ -564,7 +579,7 @@ mod tests {
         bar.handle_key(InputKey::Char('e'));
         bar.handle_key(InputKey::HistoryPrev); // → "cmd"
         bar.handle_key(InputKey::HistoryNext); // → "live"
-        assert_eq!(bar.buffer, "live");
+        assert_eq!(bar.buffer(), "live");
         assert!(bar.history_pos.is_none());
     }
 
@@ -572,7 +587,7 @@ mod tests {
     fn history_prev_on_empty_is_no_op() {
         let mut bar = bare_bar();
         bar.handle_key(InputKey::HistoryPrev); // must not panic
-        assert!(bar.buffer.is_empty());
+        assert!(bar.buffer().is_empty());
     }
 
     #[test]

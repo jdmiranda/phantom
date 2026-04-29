@@ -5,7 +5,7 @@
 //! to avoid jarring visual pops.
 //!
 //! The widget is associated with a specific pane via [`phantom_adapter::AppId`]
-//! so the caller can cycle focus across panes by updating [`FocusRing::focused`].
+//! so the caller can cycle focus across panes by calling [`FocusRing::set_focused`].
 //! When `focused` is `None` the ring is invisible (alpha = 0).
 //!
 //! Corner radius matches `tokens.radius_sm()` (2 px by default).
@@ -62,7 +62,7 @@ const RING_THICKNESS: f32 = 2.0;
 #[derive(Debug, Clone)]
 pub struct FocusRing {
     /// The pane that currently has focus, or `None` when no pane is focused.
-    pub focused: Option<AppId>,
+    focused: Option<AppId>,
     /// Animation opacity — 0.0 (invisible) to 1.0 (fully opaque).
     opacity: f32,
     /// Previous focus for detecting transitions.
@@ -91,6 +91,11 @@ impl FocusRing {
     /// Update the live render context.
     pub fn set_render_ctx(&mut self, ctx: RenderCtx) {
         self.ctx = ctx;
+    }
+
+    /// The pane that currently has focus, or `None` when no pane is focused.
+    pub fn focused(&self) -> Option<AppId> {
+        self.focused
     }
 
     /// Return the current animated opacity in `[0.0, 1.0]`.
@@ -207,7 +212,7 @@ mod tests {
     #[test]
     fn new_is_unfocused_and_invisible() {
         let ring = FocusRing::new();
-        assert!(ring.focused.is_none());
+        assert!(ring.focused().is_none());
         assert_eq!(ring.opacity(), 0.0);
     }
 
@@ -215,8 +220,8 @@ mod tests {
     fn default_matches_new() {
         let a = FocusRing::new();
         let b = FocusRing::default();
-        assert_eq!(a.focused, b.focused);
-        assert_eq!(a.opacity, b.opacity);
+        assert_eq!(a.focused(), b.focused());
+        assert_eq!(a.opacity(), b.opacity());
     }
 
     // ── Focus state ───────────────────────────────────────────────────────────
@@ -225,7 +230,7 @@ mod tests {
     fn set_focused_updates_id() {
         let mut ring = FocusRing::new();
         ring.set_focused(Some(7));
-        assert_eq!(ring.focused, Some(7));
+        assert_eq!(ring.focused(), Some(7));
     }
 
     #[test]
@@ -233,7 +238,7 @@ mod tests {
         let mut ring = FocusRing::new();
         ring.set_focused(Some(1));
         ring.set_focused(None);
-        assert!(ring.focused.is_none());
+        assert!(ring.focused().is_none());
     }
 
     // ── Animation ────────────────────────────────────────────────────────────
@@ -388,13 +393,13 @@ mod tests {
         let mut ring = FocusRing::new();
         ring.set_focused(Some(1));
         ring.tick(FADE_DURATION_MS);
-        assert_eq!(ring.focused, Some(1));
+        assert_eq!(ring.focused(), Some(1));
         assert_eq!(ring.opacity(), 1.0);
 
         ring.set_focused(Some(2));
         // Opacity stays at 1.0 (still focused, just different pane).
         ring.tick(0.0);
-        assert_eq!(ring.focused, Some(2));
+        assert_eq!(ring.focused(), Some(2));
         assert_eq!(ring.opacity(), 1.0);
     }
 }
