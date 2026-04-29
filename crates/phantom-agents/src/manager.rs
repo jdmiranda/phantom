@@ -2,20 +2,32 @@
 //!
 //! The [`AgentManager`] owns all active agents and controls concurrency.
 //! It is the single entry point for spawning, querying, and cleaning up agents.
+//!
+//! Use [`AgentManager::remote_agents`] to enumerate agents advertised by
+//! connected peers, and [`AgentManager::resolve`] to look up a local agent by
+//! [`AnyAgentRef`]. For outbound remote delivery, use the
+//! [`crate::peer_routing::AgentRouter`] that the brain holds separately.
 
 use std::time::Duration;
 
 use crate::agent::{Agent, AgentId, AgentStatus, AgentTask};
+use crate::peer_routing::{AgentRouter, AnyAgentRef, RemoteAgentInfo};
 
 // ---------------------------------------------------------------------------
 // AgentManager
 // ---------------------------------------------------------------------------
 
 /// Manages the pool of active agents.
+///
+/// Wraps a [`AgentRouter`] for cross-peer visibility. The router starts
+/// disconnected (local-only mode) and is wired up once the relay handshake
+/// completes.
 pub struct AgentManager {
     agents: Vec<Agent>,
     next_id: AgentId,
     max_concurrent: usize,
+    /// Cross-peer routing state (optional relay connection + remote agent cache).
+    pub router: AgentRouter,
 }
 
 impl AgentManager {
@@ -25,7 +37,30 @@ impl AgentManager {
             agents: Vec::new(),
             next_id: 1,
             max_concurrent,
+            router: AgentRouter::new(),
         }
+    }
+
+    /// Resolve an [`AnyAgentRef`] to a local agent.
+    ///
+    /// Returns the local [`Agent`] when `any_ref` is `Local` and the id is
+    /// known. Returns `None` for `Remote` refs — the caller must use
+    /// `self.router` for remote delivery.
+    #[must_use]
+    pub fn resolve(&self, any_ref: &AnyAgentRef) -> Option<&Agent> {
+        match any_ref {
+            AnyAgentRef::Local(id) => self.agents.iter().find(|a| a.id() == *id),
+            AnyAgentRef::Remote { .. } => None,
+        }
+    }
+
+    /// Remote agents currently visible from connected peers.
+    ///
+    /// The list is populated by the brain's relay-listener task as peers
+    /// advertise their agent rosters. Returns an empty slice when no relay is
+    /// connected.
+    pub fn remote_agents(&self) -> Vec<&RemoteAgentInfo> {
+        self.router.remote_agents()
     }
 
     /// Spawn a new agent with the given task. Returns the agent ID.
@@ -61,13 +96,19 @@ impl AgentManager {
 
     /// Get agents with a specific status.
     pub fn by_status(&self, status: AgentStatus) -> Vec<&Agent> {
-        self.agents.iter().filter(|a| a.status() == status).collect()
+        self.agents
+            .iter()
+            .filter(|a| a.status() == status)
+            .collect()
     }
 
     /// Remove completed/failed agents older than `max_age`.
     pub fn cleanup(&mut self, max_age: Duration) {
         self.agents.retain(|agent| {
-            let dominated = matches!(agent.status(), AgentStatus::Done | AgentStatus::Failed | AgentStatus::Flatline);
+            let dominated = matches!(
+                agent.status(),
+                AgentStatus::Done | AgentStatus::Failed | AgentStatus::Flatline
+            );
             if !dominated {
                 return true; // keep active agents
             }
@@ -226,7 +267,9 @@ mod tests {
         let _id2 = mgr.spawn(free_task("b"));
         assert_eq!(mgr.active_count(), 2);
 
-        mgr.get_mut(id1).unwrap().set_status(AgentStatus::WaitingForTool);
+        mgr.get_mut(id1)
+            .unwrap()
+            .set_status(AgentStatus::WaitingForTool);
         assert_eq!(mgr.active_count(), 2); // WaitingForTool counts as active
 
         mgr.get_mut(id1).unwrap().complete(true);
@@ -288,7 +331,10 @@ mod tests {
         // Use capacity=0 so the agent starts as Queued, then begin_planning().
         let mut mgr = AgentManager::new(0);
         let id = mgr.spawn(free_task("plan me")); // stays Queued (no capacity)
-        assert!(mgr.get_mut(id).unwrap().begin_planning(), "begin_planning must succeed from Queued");
+        assert!(
+            mgr.get_mut(id).unwrap().begin_planning(),
+            "begin_planning must succeed from Queued"
+        );
         assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Planning);
 
         let killed = mgr.kill(id);
@@ -337,8 +383,15 @@ mod tests {
         let killed = mgr.kill_all();
         // id1 (Working), id2 (Planning), id3 (AwaitingApproval) → 3 killed
         // id4 is Done (terminal) → not killed
-        assert_eq!(killed, 3, "kill_all() must kill Working, Planning, and AwaitingApproval agents");
-        assert_eq!(mgr.get(id4).unwrap().status(), AgentStatus::Done, "terminal agent must not be killed");
+        assert_eq!(
+            killed, 3,
+            "kill_all() must kill Working, Planning, and AwaitingApproval agents"
+        );
+        assert_eq!(
+            mgr.get(id4).unwrap().status(),
+            AgentStatus::Done,
+            "terminal agent must not be killed"
+        );
     }
 
     #[test]
