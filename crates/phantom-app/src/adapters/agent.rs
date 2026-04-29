@@ -136,7 +136,7 @@ impl AppCore for AgentAdapter {
                     topic_id: 0,
                     sender: self.app_id,
                     event: phantom_protocol::Event::AgentTaskComplete {
-                        agent_id: self.app_id,
+                        agent_id: u64::from(self.app_id),
                         success,
                         summary,
                         spawn_tag: self.spawn_tag,

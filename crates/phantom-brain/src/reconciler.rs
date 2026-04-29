@@ -56,10 +56,10 @@ pub struct ReconcilerState {
     active_dispatches: HashMap<usize, (AgentId, Instant)>,
     /// Monotonically increasing agent ID namespace for reconciler-dispatched
     /// agents. Starts high to avoid collision with AgentManager's IDs.
-    /// Stored as `u64` to guarantee no silent wraparound on long-running
-    /// sessions (#221). Narrowed to `AgentId` (`u32`) via
-    /// `u32::try_from(...).unwrap_or(u32::MAX)` at dispatch time (#272).
-    next_agent_id: u64,
+    ///
+    /// `AgentId` is now `u64` workspace-wide (fixes #273), so this field is
+    /// the same type and no narrowing cast is required at dispatch time.
+    next_agent_id: AgentId,
     /// Configurable stall timeout (overrideable in tests).
     pub stall_timeout: Duration,
 }
@@ -163,7 +163,7 @@ impl ReconcilerState {
         let idx = match self
             .active_dispatches
             .iter()
-            .find(|&(_, &(stored_id, _))| stored_id as u64 == tag)
+            .find(|&(_, &(stored_id, _))| stored_id == tag)
             .map(|(&idx, _)| idx)
         {
             Some(i) => i,
@@ -228,24 +228,21 @@ impl ReconcilerState {
             .collect();
 
         for (idx, task, description) in eligible {
-            let agent_id: u64 = self.next_agent_id;
+            let agent_id: AgentId = self.next_agent_id;
             self.next_agent_id = self
                 .next_agent_id
                 .checked_add(1)
                 .expect("reconciler next_agent_id overflowed u64 — unreachable in practice");
-            let agent_id_u32 = u32::try_from(agent_id).unwrap_or(u32::MAX);
 
             // Advance step to Active before emitting SpawnAgent so that a
             // synchronous ledger inspection sees the correct state.
-            // `agent_id` fits in u32 for the ledger field; saturate rather
-            // than truncate so corrupt IDs are visible (#221, #272).
             if let Some(s) = ledger.plan.get_mut(idx) {
                 s.status = StepStatus::Active;
-                s.agent_id = Some(agent_id_u32);
+                s.agent_id = Some(agent_id);
                 s.attempts += 1;
             }
 
-            self.active_dispatches.insert(idx, (agent_id_u32, Instant::now()));
+            self.active_dispatches.insert(idx, (agent_id, Instant::now()));
 
             log::info!(
                 "Reconciler: dispatching step {idx} (agent_id={agent_id}) — {description}"
@@ -286,7 +283,7 @@ impl ReconcilerState {
                         "Reconciler: step {idx} stalled and exhausted retries (agent_id={agent_id}) — {description}"
                     );
                     let _ = action_tx.send(AiAction::AgentFlatlined {
-                        id: agent_id as u32,
+                        id: agent_id,
                         reason: format!(
                             "step '{description}' stalled after {} attempts",
                             step.max_attempts
@@ -497,7 +494,7 @@ mod tests {
         let (&idx, &(stored_id, _)) = state.active_dispatches.iter().next()
             .expect("active_dispatches must have one entry");
         assert_eq!(idx, 0, "step 0 should be active");
-        assert_eq!(tag, stored_id as u64, "spawn_tag must match stored synthetic id");
+        assert_eq!(tag, stored_id, "spawn_tag must match stored synthetic id");
     }
 
     /// `on_agent_complete` must route by `spawn_tag`, not by sequential
@@ -840,24 +837,27 @@ mod tests {
         assert_eq!(state.active_dispatches.len(), 1, "dispatch count must not grow");
     }
 
-    // -- Issue #272: agent_id u64 → u32 saturating cast ---------------------------
+    // -- Issue #273: AgentId unified as u64 — no narrowing cast at dispatch --------
 
-    /// When `next_agent_id` is at `u32::MAX as u64 + 1` (i.e. it has overflowed
-    /// the u32 range), `dispatch_pending` must saturate to `u32::MAX` in
-    /// `active_dispatches` rather than silently truncating to 0.
+    /// Agent IDs above `u32::MAX` must survive the dispatch/complete round-trip
+    /// without any narrowing or saturation. Since `AgentId` is now `u64`
+    /// workspace-wide (fixes #273), the full value is stored in
+    /// `active_dispatches`, stamped into `PlanStep::agent_id`, and echoed back
+    /// in `spawn_tag` with no conversion at any boundary.
     ///
-    /// The `spawn_tag` on the emitted `SpawnAgent` action carries the full u64
-    /// value so `on_agent_complete` can still match the step correctly via
-    /// exact tag comparison.
+    /// Previously this range required a saturating cast to `u32::MAX`. That
+    /// cast is now gone — callers pass IDs above `u32::MAX` and get them back
+    /// unmodified.
     #[test]
-    fn dispatch_pending_agent_id_near_u32_max_uses_saturation() {
+    fn dispatch_pending_agent_id_above_u32_max_survives_roundtrip() {
         let (tx, rx) = mpsc::channel();
-        // Set next_agent_id just above u32::MAX so the first dispatch overflows.
+        // Set next_agent_id just above u32::MAX to exercise the formerly-broken range.
+        let above_u32_max = u32::MAX as u64 + 1;
         let mut state = ReconcilerState {
-            next_agent_id: u32::MAX as u64 + 1,
+            next_agent_id: above_u32_max,
             ..ReconcilerState::new()
         };
-        let mut ledger = make_ledger(&["overflow step"]);
+        let mut ledger = make_ledger(&["high-id step"]);
 
         state.tick(&mut ledger, &tx);
 
@@ -867,11 +867,14 @@ mod tests {
             panic!("expected SpawnAgent variant");
         };
 
-        // spawn_tag carries the full u64 value (u32::MAX + 1).
+        // spawn_tag carries the full u64 value — no narrowing.
         let tag = spawn_tag.expect("spawn_tag must be Some");
-        assert_eq!(tag, u32::MAX as u64 + 1, "spawn_tag must be the raw u64 counter value");
+        assert_eq!(
+            tag, above_u32_max,
+            "spawn_tag must preserve the full u64 agent ID (fixes #273)"
+        );
 
-        // The stored AgentId in active_dispatches must be u32::MAX (saturated), not 0.
+        // active_dispatches also stores the full u64 — no saturation to u32::MAX.
         let &(stored_id, _) = state
             .active_dispatches
             .values()
@@ -879,8 +882,15 @@ mod tests {
             .expect("active_dispatches must have one entry");
         assert_eq!(
             stored_id,
-            u32::MAX,
-            "active_dispatches must store u32::MAX (saturated), not 0 (truncated)"
+            above_u32_max,
+            "active_dispatches must store the raw u64 agent ID, not a saturated u32 (fixes #273)"
+        );
+
+        // PlanStep::agent_id must also hold the full value.
+        assert_eq!(
+            ledger.plan[0].agent_id,
+            Some(above_u32_max),
+            "PlanStep::agent_id must store the full u64 agent ID (fixes #273)"
         );
     }
 

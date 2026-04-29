@@ -17,7 +17,11 @@ use crate::tools::{ToolCall, ToolResult};
 // ---------------------------------------------------------------------------
 
 /// Unique agent identifier (monotonically increasing within a session).
-pub type AgentId = u32;
+///
+/// Widened to `u64` (matches [`crate::role::AgentId`] and
+/// [`crate::quarantine::QuarantineRegistry`]) so no narrowing cast is required
+/// at the dispatch / quarantine boundary. Fixes issue #273.
+pub type AgentId = u64;
 
 // ---------------------------------------------------------------------------
 // AgentStatus
