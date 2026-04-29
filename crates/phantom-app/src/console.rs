@@ -237,3 +237,153 @@ impl Console {
         self.tab_matches.clear();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #176 — Command history: Up/Down recall with LIFO ordering
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    /// Build a console that has already submitted "first", "second", "third".
+    fn console_with_3_commands() -> Console {
+        let mut c = Console::new();
+        c.input = "first".into();
+        c.submit();
+        c.input = "second".into();
+        c.submit();
+        c.input = "third".into();
+        c.submit();
+        c
+    }
+
+    // Up once → most recent command.
+    #[test]
+    fn history_up_once_returns_last_command() {
+        let mut c = console_with_3_commands();
+        c.history_up();
+        assert_eq!(c.input, "third");
+    }
+
+    // Up twice → second-most recent.
+    #[test]
+    fn history_up_twice_returns_second_command() {
+        let mut c = console_with_3_commands();
+        c.history_up();
+        c.history_up();
+        assert_eq!(c.input, "second");
+    }
+
+    // Up three times → oldest command.
+    #[test]
+    fn history_up_three_times_returns_first_command() {
+        let mut c = console_with_3_commands();
+        c.history_up();
+        c.history_up();
+        c.history_up();
+        assert_eq!(c.input, "first");
+    }
+
+    // Up past the oldest entry must stay at the oldest without panicking.
+    #[test]
+    fn history_up_past_oldest_stays_at_first_no_panic() {
+        let mut c = console_with_3_commands();
+        for _ in 0..10 {
+            c.history_up();
+        }
+        assert_eq!(c.input, "first", "must clamp at oldest entry");
+    }
+
+    // Up then Down restores the saved draft.
+    #[test]
+    fn history_up_then_down_restores_input() {
+        let mut c = console_with_3_commands();
+        c.input = "draft".into();
+        c.history_up();
+        assert_eq!(c.input, "third");
+        c.history_down();
+        assert_eq!(c.input, "draft", "Down from newest must restore draft");
+    }
+
+    // Up×3 Down×1 → "second".
+    #[test]
+    fn history_down_moves_forward() {
+        let mut c = console_with_3_commands();
+        c.history_up();
+        c.history_up();
+        c.history_up();
+        c.history_down();
+        assert_eq!(c.input, "second");
+    }
+
+    // Down all the way back restores the draft.
+    #[test]
+    fn history_down_to_end_restores_draft() {
+        let mut c = console_with_3_commands();
+        c.input = "new draft".into();
+        c.history_up();
+        c.history_up();
+        c.history_up();
+        c.history_down();
+        c.history_down();
+        c.history_down();
+        assert_eq!(c.input, "new draft");
+    }
+
+    // history_up on empty history is a no-op, no panic.
+    #[test]
+    fn history_up_on_empty_history_is_no_op_no_panic() {
+        let mut c = Console::new();
+        c.history_up(); // must not panic
+        assert!(c.command_history.is_empty());
+    }
+
+    // history_down when not navigating must not panic or change input.
+    #[test]
+    fn history_down_when_not_navigating_is_no_op() {
+        let mut c = console_with_3_commands();
+        c.input = "current".into();
+        c.history_down(); // not in navigation mode — no-op
+        assert_eq!(c.input, "current");
+    }
+
+    // Duplicate adjacent commands are deduplicated.
+    #[test]
+    fn duplicate_adjacent_commands_deduplicated() {
+        let mut c = Console::new();
+        c.input = "build".into();
+        c.submit();
+        c.input = "build".into();
+        c.submit();
+        assert_eq!(c.command_history.len(), 1, "identical adjacent commands must not be duplicated");
+    }
+
+    // submit() returns the trimmed command string.
+    #[test]
+    fn submit_returns_trimmed_command() {
+        let mut c = Console::new();
+        c.input = "  cargo test  ".into();
+        let result = c.submit();
+        assert_eq!(result, Some("cargo test".into()));
+    }
+
+    // submit() clears the input buffer.
+    #[test]
+    fn submit_clears_input() {
+        let mut c = Console::new();
+        c.input = "something".into();
+        c.submit();
+        assert!(c.input.is_empty(), "input must be empty after submit");
+    }
+
+    // submit() with only whitespace returns None and does not add to history.
+    #[test]
+    fn submit_empty_returns_none() {
+        let mut c = Console::new();
+        c.input = "   ".into();
+        let result = c.submit();
+        assert_eq!(result, None);
+        assert!(c.command_history.is_empty());
+    }
+}

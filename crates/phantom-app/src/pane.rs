@@ -403,3 +403,111 @@ mod scrollbar_tests {
         assert!(!point_in_rect(50.0, 71.0, rect)); // below rect
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #173 — Scroll position: 1000-line buffer, 40-row viewport
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod scroll_position_tests {
+    use super::*;
+    use phantom_ui::layout::Rect;
+
+    const HISTORY: usize = 1000;
+    const VIEWPORT: usize = 40;
+
+    fn track() -> Rect {
+        Rect { x: 494.0, y: 50.0, width: 6.0, height: 400.0 }
+    }
+
+    // scrollbar_y_to_offset maps a click y position to a display_offset.
+    // At mid-track the result must be history_size / 2 = 500.
+    #[test]
+    fn scroll_to_500_gives_offset_500() {
+        let t = track();
+        let mid_y = t.y + t.height / 2.0;
+        let offset = scrollbar_y_to_offset(t, mid_y, HISTORY);
+        assert_eq!(offset, 500);
+    }
+
+    // Clicking at the top of the track means oldest content → max offset.
+    #[test]
+    fn scroll_to_top_gives_max_offset() {
+        let t = track();
+        let offset = scrollbar_y_to_offset(t, t.y, HISTORY);
+        assert_eq!(offset, HISTORY);
+    }
+
+    // Clicking at the bottom of the track means live end → offset 0.
+    #[test]
+    fn scroll_to_end_gives_offset_zero() {
+        let t = track();
+        let offset = scrollbar_y_to_offset(t, t.y + t.height, HISTORY);
+        assert_eq!(offset, 0);
+    }
+
+    // Clicking above the track must clamp to history_size without panicking.
+    #[test]
+    fn scroll_past_top_clamps_no_panic() {
+        let t = track();
+        let offset = scrollbar_y_to_offset(t, t.y - 100.0, HISTORY);
+        assert_eq!(offset, HISTORY, "clamped at history_size");
+    }
+
+    // Clicking below the track must clamp to 0 without panicking.
+    #[test]
+    fn scroll_past_end_clamps_no_panic() {
+        let t = track();
+        let offset = scrollbar_y_to_offset(t, t.y + t.height + 100.0, HISTORY);
+        assert_eq!(offset, 0, "clamped at zero");
+    }
+
+    // Zero-history edge case must not panic and must return 0.
+    #[test]
+    fn scroll_zero_history_returns_zero_no_panic() {
+        let t = track();
+        let offset = scrollbar_y_to_offset(t, t.y + 100.0, 0);
+        assert_eq!(offset, 0);
+    }
+
+    // With a 1000-line history and 40-row viewport the thumb must be present
+    // (history > visible_rows means there is something to scroll).
+    #[test]
+    fn thumb_is_present_with_1000_line_history() {
+        let t = track();
+        let thumb = scrollbar_thumb_rect(t, 0, HISTORY, VIEWPORT);
+        assert!(thumb.is_some(), "thumb must exist when history > viewport");
+    }
+
+    // When history_size == 0 there is nothing to scroll; no thumb.
+    #[test]
+    fn thumb_absent_when_no_history() {
+        let t = track();
+        let thumb = scrollbar_thumb_rect(t, 0, 0, VIEWPORT);
+        assert!(thumb.is_none(), "no thumb when history is empty");
+    }
+
+    // At live end (offset = 0) the thumb should be near the bottom of the track.
+    #[test]
+    fn thumb_at_bottom_when_at_live_end() {
+        let t = track();
+        let thumb = scrollbar_thumb_rect(t, 0, HISTORY, VIEWPORT).unwrap();
+        // The thumb's top edge must be in the lower half of the track.
+        assert!(
+            thumb.y > t.y + t.height / 2.0,
+            "thumb must sit in lower half when at live end (offset=0)"
+        );
+    }
+
+    // At the oldest content (offset = history_size) the thumb must be near the top.
+    #[test]
+    fn thumb_at_top_when_at_oldest_end() {
+        let t = track();
+        let thumb = scrollbar_thumb_rect(t, HISTORY, HISTORY, VIEWPORT).unwrap();
+        // The thumb's top edge must be in the upper half of the track.
+        assert!(
+            thumb.y <= t.y + t.height / 2.0,
+            "thumb must sit in upper half when at oldest end (offset=history_size)"
+        );
+    }
+}
