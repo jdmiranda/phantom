@@ -28,6 +28,7 @@ pub mod render;
 pub mod role;
 pub mod router;
 pub mod sandbox;
+pub mod semantic_context;
 pub mod speech;
 pub mod spawn_rules;
 pub mod suggest;
@@ -46,5 +47,6 @@ pub use manager::*;
 pub use role::{
     AgentId as RoleAgentId, AgentRef, AgentRole, CapabilityClass, RoleManifest, SpawnSource,
 };
+pub use semantic_context::SemanticContext;
 pub use taint::TaintLevel;
 pub use tools::*;

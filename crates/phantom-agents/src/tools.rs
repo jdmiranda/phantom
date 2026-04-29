@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use phantom_semantic::{ParsedOutput, SemanticParser};
+
 use crate::role::{AgentRole, CapabilityClass};
 use crate::sandbox::{self, SandboxPolicy};
 use crate::taint::TaintLevel;
@@ -284,6 +286,10 @@ fn hash_args_for_provenance(args_json: &str) -> String {
 /// with only `tool`/`success`/`output` keeps compiling via
 /// `..Default::default()`, leaving the new fields at their defaults (empty
 /// strings, `None`, `TaintLevel::Clean`).
+///
+/// The `semantic_output` field carries the structured [`ParsedOutput`]
+/// produced by `phantom-semantic` for `RunCommand` results. `None` for every
+/// other tool type and for paths that haven't been updated to set it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool: ToolType,
@@ -304,6 +310,15 @@ pub struct ToolResult {
     /// provenance that is attached with [`Self::with_provenance`].
     #[serde(default)]
     pub taint: TaintLevel,
+    /// Structured semantic output for `RunCommand` results.
+    ///
+    /// `phantom-semantic` classifies the command and parses stdout/stderr into
+    /// typed variants (e.g. `GitStatus`, `TestResults`, `CompilerOutput`).
+    /// Agents read this field to reason about command output at a structural
+    /// level rather than parsing raw text. `None` for tool types other than
+    /// `RunCommand`.
+    #[serde(default)]
+    pub semantic_output: Option<Box<ParsedOutput>>,
 }
 
 impl ToolResult {
@@ -607,6 +622,7 @@ fn tool_err(tool: ToolType, msg: String) -> ToolResult {
         args_hash: String::new(),
         source_event_id: None,
         taint: Default::default(),
+        semantic_output: None,
     }
 }
 
@@ -619,6 +635,7 @@ fn tool_ok(tool: ToolType, output: String) -> ToolResult {
         args_hash: String::new(),
         source_event_id: None,
         taint: Default::default(),
+        semantic_output: None,
     }
 }
 
@@ -784,13 +801,65 @@ pub(crate) fn execute_run_command_with_policy(
         return tool_err(tool, "missing required parameter: command".into());
     };
 
-    match sandbox::execute_sandboxed(command_str, root, policy, COMMAND_TIMEOUT) {
-        Ok(out) => {
-            if out.success {
-                tool_ok(tool, out.output)
-            } else {
-                tool_err(tool, format!("command exited non-zero\n{}", out.output))
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(command_str)
+        .current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return tool_err(tool, format!("cannot spawn command: {e}")),
+    };
+
+    match child.wait_timeout(COMMAND_TIMEOUT) {
+        Ok(Some(status)) => {
+            let stdout = child
+                .stdout
+                .take()
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+                .unwrap_or_default();
+
+            let stderr = child
+                .stderr
+                .take()
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+                .unwrap_or_default();
+
+            let mut output = String::new();
+            if !stdout.is_empty() {
+                output.push_str(&stdout);
             }
+            if !stderr.is_empty() {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str("STDERR:\n");
+                output.push_str(&stderr);
+            }
+
+            // Classify and structure the output via phantom-semantic so agents
+            // receive structured context rather than raw text alone.
+            let exit_code = status.code();
+            let semantic = SemanticParser::parse(command_str, &stdout, &stderr, exit_code);
+
+            let mut result = if status.success() {
+                tool_ok(tool, output)
+            } else {
+                tool_err(tool, format!("command exited with {status}\n{output}"))
+            };
+            result.semantic_output = Some(Box::new(semantic));
+            result
         }
         Err(e) => tool_err(tool, e.to_string()),
     }

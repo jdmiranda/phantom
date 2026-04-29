@@ -21,6 +21,7 @@
 //! Callers feed it as the `system` field on the first request to the model.
 
 use crate::role::AgentRef;
+use crate::semantic_context::SemanticContext;
 
 /// Trailing instruction that closes every built prompt. Centralized as a
 /// constant so tests can assert exact match without duplicating the literal.
@@ -82,6 +83,10 @@ pub struct SystemPromptBuilder {
     /// the agent can use to address them. Empty / `None` keeps the legacy
     /// prompt unchanged.
     pub other_agents: Option<Vec<(crate::role::AgentRole, String)>>,
+    /// Structured recent command output from phantom-semantic. When `Some`,
+    /// rendered under `## Recent command output` so the agent can reason
+    /// about prior command results without re-reading raw terminal text.
+    pub semantic_context: Option<String>,
 }
 
 impl SystemPromptBuilder {
@@ -95,6 +100,7 @@ impl SystemPromptBuilder {
             apps_list: None,
             tool_summary: None,
             other_agents: None,
+            semantic_context: None,
         }
     }
 
@@ -138,6 +144,18 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Attach the structured semantic context from recent command executions.
+    ///
+    /// Pass the agent's [`SemanticContext`]; the method renders it to a Markdown
+    /// string via [`SemanticContext::as_prompt_section`] and stores it for
+    /// inclusion in [`build`]. When the context is empty, no section is emitted.
+    ///
+    /// [`build`]: SystemPromptBuilder::build
+    pub fn with_semantic_context(mut self, ctx: &SemanticContext) -> Self {
+        self.semantic_context = ctx.as_prompt_section();
+        self
+    }
+
     /// Materialize the final system prompt.
     ///
     /// Sections are emitted in this fixed order, separated by blank lines:
@@ -148,7 +166,8 @@ impl SystemPromptBuilder {
     /// 4. `## Project context` (if set).
     /// 5. `## Workspace inventory` (if set).
     /// 6. `## Tools you can call` (if set).
-    /// 7. Closing pane-id citation rule (always present).
+    /// 7. `## Recent command output` (if semantic context is set and non-empty).
+    /// 8. Closing pane-id citation rule (always present).
     ///
     /// When `agent.role == AgentRole::Composer`, the role-specific
     /// debate/critique protocol is appended after the boundary line so it
@@ -217,7 +236,12 @@ impl SystemPromptBuilder {
             sections.push(format!("## Tools you can call\n{tools}"));
         }
 
-        // 7. Closing line.
+        // 7. Structured semantic context from recent command executions.
+        if let Some(ctx_section) = &self.semantic_context {
+            sections.push(ctx_section.clone());
+        }
+
+        // 8. Closing line.
         sections.push(CLOSING_LINE.to_string());
 
         sections.join("\n\n")
