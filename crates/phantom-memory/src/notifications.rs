@@ -137,6 +137,15 @@ impl Notification {
     }
 }
 
+/// Maximum number of notifications retained in the store at any time.
+///
+/// When the store exceeds this limit after a [`NotificationStore::push`],
+/// the oldest *read* notifications are pruned first.  If the store still
+/// exceeds the limit after all read notifications have been removed, the
+/// oldest *unread* notifications are pruned next.  Unread notifications are
+/// therefore always preferred over read ones when space is tight.
+pub const MAX_NOTIFICATIONS: usize = 500;
+
 /// Persistent notification store for a single project.
 ///
 /// Backed by a JSON file at `<base_dir>/<project_hash>.json`.  All writes
@@ -238,6 +247,7 @@ impl NotificationStore {
         };
         self.next_id += 1;
         self.notifications.push(n);
+        self.prune();
         self.save()?;
         Ok(self.notifications.last().expect("just pushed"))
     }
@@ -323,6 +333,40 @@ impl NotificationStore {
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
+
+    /// Enforce [`MAX_NOTIFICATIONS`] by discarding excess entries.
+    ///
+    /// Pruning order (oldest-first within each group):
+    /// 1. Read notifications are dropped first.
+    /// 2. Unread notifications are dropped only if read ones are exhausted.
+    fn prune(&mut self) {
+        if self.notifications.len() <= MAX_NOTIFICATIONS {
+            return;
+        }
+
+        // Drop oldest read notifications until we're within budget or run out.
+        let mut read_indices: Vec<usize> = self
+            .notifications
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| if n.read { Some(i) } else { None })
+            .collect();
+
+        while self.notifications.len() > MAX_NOTIFICATIONS && !read_indices.is_empty() {
+            // Indices shift left after each removal; adjust accordingly.
+            let idx = read_indices.remove(0);
+            self.notifications.remove(idx);
+            // All subsequent stored indices are now off by one.
+            for stored in &mut read_indices {
+                *stored -= 1;
+            }
+        }
+
+        // If still over budget, drop oldest unread notifications.
+        while self.notifications.len() > MAX_NOTIFICATIONS {
+            self.notifications.remove(0);
+        }
+    }
 
     /// Persist to disk atomically (write tmp, then rename).
     fn save(&self) -> Result<()> {
@@ -735,5 +779,67 @@ mod tests {
             let back: NotificationKind = serde_json::from_str(&json).unwrap();
             assert_eq!(back, kind);
         }
+    }
+
+    // ── MAX_NOTIFICATIONS cap + pruning priority ──────────────────────────────
+
+    /// Push 600 notifications (mix of read and unread) and verify:
+    ///
+    /// 1. The store never exceeds `MAX_NOTIFICATIONS` (500) entries after any push.
+    /// 2. Unread notifications are preserved over read ones when pruning occurs.
+    ///
+    /// **Scenario**
+    ///
+    /// - Push 300 notifications and immediately mark them all read.
+    /// - Push 300 more notifications (all unread).
+    ///
+    /// After 500 entries the store starts pruning.  The 300 read notifications
+    /// are all older than the 300 unread ones, so all 100 excess entries
+    /// (600 − 500) must come from the read bucket.  That leaves 200 read and
+    /// 300 unread in the store.  The key assertion is that **zero** unread
+    /// notifications were evicted even though total > 500.
+    #[test]
+    fn push_600_caps_at_500_and_preserves_unread_over_read() {
+        let (mut store, _dir) = tmp_store("/proj-cap");
+
+        // Phase 1: push 300 read notifications.
+        for i in 1u64..=300 {
+            store
+                .push(NotificationKind::PipelineCompleted, "read", "m", None)
+                .unwrap();
+            store.mark_read(NotificationId(i)).unwrap();
+        }
+
+        // Phase 2: push 300 more *unread* notifications (IDs 301–600).
+        for _ in 301u64..=600 {
+            store
+                .push(NotificationKind::AgentRunning, "unread", "m", None)
+                .unwrap();
+        }
+
+        // 1. Cap is respected at all times; check the final state.
+        assert!(
+            store.count() <= MAX_NOTIFICATIONS,
+            "store has {} entries, expected <= {}",
+            store.count(),
+            MAX_NOTIFICATIONS,
+        );
+
+        // 2. All 300 unread notifications survive (unread are always preferred).
+        //    Pruning should have evicted only read ones.
+        let unread_count = store.unread_count();
+        assert_eq!(
+            unread_count, 300,
+            "all 300 unread notifications should be preserved; found {unread_count}",
+        );
+
+        let read_count = store.count() - unread_count;
+        // 600 total pushed − 300 unread − MAX_NOTIFICATIONS read budget
+        // = max(0, 300 − (500 − 300)) = max(0, 300 − 200) = 100 pruned reads
+        // leaving 200 reads in the store.
+        assert_eq!(
+            read_count, 200,
+            "expected 200 read notifications to remain; found {read_count}",
+        );
     }
 }
