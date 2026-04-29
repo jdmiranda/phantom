@@ -20,6 +20,10 @@ pub use notification_banner::{
     BannerSeverity, NotificationBanner, NOTIFICATION_BANNER_HEIGHT,
 };
 
+// Issue #20 — generic bordered panel with optional title bar.
+pub mod panel;
+pub use panel::{Panel, TITLE_BAR_HEIGHT};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------
