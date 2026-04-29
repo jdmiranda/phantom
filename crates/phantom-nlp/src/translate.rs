@@ -107,6 +107,7 @@ impl Intent {
     // -- field accessors -------------------------------------------------------
 
     /// Return the `cmd` field if this is a [`Intent::RunCommand`], else `None`.
+    #[must_use]
     pub fn cmd(&self) -> Option<&str> {
         match self {
             Self::RunCommand { cmd } => Some(cmd),
@@ -115,6 +116,7 @@ impl Intent {
     }
 
     /// Return the `query` field if this is a [`Intent::SearchHistory`], else `None`.
+    #[must_use]
     pub fn query(&self) -> Option<&str> {
         match self {
             Self::SearchHistory { query } => Some(query),
@@ -123,6 +125,7 @@ impl Intent {
     }
 
     /// Return the `goal` field if this is a [`Intent::SpawnAgent`], else `None`.
+    #[must_use]
     pub fn goal(&self) -> Option<&str> {
         match self {
             Self::SpawnAgent { goal } => Some(goal),
@@ -131,6 +134,7 @@ impl Intent {
     }
 
     /// Return the `question` field if this is a [`Intent::Clarify`], else `None`.
+    #[must_use]
     pub fn question(&self) -> Option<&str> {
         match self {
             Self::Clarify { question } => Some(question),
@@ -139,6 +143,7 @@ impl Intent {
     }
 
     /// Human-readable name of this intent variant (for logging).
+    #[must_use]
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::RunCommand { .. } => "RunCommand",
@@ -222,6 +227,7 @@ impl ClaudeLlmBackend {
     }
 
     /// Return the model identifier in use.
+    #[must_use]
     pub fn model(&self) -> &str {
         &self.model
     }

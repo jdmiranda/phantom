@@ -52,6 +52,7 @@ impl SavedStepStatus {
     ///
     /// `Active` → `Pending` (retry policy from the issue spec).
     /// All other statuses are restored as-is.
+    #[must_use]
     pub fn restore_as(self) -> Self {
         match self {
             Self::Active => Self::Pending,
@@ -108,30 +109,37 @@ impl SavedPlanStep {
 
     // -- Accessors -----------------------------------------------------------
 
+    #[must_use]
     pub fn description(&self) -> &str {
         &self.description
     }
 
+    #[must_use]
     pub fn assigned_task(&self) -> &AgentTask {
         &self.assigned_task
     }
 
+    #[must_use]
     pub fn status(&self) -> SavedStepStatus {
         self.status
     }
 
+    #[must_use]
     pub fn agent_id(&self) -> Option<u32> {
         self.agent_id
     }
 
+    #[must_use]
     pub fn attempts(&self) -> u32 {
         self.attempts
     }
 
+    #[must_use]
     pub fn max_attempts(&self) -> u32 {
         self.max_attempts
     }
 
+    #[must_use]
     pub fn result_summary(&self) -> Option<&str> {
         self.result_summary.as_deref()
     }
@@ -139,6 +147,7 @@ impl SavedPlanStep {
     /// The status that should be used when reconstructing a live `PlanStep`.
     ///
     /// `Active` → `Pending` (conflict policy: retry in-progress work).
+    #[must_use]
     pub fn restore_status(&self) -> SavedStepStatus {
         self.status.restore_as()
     }
@@ -166,14 +175,17 @@ pub struct SavedFact {
 }
 
 impl SavedFact {
+    #[must_use]
     pub fn content(&self) -> &str {
         &self.content
     }
 
+    #[must_use]
     pub fn confidence(&self) -> SavedFactConfidence {
         self.confidence
     }
 
+    #[must_use]
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -213,6 +225,7 @@ impl GoalSnapshot {
     /// the values they need.  The `active → pending` demotion is applied
     /// at restore time (see `restore_status()`), not at save time, so the
     /// saved record faithfully records what was running.
+    #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         goal: String,
@@ -242,42 +255,52 @@ impl GoalSnapshot {
 
     // -- Accessors -----------------------------------------------------------
 
+    #[must_use]
     pub fn goal(&self) -> &str {
         &self.goal
     }
 
+    #[must_use]
     pub fn facts(&self) -> &[SavedFact] {
         &self.facts
     }
 
+    #[must_use]
     pub fn plan(&self) -> &[SavedPlanStep] {
         &self.plan
     }
 
+    #[must_use]
     pub fn plan_history(&self) -> &[Vec<SavedPlanStep>] {
         &self.plan_history
     }
 
+    #[must_use]
     pub fn stall_counter(&self) -> u32 {
         self.stall_counter
     }
 
+    #[must_use]
     pub fn stall_threshold(&self) -> u32 {
         self.stall_threshold
     }
 
+    #[must_use]
     pub fn replan_count(&self) -> u32 {
         self.replan_count
     }
 
+    #[must_use]
     pub fn max_replans(&self) -> u32 {
         self.max_replans
     }
 
+    #[must_use]
     pub fn created_at_secs(&self) -> u64 {
         self.created_at_secs
     }
 
+    #[must_use]
     pub fn last_replan_at_secs(&self) -> Option<u64> {
         self.last_replan_at_secs
     }
@@ -288,6 +311,7 @@ impl GoalSnapshot {
     ///
     /// The reconciler uses this to detect whether completed steps would be
     /// re-executed after restore (they should not).
+    #[must_use]
     pub fn done_step_count(&self) -> usize {
         self.plan
             .iter()
@@ -297,6 +321,7 @@ impl GoalSnapshot {
 
     /// Count steps that would be `Pending` after restore (includes `Active`
     /// steps that are demoted).
+    #[must_use]
     pub fn pending_after_restore(&self) -> usize {
         self.plan
             .iter()
@@ -327,6 +352,7 @@ pub struct GoalStateFile {
 
 impl GoalStateFile {
     /// Create a new file from a collection of goal snapshots.
+    #[must_use]
     pub fn new(goals: Vec<GoalSnapshot>) -> Self {
         let saved_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -341,18 +367,22 @@ impl GoalStateFile {
 
     // -- Accessors -----------------------------------------------------------
 
+    #[must_use]
     pub fn version(&self) -> u32 {
         self.version
     }
 
+    #[must_use]
     pub fn saved_at(&self) -> u64 {
         self.saved_at
     }
 
+    #[must_use]
     pub fn goals(&self) -> &[GoalSnapshot] {
         &self.goals
     }
 
+    #[must_use]
     pub fn goal_count(&self) -> usize {
         self.goals.len()
     }
@@ -412,6 +442,7 @@ pub struct GoalStatePersister {
 impl GoalStatePersister {
     /// Return the canonical global goal-state path:
     /// `~/.local/share/phantom/goals.json`.
+    #[must_use]
     pub fn default_path() -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home)
@@ -427,6 +458,7 @@ impl GoalStatePersister {
     /// Derive a project-scoped sidecar path from a session file path.
     ///
     /// Given `{hash}_{ts}.json`, returns `{hash}_{ts}_goals.json`.
+    #[must_use]
     pub fn sidecar_path(session_path: &Path) -> PathBuf {
         let stem = session_path
             .file_stem()
@@ -440,6 +472,7 @@ impl GoalStatePersister {
     }
 
     /// Create a persister targeting `path`.
+    #[must_use]
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -472,6 +505,7 @@ impl GoalStatePersister {
         }
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -493,6 +527,7 @@ pub struct PlanStepBuilder {
 }
 
 impl PlanStepBuilder {
+    #[must_use]
     pub fn new(description: impl Into<String>, task: AgentTask) -> Self {
         Self {
             description: description.into(),
@@ -505,31 +540,37 @@ impl PlanStepBuilder {
         }
     }
 
+    #[must_use]
     pub fn status(mut self, status: SavedStepStatus) -> Self {
         self.status = status;
         self
     }
 
+    #[must_use]
     pub fn agent_id(mut self, id: u32) -> Self {
         self.agent_id = Some(id);
         self
     }
 
+    #[must_use]
     pub fn attempts(mut self, n: u32) -> Self {
         self.attempts = n;
         self
     }
 
+    #[must_use]
     pub fn max_attempts(mut self, n: u32) -> Self {
         self.max_attempts = n;
         self
     }
 
+    #[must_use]
     pub fn result_summary(mut self, s: impl Into<String>) -> Self {
         self.result_summary = Some(s.into());
         self
     }
 
+    #[must_use]
     pub fn build(self) -> SavedPlanStep {
         SavedPlanStep::from_raw(
             self.description,
@@ -558,6 +599,7 @@ pub enum GoalRestoreOutcome {
 }
 
 /// Attempt to restore goals from a saved file, tolerating per-goal failures.
+#[must_use]
 pub fn partial_restore_goals(file: &GoalStateFile) -> Vec<GoalRestoreOutcome> {
     if file.version() < 1 {
         return vec![GoalRestoreOutcome::Corrupt {

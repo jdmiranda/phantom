@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use phantom_context::ProjectContext;
 use regex::Regex;
 
@@ -41,6 +43,7 @@ impl NlpInterpreter {
     ///
     /// Returns `PassThrough` if the input doesn't match any known pattern
     /// or looks like a real shell command.
+    #[must_use]
     pub fn interpret(input: &str, ctx: &ProjectContext) -> ResolvedAction {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -89,6 +92,7 @@ impl NlpInterpreter {
     /// Returns `true` when the input contains spaces and starts with a
     /// common English verb/question word, and does NOT contain shell
     /// operators.
+    #[must_use]
     pub fn is_natural_language(input: &str) -> bool {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -152,6 +156,71 @@ impl NlpInterpreter {
 }
 
 // ---------------------------------------------------------------------------
+// Static regexes (compiled once at first use via LazyLock)
+// ---------------------------------------------------------------------------
+
+static RE_BINARY_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9_-]*$").expect("static regex"));
+
+static RE_TEST: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:test|tests|run\s+(?:the\s+)?tests?)$").expect("static regex"));
+
+static RE_RUN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:run|start|run\s+it|start\s+it|run\s+the\s+(?:app|project|server)|start\s+the\s+(?:app|project|server))$",
+    )
+    .expect("static regex")
+});
+
+static RE_LINT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:lint|check|run\s+(?:the\s+)?linter?)$").expect("static regex"));
+
+static RE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:format|fmt|format\s+(?:the\s+)?code|run\s+(?:the\s+)?formatter)$")
+        .expect("static regex")
+});
+
+static RE_CHANGES: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:what(?:'s|\s+has)?\s+changed(?:\s+today|\s+recently|\s+lately)?|recent\s+changes|show\s+(?:recent\s+)?changes)$",
+    )
+    .expect("static regex")
+});
+
+static RE_STATUS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:status|git\s+status|what(?:'s|\s+is)\s+the\s+status)$").expect("static regex")
+});
+
+static RE_DEPLOY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^deploy(?:\s+(?:to\s+)?(staging|production|prod|dev|preview))?$")
+        .expect("static regex")
+});
+
+static RE_FIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^fix\s+(?:it|this|the\s+(?:error|bug|issue|problem|failure))$")
+        .expect("static regex")
+});
+
+static RE_EXPLAIN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:explain(?:\s+(?:this|it|that))?|what\s+happened)$").expect("static regex")
+});
+
+static RE_PERF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:feels?\s+slow|it(?:'s|\s+is)\s+slow|performance|why\s+is\s+it\s+slow|diagnose\s+performance)",
+    )
+    .expect("static regex")
+});
+
+static RE_SHOW: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:show\s+me|what\s+is|tell\s+me\s+about)\s+(.+)$").expect("static regex")
+});
+
+static RE_CI: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:is\s+ci\s+green|ci\s+status|check\s+ci)$").expect("static regex")
+});
+
+// ---------------------------------------------------------------------------
 // Internal matchers
 // ---------------------------------------------------------------------------
 
@@ -186,8 +255,7 @@ fn is_shell_command(input: &str) -> bool {
 /// intended as executable binaries, not natural language requests.
 fn is_known_binary(word: &str) -> bool {
     // Must be a single token of lowercase alpha (maybe with hyphens/underscores).
-    let re = Regex::new(r"^[a-z][a-z0-9_-]*$").unwrap();
-    if !re.is_match(word) {
+    if !RE_BINARY_TOKEN.is_match(word) {
         return false;
     }
 
@@ -227,8 +295,7 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
     }
 
     // Test
-    let test_re = Regex::new(r"^(?:test|tests|run\s+(?:the\s+)?tests?)$").unwrap();
-    if test_re.is_match(lower) {
+    if RE_TEST.is_match(lower) {
         return ctx
             .commands
             .test
@@ -237,11 +304,7 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
     }
 
     // Run / start
-    let run_re = Regex::new(
-        r"^(?:run|start|run\s+it|start\s+it|run\s+the\s+(?:app|project|server)|start\s+the\s+(?:app|project|server))$",
-    )
-    .unwrap();
-    if run_re.is_match(lower) {
+    if RE_RUN.is_match(lower) {
         return ctx
             .commands
             .run
@@ -250,8 +313,7 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
     }
 
     // Lint / check
-    let lint_re = Regex::new(r"^(?:lint|check|run\s+(?:the\s+)?linter?)$").unwrap();
-    if lint_re.is_match(lower) {
+    if RE_LINT.is_match(lower) {
         return ctx
             .commands
             .lint
@@ -260,10 +322,7 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
     }
 
     // Format
-    let fmt_re =
-        Regex::new(r"^(?:format|fmt|format\s+(?:the\s+)?code|run\s+(?:the\s+)?formatter)$")
-            .unwrap();
-    if fmt_re.is_match(lower) {
+    if RE_FORMAT.is_match(lower) {
         return ctx
             .commands
             .format
@@ -277,20 +336,14 @@ fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedA
 /// Match git and VCS related patterns.
 fn match_git_patterns(lower: &str) -> Option<ResolvedAction> {
     // "what changed" / "what changed today" / "recent changes"
-    let changes_re = Regex::new(
-        r"^(?:what(?:'s|\s+has)?\s+changed(?:\s+today|\s+recently|\s+lately)?|recent\s+changes|show\s+(?:recent\s+)?changes)$",
-    )
-    .unwrap();
-    if changes_re.is_match(lower) {
+    if RE_CHANGES.is_match(lower) {
         return Some(ResolvedAction::RunCommand(
             "git log --oneline -10".to_string(),
         ));
     }
 
     // "status" / "git status" / "what's the status"
-    let status_re =
-        Regex::new(r"^(?:status|git\s+status|what(?:'s|\s+is)\s+the\s+status)$").unwrap();
-    if status_re.is_match(lower) {
+    if RE_STATUS.is_match(lower) {
         return Some(ResolvedAction::RunCommand("git status".to_string()));
     }
 
@@ -299,10 +352,7 @@ fn match_git_patterns(lower: &str) -> Option<ResolvedAction> {
 
 /// Match deploy patterns, returning Ambiguous when there's no clear target.
 fn match_deploy_patterns(lower: &str, _original: &str) -> Option<ResolvedAction> {
-    let deploy_re =
-        Regex::new(r"^deploy(?:\s+(?:to\s+)?(staging|production|prod|dev|preview))?$").unwrap();
-
-    if let Some(caps) = deploy_re.captures(lower) {
+    if let Some(caps) = RE_DEPLOY.captures(lower) {
         if let Some(target) = caps.get(1) {
             let env = match target.as_str() {
                 "prod" => "production",
@@ -326,44 +376,35 @@ fn match_deploy_patterns(lower: &str, _original: &str) -> Option<ResolvedAction>
 /// Match patterns that should delegate to an AI agent.
 fn match_agent_patterns(lower: &str) -> Option<ResolvedAction> {
     // "fix it" / "fix the error" / "fix this"
-    let fix_re =
-        Regex::new(r"^fix\s+(?:it|this|the\s+(?:error|bug|issue|problem|failure))$").unwrap();
-    if fix_re.is_match(lower) {
+    if RE_FIX.is_match(lower) {
         return Some(ResolvedAction::SpawnAgent(
             "fix the last error".to_string(),
         ));
     }
 
     // "explain" / "explain this" / "what happened"
-    let explain_re =
-        Regex::new(r"^(?:explain(?:\s+(?:this|it|that))?|what\s+happened)$").unwrap();
-    if explain_re.is_match(lower) {
+    if RE_EXPLAIN.is_match(lower) {
         return Some(ResolvedAction::SpawnAgent(
             "explain the last output".to_string(),
         ));
     }
 
     // "something feels slow" / "it's slow" / "performance" / "why is it slow"
-    let perf_re = Regex::new(
-        r"(?:feels?\s+slow|it(?:'s|\s+is)\s+slow|performance|why\s+is\s+it\s+slow|diagnose\s+performance)",
-    )
-    .unwrap();
-    if perf_re.is_match(lower) {
+    if RE_PERF.is_match(lower) {
         return Some(ResolvedAction::SpawnAgent(
             "diagnose performance".to_string(),
         ));
     }
 
     // "show me X" / "what is X" — general agent delegation.
-    let show_re = Regex::new(r"^(?:show\s+me|what\s+is|tell\s+me\s+about)\s+(.+)$").unwrap();
-    if let Some(caps) = show_re.captures(lower) {
-        let topic = caps.get(1).unwrap().as_str().to_string();
+    if let Some(caps) = RE_SHOW.captures(lower) {
+        // cap(1) is guaranteed by the regex structure.
+        let topic = caps[1].to_string();
         return Some(ResolvedAction::SpawnAgent(topic));
     }
 
     // "is CI green" / "CI status" / "check CI"
-    let ci_re = Regex::new(r"^(?:is\s+ci\s+green|ci\s+status|check\s+ci)$").unwrap();
-    if ci_re.is_match(lower) {
+    if RE_CI.is_match(lower) {
         return Some(ResolvedAction::ShowInfo("CI status check".to_string()));
     }
 
