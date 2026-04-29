@@ -27,6 +27,7 @@ pub mod permissions;
 pub mod render;
 pub mod role;
 pub mod router;
+pub mod sandbox;
 pub mod speech;
 pub mod spawn_rules;
 pub mod suggest;
