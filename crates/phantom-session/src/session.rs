@@ -84,6 +84,20 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// Return the default session directory path without creating it.
+    ///
+    /// Falls back to `"."` as an absolute last resort when `HOME` is unset.
+    pub fn session_dir_path() -> PathBuf {
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home)
+                .join(".config")
+                .join("phantom")
+                .join("sessions")
+        } else {
+            PathBuf::from(".")
+        }
+    }
+
     /// Create a session manager using the default session directory
     /// (`~/.config/phantom/sessions/`).
     ///
@@ -319,6 +333,61 @@ fn now_epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs()
+}
+
+// ---------------------------------------------------------------------------
+// Session-restore detection
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when this launch should skip the boot animation.
+///
+/// Two signals trigger a restore:
+/// 1. `PHANTOM_RESTORING=1` environment variable — set by the supervisor or a
+///    launch script when restarting after a crash or explicit restore.
+/// 2. A `{hash}_{timestamp}.json` session file exists in `session_dir` for
+///    `project_dir` — the normal case after a clean shutdown + re-launch.
+///
+/// The check is cheap: only filenames are inspected, no JSON is parsed.
+/// Returns `false` on any I/O error so the caller never has to handle an
+/// error just to decide whether to show the boot animation.
+pub fn is_session_restore(session_dir: &Path, project_dir: &str) -> bool {
+    is_session_restore_with_env(
+        session_dir,
+        project_dir,
+        std::env::var("PHANTOM_RESTORING").ok().as_deref(),
+    )
+}
+
+/// Inner implementation that accepts the env-var value as a parameter.
+///
+/// Separate from [`is_session_restore`] so tests can inject the value without
+/// mutating the process environment (which is unsafe in Rust 2024 and racy
+/// across parallel test threads).
+fn is_session_restore_with_env(
+    session_dir: &Path,
+    project_dir: &str,
+    phantom_restoring: Option<&str>,
+) -> bool {
+    if phantom_restoring == Some("1") {
+        return true;
+    }
+
+    let hash = project_hash(project_dir);
+    let prefix = format!("{hash}_");
+
+    let Ok(entries) = fs::read_dir(session_dir) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".json") {
+            return true;
+        }
+    }
+
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -748,5 +817,97 @@ mod tests {
         assert!(msg.contains("feature/agents"));
         assert!(msg.contains("2 panes"));
         assert!(msg.contains("Wiring the scene graph"));
+    }
+
+    // =======================================================================
+    // is_session_restore — boot-skip detection
+    // =======================================================================
+
+    #[test]
+    fn session_restore_cold_launch_no_files() {
+        let dir = TempDir::new().unwrap();
+        assert!(
+            !is_session_restore_with_env(dir.path(), "/home/dev/phantom", None),
+            "empty session dir must not be detected as a restore"
+        );
+    }
+
+    #[test]
+    fn session_restore_detects_existing_session_file() {
+        let dir = TempDir::new().unwrap();
+        let project_dir = "/home/dev/phantom";
+        let hash = project_hash(project_dir);
+        let filename = format!("{hash}_1700000000.json");
+        fs::write(dir.path().join(&filename), r#"{"version":1}"#).unwrap();
+        assert!(
+            is_session_restore_with_env(dir.path(), project_dir, None),
+            "session file for this project must trigger restore detection"
+        );
+    }
+
+    #[test]
+    fn session_restore_ignores_other_project_session_files() {
+        let dir = TempDir::new().unwrap();
+        let other_dir = "/home/dev/other-project";
+        let hash = project_hash(other_dir);
+        let filename = format!("{hash}_1700000000.json");
+        fs::write(dir.path().join(&filename), r#"{"version":1}"#).unwrap();
+        assert!(
+            !is_session_restore_with_env(dir.path(), "/home/dev/phantom", None),
+            "session file for another project must not trigger restore for the current project"
+        );
+    }
+
+    #[test]
+    fn session_restore_matches_only_own_project() {
+        let dir = TempDir::new().unwrap();
+        let our_dir = "/home/dev/phantom";
+        let other_dir = "/home/dev/other";
+        let our_hash = project_hash(our_dir);
+        let other_hash = project_hash(other_dir);
+        fs::write(
+            dir.path().join(format!("{our_hash}_1700000001.json")),
+            r#"{"version":1}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(format!("{other_hash}_1700000002.json")),
+            r#"{"version":1}"#,
+        )
+        .unwrap();
+        assert!(is_session_restore_with_env(dir.path(), our_dir, None));
+        assert!(is_session_restore_with_env(dir.path(), other_dir, None));
+    }
+
+    #[test]
+    fn session_restore_env_var_overrides() {
+        let dir = TempDir::new().unwrap();
+        assert!(
+            is_session_restore_with_env(dir.path(), "/home/dev/phantom", Some("1")),
+            "PHANTOM_RESTORING=1 must signal restore even with an empty session directory"
+        );
+    }
+
+    #[test]
+    fn session_restore_env_var_must_be_exactly_one() {
+        let dir = TempDir::new().unwrap();
+        assert!(
+            !is_session_restore_with_env(dir.path(), "/home/dev/phantom", Some("true")),
+            "PHANTOM_RESTORING=true must not trigger restore"
+        );
+        assert!(
+            !is_session_restore_with_env(dir.path(), "/home/dev/phantom", Some("")),
+            "PHANTOM_RESTORING= must not trigger restore"
+        );
+    }
+
+    #[test]
+    fn session_restore_missing_directory_returns_false() {
+        let nonexistent =
+            std::path::Path::new("/tmp/phantom-sessions-nonexistent-a3f9b2c1d4e5f607");
+        assert!(
+            !is_session_restore_with_env(nonexistent, "/home/dev/phantom", None),
+            "missing session dir must return false without panicking"
+        );
     }
 }

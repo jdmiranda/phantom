@@ -37,7 +37,7 @@ use phantom_memory::MemoryStore;
 use phantom_plugins::PluginRegistry;
 use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
-use phantom_session::session::{SessionManager, SessionState, PaneState};
+use phantom_session::session::{is_session_restore, SessionManager, SessionState, PaneState};
 use phantom_mcp::{spawn_listener, AppCommand, McpListener};
 
 use crate::boot::BootSequence;
@@ -345,7 +345,7 @@ impl App {
     /// Font size is multiplied by this to render at the correct visual size.
     pub fn with_config_scaled(
         gpu: GpuContext,
-        config: PhantomConfig,
+        mut config: PhantomConfig,
         supervisor_socket: Option<&Path>,
         scale_factor: f32,
     ) -> Result<Self> {
@@ -516,6 +516,17 @@ impl App {
                 None
             }
         };
+
+        // Auto-detect session restore: skip boot animation when a previous
+        // session exists for this project or PHANTOM_RESTORING=1 is set.
+        // Checked before the boot block below reads `config.skip_boot`.
+        if !config.skip_boot {
+            let session_dir = SessionManager::session_dir_path();
+            if is_session_restore(&session_dir, &project_dir) {
+                log::info!("Session restore detected — auto-skipping boot animation");
+                config.skip_boot = true;
+            }
+        }
 
         // Try to restore the most recent session for this project.
         if let Some(ref sm) = session_manager {
