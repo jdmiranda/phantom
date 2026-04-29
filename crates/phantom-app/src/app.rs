@@ -209,6 +209,13 @@ pub struct App {
     //    App share the same lock for the rest of the session.
     pub(crate) inspector_snapshot: Option<std::sync::Arc<std::sync::RwLock<phantom_agents::inspector::InspectorView>>>,
 
+    // -- Live design tokens shared with the InspectorAdapter (issue #31).
+    //    `None` before the first inspector pane is spawned. After spawn the
+    //    App and adapter share the same `Arc<RwLock<Tokens>>`; a theme switch
+    //    can write a new `Tokens` value into the arc and the inspector picks
+    //    it up at the next `render()` without an adapter restart.
+    pub(crate) inspector_tokens: Option<std::sync::Arc<std::sync::RwLock<phantom_ui::tokens::Tokens>>>,
+
     // -- Lars fix-thread sink: shared queue of `EventKind::AgentBlocked`
     //    substrate events emitted by agent panes when their consecutive
     //    tool-call failure streak crosses the threshold. Each spawned
@@ -719,6 +726,7 @@ impl App {
             pool_chrome_glyphs: Vec::with_capacity(256),
             fullscreen_pane: None,
             inspector_snapshot: None,
+            inspector_tokens: None,
             blocked_event_sink: crate::agent_pane::new_blocked_event_sink(),
             denied_event_sink: crate::agent_pane::new_denied_event_sink(),
             notifications: crate::notifications::NotificationCenter::new(),

@@ -12,6 +12,13 @@
 //! through the coordinator's mutable adapter API. The adapter takes a read
 //! lock during `render()` (cheap, no contention with the writer).
 //!
+//! ## Live design tokens
+//!
+//! The adapter holds an `Arc<RwLock<Tokens>>` shared with the App. Any theme
+//! change the App writes into the lock is picked up at the next `render()`
+//! call — no adapter restart needed. `render()` takes a short read lock to
+//! snapshot the current token values and releases it before laying out quads.
+//!
 //! ## Read-only by design
 //!
 //! `accepts_input` is `false` and `accepts_commands` is `false` — the
@@ -27,37 +34,7 @@ use phantom_adapter::{
 };
 
 use phantom_agents::inspector::InspectorView;
-
-// ---------------------------------------------------------------------------
-// Visual constants
-// ---------------------------------------------------------------------------
-
-/// Header bar background — a thin dark strip.
-const HEADER_BG: [f32; 4] = [0.05, 0.07, 0.08, 1.0];
-/// Header text color — bright phosphor green.
-const HEADER_COLOR: [f32; 4] = [0.3, 1.0, 0.5, 1.0];
-/// Section title color — slightly dimmer.
-const SECTION_COLOR: [f32; 4] = [0.5, 0.9, 0.6, 0.95];
-/// Agent row text color — neutral phosphor.
-const AGENT_COLOR: [f32; 4] = [0.7, 0.95, 0.75, 0.95];
-/// Event row text color — dimmer than agents to push focus to the live agents.
-const EVENT_COLOR: [f32; 4] = [0.5, 0.75, 0.55, 0.85];
-/// Refresh-time stamp color — dim grey-green.
-const STAMP_COLOR: [f32; 4] = [0.35, 0.55, 0.4, 0.6];
-/// Inspector pane background — near-transparent.
-const PANE_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
-/// Denials section header — a strong red drawn from `Tokens::status_danger`
-/// (`crates/phantom-ui/src/tokens.rs`). Mirrored as a literal here because
-/// the inspector adapter doesn't yet receive a `Tokens` handle through its
-/// constructor; pinning the rgba pulls the visual into line without changing
-/// the wider RenderCtx contract.
-const DENIAL_HEADER_COLOR: [f32; 4] = [1.00, 0.30, 0.25, 1.00];
-/// Denial row body — use the same red but slightly desaturated so the row
-/// reads as a continuation of the section header.
-const DENIAL_ROW_COLOR: [f32; 4] = [0.95, 0.45, 0.40, 0.95];
-/// Source-chain sub-row color — dimmer red-grey so the chain reads as
-/// secondary metadata under each denial.
-const DENIAL_CHAIN_COLOR: [f32; 4] = [0.75, 0.55, 0.55, 0.80];
+use phantom_ui::tokens::Tokens;
 
 /// Number of events shown at the bottom of the pane (fixed cap, separate from
 /// the snapshot's `recent_events` cap).
@@ -76,28 +53,48 @@ const VISIBLE_DENIAL_ROWS: usize = 20;
 /// Holds an `Arc<RwLock<InspectorView>>` whose contents are pushed by the
 /// App at the end of each `update()` cycle. `render()` reads the snapshot
 /// without copying.
+///
+/// Also holds an `Arc<RwLock<Tokens>>` so that theme changes propagate to
+/// the inspector UI in real time: any write to the shared token lock is
+/// visible at the next `render()` call without restarting the adapter.
 pub struct InspectorAdapter {
     snapshot: Arc<RwLock<InspectorView>>,
+    tokens: Arc<RwLock<Tokens>>,
     app_id: u32,
 }
 
 impl InspectorAdapter {
-    /// Build an adapter sharing `snapshot` with the producer (the App).
+    /// Build an adapter sharing `snapshot` and `tokens` with the App.
     ///
-    /// The App should hold its own `Arc` to the same `RwLock` so it can
-    /// write fresh snapshots each frame.
+    /// The App should hold its own `Arc` clones of both locks so it can
+    /// push fresh snapshots and update the active theme each frame.
     #[allow(dead_code)] // Phase 2.G+: spawn-inspector-pane wiring is staged.
-    pub(crate) fn new(snapshot: Arc<RwLock<InspectorView>>) -> Self {
+    pub(crate) fn new(snapshot: Arc<RwLock<InspectorView>>, tokens: Arc<RwLock<Tokens>>) -> Self {
         Self {
             snapshot,
+            tokens,
             app_id: 0,
         }
     }
 
-    /// Test-only constructor that wraps an existing view.
+    /// Test-only constructor that wraps an existing view with phosphor tokens.
     #[cfg(test)]
     pub(crate) fn with_view(view: InspectorView) -> Self {
-        Self::new(Arc::new(RwLock::new(view)))
+        use phantom_ui::RenderCtx;
+        let tokens = Tokens::phosphor(RenderCtx::fallback());
+        Self::new(
+            Arc::new(RwLock::new(view)),
+            Arc::new(RwLock::new(tokens)),
+        )
+    }
+
+    /// Test-only constructor that wraps an existing view with custom tokens.
+    #[cfg(test)]
+    pub(crate) fn with_view_and_tokens(view: InspectorView, tokens: Tokens) -> Self {
+        Self::new(
+            Arc::new(RwLock::new(view)),
+            Arc::new(RwLock::new(tokens)),
+        )
     }
 }
 
@@ -138,6 +135,36 @@ impl Renderable for InspectorAdapter {
         let mut quads = Vec::new();
         let mut text_segments = Vec::new();
 
+        // Snapshot the current design tokens. The read lock is released
+        // immediately after the copy so it cannot block theme writes.
+        let colors = {
+            let tok = self.tokens.read().expect("inspector tokens lock");
+            tok.colors
+        };
+
+        // Derive role-specific colors from the live token palette.
+        let header_bg      = colors.surface_recessed;
+        let header_color   = colors.text_accent;
+        let section_color  = colors.text_primary;
+        let agent_color    = colors.text_primary;
+        let event_color    = colors.text_secondary;
+        let stamp_color    = colors.text_dim;
+        let pane_bg        = [0.0_f32, 0.0, 0.0, 0.0];
+        // Denial colors are drawn from the `status_danger` token so that
+        // theme changes (e.g. amber → blood) propagate to the security UI.
+        let denial_header  = colors.status_danger;
+        // Row body: same hue but slightly softened — reduce alpha slightly.
+        let denial_row     = {
+            let [r, g, b, _] = colors.status_danger;
+            [r * 0.95, g * 1.5_f32.min(1.0), b * 1.6_f32.min(1.0), 0.95]
+        };
+        // Chain sub-row: mix toward text_dim to push it into the background.
+        let denial_chain   = {
+            let [r, g, b, _] = colors.status_danger;
+            let [dr, dg, db, _] = colors.text_dim;
+            [(r + dr) * 0.5, (g + dg) * 0.5, (b + db) * 0.5, 0.80]
+        };
+
         // Pull live cell metrics from the rect rather than baking constants;
         // doubling the font size doubles every spacing/positioning value.
         // `Rect::default()` carries `(0.0, 0.0)` as a "not provided" sentinel
@@ -154,7 +181,7 @@ impl Renderable for InspectorAdapter {
             y: rect.y,
             w: rect.width,
             h: rect.height,
-            color: PANE_BG,
+            color: pane_bg,
         });
 
         let view = self.snapshot.read().expect("inspector snapshot lock");
@@ -166,7 +193,7 @@ impl Renderable for InspectorAdapter {
             y: rect.y,
             w: rect.width,
             h: header_h,
-            color: HEADER_BG,
+            color: header_bg,
         });
 
         let header_text = format!(
@@ -177,7 +204,7 @@ impl Renderable for InspectorAdapter {
             text: header_text,
             x: rect.x + pad_x,
             y: rect.y + pad_y,
-            color: HEADER_COLOR,
+            color: header_color,
         });
 
         // Refresh stamp at the right edge of the header bar.
@@ -190,7 +217,7 @@ impl Renderable for InspectorAdapter {
             text: stamp_text,
             x: stamp_x.max(rect.x + pad_x),
             y: rect.y + pad_y,
-            color: STAMP_COLOR,
+            color: stamp_color,
         });
 
         // Cursor advances down the pane as we lay out sections.
@@ -201,7 +228,7 @@ impl Renderable for InspectorAdapter {
             text: "AGENTS".to_string(),
             x: rect.x + pad_x,
             y: cursor_y,
-            color: SECTION_COLOR,
+            color: section_color,
         });
         cursor_y += cell_h * 1.2;
 
@@ -220,7 +247,7 @@ impl Renderable for InspectorAdapter {
                 text: line,
                 x: rect.x + pad_x * 2.0, // indent agent rows one cell deeper.
                 y: cursor_y,
-                color: AGENT_COLOR,
+                color: agent_color,
             });
             cursor_y += cell_h;
 
@@ -236,7 +263,7 @@ impl Renderable for InspectorAdapter {
                 text: "  (no agents)".to_string(),
                 x: rect.x + pad_x * 2.0,
                 y: cursor_y,
-                color: EVENT_COLOR,
+                color: event_color,
             });
             cursor_y += cell_h;
         }
@@ -247,7 +274,7 @@ impl Renderable for InspectorAdapter {
             text: "RECENT EVENTS".to_string(),
             x: rect.x + pad_x,
             y: cursor_y,
-            color: SECTION_COLOR,
+            color: section_color,
         });
         cursor_y += cell_h * 1.2;
 
@@ -269,7 +296,7 @@ impl Renderable for InspectorAdapter {
                 text: summary,
                 x: rect.x + pad_x * 2.0,
                 y: cursor_y,
-                color: EVENT_COLOR,
+                color: event_color,
             });
             cursor_y += cell_h;
             if cursor_y > rect.y + rect.height - cell_h {
@@ -282,7 +309,7 @@ impl Renderable for InspectorAdapter {
                 text: "  (no recent events)".to_string(),
                 x: rect.x + pad_x * 2.0,
                 y: cursor_y,
-                color: EVENT_COLOR,
+                color: event_color,
             });
             cursor_y += cell_h;
         }
@@ -299,7 +326,7 @@ impl Renderable for InspectorAdapter {
             text: "DENIALS".to_string(),
             x: rect.x + pad_x,
             y: cursor_y,
-            color: DENIAL_HEADER_COLOR,
+            color: denial_header,
         });
         cursor_y += cell_h * 1.2;
 
@@ -308,7 +335,7 @@ impl Renderable for InspectorAdapter {
                 text: "  (no denials)".to_string(),
                 x: rect.x + pad_x * 2.0,
                 y: cursor_y,
-                color: EVENT_COLOR,
+                color: event_color,
             });
         } else {
             // Newest-on-top: snapshot pushes oldest-first, so iterate
@@ -333,7 +360,7 @@ impl Renderable for InspectorAdapter {
                     text: primary,
                     x: rect.x + pad_x * 2.0,
                     y: cursor_y,
-                    color: DENIAL_ROW_COLOR,
+                    color: denial_row,
                 });
                 cursor_y += cell_h;
 
@@ -345,7 +372,7 @@ impl Renderable for InspectorAdapter {
                     text: chain_text,
                     x: rect.x + pad_x * 3.0, // double-indent under the primary row
                     y: cursor_y,
-                    color: DENIAL_CHAIN_COLOR,
+                    color: denial_chain,
                 });
                 cursor_y += cell_h;
             }
@@ -717,13 +744,21 @@ mod tests {
         assert!(chain.text.contains("123"));
         assert!(chain.text.contains("456"));
 
-        // Header color must match the danger token (status_danger rgba).
+        // Header color must match the live token's status_danger value.
+        // With default phosphor tokens: status_danger = [1.00, 0.30, 0.25, 1.00].
         let header = output
             .text_segments
             .iter()
             .find(|t| t.text == "DENIALS")
             .expect("DENIALS header must render");
-        assert_eq!(header.color, DENIAL_HEADER_COLOR);
+        // The DENIALS header reads from tokens.colors.status_danger, so its
+        // red channel must be dominant (> 0.8) to distinguish it from regular
+        // text colors.
+        assert!(
+            header.color[0] > 0.8,
+            "DENIALS header must be red-dominant (status_danger), got {:?}",
+            header.color,
+        );
     }
 
     #[test]
@@ -747,5 +782,183 @@ mod tests {
             .text_segments
             .iter()
             .any(|t| t.text == "chain: (empty)"));
+    }
+
+    // ---- Issue #31: live Tokens propagation --------------------------------
+
+    /// Verify that `InspectorAdapter::new` accepts a `Tokens` arc and that
+    /// the constructor compiles without the test helper wrapper.
+    #[test]
+    fn inspector_adapter_new_accepts_tokens_arc() {
+        use phantom_ui::RenderCtx;
+        let snapshot = Arc::new(RwLock::new(InspectorView::empty()));
+        let tokens = Arc::new(RwLock::new(Tokens::phosphor(RenderCtx::fallback())));
+        let adapter = InspectorAdapter::new(snapshot, tokens);
+        assert_eq!(adapter.app_type(), "inspector");
+    }
+
+    /// The DENIALS header must read its color from `tokens.colors.status_danger`
+    /// rather than a baked-in constant. This test builds two adapters with
+    /// contrasting token palettes and asserts that their DENIALS header colors
+    /// differ — proving the live plumbing is in place.
+    #[test]
+    fn denials_header_color_changes_with_tokens() {
+        use phantom_ui::tokens::{ColorRoles, Tokens};
+        use phantom_ui::RenderCtx;
+
+        // Phosphor tokens: status_danger is red-dominant (r ≈ 1.0).
+        let phosphor_tokens = Tokens::phosphor(RenderCtx::fallback());
+
+        // Custom "safe" palette: make status_danger blue-dominant (b = 1.0, r ≈ 0).
+        let mut blue_roles = ColorRoles::phosphor();
+        blue_roles.status_danger = [0.0, 0.2, 1.0, 1.0];
+        let blue_tokens = Tokens::new(blue_roles, RenderCtx::fallback());
+
+        let view = InspectorView::empty();
+        let adapter_phosphor =
+            InspectorAdapter::with_view_and_tokens(view.clone(), phosphor_tokens);
+        let adapter_blue = InspectorAdapter::with_view_and_tokens(view, blue_tokens);
+
+        let out_p = adapter_phosphor.render(&make_rect(8.0));
+        let out_b = adapter_blue.render(&make_rect(8.0));
+
+        let header_p = out_p
+            .text_segments
+            .iter()
+            .find(|t| t.text == "DENIALS")
+            .expect("phosphor: DENIALS header must render");
+        let header_b = out_b
+            .text_segments
+            .iter()
+            .find(|t| t.text == "DENIALS")
+            .expect("blue: DENIALS header must render");
+
+        // Phosphor: red channel > 0.8, blue < 0.5.
+        assert!(
+            header_p.color[0] > 0.8,
+            "phosphor DENIALS should be red-dominant, got {:?}",
+            header_p.color,
+        );
+        // Blue palette: red channel < 0.2, blue channel > 0.8.
+        assert!(
+            header_b.color[0] < 0.2,
+            "blue DENIALS red channel should be near 0, got {:?}",
+            header_b.color,
+        );
+        assert!(
+            header_b.color[2] > 0.8,
+            "blue DENIALS should be blue-dominant, got {:?}",
+            header_b.color,
+        );
+        // The two headers must have different colors.
+        assert_ne!(
+            header_p.color, header_b.color,
+            "DENIALS header color must change when Tokens changes",
+        );
+    }
+
+    /// Mutating the shared `Arc<RwLock<Tokens>>` after construction must
+    /// propagate to the next `render()` call without rebuilding the adapter.
+    /// This is the core contract of the live-tokens feature.
+    #[test]
+    fn live_tokens_propagate_without_adapter_restart() {
+        use phantom_ui::tokens::{ColorRoles, Tokens};
+        use phantom_ui::RenderCtx;
+
+        let phosphor_tokens = Tokens::phosphor(RenderCtx::fallback());
+        let tokens_arc = Arc::new(RwLock::new(phosphor_tokens));
+        let snapshot = Arc::new(RwLock::new(InspectorView::empty()));
+
+        let adapter = InspectorAdapter::new(Arc::clone(&snapshot), Arc::clone(&tokens_arc));
+
+        // First render: phosphor — DENIALS header is red-dominant.
+        let out1 = adapter.render(&make_rect(8.0));
+        let header1 = out1
+            .text_segments
+            .iter()
+            .find(|t| t.text == "DENIALS")
+            .expect("first render: DENIALS header");
+        let color1 = header1.color;
+        assert!(color1[0] > 0.8, "first render should be red: {color1:?}");
+
+        // Mutate tokens in-place — simulates a theme switch.
+        {
+            let mut tok = tokens_arc.write().expect("tokens write lock");
+            let mut blue_roles = ColorRoles::phosphor();
+            blue_roles.status_danger = [0.0, 0.2, 1.0, 1.0];
+            *tok = Tokens::new(blue_roles, RenderCtx::fallback());
+        }
+
+        // Second render with same adapter instance: must pick up the new color.
+        let out2 = adapter.render(&make_rect(8.0));
+        let header2 = out2
+            .text_segments
+            .iter()
+            .find(|t| t.text == "DENIALS")
+            .expect("second render: DENIALS header");
+        let color2 = header2.color;
+
+        assert!(
+            color2[0] < 0.2,
+            "second render should have near-zero red after theme switch: {color2:?}",
+        );
+        assert!(
+            color2[2] > 0.8,
+            "second render should be blue-dominant after theme switch: {color2:?}",
+        );
+        assert_ne!(
+            color1, color2,
+            "color must change after live token update (got same value: {color1:?})",
+        );
+    }
+
+    /// Header text color is sourced from `tokens.colors.text_accent`. Switching
+    /// to a custom palette with a clearly distinct accent must change the header
+    /// text color emitted by `render()`.
+    #[test]
+    fn header_text_color_changes_with_tokens() {
+        use phantom_ui::tokens::{ColorRoles, Tokens};
+        use phantom_ui::RenderCtx;
+
+        let phosphor_tokens = Tokens::phosphor(RenderCtx::fallback());
+
+        let mut alt_roles = ColorRoles::phosphor();
+        // Override text_accent to pure blue so it's clearly different from phosphor green.
+        alt_roles.text_accent = [0.0, 0.0, 1.0, 1.0];
+        let alt_tokens = Tokens::new(alt_roles, RenderCtx::fallback());
+
+        let adapter_p = InspectorAdapter::with_view_and_tokens(
+            InspectorView::empty(),
+            phosphor_tokens,
+        );
+        let adapter_a = InspectorAdapter::with_view_and_tokens(
+            InspectorView::empty(),
+            alt_tokens,
+        );
+
+        let out_p = adapter_p.render(&make_rect(8.0));
+        let out_a = adapter_a.render(&make_rect(8.0));
+
+        let hdr_p = out_p
+            .text_segments
+            .iter()
+            .find(|t| t.text.starts_with("INSPECTOR"))
+            .expect("phosphor: INSPECTOR header");
+        let hdr_a = out_a
+            .text_segments
+            .iter()
+            .find(|t| t.text.starts_with("INSPECTOR"))
+            .expect("alt: INSPECTOR header");
+
+        assert_ne!(
+            hdr_p.color, hdr_a.color,
+            "INSPECTOR header color must change when text_accent changes",
+        );
+        // Alt palette has blue accent — blue channel must dominate.
+        assert!(
+            hdr_a.color[2] > 0.8,
+            "alt adapter: INSPECTOR header should be blue-dominant, got {:?}",
+            hdr_a.color,
+        );
     }
 }
