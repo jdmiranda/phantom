@@ -11,6 +11,7 @@ use log::{info, warn};
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::agent::{Agent, AgentMessage};
 use phantom_agents::audit::{AuditOutcome, emit_tool_call};
+use phantom_session::AgentSnapshot;
 use phantom_agents::chat::{ChatBackend, ChatModel, ChatRequest, build_backend};
 use phantom_agents::permissions::PermissionSet;
 use phantom_agents::role::{AgentRole, CapabilityClass};
@@ -74,6 +75,20 @@ pub(crate) type DeniedEventSink = Arc<Mutex<Vec<SubstrateEvent>>>;
 /// Construct a fresh, empty `DeniedEventSink`.
 #[allow(dead_code)] // Producer for Sec.4 consumer wiring; kept ahead of time.
 pub(crate) fn new_denied_event_sink() -> DeniedEventSink {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Shared queue of [`AgentSnapshot`] records pushed by agent panes when they
+/// reach a terminal state (Done or Failed).
+///
+/// The `App` owns the canonical queue; each spawned pane is given a clone.
+/// On completion the pane captures a snapshot of itself and pushes it here.
+/// `App::shutdown` drains the queue and hands it to
+/// [`phantom_session::AgentStateFile`] for persistence alongside the session.
+pub(crate) type AgentSnapshotQueue = Arc<Mutex<Vec<AgentSnapshot>>>;
+
+/// Construct a fresh, empty [`AgentSnapshotQueue`].
+pub(crate) fn new_agent_snapshot_queue() -> AgentSnapshotQueue {
     Arc::new(Mutex::new(Vec::new()))
 }
 
@@ -229,6 +244,11 @@ pub(crate) struct AgentPane {
     /// Last error excerpt observed on a failing tool call, used to populate
     /// the `reason` field of the emitted `AgentBlocked` event.
     last_tool_error: Option<String>,
+    /// Shared queue into which the pane pushes an [`AgentSnapshot`] whenever
+    /// it reaches a terminal state (Done or Failed). The `App` drains this at
+    /// shutdown and persists the snapshots via [`phantom_session::AgentStateFile`].
+    /// `None` for legacy/test callers that do not have a wired App.
+    snapshot_sink: Option<AgentSnapshotQueue>,
     /// Shared registry handle used by chat-tool dispatch (`send_to_agent`,
     /// `broadcast_to_role`, `request_critique`). Cloned from the runtime at
     /// spawn time so dispatch contexts can read/write the same directory the
@@ -302,6 +322,7 @@ impl AgentPane {
             blocked_event_sink: None,
             denied_event_sink: None,
             last_tool_error: None,
+            snapshot_sink: None,
         }
     }
 
@@ -490,6 +511,7 @@ impl AgentPane {
             blocked_event_sink,
             denied_event_sink,
             last_tool_error: None,
+            snapshot_sink: None,
             registry: None,
             event_log: None,
             pending_spawn: None,
@@ -519,6 +541,30 @@ impl AgentPane {
         self.role = role;
     }
 
+    /// Wire the shared snapshot queue so this pane pushes an [`AgentSnapshot`]
+    /// into it whenever it reaches a terminal state (Done or Failed).
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` after construction so the
+    /// App's canonical queue receives the snapshot at completion time.
+    pub(crate) fn set_snapshot_sink(&mut self, sink: AgentSnapshotQueue) {
+        self.snapshot_sink = Some(sink);
+    }
+
+    /// Push a snapshot of the current agent state into the shared queue.
+    ///
+    /// No-op when no sink is wired (test / legacy callers). Logs a warning
+    /// and drops the snapshot if the mutex is poisoned.
+    fn push_snapshot(&self) {
+        let Some(ref sink) = self.snapshot_sink else {
+            return;
+        };
+        let snapshot = AgentSnapshot::from_agent(&self.agent);
+        match sink.lock() {
+            Ok(mut q) => q.push(snapshot),
+            Err(_) => warn!("snapshot_sink mutex poisoned; dropping AgentSnapshot"),
+        }
+    }
+
     /// Build a [`phantom_agents::dispatch::DispatchContext`] from the
     /// pane's current substrate handles, if all required pieces are wired.
     ///
@@ -540,6 +586,7 @@ impl AgentPane {
             event_log: self.event_log.clone(),
             pending_spawn,
             source_event_id: None,
+            quarantine: None,
         })
     }
 
@@ -597,6 +644,7 @@ impl AgentPane {
                         ));
                         self.status = AgentPaneStatus::Done;
                         self.api_handle = None;
+                        self.push_snapshot();
                         self.save_conversation();
                     } else {
                         // Execute pending tools and continue conversation.
@@ -610,6 +658,7 @@ impl AgentPane {
                     self.rollback_if_dirty();
                     self.status = AgentPaneStatus::Failed;
                     self.api_handle = None;
+                    self.push_snapshot();
                     self.save_conversation();
                     got_content = true;
                     break;
@@ -631,6 +680,7 @@ impl AgentPane {
             self.rollback_if_dirty();
             self.status = AgentPaneStatus::Failed;
             self.api_handle = None;
+            self.push_snapshot();
             self.save_conversation();
             return;
         }
@@ -1242,6 +1292,11 @@ impl App {
             DEFAULT_AGENT_PANE_ROLE,
         );
 
+        // Wire the snapshot sink so the pane pushes an AgentSnapshot into the
+        // App-owned queue when it reaches Done or Failed.  The App drains this
+        // at shutdown and persists the snapshots via AgentStatePersister.
+        agent_pane.set_snapshot_sink(self.agent_snapshot_queue.clone());
+
         let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
 
         let scene_node = self.scene.add_node(
@@ -1343,6 +1398,7 @@ mod tests {
             blocked_event_sink: None,
             denied_event_sink: None,
             last_tool_error: None,
+            snapshot_sink: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -1432,6 +1488,7 @@ mod tests {
             blocked_event_sink: None,
             denied_event_sink: None,
             last_tool_error: None,
+            snapshot_sink: None,
             turn_count: 0,
             current_assistant_text: String::new(),
             permissions: PermissionSet::all(),
@@ -1577,6 +1634,52 @@ mod tests {
                 "task desc '{desc}' should start with '{expected_prefix}'"
             );
         }
+    }
+
+    // -- Issue #206: AgentSnapshotQueue producer tests -----------------------
+
+    /// When an `AgentPane` receives `ApiEvent::Done`, it must push an
+    /// `AgentSnapshot` into the wired `AgentSnapshotQueue` exactly once.
+    #[test]
+    fn done_event_pushes_snapshot_to_queue() {
+        let (mut pane, tx) = agent_with_handle();
+        let queue = new_agent_snapshot_queue();
+        pane.set_snapshot_sink(queue.clone());
+
+        tx.send(ApiEvent::Done).unwrap();
+        pane.poll();
+
+        assert_eq!(pane.status, AgentPaneStatus::Done);
+        let snaps = queue.lock().unwrap();
+        assert_eq!(snaps.len(), 1, "one snapshot must be pushed on Done");
+    }
+
+    /// When an `AgentPane` receives `ApiEvent::Error`, it must push a snapshot.
+    #[test]
+    fn error_event_pushes_snapshot_to_queue() {
+        let (mut pane, tx) = agent_with_handle();
+        let queue = new_agent_snapshot_queue();
+        pane.set_snapshot_sink(queue.clone());
+
+        tx.send(ApiEvent::Error("API error".into())).unwrap();
+        pane.poll();
+
+        assert_eq!(pane.status, AgentPaneStatus::Failed);
+        let snaps = queue.lock().unwrap();
+        assert_eq!(snaps.len(), 1, "one snapshot must be pushed on Error");
+    }
+
+    /// Without a wired queue, Done must still succeed (no panic, no-op).
+    #[test]
+    fn done_without_queue_is_silent_noop() {
+        let (mut pane, tx) = agent_with_handle();
+        // No snapshot sink wired.
+
+        tx.send(ApiEvent::Done).unwrap();
+        pane.poll();
+
+        assert_eq!(pane.status, AgentPaneStatus::Done);
+        // Test passes if no panic occurred.
     }
 
     // -- Lars fix-thread producer tests (Phase 2.E) --------------------------
