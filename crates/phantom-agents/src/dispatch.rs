@@ -72,6 +72,7 @@ use crate::composer_tools::{
     ComposerTool, SpawnSubagentRequest, event_log_query, request_critique, spawn_subagent,
     wait_for_agent,
 };
+use crate::correlation::CorrelationId;
 use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
 use crate::inbox::{AgentRegistry, AgentStatus};
 use crate::quarantine::QuarantineRegistry;
@@ -169,6 +170,16 @@ pub struct DispatchContext<'a> {
     /// `None` skips the quarantine gate — the correct behaviour for legacy /
     /// test paths that have not wired a quarantine registry.
     pub quarantine: Option<Arc<Mutex<QuarantineRegistry>>>,
+    /// Causality token linking this dispatch turn to the pipeline run that
+    /// triggered it.
+    ///
+    /// When `Some`, tracing spans and log macros should attach this id so
+    /// every event, tool call, and log entry in the same pipeline run can be
+    /// correlated by querying `WHERE correlation_id = ?`.
+    ///
+    /// `None` means the dispatch was not initiated from a tracked user action
+    /// (legacy / test path) — this is never an error.
+    pub correlation_id: Option<CorrelationId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +587,7 @@ mod tests {
             pending_spawn,
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
         }
     }
 
@@ -624,6 +636,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
         };
 
         let result = dispatch_tool(
@@ -757,6 +770,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: None,
+            correlation_id: None,
         };
 
         let result = dispatch_tool(
@@ -815,6 +829,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(upstream_id),
             quarantine: None,
+            correlation_id: None,
         };
 
         // Act.
@@ -865,6 +880,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(denied_event_id),
             quarantine: None,
+            correlation_id: None,
         };
 
         // Act.
@@ -926,6 +942,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(upstream_id),
             quarantine: None,
+            correlation_id: None,
         };
 
         // Act.
@@ -989,6 +1006,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(event_id),
             quarantine: None,
+            correlation_id: None,
         };
 
         // This call must return — any infinite loop would cause the test to hang
@@ -1047,6 +1065,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: Some(quarantine),
+            correlation_id: None,
         };
 
         // A normal file-read that would otherwise succeed must be denied.
@@ -1098,6 +1117,7 @@ mod tests {
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: Some(quarantine),
+            correlation_id: None,
         };
 
         let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1108,5 +1128,90 @@ mod tests {
             res.output,
         );
         assert_eq!(res.output, "clean-agent-data");
+    }
+
+    // ---- Correlation ID on DispatchContext ------------------------------------
+
+    /// A `DispatchContext` built with `correlation_id: Some(id)` must
+    /// successfully route the tool — the correlation field is metadata only and
+    /// must not affect routing or capability checks.
+    #[test]
+    fn dispatch_with_correlation_id_routes_normally() {
+        use crate::correlation::CorrelationId;
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("corr.txt"), "hello-correlation").unwrap();
+
+        let cid = CorrelationId::new();
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(1, AgentRole::Conversational, "traced-agent", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: Some(cid),
+        };
+
+        let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
+
+        assert!(
+            res.success,
+            "dispatch with correlation_id must succeed normally: {}",
+            res.output,
+        );
+        assert_eq!(
+            res.output, "hello-correlation",
+            "output must be the file contents, got: {}",
+            res.output,
+        );
+    }
+
+    /// Two [`DispatchContext`]s built with the same [`CorrelationId`] should
+    /// each route independently — the id is carried in the context but does
+    /// not change the routing outcome.
+    #[test]
+    fn dispatch_with_shared_correlation_id_routes_independently() {
+        use crate::correlation::CorrelationId;
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), "file-a").unwrap();
+        fs::write(tmp.path().join("b.txt"), "file-b").unwrap();
+
+        let cid = CorrelationId::new();
+
+        let ctx_a = DispatchContext {
+            self_ref: AgentRef::new(1, AgentRole::Conversational, "agent-a", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: Some(cid),
+        };
+
+        let ctx_b = DispatchContext {
+            self_ref: AgentRef::new(2, AgentRole::Conversational, "agent-b", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: Some(cid),
+        };
+
+        let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
+        let res_b = dispatch_tool("read_file", &json!({"path": "b.txt"}), &ctx_b);
+
+        assert!(res_a.success, "agent-a dispatch must succeed: {}", res_a.output);
+        assert!(res_b.success, "agent-b dispatch must succeed: {}", res_b.output);
+        assert_eq!(res_a.output, "file-a");
+        assert_eq!(res_b.output, "file-b");
     }
 }
