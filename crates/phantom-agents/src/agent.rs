@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::correlation::CorrelationId;
 use crate::dispatch::Disposition;
+use crate::policy::AgentPolicy;
 use crate::semantic_context::SemanticContext;
 use crate::tools::{ToolCall, ToolResult};
 
@@ -218,6 +219,13 @@ pub struct Agent {
     /// [`Agent::semantic_prompt_section`] so the model can reason about
     /// structured command history rather than raw terminal text.
     semantic_ctx: SemanticContext,
+    /// Per-agent execution policy: retry budget, stall timeout, and gate flags.
+    ///
+    /// The reconciler reads `policy.timeout_seconds` for stall detection and
+    /// `policy.max_attempts` for the retry ceiling. Storing policy on the agent
+    /// (rather than as global constants) lets individual tasks opt into
+    /// longer timeouts or more retries without affecting the rest of the system.
+    pub policy: AgentPolicy,
 }
 
 impl Agent {
@@ -239,6 +247,7 @@ impl Agent {
             correlation_id: None,
             parent_id: None,
             semantic_ctx: SemanticContext::new(),
+            policy: AgentPolicy::default(),
         }
     }
 
@@ -337,6 +346,15 @@ impl Agent {
     #[must_use]
     pub fn disposition(&self) -> Disposition {
         self.disposition
+    }
+
+    /// Return the execution policy for this agent.
+    ///
+    /// The reconciler uses `policy.timeout_seconds` for stall detection and
+    /// `policy.max_attempts` as the per-step retry ceiling.
+    #[must_use]
+    pub fn policy(&self) -> &AgentPolicy {
+        &self.policy
     }
 
     /// Push a `ParsedOutput` from a `RunCommand` tool result into the
