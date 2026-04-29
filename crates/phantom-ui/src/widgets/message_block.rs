@@ -31,9 +31,9 @@ use phantom_renderer::quads::QuadInstance;
 // -----------------------------------------------------------------------
 
 /// Width of the avatar glyph column in pixels.
-pub const AVATAR_W: f32 = 16.0;
+pub(crate) const AVATAR_W: f32 = 16.0;
 /// Horizontal gap between the avatar column and the body text column.
-pub const AVATAR_GAP: f32 = 8.0;
+pub(crate) const AVATAR_GAP: f32 = 8.0;
 
 // -----------------------------------------------------------------------
 // MessageRole
@@ -131,7 +131,8 @@ pub struct MessageBlock {
     pub body: String,
     /// Wall-clock timestamp (milliseconds since epoch). Currently unused
     /// in rendering but stored for future timestamp overlays.
-    pub timestamp_ms: u64,
+    #[allow(dead_code)]
+    pub(crate) timestamp_ms: u64,
     /// Render context for cell metrics. Defaults to `RenderCtx::fallback()`.
     ctx: RenderCtx,
 }
@@ -191,10 +192,14 @@ impl MessageBlock {
                 break;
             }
             // Find the last space within `cols` chars to word-wrap cleanly.
-            let slice: String = chars[..cols].iter().collect();
-            let break_at = slice
-                .rfind(' ')
-                .filter(|&p| p > 0)
+            // Use char-index arithmetic throughout — `rfind` on a `&str`
+            // returns a *byte* offset, which is wrong for multibyte text.
+            let break_at = chars[..cols]
+                .iter()
+                .enumerate()
+                .rfind(|&(_, c)| *c == ' ')
+                .map(|(i, _)| i)
+                .filter(|&i| i > 0)
                 .unwrap_or(cols); // hard-break if no space found
 
             lines.push(chars[..break_at].iter().collect());
@@ -657,5 +662,66 @@ mod tests {
         ] {
             assert!(!role.label().is_empty(), "label for {role:?} must not be empty");
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Multibyte / Unicode regression tests
+    // ----------------------------------------------------------------
+
+    /// Wrapping a body that contains multibyte characters (emoji, accented
+    /// letters, CJK) must not panic and must produce correct line boundaries.
+    ///
+    /// With cell_w=8, rect=800 → body col = (800 - 16 - 8) / 8 = 97 cols.
+    /// Each emoji is one *char* but 4 UTF-8 bytes.  Using a byte offset from
+    /// `rfind` as a char index would either panic (out-of-bounds) or slice at
+    /// a non-char boundary — this test catches both failure modes.
+    #[test]
+    fn wrap_is_correct_for_multibyte_body() {
+        // 50 emoji chars + space + 50 more emoji → 101 chars total.
+        // The space is at char index 50, well inside the 97-col limit,
+        // so the wrap should break there and NOT at a mid-emoji byte offset.
+        let left: String = "🦀".repeat(50); // 50 chars, 200 bytes
+        let right: String = "🦀".repeat(50); // 50 chars, 200 bytes
+        let body = format!("{left} {right}"); // 101 chars, 401 bytes
+
+        let mut block = MessageBlock::new(MessageRole::Agent, body.clone(), 0);
+        block.set_render_ctx(fallback_ctx());
+
+        // Must not panic:
+        let lines = block.wrapped_lines(800.0);
+
+        // The space lives at char index 50 (≤ 97), so we expect a soft wrap
+        // there, giving us exactly 2 lines.
+        assert_eq!(lines.len(), 2, "emoji body should wrap into 2 lines: {lines:?}");
+
+        // First line must be exactly the 50 crab emoji.
+        assert_eq!(lines[0], left, "first line should be the 50-emoji prefix");
+
+        // Second line must be the remaining 50 emoji (space consumed by wrap).
+        assert_eq!(lines[1], right, "second line should be the 50-emoji suffix");
+
+        // Sanity-check that the output round-trips back to the original body
+        // (minus the joining space which is consumed).
+        let reconstructed = lines.join(" ");
+        assert_eq!(reconstructed, body, "reconstructed body must match original");
+    }
+
+    /// Accented / Latin-extended characters (2-byte UTF-8) wrap correctly.
+    #[test]
+    fn wrap_is_correct_for_accented_chars() {
+        // 'é' is U+00E9, 2 bytes in UTF-8 but 1 char.
+        // 48 × 'é' + space + 48 × 'é' = 97 chars exactly at the break point.
+        let left: String = "é".repeat(48);
+        let right: String = "é".repeat(48);
+        let body = format!("{left} {right}extra"); // space at index 48 → within 97 cols
+
+        let mut block = MessageBlock::new(MessageRole::User, body, 0);
+        block.set_render_ctx(fallback_ctx());
+
+        // Must not panic:
+        let lines = block.wrapped_lines(800.0);
+
+        assert!(lines.len() >= 2, "accented body should wrap: {lines:?}");
+        assert_eq!(lines[0], left, "first line should be 48 accented chars");
     }
 }
