@@ -87,8 +87,9 @@ impl AppCoordinator {
     /// Collect spatial preferences from all running adapters, run the
     /// arbiter, and log the resulting plan.
     ///
-    /// TODO: Apply the plan's allocations as Taffy min/max constraints
-    /// on the corresponding pane nodes. For now we just log.
+    /// limitation: Applying the plan's allocations as Taffy min/max constraints
+    /// on the corresponding pane nodes is tracked in #154. For now we log the
+    /// plan so the arbiter logic can be iterated without layout regressions. // see #154
     fn run_arbiter_negotiation(&self) {
         let default_pref = SpatialPreference::simple(40, 10);
 
