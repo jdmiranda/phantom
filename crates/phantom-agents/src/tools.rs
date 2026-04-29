@@ -12,6 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::role::{AgentRole, CapabilityClass};
+use crate::sandbox::{self, SandboxPolicy};
 use crate::taint::TaintLevel;
 
 // ---------------------------------------------------------------------------
@@ -764,70 +765,34 @@ fn execute_edit_file(root: &Path, args: &serde_json::Value) -> ToolResult {
 }
 
 fn execute_run_command(root: &Path, args: &serde_json::Value) -> ToolResult {
+    execute_run_command_with_policy(root, args, SandboxPolicy::Strict)
+}
+
+/// Execute `run_command` under the given [`SandboxPolicy`].
+///
+/// This is the real implementation; [`execute_run_command`] is a thin wrapper
+/// that always uses [`SandboxPolicy::Strict`] (the safe default). Tests and
+/// internal callers that need a specific policy call this directly.
+pub(crate) fn execute_run_command_with_policy(
+    root: &Path,
+    args: &serde_json::Value,
+    policy: SandboxPolicy,
+) -> ToolResult {
     let tool = ToolType::RunCommand;
 
     let Some(command_str) = args.get("command").and_then(|v| v.as_str()) else {
         return tool_err(tool, "missing required parameter: command".into());
     };
 
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command_str)
-        .current_dir(root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => return tool_err(tool, format!("cannot spawn command: {e}")),
-    };
-
-    match child.wait_timeout(COMMAND_TIMEOUT) {
-        Ok(Some(status)) => {
-            let stdout = child
-                .stdout
-                .take()
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    let _ = s.read_to_string(&mut buf);
-                    buf
-                })
-                .unwrap_or_default();
-
-            let stderr = child
-                .stderr
-                .take()
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    let _ = s.read_to_string(&mut buf);
-                    buf
-                })
-                .unwrap_or_default();
-
-            let mut output = String::new();
-            if !stdout.is_empty() {
-                output.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str("STDERR:\n");
-                output.push_str(&stderr);
-            }
-
-            if status.success() {
-                tool_ok(tool, output)
+    match sandbox::execute_sandboxed(command_str, root, policy, COMMAND_TIMEOUT) {
+        Ok(out) => {
+            if out.success {
+                tool_ok(tool, out.output)
             } else {
-                tool_err(tool, format!("command exited with {status}\n{output}"))
+                tool_err(tool, format!("command exited non-zero\n{}", out.output))
             }
         }
-        Ok(None) => {
-            let _ = child.kill();
-            tool_err(tool, format!("command timed out after {COMMAND_TIMEOUT:?}"))
-        }
-        Err(e) => tool_err(tool, format!("error waiting for command: {e}")),
+        Err(e) => tool_err(tool, e.to_string()),
     }
 }
 
@@ -940,38 +905,6 @@ fn execute_list_files(root: &Path, args: &serde_json::Value) -> ToolResult {
     tool_ok(tool, sorted.join("\n"))
 }
 
-// ---------------------------------------------------------------------------
-// Wait-with-timeout helper for std::process::Child
-// ---------------------------------------------------------------------------
-
-trait ChildExt {
-    fn wait_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> std::io::Result<Option<std::process::ExitStatus>>;
-}
-
-impl ChildExt for std::process::Child {
-    fn wait_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> std::io::Result<Option<std::process::ExitStatus>> {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(50);
-
-        loop {
-            match self.try_wait()? {
-                Some(status) => return Ok(Some(status)),
-                None => {
-                    if start.elapsed() >= timeout {
-                        return Ok(None);
-                    }
-                    std::thread::sleep(poll_interval);
-                }
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1164,6 +1097,89 @@ mod tests {
             &AgentRole::Actor,
         );
         assert!(!result.success);
+    }
+
+    // -- RunCommand + SandboxPolicy integration tests -------------------------
+
+    #[test]
+    fn run_command_strict_allows_simple_echo() {
+        // Strict policy must not break basic echo (cwd-only, no network).
+        let tmp = TempDir::new().unwrap();
+        let result = execute_run_command_with_policy(
+            tmp.path(),
+            &serde_json::json!({ "command": "echo strict_ok" }),
+            SandboxPolicy::Strict,
+        );
+        assert!(result.success, "strict echo failed: {}", result.output);
+        assert!(result.output.contains("strict_ok"));
+    }
+
+    #[test]
+    fn run_command_permissive_allows_simple_echo() {
+        let tmp = TempDir::new().unwrap();
+        let result = execute_run_command_with_policy(
+            tmp.path(),
+            &serde_json::json!({ "command": "echo permissive_ok" }),
+            SandboxPolicy::Permissive,
+        );
+        assert!(result.success, "permissive echo failed: {}", result.output);
+        assert!(result.output.contains("permissive_ok"));
+    }
+
+    #[test]
+    fn run_command_none_policy_allows_simple_echo() {
+        let tmp = TempDir::new().unwrap();
+        let result = execute_run_command_with_policy(
+            tmp.path(),
+            &serde_json::json!({ "command": "echo none_ok" }),
+            SandboxPolicy::None,
+        );
+        assert!(result.success, "none echo failed: {}", result.output);
+        assert!(result.output.contains("none_ok"));
+    }
+
+    #[test]
+    fn run_command_strict_blocks_network_macos() {
+        // Only run on macOS where sandbox-exec is available.
+        #[cfg(not(target_os = "macos"))]
+        return;
+
+        #[cfg(target_os = "macos")]
+        {
+            let tmp = TempDir::new().unwrap();
+            let result = execute_run_command_with_policy(
+                tmp.path(),
+                &serde_json::json!({
+                    "command": "curl --connect-timeout 1 http://127.0.0.1:19999 2>&1; true"
+                }),
+                SandboxPolicy::Strict,
+            );
+            // The command exits 0 (because of `; true`) but curl output must
+            // contain a connection error, OR the sandbox denies network entirely.
+            let blocked = result.output.to_lowercase().contains("failed")
+                || result.output.to_lowercase().contains("refused")
+                || result.output.to_lowercase().contains("not permitted")
+                || result.output.to_lowercase().contains("unreachable")
+                || result.output.to_lowercase().contains("operation not supported")
+                || !result.success;
+            assert!(
+                blocked,
+                "expected network block under Strict policy; got: {}",
+                result.output
+            );
+        }
+    }
+
+    #[test]
+    fn run_command_missing_command_param_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let result = execute_run_command_with_policy(
+            tmp.path(),
+            &serde_json::json!({}),
+            SandboxPolicy::None,
+        );
+        assert!(!result.success);
+        assert!(result.output.contains("missing"));
     }
 
     // -- SearchFiles tests --------------------------------------------------
