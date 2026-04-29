@@ -4,6 +4,7 @@
 //! Both are passed over `std::sync::mpsc` channels between the brain thread
 //! and the rest of the application.
 
+use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 use phantom_agents::{AgentId, AgentTask};
 use phantom_semantic::ParsedOutput;
@@ -201,6 +202,43 @@ pub enum AiAction {
         confidence: f32,
     },
 
+    /// Pause a running agent because its backend became unavailable.
+    ///
+    /// The reconciler emits this when `ChatBackend::is_available()` returns
+    /// `false` for a backend that a running agent depends on.
+    PauseAgent {
+        agent_id: AgentId,
+        reason: PauseReason,
+    },
+
+    /// Resume a previously paused agent because its backend is available again.
+    ///
+    /// The reconciler emits this when `ChatBackend::is_available()` flips back
+    /// to `true` for a backend that a paused agent was waiting for.
+    ResumeAgent { agent_id: AgentId },
+
+    /// Update the connection state displayed in the status bar.
+    UpdateConnectionState { state: ConnectionState },
+
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionState
+// ---------------------------------------------------------------------------
+
+/// The connectivity status of the AI backend as observed by the reconciler.
+///
+/// Mirrors the `PauseReason` taxonomy but is a coarser, UI-facing enum.
+/// The reconciler derives this from the most recent `PauseReason` seen across
+/// all paused agents and broadcasts it via [`AiAction::UpdateConnectionState`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// All backends are reachable.
+    Connected,
+    /// A named provider is responding but returning errors or degraded results.
+    Degraded { provider: String },
+    /// No backend is reachable (network down or all providers offline).
+    Offline,
 }

@@ -8,14 +8,14 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{debug, info, warn};
 
+use crate::app::{App, AppState, SuggestionOverlay};
+use crate::input::chrono_time_string;
 use phantom_brain::events::{AiAction, AiEvent};
 use phantom_brain::ooda::WorldState;
-use phantom_protocol::Event;
 use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AppCommand, ScreenshotReply};
-use crate::app::{App, AppState, SuggestionOverlay};
-use crate::input::chrono_time_string;
+use phantom_protocol::Event;
 
 impl App {
     /// Per-frame update: read PTY data, advance boot sequence, update widgets.
@@ -123,10 +123,16 @@ impl App {
 
             while let Some(action) = brain.try_recv_action() {
                 Self::execute_brain_action(
-                    action, now, &mut self.suggestion, &mut self.memory,
+                    action,
+                    now,
+                    &mut self.suggestion,
+                    &mut self.memory,
                     &mut self.notification_store,
-                    &mut self.console, &mut self.coordinator, &mut self.layout,
-                    &mut self.scene, &mut tasks_to_spawn,
+                    &mut self.console,
+                    &mut self.coordinator,
+                    &mut self.layout,
+                    &mut self.scene,
+                    &mut tasks_to_spawn,
                 );
             }
         }
@@ -154,10 +160,16 @@ impl App {
             let ooda_actions = self.ooda_loop.tick(&world, dt_ms);
             for action in ooda_actions {
                 Self::execute_brain_action(
-                    action, now, &mut self.suggestion, &mut self.memory,
+                    action,
+                    now,
+                    &mut self.suggestion,
+                    &mut self.memory,
                     &mut self.notification_store,
-                    &mut self.console, &mut self.coordinator, &mut self.layout,
-                    &mut self.scene, &mut tasks_to_spawn,
+                    &mut self.console,
+                    &mut self.coordinator,
+                    &mut self.layout,
+                    &mut self.scene,
+                    &mut tasks_to_spawn,
                 );
             }
         }
@@ -166,10 +178,16 @@ impl App {
         let pending = std::mem::take(&mut self.pending_brain_actions);
         for action in pending {
             Self::execute_brain_action(
-                action, now, &mut self.suggestion, &mut self.memory,
+                action,
+                now,
+                &mut self.suggestion,
+                &mut self.memory,
                 &mut self.notification_store,
-                &mut self.console, &mut self.coordinator, &mut self.layout,
-                &mut self.scene, &mut tasks_to_spawn,
+                &mut self.console,
+                &mut self.coordinator,
+                &mut self.layout,
+                &mut self.scene,
+                &mut tasks_to_spawn,
             );
         }
 
@@ -183,10 +201,16 @@ impl App {
                     self.console.system(res.display);
                     if let Some(action) = res.action {
                         Self::execute_brain_action(
-                            action, now, &mut self.suggestion, &mut self.memory,
+                            action,
+                            now,
+                            &mut self.suggestion,
+                            &mut self.memory,
                             &mut self.notification_store,
-                            &mut self.console, &mut self.coordinator, &mut self.layout,
-                            &mut self.scene, &mut tasks_to_spawn,
+                            &mut self.console,
+                            &mut self.coordinator,
+                            &mut self.layout,
+                            &mut self.scene,
+                            &mut tasks_to_spawn,
                         );
                     }
                 }
@@ -216,7 +240,9 @@ impl App {
             Err(_) => Vec::new(),
         };
         for req in pending_subagents {
-            let task = phantom_agents::AgentTask::FreeForm { prompt: req.task.clone() };
+            let task = phantom_agents::AgentTask::FreeForm {
+                prompt: req.task.clone(),
+            };
             // Wire role / label / chat_model from the SpawnSubagentRequest into
             // AgentSpawnOpts so the spawned pane runs under the requested role
             // and displays the requested label. Fixes #224 where these fields
@@ -523,12 +549,11 @@ impl App {
                     self.pane_last_command.insert(*app_id, command.clone());
                 }
                 Event::CommandComplete { app_id, exit_code } => {
-                    let command_text = self
-                        .pending_command_text
-                        .remove(app_id)
-                        .unwrap_or_default();
+                    let command_text = self.pending_command_text.remove(app_id).unwrap_or_default();
                     if let Some(ref mut store) = self.history {
-                        let cwd = self.context.as_ref()
+                        let cwd = self
+                            .context
+                            .as_ref()
                             .map(|c| std::path::PathBuf::from(&c.root))
                             .unwrap_or_else(|| std::path::PathBuf::from("."));
                         let entry = HistoryEntry::builder(&command_text, cwd, self.session_uuid)
@@ -570,22 +595,23 @@ impl App {
                         );
                         Some(AiEvent::CommandComplete(parsed))
                     }
-                    Event::AgentTaskComplete { agent_id, success, summary, spawn_tag } => {
-                        Some(AiEvent::AgentComplete {
-                            id: *agent_id,
-                            success: *success,
-                            summary: summary.clone(),
-                            spawn_tag: *spawn_tag,
-                        })
-                    }
-                    Event::AgentError { agent_id, error } => {
-                        Some(AiEvent::AgentComplete {
-                            id: *agent_id,
-                            success: false,
-                            summary: error.clone(),
-                            spawn_tag: None,
-                        })
-                    }
+                    Event::AgentTaskComplete {
+                        agent_id,
+                        success,
+                        summary,
+                        spawn_tag,
+                    } => Some(AiEvent::AgentComplete {
+                        id: *agent_id,
+                        success: *success,
+                        summary: summary.clone(),
+                        spawn_tag: *spawn_tag,
+                    }),
+                    Event::AgentError { agent_id, error } => Some(AiEvent::AgentComplete {
+                        id: *agent_id,
+                        success: false,
+                        summary: error.clone(),
+                        spawn_tag: None,
+                    }),
                     _ => None,
                 };
                 if let Some(event) = ai_event {
@@ -652,15 +678,19 @@ impl App {
                     );
                 }
             }
-            AiAction::SpawnAgent { task, spawn_tag, disposition } => {
+            AiAction::SpawnAgent {
+                task,
+                spawn_tag,
+                disposition,
+            } => {
                 info!(
                     "[PHANTOM]: Spawning agent \
                      (spawn_tag={spawn_tag:?}, disposition={disposition:?}, \
                      auto_approve={})...",
                     disposition.auto_approve(),
                 );
-                let mut opts = phantom_agents::AgentSpawnOpts::new(task)
-                    .with_disposition(disposition);
+                let mut opts =
+                    phantom_agents::AgentSpawnOpts::new(task).with_disposition(disposition);
                 opts.spawn_tag = spawn_tag;
                 tasks_to_spawn.push(opts);
             }
@@ -685,14 +715,35 @@ impl App {
             AiAction::AgentFlatlined { id, reason } => {
                 info!("[PHANTOM]: Agent {id} flatlined: {reason}");
             }
-            AiAction::Suggest { action, rationale, confidence } => {
-                info!("[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}");
+            AiAction::Suggest {
+                action,
+                rationale,
+                confidence,
+            } => {
+                info!(
+                    "[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}"
+                );
             }
-            AiAction::QuarantineAgent { agent_id, denial_count } => {
+            AiAction::QuarantineAgent {
+                agent_id,
+                denial_count,
+            } => {
                 info!("[PHANTOM]: Quarantining agent {agent_id} after {denial_count} denials");
             }
-            AiAction::AgentQuarantined { agent_id, denial_count } => {
+            AiAction::AgentQuarantined {
+                agent_id,
+                denial_count,
+            } => {
                 info!("[PHANTOM]: Agent {agent_id} quarantined ({denial_count} denials)");
+            }
+            AiAction::PauseAgent { agent_id, reason } => {
+                info!("[PHANTOM]: Pausing agent {agent_id} ({reason:?})");
+            }
+            AiAction::ResumeAgent { agent_id } => {
+                info!("[PHANTOM]: Resuming agent {agent_id}");
+            }
+            AiAction::UpdateConnectionState { state } => {
+                info!("[PHANTOM]: Connection state updated: {state:?}");
             }
             AiAction::DoNothing => {}
         }
@@ -927,19 +978,21 @@ impl App {
         use phantom_renderer::shader_loader::ShaderEvent;
 
         loop {
-            let Some(event) = self.shader_reloader.poll() else { break };
+            let Some(event) = self.shader_reloader.poll() else {
+                break;
+            };
             match event {
-                ShaderEvent::Reloaded { ref name, ref source } if name == "crt" => {
-                    match self.postfx.reload_shader(&self.gpu.device, source) {
-                        Ok(()) => log::info!("live-reload: crt.wgsl pipeline swapped"),
-                        Err(msg) => {
-                            let message = format!(
-                                "crt.wgsl hot-swap failed — {msg}. Last-good shader active."
-                            );
-                            self.push_shader_error_banner(message, now_ms);
-                        }
+                ShaderEvent::Reloaded {
+                    ref name,
+                    ref source,
+                } if name == "crt" => match self.postfx.reload_shader(&self.gpu.device, source) {
+                    Ok(()) => log::info!("live-reload: crt.wgsl pipeline swapped"),
+                    Err(msg) => {
+                        let message =
+                            format!("crt.wgsl hot-swap failed — {msg}. Last-good shader active.");
+                        self.push_shader_error_banner(message, now_ms);
                     }
-                }
+                },
                 ShaderEvent::Reloaded { name, .. } => {
                     log::debug!("live-reload: {name}.wgsl reloaded (no pipeline swap yet)");
                 }
@@ -955,7 +1008,7 @@ impl App {
 
     /// Push a Severity::Warn banner from a shader reload failure.
     fn push_shader_error_banner(&mut self, message: String, now_ms: u64) {
-        use crate::notifications::{Banner, Severity, DEFAULT_BANNER_TTL_MS};
+        use crate::notifications::{Banner, DEFAULT_BANNER_TTL_MS, Severity};
         self.notifications.push_banner(Banner {
             message,
             severity: Severity::Warn,
@@ -1166,11 +1219,9 @@ mod tests {
 
         // ---- replicate the timeout guard from App::update ----
         if git_refresh_handle.is_some() {
-            let timed_out = git_refresh_spawned_at
-                .is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
-            let finished = git_refresh_handle
-                .as_ref()
-                .is_some_and(|h| h.is_finished());
+            let timed_out =
+                git_refresh_spawned_at.is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
+            let finished = git_refresh_handle.as_ref().is_some_and(|h| h.is_finished());
             if timed_out {
                 git_refresh_handle = None;
                 git_refresh_spawned_at = None;
@@ -1219,11 +1270,9 @@ mod tests {
         let mut git_refresh_spawned_at: Option<Instant> = spawned_at;
 
         if git_refresh_handle.is_some() {
-            let timed_out = git_refresh_spawned_at
-                .is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
-            let finished = git_refresh_handle
-                .as_ref()
-                .is_some_and(|h| h.is_finished());
+            let timed_out =
+                git_refresh_spawned_at.is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
+            let finished = git_refresh_handle.as_ref().is_some_and(|h| h.is_finished());
             if timed_out {
                 git_refresh_handle = None;
                 git_refresh_spawned_at = None;

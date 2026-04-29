@@ -39,6 +39,18 @@ impl AgentPaneStyle {
             AgentStatus::AwaitingApproval => Self::awaiting_approval(),
             AgentStatus::Done => Self::done(),
             AgentStatus::Failed | AgentStatus::Flatline => Self::failed(),
+            AgentStatus::Paused { .. } => Self::paused(),
+        }
+    }
+
+    /// Dim amber, no pulse — the agent is waiting for its backend to recover.
+    fn paused() -> Self {
+        Self {
+            border_color: [0.7, 0.55, 0.1, 1.0],      // muted amber
+            header_bg: [0.10, 0.08, 0.02, 1.0],        // very dark amber
+            header_fg: [0.85, 0.70, 0.35, 1.0],        // pale amber
+            status_color: [0.7, 0.55, 0.1, 1.0],       // muted amber
+            pulse_speed: 0.0,                           // no pulse — waiting
         }
     }
 
@@ -168,6 +180,7 @@ pub fn agent_header(agent: &Agent) -> String {
         AgentStatus::Done => format!("DONE {:.1}s", agent.elapsed().as_secs_f32()),
         AgentStatus::Failed => "FAILED".to_string(),
         AgentStatus::Flatline => "FLATLINE".to_string(),
+        AgentStatus::Paused { .. } => "PAUSED".to_string(),
     };
 
     format!("\u{25a0} AGENT #{} \u{2014} {} [{}]", agent.id(), task_desc, status)

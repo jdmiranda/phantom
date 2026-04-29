@@ -54,6 +54,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         enable_memory: true,
         quiet_threshold: 0.5,
         router: None,
+        catalog: None,
     });
 
     // Agent manager (max 5 concurrent agents).
@@ -482,6 +483,15 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             }
             AiAction::AgentQuarantined { agent_id, denial_count } => {
                 println!("[BRAIN]: agent {agent_id} quarantined after {denial_count} denials");
+            }
+            AiAction::PauseAgent { agent_id, reason } => {
+                println!("[BRAIN]: pausing agent {agent_id} ({reason:?})");
+            }
+            AiAction::ResumeAgent { agent_id } => {
+                println!("[BRAIN]: resuming agent {agent_id}");
+            }
+            AiAction::UpdateConnectionState { state } => {
+                println!("[BRAIN]: connection state: {state:?}");
             }
             AiAction::DoNothing => {}
         }
