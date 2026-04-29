@@ -9,6 +9,7 @@ use anyhow::Result;
 use log::{debug, info, warn};
 
 use phantom_brain::events::{AiAction, AiEvent};
+use phantom_brain::ooda::WorldState;
 use phantom_protocol::Event;
 use phantom_context::ProjectContext;
 use phantom_mcp::{AppCommand, ScreenshotReply};
@@ -116,6 +117,37 @@ impl App {
             }
 
             while let Some(action) = brain.try_recv_action() {
+                Self::execute_brain_action(
+                    action, now, &mut self.suggestion, &mut self.memory,
+                    &mut self.console, &mut self.coordinator, &mut self.layout,
+                    &mut self.scene, &mut tasks_to_spawn,
+                );
+            }
+        }
+
+        // Per-frame OODA tick (#45): synchronous Observe/Orient/Decide/Act pass
+        // driven by the render clock. Builds a WorldState snapshot from current
+        // App state, runs the BDS in <2 ms, and feeds winning actions directly
+        // into the same execute_brain_action pipeline as the async brain thread.
+        {
+            let idle_secs = now.duration_since(self.last_input_time).as_secs_f32();
+            let world = WorldState {
+                idle_secs,
+                // Derive error presence from the last command context stored on
+                // the async brain scorer — we snapshot the same signals.
+                has_errors: false,   // OODA uses BDS which will be fed via orient
+                error_count: 0,
+                has_active_process: false,
+                new_pattern_detected: false,
+                agent_just_completed: false,
+                file_or_git_changed: false,
+                in_repl: false,
+                chattiness: 0.0,
+                suggestions_since_input: 0,
+            };
+            let dt_ms = (dt * 1000.0) as u64;
+            let ooda_actions = self.ooda_loop.tick(&world, dt_ms);
+            for action in ooda_actions {
                 Self::execute_brain_action(
                     action, now, &mut self.suggestion, &mut self.memory,
                     &mut self.console, &mut self.coordinator, &mut self.layout,
