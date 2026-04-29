@@ -12,6 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::role::{AgentRole, CapabilityClass};
+use crate::taint::TaintLevel;
 
 // ---------------------------------------------------------------------------
 // ToolType
@@ -168,9 +169,10 @@ pub struct ToolCall {
 
 /// Provenance tag attached to a tool call/result.
 ///
-/// Records the `(tool_name, args_hash, source_event_id)` triple for every
+/// Records the `(tool_name, args_hash, source_event_id, taint)` quad for every
 /// tool invocation so the runtime can later walk back through the input
-/// chain that led to a particular decision.
+/// chain that led to a particular decision, and so taint flows through the
+/// chain without downgrading.
 ///
 /// `args_hash` is the first 16 hex chars of a blake3 digest over the JSON
 /// args (matching `phantom_agents::audit::emit_tool_call`).
@@ -187,6 +189,14 @@ pub struct ToolProvenance {
     /// Id of the `phantom_memory::event_log::EventEnvelope` that
     /// triggered this tool call. `None` when no event log is wired.
     pub source_event_id: Option<u64>,
+    /// Taint level for the tool result. Defaults to [`TaintLevel::Clean`].
+    ///
+    /// Taint is monotone: it can only increase through [`Self::with_taint`]
+    /// or [`propagate_taint`]. A `Clean` result produced from a `Suspect`
+    /// upstream source should use [`propagate_taint`] to merge the levels
+    /// rather than overwriting.
+    #[serde(default)]
+    pub taint: TaintLevel,
 }
 
 impl ToolProvenance {
@@ -194,7 +204,8 @@ impl ToolProvenance {
     ///
     /// Hashes the args with the same algorithm as
     /// `phantom_agents::audit::emit_tool_call` so the audit log and the
-    /// in-memory provenance stay consistent.
+    /// in-memory provenance stay consistent. Taint defaults to
+    /// [`TaintLevel::Clean`].
     #[must_use]
     pub fn from_call(
         tool: ToolType,
@@ -206,8 +217,51 @@ impl ToolProvenance {
             tool_name: tool.api_name().to_owned(),
             args_hash: hash_args_for_provenance(&args_json),
             source_event_id,
+            taint: TaintLevel::Clean,
         }
     }
+
+    /// Builder: set the taint level, returning `self`.
+    ///
+    /// Taint is monotone — calling this with a lower severity than the
+    /// current `taint` is a no-op (it never downgrades). Use
+    /// [`propagate_taint`] when merging taint from an external source.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use phantom_agents::tools::ToolProvenance;
+    /// use phantom_agents::taint::TaintLevel;
+    ///
+    /// let prov = ToolProvenance::default().with_taint(TaintLevel::Suspect);
+    /// assert_eq!(prov.taint, TaintLevel::Suspect);
+    /// ```
+    #[must_use]
+    pub fn with_taint(mut self, level: TaintLevel) -> Self {
+        self.taint = self.taint.merge(level);
+        self
+    }
+}
+
+/// Merge `incoming` taint onto `current` via max-severity (never downgrades).
+///
+/// Returns the higher of the two [`TaintLevel`]s. This is the correct merge
+/// for propagation: if a result is derived from a `Tainted` source, calling
+/// `propagate_taint(TaintLevel::Tainted)` on the result's `Suspect` taint
+/// upgrades it to `Tainted`.
+///
+/// # Examples
+///
+/// ```
+/// use phantom_agents::tools::propagate_taint;
+/// use phantom_agents::taint::TaintLevel;
+///
+/// assert_eq!(propagate_taint(TaintLevel::Suspect, TaintLevel::Tainted), TaintLevel::Tainted);
+/// assert_eq!(propagate_taint(TaintLevel::Tainted, TaintLevel::Clean),   TaintLevel::Tainted);
+/// ```
+#[must_use]
+pub fn propagate_taint(current: TaintLevel, incoming: TaintLevel) -> TaintLevel {
+    current.merge(incoming)
 }
 
 /// Hash `args_json` with blake3, return the first 16 hex chars.
@@ -223,11 +277,12 @@ fn hash_args_for_provenance(args_json: &str) -> String {
 /// Result of a tool execution.
 ///
 /// Carries provenance for the call (tool name, args hash, optional source
-/// event id) so the runtime can later reconstruct the chain of substrate
-/// events that produced any given agent decision. The provenance fields
-/// are purely additive — pre-Sec.2 code that constructs a `ToolResult` with
-/// only `tool`/`success`/`output` keeps compiling via `..Default::default()`,
-/// leaving the new fields at their defaults (empty strings, `None`).
+/// event id, taint level) so the runtime can later reconstruct the chain of
+/// substrate events that produced any given agent decision. The provenance
+/// fields are purely additive — pre-Sec.2 code that constructs a `ToolResult`
+/// with only `tool`/`success`/`output` keeps compiling via
+/// `..Default::default()`, leaving the new fields at their defaults (empty
+/// strings, `None`, `TaintLevel::Clean`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool: ToolType,
@@ -243,6 +298,11 @@ pub struct ToolResult {
     /// triggered this tool call.
     #[serde(default)]
     pub source_event_id: Option<u64>,
+    /// Taint level for this result. Defaults to [`TaintLevel::Clean`].
+    /// Monotone: populated via [`ToolProvenance::with_taint`] on the
+    /// provenance that is attached with [`Self::with_provenance`].
+    #[serde(default)]
+    pub taint: TaintLevel,
 }
 
 impl ToolResult {
@@ -253,15 +313,21 @@ impl ToolResult {
             tool_name: self.tool_name.clone(),
             args_hash: self.args_hash.clone(),
             source_event_id: self.source_event_id,
+            taint: self.taint,
         }
     }
 
     /// Attach provenance to an existing result.
+    ///
+    /// Taint is merged via max-severity so the result's taint can only
+    /// increase — attaching a `Clean` provenance to a `Tainted` result
+    /// keeps the result `Tainted`.
     #[must_use]
     pub fn with_provenance(mut self, prov: ToolProvenance) -> Self {
         self.tool_name = prov.tool_name;
         self.args_hash = prov.args_hash;
         self.source_event_id = prov.source_event_id;
+        self.taint = propagate_taint(self.taint, prov.taint);
         self
     }
 }
@@ -539,6 +605,7 @@ fn tool_err(tool: ToolType, msg: String) -> ToolResult {
         tool_name: tool.api_name().to_owned(),
         args_hash: String::new(),
         source_event_id: None,
+        taint: Default::default(),
     }
 }
 
@@ -550,6 +617,7 @@ fn tool_ok(tool: ToolType, output: String) -> ToolResult {
         tool_name: tool.api_name().to_owned(),
         args_hash: String::new(),
         source_event_id: None,
+        taint: Default::default(),
     }
 }
 
@@ -1369,5 +1437,121 @@ mod tests {
         assert_eq!(p1.tool_name, "read_file");
         assert_eq!(p1.args_hash.len(), 16);
         assert_eq!(p1.source_event_id, Some(7));
+    }
+
+    // -- Sec.7.1 taint propagation tests ------------------------------------
+
+    #[test]
+    fn tool_provenance_default_taint_is_clean() {
+        // Acceptance: ToolProvenance default must be Clean so existing
+        // code that doesn't mention taint is unaffected.
+        let prov = ToolProvenance::default();
+        assert_eq!(prov.taint, TaintLevel::Clean);
+    }
+
+    #[test]
+    fn with_taint_sets_taint_on_provenance() {
+        // Acceptance criterion: ToolProvenance::default().with_taint(Suspect).taint == Suspect
+        let prov = ToolProvenance::default().with_taint(TaintLevel::Suspect);
+        assert_eq!(prov.taint, TaintLevel::Suspect);
+    }
+
+    #[test]
+    fn with_taint_sets_tainted_level() {
+        let prov = ToolProvenance::default().with_taint(TaintLevel::Tainted);
+        assert_eq!(prov.taint, TaintLevel::Tainted);
+    }
+
+    #[test]
+    fn with_taint_is_monotone_never_downgrades() {
+        // Tainted → Suspect must remain Tainted.
+        let prov = ToolProvenance::default()
+            .with_taint(TaintLevel::Tainted)
+            .with_taint(TaintLevel::Suspect);
+        assert_eq!(prov.taint, TaintLevel::Tainted);
+    }
+
+    #[test]
+    fn propagate_taint_upgrades_suspect_to_tainted() {
+        // Acceptance criterion: propagate_taint(Tainted) on a Suspect taint
+        // returns Tainted.
+        let result = propagate_taint(TaintLevel::Suspect, TaintLevel::Tainted);
+        assert_eq!(result, TaintLevel::Tainted);
+    }
+
+    #[test]
+    fn propagate_taint_never_downgrades() {
+        // Tainted cannot become Clean through propagation.
+        let result = propagate_taint(TaintLevel::Tainted, TaintLevel::Clean);
+        assert_eq!(result, TaintLevel::Tainted);
+    }
+
+    #[test]
+    fn propagate_taint_clean_with_suspect_becomes_suspect() {
+        let result = propagate_taint(TaintLevel::Clean, TaintLevel::Suspect);
+        assert_eq!(result, TaintLevel::Suspect);
+    }
+
+    #[test]
+    fn execute_tool_result_taint_defaults_clean() {
+        // Tool results emitted by execute_tool must default to Clean taint so
+        // callers not yet aware of Sec.7.1 are unaffected.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("f.txt"), "data").unwrap();
+
+        let result = execute_tool(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": "f.txt" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        assert_eq!(result.taint, TaintLevel::Clean);
+    }
+
+    #[test]
+    fn with_provenance_propagates_taint_into_result() {
+        // Attaching a Suspect provenance to a Clean ToolResult raises its taint.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("g.txt"), "data").unwrap();
+
+        let args = serde_json::json!({ "path": "g.txt" });
+        let prov = ToolProvenance::from_call(ToolType::ReadFile, &args, None)
+            .with_taint(TaintLevel::Suspect);
+
+        let result = execute_tool(
+            ToolType::ReadFile,
+            &args,
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        )
+        .with_provenance(prov);
+
+        assert_eq!(result.taint, TaintLevel::Suspect);
+    }
+
+    #[test]
+    fn provenance_roundtrip_carries_taint() {
+        // ToolResult::provenance() must echo back the taint that was wired in.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("h.txt"), "data").unwrap();
+
+        let args = serde_json::json!({ "path": "h.txt" });
+        let prov = ToolProvenance::from_call(ToolType::ReadFile, &args, Some(99))
+            .with_taint(TaintLevel::Tainted);
+
+        let result = execute_tool(
+            ToolType::ReadFile,
+            &args,
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        )
+        .with_provenance(prov);
+
+        assert_eq!(result.taint, TaintLevel::Tainted);
+
+        // Round-trip: ToolResult → provenance() must preserve the taint.
+        let recovered = result.provenance();
+        assert_eq!(recovered.taint, TaintLevel::Tainted);
+        assert_eq!(recovered.source_event_id, Some(99));
     }
 }

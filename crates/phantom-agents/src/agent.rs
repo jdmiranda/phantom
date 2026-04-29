@@ -404,16 +404,21 @@ pub struct AgentSpawnOpts {
     /// Optional chat-model override. `None` falls through to the env-var
     /// resolver (`PHANTOM_AGENT_MODEL`), and ultimately to default Claude.
     pub chat_model: Option<crate::chat::ChatModel>,
+    /// Reconciler-issued spawn tag used to correlate `AgentComplete` events
+    /// back to the correct `active_dispatches` entry. `None` for
+    /// user-initiated spawns that are not tracked by the reconciler.
+    pub spawn_tag: Option<u64>,
 }
 
 impl AgentSpawnOpts {
-    /// Build a new options bundle for `task`. Chat model defaults to `None`
-    /// (env-var or default Claude path).
+    /// Build a new options bundle for `task`. Chat model and spawn tag default
+    /// to `None` (env-var or default Claude path; non-reconciler spawn).
     #[must_use]
     pub fn new(task: AgentTask) -> Self {
         Self {
             task,
             chat_model: None,
+            spawn_tag: None,
         }
     }
 
@@ -727,6 +732,7 @@ mod tests {
             tool_name: "read_file".into(),
             args_hash: "abcdef0123456789".into(),
             source_event_id: Some(id),
+            ..Default::default()
         }
     }
 

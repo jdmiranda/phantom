@@ -841,6 +841,7 @@ mod tests {
             tool_name: String::new(),
             args_hash: String::new(),
             source_event_id: None,
+            ..Default::default()
         }));
 
         let ids = vec!["call_abc123".to_owned()];
@@ -891,6 +892,7 @@ mod tests {
             tool_name: String::new(),
             args_hash: String::new(),
             source_event_id: None,
+            ..Default::default()
         }));
         let ids = vec!["call_xyz".to_owned()];
         let body = build_openai_request_body("gpt-4o", 256, &agent, &[], &ids);
