@@ -312,6 +312,7 @@ mod tests {
                 agent_id: 1,
                 success: true,
                 summary: "fix the bug".into(),
+                spawn_tag: None,
             },
             frame: 0,
             timestamp: 100,
@@ -321,7 +322,7 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert!(matches!(
             &msgs[0].event,
-            Event::AgentTaskComplete { agent_id: 1, success: true, summary }
+            Event::AgentTaskComplete { agent_id: 1, success: true, summary, .. }
             if summary == "fix the bug"
         ));
     }

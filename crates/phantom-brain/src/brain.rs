@@ -213,9 +213,9 @@ fn brain_loop(
         }
 
         // Forward AgentComplete to the reconciler to advance the task ledger.
-        if let AiEvent::AgentComplete { id, success, ref summary } = event {
+        if let AiEvent::AgentComplete { id, success, ref summary, spawn_tag } = event {
             if let Some(ref mut l) = active_ledger {
-                reconciler.on_agent_complete(l, id, success, summary);
+                reconciler.on_agent_complete(l, id, success, summary, spawn_tag);
             }
             // Fall through to OODA scoring — notification_score handles this event.
         }
@@ -358,11 +358,11 @@ fn enhance_with_investigation(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    crate::events::SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FixError {
+                    crate::events::SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FixError {
                         error_summary: parsed.errors.first().map(|e| e.message.clone()).unwrap_or_default(),
                         file: parsed.errors.first().and_then(|e| e.file.clone()),
                         context,
-                    }))) },
+                    }, spawn_tag: None })) },
                     crate::events::SuggestionOption { key: 'd', label: "Dismiss".into(), action: None },
                 ],
             }
@@ -454,7 +454,7 @@ fn enhance_with_ollama(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }))) },
+                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }, spawn_tag: None })) },
                     crate::events::SuggestionOption { key: 'n', label: "Dismiss".into(), action: None },
                 ],
             }
@@ -521,7 +521,7 @@ fn enhance_with_claude(
             AiAction::ShowSuggestion {
                 text,
                 options: vec![
-                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }))) },
+                    crate::events::SuggestionOption { key: 'y', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FreeForm { prompt: "Fix it".into() }, spawn_tag: None })) },
                     crate::events::SuggestionOption { key: 'n', label: "Dismiss".into(), action: None },
                 ],
             }
@@ -693,7 +693,7 @@ fn handle_console_query(
 pub(crate) fn action_name(action: &AiAction) -> &str {
     match action {
         AiAction::ShowSuggestion { .. } => "suggest",
-        AiAction::SpawnAgent(_) => "spawn_agent",
+        AiAction::SpawnAgent { .. } => "spawn_agent",
         AiAction::UpdateMemory { .. } => "update_memory",
         AiAction::ShowNotification(_) => "notify",
         AiAction::RunCommand(_) => "run_command",
@@ -723,9 +723,10 @@ mod tests {
             "suggest"
         );
         assert_eq!(
-            action_name(&AiAction::SpawnAgent(phantom_agents::AgentTask::FreeForm {
-                prompt: "x".into()
-            })),
+            action_name(&AiAction::SpawnAgent {
+                task: phantom_agents::AgentTask::FreeForm { prompt: "x".into() },
+                spawn_tag: None,
+            }),
             "spawn_agent"
         );
         assert_eq!(

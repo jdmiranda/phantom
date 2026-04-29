@@ -580,6 +580,7 @@ mod tests {
             id: 1,
             success: true,
             summary: "Fixed the bug".into(),
+            spawn_tag: None,
         };
 
         let scored = scorer.notification_score(&event);

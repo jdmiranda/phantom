@@ -408,6 +408,7 @@ mod tests {
             id: 1,
             success: true,
             summary: "done".into(),
+            spawn_tag: None,
         };
         assert_eq!(TaskClassifier::classify(&event), TaskComplexity::Simple);
     }

@@ -41,6 +41,10 @@ pub enum AiEvent {
         id: AgentId,
         success: bool,
         summary: String,
+        /// Reconciler spawn tag echoed back from the agent adapter so
+        /// `ReconcilerState::on_agent_complete` can match by tag rather
+        /// than relying on sequential execution assumptions.
+        spawn_tag: Option<u64>,
     },
 
     /// An agent needs user input before it can continue.
@@ -104,7 +108,16 @@ pub enum AiAction {
     },
 
     /// Spawn a new agent to work on a task.
-    SpawnAgent(AgentTask),
+    ///
+    /// `spawn_tag` is stamped by the reconciler so that the resulting
+    /// `AgentComplete` event can be matched back to the correct
+    /// `active_dispatches` entry regardless of the AgentManager's own
+    /// sequential ID assignment. Non-reconciler callers leave it `None`.
+    SpawnAgent {
+        task: AgentTask,
+        /// Reconciler-assigned synthetic ID; `None` for user-initiated spawns.
+        spawn_tag: Option<u64>,
+    },
 
     /// Persist a key-value pair to project memory.
     UpdateMemory { key: String, value: String },

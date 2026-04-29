@@ -26,7 +26,14 @@ pub enum Event {
     // -- Agents --------------------------------------------------------------
     AgentSpawned { agent_id: AgentId, task: String },
     AgentProgress { agent_id: AgentId, fraction: f32, message: String },
-    AgentTaskComplete { agent_id: AgentId, success: bool, summary: String },
+    AgentTaskComplete {
+        agent_id: AgentId,
+        success: bool,
+        summary: String,
+        /// Reconciler spawn tag echoed back so the brain can route the
+        /// completion to the correct `active_dispatches` entry.
+        spawn_tag: Option<u64>,
+    },
     AgentError { agent_id: AgentId, error: String },
 
     // -- Sessions / Focus ----------------------------------------------------
@@ -127,6 +134,7 @@ mod tests {
                 agent_id: 1,
                 success: true,
                 summary: "done".into(),
+                spawn_tag: None,
             },
             Event::AgentError { agent_id: 1, error: "oops".into() },
         ];

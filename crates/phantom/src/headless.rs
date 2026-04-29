@@ -460,8 +460,8 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
             AiAction::RunCommand(cmd) => {
                 println!("[BRAIN]: suggested command: {cmd}");
             }
-            AiAction::SpawnAgent(task) => {
-                println!("[BRAIN]: suggested agent: {task:?}");
+            AiAction::SpawnAgent { task, spawn_tag } => {
+                println!("[BRAIN]: suggested agent: {task:?} (spawn_tag={spawn_tag:?})");
             }
             AiAction::ConsoleReply(reply) => {
                 println!("[PHANTOM]: {reply}");

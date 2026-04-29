@@ -226,16 +226,17 @@ impl SelfTestRunner {
                     .and_then(|f| f.files.first().cloned());
 
                 app.pending_brain_actions.push(
-                    phantom_brain::events::AiAction::SpawnAgent(
-                        phantom_agents::AgentTask::FixError {
+                    phantom_brain::events::AiAction::SpawnAgent {
+                        task: phantom_agents::AgentTask::FixError {
                             error_summary: format!(
                                 "{} selftest failure(s)",
                                 self.failures.len()
                             ),
                             file: first_file,
                             context: repair_prompt,
-                        }
-                    )
+                        },
+                        spawn_tag: None,
+                    }
                 );
 
                 self.heal_stage = HealStage::Repairing;
