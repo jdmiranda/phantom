@@ -1,133 +1,159 @@
-use std::collections::hash_map::DefaultHasher;
-use std::fs::{self, OpenOptions};
-use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Write};
+//! Append-only JSONL history store.
+//!
+//! One JSONL file lives at `~/.local/share/phantom/history/<session_id>.jsonl`.
+//! Each line is a serialised [`HistoryEntry`].  The store also maintains an
+//! in-memory index (`HashMap<Uuid, u64>`) that maps entry ID → byte offset so
+//! that id-lookup stays O(1) without a full scan after the store is opened.
+
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use phantom_semantic::ParsedOutput;
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
-/// A history entry with timestamp and metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HistoryEntry {
-    /// Unix epoch seconds.
-    pub timestamp: u64,
-    /// Working directory where the command was executed.
-    pub working_dir: String,
-    /// Semantic parse result for the command.
-    pub parsed: ParsedOutput,
-}
+use crate::jsonl::HistoryEntry;
 
-/// Append-only command history backed by a `.jsonl` file.
+// ---------------------------------------------------------------------------
+// HistoryStore
+// ---------------------------------------------------------------------------
+
+/// Append-only JSONL history store for a session.
 ///
-/// One file per project directory, stored at `~/.config/phantom/history/`.
-/// Each line is a JSON-serialized [`HistoryEntry`].
+/// All public methods return [`anyhow::Result`] — no `.unwrap()` in production
+/// paths.
 pub struct HistoryStore {
+    /// Path to the `.jsonl` file.
     path: PathBuf,
+    /// Maps entry id → byte offset of the start of its line in the file.
+    index: HashMap<Uuid, u64>,
+    /// Byte offset where the next append will begin.
+    next_offset: u64,
 }
 
 impl HistoryStore {
-    /// Open or create a history store for the given project directory.
+    // -----------------------------------------------------------------------
+    // Construction
+    // -----------------------------------------------------------------------
+
+    /// Open (or create) a store for `session_id` under the default data dir:
+    /// `~/.local/share/phantom/history/<session_id>.jsonl`.
+    pub fn open(session_id: Uuid) -> Result<Self> {
+        let dir = default_data_dir();
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create history dir: {}", dir.display()))?;
+        let path = dir.join(format!("{session_id}.jsonl"));
+        Self::open_at(path)
+    }
+
+    /// Open (or create) a store at an explicit path.
     ///
-    /// The project directory is hashed to produce a stable filename under
-    /// `~/.config/phantom/history/{hash}.jsonl`.
-    pub fn open(project_dir: &str) -> Result<Self> {
-        let base = dirs_base();
-        fs::create_dir_all(&base)
-            .with_context(|| format!("failed to create history dir: {}", base.display()))?;
+    /// Scans the existing file to rebuild the in-memory index.
+    pub fn open_at(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
 
-        let hash = hash_project_dir(project_dir);
-        let path = base.join(format!("{hash}.jsonl"));
+        let mut store = Self {
+            path,
+            index: HashMap::new(),
+            next_offset: 0,
+        };
 
-        Ok(Self { path })
+        store.rebuild_index()?;
+        Ok(store)
     }
 
-    /// Open a store at an explicit path (used in tests).
-    #[cfg(test)]
-    fn open_at(path: PathBuf) -> Self {
-        Self { path }
-    }
+    // -----------------------------------------------------------------------
+    // Writes
+    // -----------------------------------------------------------------------
 
-    /// Append a command execution to history.
-    pub fn append(&self, entry: &HistoryEntry) -> Result<()> {
+    /// Append `entry` to the JSONL file.
+    ///
+    /// The in-memory index is updated so subsequent id-lookups reflect the new
+    /// entry without a file rescan.
+    pub fn append(&mut self, entry: &HistoryEntry) -> Result<()> {
+        let line = entry.to_jsonl_line()?;
+
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .with_context(|| format!("failed to open history file: {}", self.path.display()))?;
+            .with_context(|| format!("cannot open history file: {}", self.path.display()))?;
 
-        let json =
-            serde_json::to_string(entry).context("failed to serialize history entry")?;
+        let offset = self.next_offset;
+        writeln!(file, "{line}")
+            .with_context(|| format!("cannot write to history file: {}", self.path.display()))?;
 
-        writeln!(file, "{json}").context("failed to write history entry")?;
+        // line + '\n'
+        self.next_offset += line.len() as u64 + 1;
+        self.index.insert(entry.id(), offset);
 
         Ok(())
     }
 
-    /// Search history by text query (case-insensitive substring match on
-    /// command, raw_output, and error messages). Returns the most recent
-    /// matches first, up to `limit`.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let lower_query = query.to_lowercase();
-        let entries = self.read_all()?;
+    // -----------------------------------------------------------------------
+    // Reads
+    // -----------------------------------------------------------------------
 
-        let mut matches: Vec<HistoryEntry> = entries
-            .into_iter()
-            .filter(|e| entry_matches(e, &lower_query))
-            .collect();
-
-        // Most recent first.
-        matches.reverse();
-        matches.truncate(limit);
-
-        Ok(matches)
-    }
-
-    /// Get the last N entries (most recent last in the returned vec, matching
-    /// chronological order).
+    /// Return the most-recent `limit` entries in chronological order
+    /// (oldest first, newest last).
     pub fn recent(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let entries = self.read_all()?;
-        let start = entries.len().saturating_sub(limit);
-
-        Ok(entries[start..].to_vec())
+        let all = self.read_all()?;
+        let start = all.len().saturating_sub(limit);
+        Ok(all[start..].to_vec())
     }
 
-    /// Search for entries with errors, most recent first.
-    pub fn errors_recent(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
-        let entries = self.read_all()?;
+    /// Fetch a single entry by its UUID in O(1) (index lookup + one seek).
+    pub fn get_by_id(&self, id: Uuid) -> Result<Option<HistoryEntry>> {
+        let Some(&offset) = self.index.get(&id) else {
+            return Ok(None);
+        };
 
-        let mut with_errors: Vec<HistoryEntry> = entries
+        let mut file = File::open(&self.path)
+            .with_context(|| format!("cannot open history file: {}", self.path.display()))?;
+        file.seek(SeekFrom::Start(offset)).context("seek failed")?;
+
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        reader.read_line(&mut line).context("read_line failed")?;
+
+        let entry = HistoryEntry::from_jsonl_line(line.trim())
+            .context("index pointed at a corrupt line")?;
+        Ok(Some(entry))
+    }
+
+    /// Return all entries for `session_id` in chronological order.
+    pub fn by_session(&self, session_id: Uuid) -> Result<Vec<HistoryEntry>> {
+        let all = self.read_all()?;
+        Ok(all
             .into_iter()
-            .filter(|e| !e.parsed.errors.is_empty())
-            .collect();
-
-        with_errors.reverse();
-        with_errors.truncate(limit);
-
-        Ok(with_errors)
+            .filter(|e| e.session_id() == session_id)
+            .collect())
     }
 
-    /// Get total entry count (without deserializing every line).
-    pub fn count(&self) -> Result<usize> {
-        if !self.path.exists() {
-            return Ok(0);
-        }
-
-        let file = fs::File::open(&self.path)
-            .with_context(|| format!("failed to open history file: {}", self.path.display()))?;
-        let reader = BufReader::new(file);
-
-        let count = reader
-            .lines()
-            .filter_map(|l| l.ok())
-            .filter(|l| !l.trim().is_empty())
-            .count();
-
-        Ok(count)
+    /// Return entries whose timestamp falls within `[from, to]` (inclusive),
+    /// in chronological order.
+    pub fn by_time_range(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<HistoryEntry>> {
+        let all = self.read_all()?;
+        Ok(all
+            .into_iter()
+            .filter(|e| e.timestamp() >= from && e.timestamp() <= to)
+            .collect())
     }
 
-    /// Get the history file path.
+    /// Total number of (non-corrupt) entries recorded in the index.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Path to the backing JSONL file.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -136,78 +162,72 @@ impl HistoryStore {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Read all entries from the backing file.
+    /// Read and deserialise all entries, skipping corrupt lines with a warning.
     fn read_all(&self) -> Result<Vec<HistoryEntry>> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
 
-        let file = fs::File::open(&self.path)
-            .with_context(|| format!("failed to open history file: {}", self.path.display()))?;
+        let file = File::open(&self.path)
+            .with_context(|| format!("cannot open history file: {}", self.path.display()))?;
         let reader = BufReader::new(file);
 
         let mut entries = Vec::new();
         for line in reader.lines() {
-            let line = line.context("failed to read line from history file")?;
+            let line = line.context("read error in history file")?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<HistoryEntry>(trimmed) {
-                Ok(entry) => entries.push(entry),
-                Err(e) => {
-                    // Log but skip corrupt lines so one bad entry doesn't brick
-                    // the entire history.
-                    log::warn!("skipping corrupt history entry: {e}");
-                }
+            match HistoryEntry::from_jsonl_line(trimmed) {
+                Ok(e) => entries.push(e),
+                Err(e) => log::warn!("skipping corrupt history line: {e}"),
             }
         }
-
         Ok(entries)
     }
+
+    /// Scan the file to populate `index` and `next_offset`.
+    fn rebuild_index(&mut self) -> Result<()> {
+        if !self.path.exists() {
+            self.next_offset = 0;
+            return Ok(());
+        }
+
+        let file = File::open(&self.path).with_context(|| {
+            format!(
+                "cannot open history file for indexing: {}",
+                self.path.display()
+            )
+        })?;
+        let reader = BufReader::new(file);
+
+        let mut offset: u64 = 0;
+        for line in reader.lines() {
+            let line = line.context("read error while rebuilding index")?;
+            // +1 for the '\n' that writeln! appended
+            let line_len = line.len() as u64 + 1;
+            let trimmed = line.trim();
+            if !trimmed.is_empty()
+                && let Ok(entry) = HistoryEntry::from_jsonl_line(trimmed)
+            {
+                self.index.insert(entry.id(), offset);
+            }
+            offset += line_len;
+        }
+        self.next_offset = offset;
+        Ok(())
+    }
 }
 
-/// Case-insensitive substring match across the searchable fields of an entry.
-fn entry_matches(entry: &HistoryEntry, lower_query: &str) -> bool {
-    let p = &entry.parsed;
-
-    if p.command.to_lowercase().contains(lower_query) {
-        return true;
-    }
-    if p.raw_output.to_lowercase().contains(lower_query) {
-        return true;
-    }
-    for err in &p.errors {
-        if err.message.to_lowercase().contains(lower_query) {
-            return true;
-        }
-        if err.raw_line.to_lowercase().contains(lower_query) {
-            return true;
-        }
-    }
-    for warn in &p.warnings {
-        if warn.message.to_lowercase().contains(lower_query) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Default base directory for history files.
-fn dirs_base() -> PathBuf {
+/// Default data directory: `~/.local/share/phantom/history/`.
+fn default_data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home)
-        .join(".config")
+        .join(".local")
+        .join("share")
         .join("phantom")
         .join("history")
-}
-
-/// Deterministic hash of a project directory path to a hex string.
-fn hash_project_dir(project_dir: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    project_dir.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
 }
 
 // ===========================================================================
@@ -217,92 +237,66 @@ fn hash_project_dir(project_dir: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phantom_semantic::{
-        CommandType, ContentType, DetectedError, ErrorType, ParsedOutput, Severity,
-    };
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use chrono::Duration;
+    use phantom_semantic::CommandType;
+    use std::io::Write;
+    use tempfile::TempDir;
 
-    /// Helper: create a store backed by a temp file.
-    fn temp_store() -> (HistoryStore, tempfile::TempDir) {
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn temp_store() -> (HistoryStore, TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
-        let store = HistoryStore::open_at(path);
+        let store = HistoryStore::open_at(&path).unwrap();
         (store, dir)
     }
 
-    /// Helper: build a basic history entry.
-    fn make_entry(command: &str, output: &str, errors: Vec<DetectedError>) -> HistoryEntry {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        HistoryEntry {
-            timestamp: now,
-            working_dir: "/home/dev/project".to_string(),
-            parsed: ParsedOutput {
-                command: command.to_string(),
-                command_type: CommandType::Shell,
-                exit_code: Some(0),
-                content_type: ContentType::PlainText,
-                errors,
-                warnings: vec![],
-                duration_ms: Some(42),
-                raw_output: output.to_string(),
-            },
-        }
+    fn entry(cmd: &str, session: Uuid) -> HistoryEntry {
+        HistoryEntry::builder(cmd, "/home/dev", session).build()
     }
 
-    fn make_error(message: &str) -> DetectedError {
-        DetectedError {
-            message: message.to_string(),
-            error_type: ErrorType::Compiler,
-            file: Some("src/main.rs".to_string()),
-            line: Some(10),
-            column: Some(5),
-            code: Some("E0308".to_string()),
-            severity: Severity::Error,
-            raw_line: format!("error[E0308]: {message}"),
-            suggestion: None,
-        }
+    fn entry_with_exit(cmd: &str, session: Uuid, code: i32) -> HistoryEntry {
+        HistoryEntry::builder(cmd, "/home/dev", session)
+            .exit_code(code)
+            .build()
     }
 
     // -----------------------------------------------------------------------
-    // 1. Append and count
+    // 1. Append increments count
     // -----------------------------------------------------------------------
 
     #[test]
     fn append_increments_count() {
-        let (store, _dir) = temp_store();
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
 
-        assert_eq!(store.count().unwrap(), 0);
-
-        store.append(&make_entry("ls -la", "file1\nfile2", vec![])).unwrap();
-        assert_eq!(store.count().unwrap(), 1);
-
-        store.append(&make_entry("pwd", "/home/dev/project", vec![])).unwrap();
-        assert_eq!(store.count().unwrap(), 2);
+        assert_eq!(store.count(), 0);
+        store.append(&entry("ls", session)).unwrap();
+        assert_eq!(store.count(), 1);
+        store.append(&entry("pwd", session)).unwrap();
+        assert_eq!(store.count(), 2);
     }
 
     // -----------------------------------------------------------------------
-    // 2. Recent entries
+    // 2. Recent returns last N in chronological order
     // -----------------------------------------------------------------------
 
     #[test]
     fn recent_returns_last_n_in_order() {
-        let (store, _dir) = temp_store();
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
 
         for i in 0..5 {
-            store
-                .append(&make_entry(&format!("cmd-{i}"), "", vec![]))
-                .unwrap();
+            store.append(&entry(&format!("cmd-{i}"), session)).unwrap();
         }
 
         let recent = store.recent(3).unwrap();
         assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].parsed.command, "cmd-2");
-        assert_eq!(recent[1].parsed.command, "cmd-3");
-        assert_eq!(recent[2].parsed.command, "cmd-4");
+        assert_eq!(recent[0].command(), "cmd-2");
+        assert_eq!(recent[1].command(), "cmd-3");
+        assert_eq!(recent[2].command(), "cmd-4");
     }
 
     // -----------------------------------------------------------------------
@@ -311,208 +305,206 @@ mod tests {
 
     #[test]
     fn recent_limit_exceeds_total() {
-        let (store, _dir) = temp_store();
-
-        store.append(&make_entry("only-one", "", vec![])).unwrap();
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        store.append(&entry("only-one", session)).unwrap();
 
         let recent = store.recent(100).unwrap();
         assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].parsed.command, "only-one");
     }
 
     // -----------------------------------------------------------------------
-    // 4. Search by command text
+    // 4. get_by_id returns correct entry (O(1) path)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn search_matches_command_text() {
-        let (store, _dir) = temp_store();
+    fn get_by_id_returns_correct_entry() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
 
-        store.append(&make_entry("cargo build", "Compiling...", vec![])).unwrap();
-        store.append(&make_entry("git status", "On branch main", vec![])).unwrap();
-        store.append(&make_entry("cargo test", "test result: ok", vec![])).unwrap();
+        store.append(&entry("first", session)).unwrap();
+        let target = entry("target-command", session);
+        let target_id = target.id();
+        store.append(&target).unwrap();
+        store.append(&entry("third", session)).unwrap();
 
-        let results = store.search("cargo", 10).unwrap();
-        assert_eq!(results.len(), 2);
-        // Most recent first.
-        assert_eq!(results[0].parsed.command, "cargo test");
-        assert_eq!(results[1].parsed.command, "cargo build");
+        let found = store.get_by_id(target_id).unwrap().unwrap();
+        assert_eq!(found.command(), "target-command");
+        assert_eq!(found.id(), target_id);
     }
 
     // -----------------------------------------------------------------------
-    // 5. Search is case-insensitive
+    // 5. get_by_id returns None for unknown UUID
     // -----------------------------------------------------------------------
 
     #[test]
-    fn search_is_case_insensitive() {
-        let (store, _dir) = temp_store();
+    fn get_by_id_unknown_returns_none() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        store.append(&entry("ls", session)).unwrap();
 
-        store
-            .append(&make_entry("CARGO BUILD", "COMPILING", vec![]))
-            .unwrap();
+        let result = store.get_by_id(Uuid::new_v4()).unwrap();
+        assert!(result.is_none());
+    }
 
-        let results = store.search("cargo", 10).unwrap();
+    // -----------------------------------------------------------------------
+    // 6. by_session filters correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn by_session_filters_entries() {
+        let (mut store, _dir) = temp_store();
+        let session_a = Uuid::new_v4();
+        let session_b = Uuid::new_v4();
+
+        store.append(&entry("a1", session_a)).unwrap();
+        store.append(&entry("b1", session_b)).unwrap();
+        store.append(&entry("a2", session_a)).unwrap();
+        store.append(&entry("b2", session_b)).unwrap();
+
+        let a_entries = store.by_session(session_a).unwrap();
+        assert_eq!(a_entries.len(), 2);
+        assert!(a_entries.iter().all(|e| e.session_id() == session_a));
+
+        let b_entries = store.by_session(session_b).unwrap();
+        assert_eq!(b_entries.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. by_time_range returns entries within the range
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn by_time_range_filters_correctly() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        let now = Utc::now();
+
+        let past = HistoryEntry::builder("past", "/", session)
+            .timestamp(now - Duration::hours(2))
+            .build();
+        let in_range = HistoryEntry::builder("in-range", "/", session)
+            .timestamp(now - Duration::minutes(30))
+            .build();
+        let future = HistoryEntry::builder("future", "/", session)
+            .timestamp(now + Duration::hours(1))
+            .build();
+
+        store.append(&past).unwrap();
+        store.append(&in_range).unwrap();
+        store.append(&future).unwrap();
+
+        let from = now - Duration::hours(1);
+        let to = now;
+        let results = store.by_time_range(from, to).unwrap();
+
         assert_eq!(results.len(), 1);
-
-        let results_upper = store.search("CARGO", 10).unwrap();
-        assert_eq!(results_upper.len(), 1);
+        assert_eq!(results[0].command(), "in-range");
     }
 
     // -----------------------------------------------------------------------
-    // 6. Search matches raw output
+    // 8. Index survives reopen (rebuild_index)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn search_matches_raw_output() {
-        let (store, _dir) = temp_store();
+    fn index_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let session = Uuid::new_v4();
 
-        store
-            .append(&make_entry("curl api.example.com", "404 Not Found", vec![]))
-            .unwrap();
-        store
-            .append(&make_entry("echo hello", "hello", vec![]))
-            .unwrap();
+        let target_id = {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&entry("first", session)).unwrap();
+            let target = entry("second", session);
+            let id = target.id();
+            store.append(&target).unwrap();
+            id
+        };
 
-        let results = store.search("not found", 10).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].parsed.command, "curl api.example.com");
+        // Re-open — index must be rebuilt from file
+        let store = HistoryStore::open_at(&path).unwrap();
+        assert_eq!(store.count(), 2);
+
+        let found = store.get_by_id(target_id).unwrap().unwrap();
+        assert_eq!(found.command(), "second");
     }
 
     // -----------------------------------------------------------------------
-    // 7. Search matches error messages
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn search_matches_error_messages() {
-        let (store, _dir) = temp_store();
-
-        let err = make_error("mismatched types");
-        store
-            .append(&make_entry("cargo build", "", vec![err]))
-            .unwrap();
-        store
-            .append(&make_entry("ls", "", vec![]))
-            .unwrap();
-
-        let results = store.search("mismatched", 10).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].parsed.command, "cargo build");
-    }
-
-    // -----------------------------------------------------------------------
-    // 8. errors_recent filters correctly
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn errors_recent_filters_entries_with_errors() {
-        let (store, _dir) = temp_store();
-
-        store
-            .append(&make_entry("cargo build", "ok", vec![]))
-            .unwrap();
-
-        let err1 = make_error("mismatched types");
-        store
-            .append(&make_entry("cargo check", "", vec![err1]))
-            .unwrap();
-
-        store
-            .append(&make_entry("ls", "file1", vec![]))
-            .unwrap();
-
-        let err2 = make_error("unresolved import");
-        store
-            .append(&make_entry("cargo test", "", vec![err2]))
-            .unwrap();
-
-        let errors = store.errors_recent(10).unwrap();
-        assert_eq!(errors.len(), 2);
-        // Most recent first.
-        assert_eq!(errors[0].parsed.command, "cargo test");
-        assert_eq!(errors[1].parsed.command, "cargo check");
-    }
-
-    // -----------------------------------------------------------------------
-    // 9. errors_recent respects limit
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn errors_recent_respects_limit() {
-        let (store, _dir) = temp_store();
-
-        for i in 0..5 {
-            let err = make_error(&format!("error-{i}"));
-            store
-                .append(&make_entry(&format!("cmd-{i}"), "", vec![err]))
-                .unwrap();
-        }
-
-        let errors = store.errors_recent(2).unwrap();
-        assert_eq!(errors.len(), 2);
-        assert_eq!(errors[0].parsed.command, "cmd-4");
-        assert_eq!(errors[1].parsed.command, "cmd-3");
-    }
-
-    // -----------------------------------------------------------------------
-    // 10. Empty store returns empty results
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn empty_store_returns_empty() {
-        let (store, _dir) = temp_store();
-
-        assert_eq!(store.count().unwrap(), 0);
-        assert!(store.recent(10).unwrap().is_empty());
-        assert!(store.search("anything", 10).unwrap().is_empty());
-        assert!(store.errors_recent(10).unwrap().is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // 11. Corrupt lines are skipped gracefully
+    // 9. Corrupt lines are skipped gracefully
     // -----------------------------------------------------------------------
 
     #[test]
     fn corrupt_lines_skipped() {
-        let (store, _dir) = temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let session = Uuid::new_v4();
 
-        // Write a valid entry.
-        store
-            .append(&make_entry("valid", "output", vec![]))
-            .unwrap();
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&entry("good-first", session)).unwrap();
+        }
 
-        // Manually append garbage.
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(store.path())
-            .unwrap();
-        writeln!(file, "{{not valid json at all").unwrap();
+        // Inject a corrupt line directly
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(f, "{{not valid json").unwrap();
+        }
 
-        // Write another valid entry.
-        store
-            .append(&make_entry("also-valid", "output2", vec![]))
-            .unwrap();
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&entry("good-second", session)).unwrap();
+        }
 
+        let store = HistoryStore::open_at(&path).unwrap();
         let recent = store.recent(10).unwrap();
         assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].parsed.command, "valid");
-        assert_eq!(recent[1].parsed.command, "also-valid");
+        assert_eq!(recent[0].command(), "good-first");
+        assert_eq!(recent[1].command(), "good-second");
     }
 
     // -----------------------------------------------------------------------
-    // 12. Serialization round-trip
+    // 10. Empty store is safe
     // -----------------------------------------------------------------------
 
     #[test]
-    fn entry_round_trips_through_json() {
-        let err = make_error("type mismatch");
-        let entry = make_entry("cargo build --release", "Compiling phantom...", vec![err]);
+    fn empty_store_is_safe() {
+        let (store, _dir) = temp_store();
+        assert_eq!(store.count(), 0);
+        assert!(store.recent(10).unwrap().is_empty());
+        assert!(store.get_by_id(Uuid::new_v4()).unwrap().is_none());
+    }
 
-        let json = serde_json::to_string(&entry).unwrap();
-        let deser: HistoryEntry = serde_json::from_str(&json).unwrap();
+    // -----------------------------------------------------------------------
+    // 11. exit_code survives round-trip
+    // -----------------------------------------------------------------------
 
-        assert_eq!(deser.parsed.command, entry.parsed.command);
-        assert_eq!(deser.parsed.errors.len(), 1);
-        assert_eq!(deser.parsed.errors[0].message, "type mismatch");
-        assert_eq!(deser.working_dir, entry.working_dir);
+    #[test]
+    fn exit_code_round_trip() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        let e = entry_with_exit("failing-cmd", session, 127);
+        let id = e.id();
+        store.append(&e).unwrap();
+
+        let restored = store.get_by_id(id).unwrap().unwrap();
+        assert_eq!(restored.exit_code(), Some(127));
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. Semantic type survives round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn semantic_type_round_trip() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        let e = HistoryEntry::builder("cargo build", "/project", session)
+            .semantic_type(CommandType::Shell)
+            .build();
+        let id = e.id();
+        store.append(&e).unwrap();
+
+        let restored = store.get_by_id(id).unwrap().unwrap();
+        assert_eq!(restored.semantic_type(), &CommandType::Shell);
     }
 }
