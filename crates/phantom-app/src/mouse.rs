@@ -11,7 +11,7 @@ use log::debug;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
 use phantom_terminal::input::{
-    encode_mouse_sgr, MouseButton as TermMouseButton,
+    encode_mouse_motion_sgr, encode_mouse_sgr, MouseButton as TermMouseButton,
 };
 
 use crate::app::{App, FloatInteraction, ResizeEdge};
@@ -143,15 +143,49 @@ impl App {
             }
         }
 
+        // SGR 1006 motion forwarding: if the focused adapter has mouse tracking
+        // enabled, encode cursor movement as an SGR motion sequence and forward
+        // to the PTY. Motion mode (1003) sends all moves; Drag mode (1002)
+        // only sends while a button is held.
+        if let Some(focused) = self.coordinator.focused() {
+            if self.coordinator.adapter_wants_mouse(focused) {
+                let state = self.coordinator.get_state(focused);
+                let mouse_mode = state
+                    .as_ref()
+                    .and_then(|s| s.get("mouse_mode"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none");
+                let forward = match mouse_mode {
+                    "motion" => true,
+                    "drag" => self.mouse_button_held.is_some(),
+                    _ => false,
+                };
+                if forward {
+                    if let Some((col, row)) = self.cursor_to_cell(focused) {
+                        let btn = self.mouse_button_held.unwrap_or(TermMouseButton::Left);
+                        let sgr = encode_mouse_motion_sgr(btn, col, row);
+                        let _ = self.coordinator.route_bytes_to(focused, &sgr);
+                    }
+                }
+            }
+        }
+
         // If left button is held, update selection (drag-to-select).
+        // Skip when SGR mouse tracking is active — the PTY handles its own selection.
         if self.mouse_button_held == Some(phantom_terminal::input::MouseButton::Left) {
-            if let Some(focused) = self.coordinator.focused() {
-                if let Some((col, row)) = self.cursor_to_cell(focused) {
-                    let _ = self.coordinator.send_command(
-                        focused,
-                        "select_update",
-                        &serde_json::json!({"col": col, "row": row}),
-                    );
+            let sgr_active = self
+                .coordinator
+                .focused()
+                .map_or(false, |id| self.coordinator.adapter_wants_mouse(id));
+            if !sgr_active {
+                if let Some(focused) = self.coordinator.focused() {
+                    if let Some((col, row)) = self.cursor_to_cell(focused) {
+                        let _ = self.coordinator.send_command(
+                            focused,
+                            "select_update",
+                            &serde_json::json!({"col": col, "row": row}),
+                        );
+                    }
                 }
             }
         }
@@ -326,12 +360,25 @@ impl App {
             let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
 
             // Check scrollbar hit on each coordinator-managed pane.
+            // The track rect must match exactly what the renderer draws:
+            //   • single-pane  → track anchored to the raw layout_rect
+            //   • multi-pane   → track anchored to the chrome-inset inner_rect
+            let tiled_count = self.coordinator.all_app_ids().len();
             for app_id in self.coordinator.all_app_ids() {
                 let Some(pane_id) = self.coordinator.pane_id_for(app_id) else { continue };
                 let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) else { continue };
-                let outer = container_rect(layout_rect, self.cell_size);
-                let inner = pane_inner_rect(self.cell_size, outer);
-                let track = scrollbar_track_rect(inner);
+                let track = if tiled_count <= 1 {
+                    scrollbar_track_rect(phantom_ui::layout::Rect {
+                        x: layout_rect.x,
+                        y: layout_rect.y,
+                        width: layout_rect.width,
+                        height: layout_rect.height,
+                    })
+                } else {
+                    let outer = container_rect(layout_rect, self.cell_size);
+                    let inner = pane_inner_rect(self.cell_size, outer);
+                    scrollbar_track_rect(inner)
+                };
 
                 if point_in_rect(mx, my, track) {
                     // Query actual history size from adapter state for accurate jump.
@@ -550,5 +597,90 @@ mod tests {
         assert_eq!(winit_to_term_button(MouseButton::Middle), Some(TermMouseButton::Middle));
         assert_eq!(winit_to_term_button(MouseButton::Back), None);
         assert_eq!(winit_to_term_button(MouseButton::Forward), None);
+    }
+
+    // -- Bug #2: SGR motion encoding regression tests --
+
+    /// Motion events must add 32 to the button code (SGR 1006 spec).
+    /// Left (0+32=32), Right (2+32=34).
+    #[test]
+    fn sgr_motion_adds_32_to_button_code() {
+        let left_motion = encode_mouse_motion_sgr(TermMouseButton::Left, 0, 0);
+        // Left = 0, motion adds 32 → code 32; coords 1-based → col=1 row=1; always M
+        assert_eq!(left_motion, b"\x1b[<32;1;1M");
+
+        let right_motion = encode_mouse_motion_sgr(TermMouseButton::Right, 5, 10);
+        // Right = 2, motion adds 32 → code 34; col=6, row=11
+        assert_eq!(right_motion, b"\x1b[<34;6;11M");
+    }
+
+    /// No-button motion (cursor move without any held button) uses Left (code 32).
+    #[test]
+    fn sgr_motion_no_button_defaults_to_left_code() {
+        let motion = encode_mouse_motion_sgr(TermMouseButton::Left, 79, 23);
+        // col=80, row=24
+        assert_eq!(motion, b"\x1b[<32;80;24M");
+    }
+
+    // -- Bug #1: single-pane scrollbar geometry regression tests --
+    // These test the helper functions used by the renderer and click handler.
+
+    /// scrollbar_track_rect should be anchored to the rect origin, not require
+    /// chrome-inset correction in single-pane mode.
+    #[test]
+    fn scrollbar_track_rect_single_pane_anchoring() {
+        use crate::pane::{scrollbar_track_rect, SCROLLBAR_WIDTH};
+
+        // Simulate a full-screen layout rect (no chrome insets applied).
+        let layout_rect = phantom_ui::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+
+        let track = scrollbar_track_rect(layout_rect);
+        let margin = 2.0;
+
+        // Track x must be at the right edge minus scrollbar width and margin.
+        let expected_x = layout_rect.x + layout_rect.width - SCROLLBAR_WIDTH - margin;
+        assert!((track.x - expected_x).abs() < 0.01,
+            "track.x={} expected {}", track.x, expected_x);
+
+        // Track y starts at layout_rect.y + margin.
+        assert!((track.y - (layout_rect.y + margin)).abs() < 0.01,
+            "track.y={} expected {}", track.y, layout_rect.y + margin);
+
+        // Track height is inset by margin on both ends.
+        let expected_h = layout_rect.height - margin * 2.0;
+        assert!((track.height - expected_h).abs() < 0.01,
+            "track.height={} expected {}", track.height, expected_h);
+
+        assert_eq!(track.width, SCROLLBAR_WIDTH);
+    }
+
+    /// scrollbar_thumb_rect returns None when no history exists.
+    #[test]
+    fn scrollbar_thumb_absent_without_history() {
+        use crate::pane::{scrollbar_thumb_rect, scrollbar_track_rect};
+
+        let rect = phantom_ui::layout::Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let track = scrollbar_track_rect(rect);
+        assert!(scrollbar_thumb_rect(track, 0, 0, 24).is_none());
+    }
+
+    /// scrollbar_thumb_rect returns Some when history is non-zero.
+    #[test]
+    fn scrollbar_thumb_present_with_history() {
+        use crate::pane::{scrollbar_thumb_rect, scrollbar_track_rect};
+
+        let rect = phantom_ui::layout::Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let track = scrollbar_track_rect(rect);
+        let thumb = scrollbar_thumb_rect(track, 0, 500, 24);
+        assert!(thumb.is_some(), "thumb should exist when history_size > 0");
+        let t = thumb.unwrap();
+        assert!(t.height > 0.0);
+        assert!(t.y >= track.y);
+        assert!(t.y + t.height <= track.y + track.height + 1.0); // +1 for float rounding
     }
 }
