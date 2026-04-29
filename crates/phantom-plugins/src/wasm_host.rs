@@ -385,4 +385,31 @@ mod tests {
         let err = h.load(b"this is not wasm");
         assert!(err.is_err(), "expected compile error for invalid WASM");
     }
+
+    // ------------------------------------------------------------------
+    // Sandbox: WASI imports are rejected at instantiation
+    // ------------------------------------------------------------------
+
+    /// A module that imports `wasi_snapshot_preview1::fd_write`.
+    ///
+    /// Because the host provides no WASI linker, `Instance::new` must fail
+    /// with an "unknown import" error, proving the sandbox holds.
+    const WASI_IMPORT_WAT: &str = r#"
+        (module
+            (import "wasi_snapshot_preview1" "fd_write"
+                (func $fd_write (param i32 i32 i32 i32) (result i32)))
+            (func (export "main"))
+        )
+    "#;
+
+    #[test]
+    fn wasi_import_rejected_at_instantiation() {
+        let h = host();
+        let result = h.load(WASI_IMPORT_WAT.as_bytes());
+        assert!(
+            result.is_err(),
+            "expected Err when loading a WASM module with WASI imports; \
+             the sandbox must reject unsatisfied host imports"
+        );
+    }
 }
