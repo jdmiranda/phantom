@@ -13,6 +13,7 @@ pub mod api;
 pub mod audit;
 pub mod lifecycle;
 pub mod correlation;
+pub mod policy;
 pub mod handoff;
 pub mod chat;
 pub mod chat_tools;
@@ -47,6 +48,7 @@ pub mod tools;
 pub use agent::*;
 pub use correlation::CorrelationId;
 pub use dispatch::Disposition;
+pub use policy::AgentPolicy;
 pub use chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
     OpenAiChatBackend, build_backend,
