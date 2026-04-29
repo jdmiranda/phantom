@@ -113,12 +113,12 @@ pub struct PlanStep {
     ///
     /// This step will not be eligible for dispatch until every step whose
     /// index appears here has reached `StepStatus::Done`.
-    pub depends_on: Vec<usize>,
+    depends_on: Vec<usize>,
     /// Preferred provider ID for routing this step (Issue #61).
     ///
     /// When `Some`, the dispatch layer resolves this ID in the
     /// `ProviderCatalog`. Unknown IDs fall back to `"claude-default"`.
-    pub preferred_provider: Option<String>,
+    preferred_provider: Option<String>,
 }
 
 impl PlanStep {
@@ -165,6 +165,22 @@ impl PlanStep {
     pub fn with_provider(mut self, provider_id: impl Into<String>) -> Self {
         self.preferred_provider = Some(provider_id.into());
         self
+    }
+
+    /// Prerequisite step indices for this step.
+    ///
+    /// A step is not eligible for dispatch until every index in this slice
+    /// has reached [`StepStatus::Done`].
+    pub fn depends_on(&self) -> &[usize] {
+        &self.depends_on
+    }
+
+    /// Preferred provider ID for routing this step.
+    ///
+    /// When `Some`, the dispatch layer resolves the ID in the `ProviderCatalog`.
+    /// Unknown IDs fall back to `"claude-default"`.
+    pub fn preferred_provider(&self) -> Option<&str> {
+        self.preferred_provider.as_deref()
     }
 
     /// Record a failed attempt. Returns true if retries remain.
@@ -364,7 +380,9 @@ impl TaskLedger {
             .enumerate()
             .filter(|(_, s)| {
                 s.status == StepStatus::Pending
-                    && s.depends_on.iter().all(|dep| done.contains(dep))
+                    && s.depends_on
+                        .iter()
+                        .all(|dep| *dep >= self.plan.len() || done.contains(dep))
             })
             .collect()
     }
@@ -1675,6 +1693,32 @@ mod tests {
         assert_eq!(eligible[0].1.description, "s1");
     }
 
+    /// Out-of-bounds dep indices are treated as satisfied so the step can run.
+    ///
+    /// A step with `depends_on: [99]` in a 3-step plan must appear in
+    /// `eligible_next()` — the OOB index cannot block it forever.
+    #[test]
+    fn eligible_next_skips_oob_dep_indices() {
+        let mut ledger = TaskLedger::new("test");
+        // Index 99 does not exist in a 3-element plan; treat as satisfied.
+        ledger.set_plan(vec![
+            PlanStep::new("s0", free_task("s0")),
+            PlanStep::new("s1", free_task("s1")),
+            PlanStep::with_deps("s2-oob", free_task("s2"), vec![99]),
+        ]);
+
+        let eligible = ledger.eligible_next();
+        // All three steps should be eligible: s0 and s1 have no deps,
+        // s2 has only an OOB dep (treated as satisfied).
+        assert_eq!(eligible.len(), 3, "OOB dep index must not block the step");
+        let descriptions: Vec<&str> =
+            eligible.iter().map(|(_, s)| s.description.as_str()).collect();
+        assert!(
+            descriptions.contains(&"s2-oob"),
+            "s2-oob must appear in eligible_next output"
+        );
+    }
+
     /// A simple acyclic graph has no cycle.
     #[test]
     fn has_cycle_false_on_dag() {
@@ -1771,17 +1815,17 @@ mod tests {
     #[test]
     fn plan_step_with_deps_sets_depends_on() {
         let step = PlanStep::with_deps("my step", free_task("x"), vec![2, 5]);
-        assert_eq!(step.depends_on, vec![2, 5]);
+        assert_eq!(step.depends_on(), &[2, 5]);
         assert_eq!(step.status, StepStatus::Pending);
-        assert!(step.preferred_provider.is_none());
+        assert!(step.preferred_provider().is_none());
     }
 
     /// with_provider sets preferred_provider via builder style.
     #[test]
     fn plan_step_with_provider_sets_field() {
         let step = PlanStep::new("my step", free_task("x")).with_provider("claude-fast");
-        assert_eq!(step.preferred_provider.as_deref(), Some("claude-fast"));
-        assert!(step.depends_on.is_empty());
+        assert_eq!(step.preferred_provider(), Some("claude-fast"));
+        assert!(step.depends_on().is_empty());
     }
 
     /// with_deps + with_provider can be combined.
@@ -1789,15 +1833,15 @@ mod tests {
     fn plan_step_with_deps_and_provider() {
         let step =
             PlanStep::with_deps("combined", free_task("x"), vec![0]).with_provider("ollama-phi3.5");
-        assert_eq!(step.depends_on, vec![0]);
-        assert_eq!(step.preferred_provider.as_deref(), Some("ollama-phi3.5"));
+        assert_eq!(step.depends_on(), &[0]);
+        assert_eq!(step.preferred_provider(), Some("ollama-phi3.5"));
     }
 
     /// new() leaves depends_on empty and preferred_provider as None.
     #[test]
     fn plan_step_new_defaults() {
         let step = PlanStep::new("plain step", free_task("x"));
-        assert!(step.depends_on.is_empty());
-        assert!(step.preferred_provider.is_none());
+        assert!(step.depends_on().is_empty());
+        assert!(step.preferred_provider().is_none());
     }
 }
