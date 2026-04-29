@@ -210,6 +210,53 @@ fn class_for(tool: ToolType) -> CapabilityClass {
 }
 
 // ---------------------------------------------------------------------------
+// RuntimeMode (Issue #105)
+// ---------------------------------------------------------------------------
+
+/// Runtime execution mode for the dispatch layer.
+///
+/// `SpawnOnly` is the mechanically-enforced harness mode required by issue #105.
+/// When a [`DispatchContext`] is built with `runtime_mode: RuntimeMode::SpawnOnly`,
+/// `dispatch_tool` denies every tool whose name is not `"spawn_subagent"` before
+/// any capability gate or handler runs. The denial is logged to the event log so
+/// the audit trail is complete.
+///
+/// Layer ordering: quarantine gate (layer-4) → SpawnOnly gate (layer-3) →
+/// capability-class gate (layer-2) → handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeMode {
+    /// No extra restriction beyond role-manifest capability gating.
+    #[default]
+    Normal,
+    /// Orchestrator harness mode: only `spawn_subagent` is permitted.
+    ///
+    /// All other tool calls return `"runtime denied: … only spawn_subagent is
+    /// permitted in spawn_only mode"` without touching any handler.
+    SpawnOnly,
+}
+
+impl RuntimeMode {
+    /// Machine-readable label used in event-log payloads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::SpawnOnly => "spawn_only",
+        }
+    }
+
+    /// Returns `true` iff `tool_name` is permitted under this mode.
+    ///
+    /// In `Normal` mode every tool is permitted (capability gating applies
+    /// separately). In `SpawnOnly` mode only `"spawn_subagent"` passes.
+    pub fn permits(self, tool_name: &str) -> bool {
+        match self {
+            Self::Normal => true,
+            Self::SpawnOnly => tool_name == "spawn_subagent",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DispatchContext
 // ---------------------------------------------------------------------------
 
@@ -533,6 +580,37 @@ pub fn dispatch_tool(
                 ),
             );
         }
+    }
+
+    // ---- Issue #105: SpawnOnly gate (layer-3) ------------------------------
+    //
+    // When runtime_mode is SpawnOnly, only spawn_subagent is permitted.
+    // All other tools are denied before any capability check or handler runs.
+    // The denial is recorded in the event log for audit completeness.
+    if !ctx.runtime_mode.permits(name) {
+        if let Some(log) = ctx.event_log.as_ref() {
+            if let Ok(mut guard) = log.lock() {
+                let _ = guard.append(
+                    phantom_memory::event_log::EventSource::Agent { id: ctx.self_ref.id },
+                    "runtime.denied",
+                    serde_json::json!({
+                        "agent_id": ctx.self_ref.id,
+                        "tool": name,
+                        "mode": ctx.runtime_mode.as_str(),
+                    }),
+                );
+            }
+        }
+        return result(
+            PLACEHOLDER_TOOL,
+            false,
+            format!(
+                "runtime denied: {} — only spawn_subagent is permitted in {} mode (agent {})",
+                name,
+                ctx.runtime_mode.as_str(),
+                ctx.self_ref.id,
+            ),
+        );
     }
 
     // ---- Route to the appropriate tool surface -----------------------------
@@ -2137,4 +2215,133 @@ mod tests {
             "4-node chain must traverse e4 -> e3 -> e2 -> e1, got {chain:?}"
         );
     }
+
+    // ---- Issue #105: RuntimeMode::SpawnOnly gate ----------------------------
+
+    /// In `SpawnOnly` mode every non-spawn tool is denied before any
+    /// capability or handler runs. Calling `read_file` must return a
+    /// runtime-denied failure even though the agent is Conversational (which
+    /// has Sense capability).
+    #[test]
+    fn spawn_only_blocks_non_spawn_tools() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("probe.txt"), "should-not-be-read").unwrap();
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(1, AgentRole::Conversational, "harness-agent", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
+            runtime_mode: RuntimeMode::SpawnOnly,
+        };
+
+        let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
+
+        assert!(!res.success, "SpawnOnly must block read_file");
+        assert!(
+            res.output.contains("runtime denied"),
+            "expected runtime denied message, got: {}",
+            res.output,
+        );
+    }
+
+    /// In `SpawnOnly` mode `spawn_subagent` still passes through to the
+    /// handler (which may return an error about missing args, but that proves
+    /// the gate did not block it).
+    #[test]
+    fn spawn_only_permits_spawn_subagent() {
+        let tmp = TempDir::new().unwrap();
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(2, AgentRole::Orchestrator, "harness-orch", SpawnSource::User),
+            role: AgentRole::Orchestrator,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
+            runtime_mode: RuntimeMode::SpawnOnly,
+        };
+
+        // Empty args — handler may fail on validation but must not be
+        // blocked by the runtime gate. The output must NOT start with
+        // "runtime denied".
+        let res = dispatch_tool("spawn_subagent", &json!({}), &ctx);
+        assert!(
+            !res.output.starts_with("runtime denied"),
+            "spawn_subagent must pass the SpawnOnly gate; got: {}",
+            res.output,
+        );
+    }
+
+    /// In `SpawnOnly` mode a denied tool call must be appended to the event
+    /// log with kind `"runtime.denied"`.
+    #[test]
+    fn spawn_only_denial_is_logged_to_event_log() {
+        use phantom_memory::event_log::EventLog;
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("events.jsonl");
+        let log = Arc::new(Mutex::new(
+            EventLog::open(&log_path).expect("open event log"),
+        ));
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(3, AgentRole::Conversational, "spy-agent", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: Some(log.clone()),
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
+            runtime_mode: RuntimeMode::SpawnOnly,
+        };
+
+        let res = dispatch_tool("write_file", &json!({"path": "x.txt", "content": "boom"}), &ctx);
+        assert!(!res.success, "must be denied");
+        assert!(res.output.contains("runtime denied"), "wrong error: {}", res.output);
+
+        // The event log must contain a runtime.denied entry.
+        let events = log.lock().unwrap().tail(32);
+        let denied = events.iter().any(|e| e.kind == "runtime.denied");
+        assert!(denied, "runtime.denied must be in the event log; got: {:?}", events);
+    }
+
+    /// `Normal` mode must be transparent — tools are routed by capability
+    /// class as always, with no additional restriction from `runtime_mode`.
+    #[test]
+    fn normal_mode_is_transparent() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("visible.txt"), "hello-normal").unwrap();
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(4, AgentRole::Conversational, "normal-agent", SpawnSource::User),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: None,
+            correlation_id: None,
+            ticket_dispatcher: None,
+            runtime_mode: RuntimeMode::Normal,
+        };
+
+        let res = dispatch_tool("read_file", &json!({"path": "visible.txt"}), &ctx);
+        assert!(res.success, "Normal mode must allow Sense tools: {}", res.output);
+        assert_eq!(res.output, "hello-normal");
+    }
+
 }

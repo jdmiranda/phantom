@@ -49,6 +49,11 @@ pub enum Event {
 
     // -- Video / FX ----------------------------------------------------------
     VideoPlaybackStateChanged { app_id: AppId, playing: bool },
+    /// Emitted by the capture pipeline after a frame passes the perceptual-hash
+    /// dedup gate and is accepted into the open bundle. Issue #79 item 7.
+    ///
+    /// PNG bytes are NOT included — consumers should read from the bundle store.
+    FrameCaptured { pane_id: AppId, timestamp_ms: u64 },
     GlitchFxTriggered { origin: [f32; 2], intensity: f32 },
 
     // -- System --------------------------------------------------------------
@@ -91,7 +96,7 @@ impl Event {
 
             Self::BrainDecision { .. } | Self::NlpInterpreted { .. } => EventTopic::Brain,
 
-            Self::VideoPlaybackStateChanged { .. } => EventTopic::Video,
+            Self::VideoPlaybackStateChanged { .. } | Self::FrameCaptured { .. } => EventTopic::Video,
 
             Self::GlitchFxTriggered { .. } => EventTopic::Fx,
 
@@ -185,10 +190,11 @@ mod tests {
             Event::SessionSwitched { from: 0, to: 0 }.topic(),
             Event::BrainDecision { action: String::new(), confidence: 0.0 }.topic(),
             Event::VideoPlaybackStateChanged { app_id: 0, playing: false }.topic(),
+            Event::FrameCaptured { pane_id: 0, timestamp_ms: 0 }.topic(),
             Event::GlitchFxTriggered { origin: [0.0, 0.0], intensity: 0.0 }.topic(),
             Event::Shutdown.topic(),
             Event::Custom { kind: String::new(), data: String::new() }.topic(),
         ];
-        assert_eq!(topics.len(), 8);
+        assert_eq!(topics.len(), 9);
     }
 }

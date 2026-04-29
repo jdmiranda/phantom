@@ -308,6 +308,9 @@ pub struct App {
     pub(crate) topic_terminal_error: TopicId,
     #[allow(dead_code)]
     pub(crate) topic_agent_event: TopicId,
+    /// Issue #79 item 7: topic for post-dedup frame notifications.
+    #[allow(dead_code)]
+    pub(crate) topic_capture_frame: TopicId,
 
     // -- Plugin registry --
     pub(crate) plugin_registry: PluginRegistry,
@@ -795,12 +798,15 @@ impl App {
             event_bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
         let topic_terminal_error = event_bus.create_topic(0, "terminal.error", DataType::Text);
         let topic_agent_event = event_bus.create_topic(0, "agent.event", DataType::Json);
+        // Issue #79 item 7: topic for post-dedup frame notifications.
+        let topic_capture_frame = event_bus.create_topic(0, "capture.frame", DataType::Json);
 
         // Subscribe a virtual "brain observer" so the AI brain receives bus events.
         const BRAIN_OBSERVER_ID: u32 = 0xFFFF_FFFE;
         event_bus.subscribe(BRAIN_OBSERVER_ID, topic_terminal_output);
         event_bus.subscribe(BRAIN_OBSERVER_ID, topic_terminal_error);
         event_bus.subscribe(BRAIN_OBSERVER_ID, topic_agent_event);
+        event_bus.subscribe(BRAIN_OBSERVER_ID, topic_capture_frame);
         info!(
             "Event bus initialized: {} topics, brain observer subscribed",
             event_bus.topic_count()
@@ -993,6 +999,7 @@ impl App {
             topic_terminal_output,
             topic_terminal_error,
             topic_agent_event,
+            topic_capture_frame,
             plugin_registry,
             sysmon,
             sysmon_visible: false,
