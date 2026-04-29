@@ -15,6 +15,7 @@ pub mod client;
 pub mod error;
 pub mod listener;
 pub mod protocol;
+pub mod registry;
 pub mod server;
 
 pub use client::{McpClient, McpResourceDef, McpToolDef};
@@ -24,4 +25,5 @@ pub use protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpResource, McpTool,
     create_error, create_request, create_response,
 };
+pub use registry::{McpError, McpToolRegistry, McpToolRoute, ToolProvenance};
 pub use server::PhantomMcpServer;
