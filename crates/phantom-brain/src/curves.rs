@@ -736,6 +736,370 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
 }
 
 // ---------------------------------------------------------------------------
+// UtilityCurve — normalized [0,1] → [0,1] scoring primitives (issue #40)
+// ---------------------------------------------------------------------------
+
+/// A scoring curve that maps a normalized input `x ∈ [0.0, 1.0]` to a
+/// normalized output score `∈ [0.0, 1.0]`.
+///
+/// These are the raw mathematical building blocks used by the BDS system's
+/// [`ResponseCurve`] variants (which add action-specific max_score scaling
+/// on top). Use `UtilityCurve` implementations directly when you need pure
+/// normalized scoring without the DA:I class/range machinery.
+///
+/// # Contract
+///
+/// - Input `x` outside `[0.0, 1.0]` is clamped before evaluation.
+/// - Output is always clamped to `[0.0, 1.0]`.
+/// - Implementations must be `Send + Sync` (curves are shared across threads).
+pub trait UtilityCurve: Send + Sync {
+    /// Evaluate the curve at normalized input `x`.
+    ///
+    /// `x` is clamped to `[0.0, 1.0]` before use; output is guaranteed in
+    /// `[0.0, 1.0]`.
+    fn score(&self, x: f32) -> f32;
+}
+
+// ---------------------------------------------------------------------------
+// LinearCurve
+// ---------------------------------------------------------------------------
+
+/// A linear ramp: `score = m * x + b`, clamped to `[0.0, 1.0]`.
+///
+/// Produces a proportional response. Use for inputs where the scoring
+/// contribution should scale evenly (idle time, file count, etc.).
+///
+/// # Builder
+///
+/// ```rust
+/// use phantom_brain::curves::{LinearCurve, UtilityCurve};
+///
+/// // Rising from 0 at x=0 to 1 at x=1.
+/// let ramp = LinearCurve::rising();
+/// assert_eq!(ramp.score(0.0), 0.0);
+/// assert_eq!(ramp.score(1.0), 1.0);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct LinearCurve {
+    /// Slope (rise per unit input).
+    m: f32,
+    /// Y-intercept (score at x=0 before clamping).
+    b: f32,
+}
+
+impl LinearCurve {
+    /// Create a custom linear curve `score = m * x + b`.
+    pub fn new(m: f32, b: f32) -> Self {
+        Self { m, b }
+    }
+
+    /// Rising ramp from 0 to 1 (`m=1, b=0`).
+    pub fn rising() -> Self {
+        Self { m: 1.0, b: 0.0 }
+    }
+
+    /// Falling ramp from 1 to 0 (`m=-1, b=1`).
+    pub fn falling() -> Self {
+        Self { m: -1.0, b: 1.0 }
+    }
+}
+
+impl UtilityCurve for LinearCurve {
+    fn score(&self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        (self.m * x + self.b).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExponentialCurve
+// ---------------------------------------------------------------------------
+
+/// A power-law curve: `score = x^k`, clamped to `[0.0, 1.0]`.
+///
+/// - `k > 1.0`: accelerating (convex) — slow start, fast finish.
+/// - `k = 1.0`: linear (same as [`LinearCurve::rising`]).
+/// - `0 < k < 1.0`: decelerating (concave) — fast start, slow finish.
+///
+/// # Builder
+///
+/// ```rust
+/// use phantom_brain::curves::{ExponentialCurve, UtilityCurve};
+///
+/// let quadratic = ExponentialCurve::quadratic();
+/// assert!(quadratic.score(0.5) < 0.5); // accelerating: scores below linear
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ExponentialCurve {
+    /// The exponent `k`. Must be positive.
+    k: f32,
+}
+
+impl ExponentialCurve {
+    /// Create a power-law curve with exponent `k`.
+    pub fn new(k: f32) -> Self {
+        Self { k: k.max(f32::EPSILON) }
+    }
+
+    /// Quadratic ramp (`k = 2`): accelerating urgency.
+    pub fn quadratic() -> Self {
+        Self { k: 2.0 }
+    }
+
+    /// Square-root ramp (`k = 0.5`): fast initial gain, diminishing returns.
+    pub fn sqrt() -> Self {
+        Self { k: 0.5 }
+    }
+}
+
+impl UtilityCurve for ExponentialCurve {
+    fn score(&self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        x.powf(self.k).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LogisticCurve (sigmoid)
+// ---------------------------------------------------------------------------
+
+/// A logistic (sigmoid) S-curve: low below midpoint, rapid transition, high above.
+///
+/// `score = 1 / (1 + exp(-steepness * (x - midpoint)))`, clamped to `[0.0, 1.0]`.
+///
+/// Use for threshold-triggered scoring — inputs below the midpoint score
+/// near 0, inputs above score near 1, with a sharp transition width
+/// controlled by `steepness`.
+///
+/// # Builder
+///
+/// ```rust
+/// use phantom_brain::curves::{LogisticCurve, UtilityCurve};
+///
+/// let sigmoid = LogisticCurve::standard();
+/// assert!(sigmoid.score(0.0) < 0.1);
+/// assert!((sigmoid.score(0.5) - 0.5).abs() < 0.01);
+/// assert!(sigmoid.score(1.0) > 0.9);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct LogisticCurve {
+    /// The x-value at the inflection point (score = 0.5).
+    midpoint: f32,
+    /// Controls the transition sharpness. Higher = steeper S.
+    steepness: f32,
+}
+
+impl LogisticCurve {
+    /// Create a logistic curve with custom midpoint and steepness.
+    pub fn new(midpoint: f32, steepness: f32) -> Self {
+        Self { midpoint, steepness }
+    }
+
+    /// Standard sigmoid centered at 0.5 with moderate steepness (10).
+    pub fn standard() -> Self {
+        Self { midpoint: 0.5, steepness: 10.0 }
+    }
+
+    /// Sharp transition (steepness = 20) centered at 0.5.
+    pub fn sharp() -> Self {
+        Self { midpoint: 0.5, steepness: 20.0 }
+    }
+}
+
+impl UtilityCurve for LogisticCurve {
+    fn score(&self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        let exp = (-self.steepness * (x - self.midpoint)).exp();
+        (1.0 / (1.0 + exp)).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StepCurve
+// ---------------------------------------------------------------------------
+
+/// A binary step: `score = on_value` when `x >= threshold`, else `off_value`.
+///
+/// Use for hard on/off conditions that still participate in the normalized
+/// scoring pipeline (rather than being a boolean filter gate).
+///
+/// # Builder
+///
+/// ```rust
+/// use phantom_brain::curves::{StepCurve, UtilityCurve};
+///
+/// let gate = StepCurve::on_at(0.5);
+/// assert_eq!(gate.score(0.49), 0.0);
+/// assert_eq!(gate.score(0.5),  1.0);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct StepCurve {
+    /// The input threshold. At or above this value, output is `on_value`.
+    threshold: f32,
+    /// Output when `x >= threshold`.
+    on_value: f32,
+    /// Output when `x < threshold`.
+    off_value: f32,
+}
+
+impl StepCurve {
+    /// Create a step with custom threshold and values.
+    pub fn new(threshold: f32, on_value: f32, off_value: f32) -> Self {
+        Self { threshold, on_value: on_value.clamp(0.0, 1.0), off_value: off_value.clamp(0.0, 1.0) }
+    }
+
+    /// Binary 0/1 step that activates at `threshold`.
+    pub fn on_at(threshold: f32) -> Self {
+        Self { threshold, on_value: 1.0, off_value: 0.0 }
+    }
+
+    /// Always-on constant (threshold = 0).
+    pub fn always_on() -> Self {
+        Self { threshold: 0.0, on_value: 1.0, off_value: 1.0 }
+    }
+}
+
+impl UtilityCurve for StepCurve {
+    fn score(&self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        if x >= self.threshold { self.on_value } else { self.off_value }.clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InvertedCurve
+// ---------------------------------------------------------------------------
+
+/// Wraps another curve and inverts its output: `score = 1 - inner.score(x)`.
+///
+/// Use to express "less is more" semantics — e.g., high chattiness should
+/// *lower* the intervention score, which is the inversion of the raw curve.
+///
+/// # Builder
+///
+/// ```rust
+/// use phantom_brain::curves::{InvertedCurve, LinearCurve, UtilityCurve};
+///
+/// let falling = InvertedCurve::of(LinearCurve::rising());
+/// assert_eq!(falling.score(0.0), 1.0);
+/// assert_eq!(falling.score(1.0), 0.0);
+/// ```
+pub struct InvertedCurve {
+    inner: Box<dyn UtilityCurve>,
+}
+
+impl InvertedCurve {
+    /// Wrap `curve` and invert its output.
+    pub fn of<C: UtilityCurve + 'static>(curve: C) -> Self {
+        Self { inner: Box::new(curve) }
+    }
+}
+
+impl std::fmt::Debug for InvertedCurve {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InvertedCurve(..)")
+    }
+}
+
+impl UtilityCurve for InvertedCurve {
+    fn score(&self, x: f32) -> f32 {
+        (1.0 - self.inner.score(x)).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CompositeCurve
+// ---------------------------------------------------------------------------
+
+/// Combines multiple [`UtilityCurve`]s with explicit weights.
+///
+/// The output is the weighted average of all component curves:
+///
+/// ```text
+/// score = Σ(weight_i * curve_i.score(x)) / Σ(weight_i)
+/// ```
+///
+/// Weights need not sum to 1.0 — they are normalized internally. An empty
+/// composite scores 0.0.
+///
+/// # Validation
+///
+/// [`CompositeCurve::build`] returns an error if any weight is negative.
+/// Use [`CompositeCurve::new`] if you want to bypass the guard (weights are
+/// clamped to 0.0 at evaluation time in that case).
+///
+/// # Example
+///
+/// ```rust
+/// use phantom_brain::curves::{CompositeCurve, LinearCurve, LogisticCurve, UtilityCurve};
+///
+/// let composite = CompositeCurve::build(vec![
+///     (Box::new(LinearCurve::rising()),    0.6),
+///     (Box::new(LogisticCurve::standard()), 0.4),
+/// ]).unwrap();
+///
+/// let score = composite.score(0.5);
+/// assert!(score >= 0.0 && score <= 1.0);
+/// ```
+pub struct CompositeCurve {
+    components: Vec<(Box<dyn UtilityCurve>, f32)>,
+}
+
+impl CompositeCurve {
+    /// Create without validation (weights clamped to ≥ 0 at evaluation).
+    pub fn new(components: Vec<(Box<dyn UtilityCurve>, f32)>) -> Self {
+        Self { components }
+    }
+
+    /// Create with validation: returns `Err` if any weight is negative.
+    pub fn build(components: Vec<(Box<dyn UtilityCurve>, f32)>) -> Result<Self, &'static str> {
+        if components.iter().any(|(_, w)| *w < 0.0) {
+            return Err("CompositeCurve: all weights must be non-negative");
+        }
+        Ok(Self { components })
+    }
+
+    /// Number of component curves.
+    pub fn len(&self) -> usize {
+        self.components.len()
+    }
+
+    /// True if no component curves are registered.
+    pub fn is_empty(&self) -> bool {
+        self.components.is_empty()
+    }
+}
+
+impl std::fmt::Debug for CompositeCurve {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CompositeCurve({} components)", self.components.len())
+    }
+}
+
+impl UtilityCurve for CompositeCurve {
+    fn score(&self, x: f32) -> f32 {
+        if self.components.is_empty() {
+            return 0.0;
+        }
+
+        let x = x.clamp(0.0, 1.0);
+        let total_weight: f32 = self.components.iter().map(|(_, w)| w.max(0.0)).sum();
+
+        if total_weight <= 0.0 {
+            return 0.0;
+        }
+
+        let weighted_sum: f32 = self
+            .components
+            .iter()
+            .map(|(curve, w)| curve.score(x) * w.max(0.0))
+            .sum();
+
+        (weighted_sum / total_weight).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1131,5 +1495,298 @@ mod tests {
             fix_score > quiet_score,
             "fix_error ({fix_score}) should beat quiet ({quiet_score}) when errors present"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // UtilityCurve trait tests
+    // -----------------------------------------------------------------------
+
+    // -- LinearCurve ---------------------------------------------------------
+
+    #[test]
+    fn linear_curve_at_zero() {
+        let c = LinearCurve::rising();
+        assert_eq!(c.score(0.0), 0.0);
+    }
+
+    #[test]
+    fn linear_curve_at_half() {
+        let c = LinearCurve::rising();
+        assert!((c.score(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linear_curve_at_one() {
+        let c = LinearCurve::rising();
+        assert_eq!(c.score(1.0), 1.0);
+    }
+
+    #[test]
+    fn linear_falling_is_inverse_of_rising() {
+        let rising = LinearCurve::rising();
+        let falling = LinearCurve::falling();
+        for x in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let sum = rising.score(x) + falling.score(x);
+            assert!((sum - 1.0).abs() < 1e-6, "rising + falling should sum to 1 at x={x}, got {sum}");
+        }
+    }
+
+    #[test]
+    fn linear_clamps_input_below_zero() {
+        let c = LinearCurve::rising();
+        assert_eq!(c.score(-5.0), 0.0);
+    }
+
+    #[test]
+    fn linear_clamps_input_above_one() {
+        let c = LinearCurve::rising();
+        assert_eq!(c.score(2.0), 1.0);
+    }
+
+    // -- ExponentialCurve ----------------------------------------------------
+
+    #[test]
+    fn exponential_quadratic_at_zero() {
+        let c = ExponentialCurve::quadratic();
+        assert_eq!(c.score(0.0), 0.0);
+    }
+
+    #[test]
+    fn exponential_quadratic_at_one() {
+        let c = ExponentialCurve::quadratic();
+        assert_eq!(c.score(1.0), 1.0);
+    }
+
+    #[test]
+    fn exponential_quadratic_at_half_is_below_linear() {
+        let c = ExponentialCurve::quadratic();
+        // x^2 at 0.5 = 0.25, which is less than linear 0.5
+        assert!(c.score(0.5) < 0.5, "quadratic should score below linear midpoint");
+        assert!((c.score(0.5) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn exponential_sqrt_at_half_is_above_linear() {
+        let c = ExponentialCurve::sqrt();
+        // sqrt(0.5) ≈ 0.707 > 0.5
+        assert!(c.score(0.5) > 0.5, "sqrt should score above linear midpoint");
+    }
+
+    #[test]
+    fn exponential_monotonically_increasing() {
+        let c = ExponentialCurve::quadratic();
+        let samples = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0];
+        for window in samples.windows(2) {
+            let (lo, hi) = (window[0], window[1]);
+            assert!(
+                c.score(hi) >= c.score(lo),
+                "ExponentialCurve should be monotonic: score({hi}) < score({lo})"
+            );
+        }
+    }
+
+    // -- LogisticCurve -------------------------------------------------------
+
+    #[test]
+    fn logistic_at_zero_is_low() {
+        let c = LogisticCurve::standard();
+        assert!(c.score(0.0) < 0.1, "logistic at x=0 should be < 0.1, got {}", c.score(0.0));
+    }
+
+    #[test]
+    fn logistic_at_half_is_midpoint() {
+        let c = LogisticCurve::standard();
+        // Sigmoid(0) = 0.5 exactly.
+        assert!((c.score(0.5) - 0.5).abs() < 1e-5, "logistic at midpoint should be 0.5, got {}", c.score(0.5));
+    }
+
+    #[test]
+    fn logistic_at_one_is_high() {
+        let c = LogisticCurve::standard();
+        assert!(c.score(1.0) > 0.9, "logistic at x=1 should be > 0.9, got {}", c.score(1.0));
+    }
+
+    #[test]
+    fn logistic_is_monotonically_increasing() {
+        let c = LogisticCurve::standard();
+        let samples = [0.0, 0.1, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0];
+        for window in samples.windows(2) {
+            let (lo, hi) = (window[0], window[1]);
+            assert!(
+                c.score(hi) > c.score(lo),
+                "LogisticCurve should be strictly increasing: score({hi})={} < score({lo})={}",
+                c.score(hi), c.score(lo)
+            );
+        }
+    }
+
+    #[test]
+    fn logistic_output_always_in_range() {
+        let c = LogisticCurve::new(0.5, 50.0); // very steep
+        for x in [0.0f32, 0.499, 0.5, 0.501, 1.0] {
+            let s = c.score(x);
+            assert!(s >= 0.0 && s <= 1.0, "logistic output {s} out of [0,1] at x={x}");
+        }
+    }
+
+    // -- StepCurve -----------------------------------------------------------
+
+    #[test]
+    fn step_below_threshold_returns_off() {
+        let c = StepCurve::on_at(0.5);
+        assert_eq!(c.score(0.0), 0.0);
+        assert_eq!(c.score(0.49), 0.0);
+    }
+
+    #[test]
+    fn step_at_threshold_returns_on() {
+        let c = StepCurve::on_at(0.5);
+        assert_eq!(c.score(0.5), 1.0);
+    }
+
+    #[test]
+    fn step_above_threshold_returns_on() {
+        let c = StepCurve::on_at(0.5);
+        assert_eq!(c.score(1.0), 1.0);
+    }
+
+    #[test]
+    fn step_custom_on_off_values() {
+        let c = StepCurve::new(0.7, 0.8, 0.2);
+        assert!((c.score(0.5) - 0.2).abs() < 1e-6);
+        assert!((c.score(0.7) - 0.8).abs() < 1e-6);
+        assert!((c.score(1.0) - 0.8).abs() < 1e-6);
+    }
+
+    // -- InvertedCurve -------------------------------------------------------
+
+    #[test]
+    fn inverted_at_zero_is_one() {
+        let c = InvertedCurve::of(LinearCurve::rising());
+        assert_eq!(c.score(0.0), 1.0);
+    }
+
+    #[test]
+    fn inverted_at_half_is_half() {
+        let c = InvertedCurve::of(LinearCurve::rising());
+        assert!((c.score(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inverted_at_one_is_zero() {
+        let c = InvertedCurve::of(LinearCurve::rising());
+        assert_eq!(c.score(1.0), 0.0);
+    }
+
+    #[test]
+    fn inverted_output_always_in_range() {
+        let c = InvertedCurve::of(LogisticCurve::sharp());
+        for x in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let s = c.score(x);
+            assert!(s >= 0.0 && s <= 1.0, "inverted output {s} out of [0,1] at x={x}");
+        }
+    }
+
+    // -- CompositeCurve ------------------------------------------------------
+
+    #[test]
+    fn composite_at_zero() {
+        let c = CompositeCurve::build(vec![
+            (Box::new(LinearCurve::rising()), 0.5),
+            (Box::new(LogisticCurve::standard()), 0.5),
+        ]).unwrap();
+        // Both curves score ~0 at x=0; weighted avg is also ~0.
+        assert!(c.score(0.0) < 0.1);
+    }
+
+    #[test]
+    fn composite_at_half() {
+        let c = CompositeCurve::build(vec![
+            (Box::new(LinearCurve::rising()), 1.0),  // 0.5
+            (Box::new(LinearCurve::rising()), 1.0),  // 0.5
+        ]).unwrap();
+        assert!((c.score(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn composite_at_one() {
+        let c = CompositeCurve::build(vec![
+            (Box::new(LinearCurve::rising()), 0.6),
+            (Box::new(ExponentialCurve::quadratic()), 0.4),
+        ]).unwrap();
+        // Both score 1.0 at x=1; composite should also be 1.0.
+        assert!((c.score(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn composite_weights_sum_guard_rejects_negative() {
+        let result = CompositeCurve::build(vec![
+            (Box::new(LinearCurve::rising()), 0.6),
+            (Box::new(LinearCurve::rising()), -0.1),  // negative weight
+        ]);
+        assert!(result.is_err(), "CompositeCurve::build should reject negative weights");
+    }
+
+    #[test]
+    fn composite_output_always_in_range() {
+        let c = CompositeCurve::build(vec![
+            (Box::new(LinearCurve::rising()), 0.3),
+            (Box::new(LogisticCurve::standard()), 0.4),
+            (Box::new(ExponentialCurve::sqrt()), 0.3),
+        ]).unwrap();
+        for x in [0.0f32, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
+            let s = c.score(x);
+            assert!(s >= 0.0 && s <= 1.0, "composite output {s} out of [0,1] at x={x}");
+        }
+    }
+
+    #[test]
+    fn composite_unequal_weights_bias_toward_heavier_curve() {
+        // Heavy curve: step that's always 1.0. Light curve: linear rising (0.5 at x=0.5).
+        // With weights 0.9 / 0.1, result should be much closer to 1.0 than 0.5.
+        let c = CompositeCurve::build(vec![
+            (Box::new(StepCurve::always_on()), 0.9),
+            (Box::new(LinearCurve::rising()), 0.1),
+        ]).unwrap();
+        let score = c.score(0.5);
+        // weighted avg = (0.9 * 1.0 + 0.1 * 0.5) / 1.0 = 0.95
+        assert!((score - 0.95).abs() < 1e-6, "expected 0.95, got {score}");
+    }
+
+    #[test]
+    fn composite_empty_returns_zero() {
+        let c = CompositeCurve::new(vec![]);
+        assert_eq!(c.score(0.5), 0.0);
+    }
+
+    #[test]
+    fn composite_monotonic_when_all_components_monotonic() {
+        let c = CompositeCurve::build(vec![
+            (Box::new(LinearCurve::rising()), 0.5),
+            (Box::new(ExponentialCurve::quadratic()), 0.5),
+        ]).unwrap();
+        let samples = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0];
+        for window in samples.windows(2) {
+            let (lo, hi) = (window[0], window[1]);
+            assert!(
+                c.score(hi) >= c.score(lo),
+                "CompositeCurve should be monotonic: score({hi}) < score({lo})"
+            );
+        }
+    }
+
+    // -- Send + Sync (compile-time checks) -----------------------------------
+
+    #[test]
+    fn utility_curve_implementations_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LinearCurve>();
+        assert_send_sync::<ExponentialCurve>();
+        assert_send_sync::<LogisticCurve>();
+        assert_send_sync::<StepCurve>();
+        // InvertedCurve and CompositeCurve hold Box<dyn UtilityCurve>
+        // which is Send+Sync because UtilityCurve: Send + Sync.
+        assert_send_sync::<InvertedCurve>();
+        assert_send_sync::<CompositeCurve>();
     }
 }

@@ -29,6 +29,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::curves::{LogisticCurve, UtilityCurve};
+
 // ---------------------------------------------------------------------------
 // Signal taxonomy (paper's E_t, A_t, S_t decomposition)
 // ---------------------------------------------------------------------------
@@ -374,11 +376,15 @@ impl InterventionEngine {
         // Phase 6: Decision.
         let should_act = effective_score > threshold;
 
-        let confidence = if should_act {
-            ((effective_score - threshold) / (1.0 - threshold + f32::EPSILON)).min(1.0)
-        } else {
-            ((threshold - effective_score) / (threshold + f32::EPSILON)).min(1.0)
-        };
+        // Map the margin between effective_score and threshold through a
+        // logistic curve to get a smooth, well-calibrated confidence value.
+        // A positive margin means we're acting; negative means we're silent.
+        // We normalize the margin into [0,1] and feed it through the sigmoid
+        // so confidence saturates gracefully rather than jumping to extremes.
+        let margin = effective_score - threshold; // [-1.0, 1.0]
+        let normalized_margin = (margin + 1.0) / 2.0; // map to [0, 1]
+        let confidence_curve = LogisticCurve::new(0.5, 12.0);
+        let confidence = confidence_curve.score(normalized_margin);
 
         InterventionDecision {
             should_act,
