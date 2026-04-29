@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use crate::peer_routing::AnyAgentRef;
 use crate::role::{AgentId, AgentRef, AgentRole};
 
 // ---------------------------------------------------------------------------
@@ -149,6 +150,20 @@ impl AgentRegistry {
     pub fn find_by_label(&self, label: &str) -> Option<&AgentHandle> {
         self.by_id.values().find(|h| h.agent_ref.label == label)
     }
+
+    /// Resolve an [`AnyAgentRef`] to a local [`AgentHandle`].
+    ///
+    /// Returns the handle when the ref is `Local` and the agent is registered.
+    /// Returns `None` for `Remote` refs (the caller must use
+    /// [`crate::peer_routing::AgentRouter`] for remote delivery) or when the
+    /// local agent id is unknown.
+    #[must_use]
+    pub fn resolve(&self, any_ref: &AnyAgentRef) -> Option<&AgentHandle> {
+        match any_ref {
+            AnyAgentRef::Local(id) => self.by_id.get(id),
+            AnyAgentRef::Remote { .. } => None,
+        }
+    }
 }
 
 /// Manual per-recipient clone of an [`InboxMessage`]. Used by [`broadcast_role`]
@@ -255,9 +270,7 @@ mod tests {
     #[tokio::test]
     async fn route_to_absent_id_returns_no_such_agent() {
         let reg = AgentRegistry::new();
-        let err = reg
-            .route(999, InboxMessage::Stop)
-            .expect_err("should fail");
+        let err = reg.route(999, InboxMessage::Stop).expect_err("should fail");
         match err {
             RouteError::NoSuchAgent(id) => assert_eq!(id, 999),
             other => panic!("wrong error: {other:?}"),
@@ -272,9 +285,7 @@ mod tests {
         reg.register(handle);
         drop(rx); // simulate agent crash
 
-        let err = reg
-            .route(1, InboxMessage::Stop)
-            .expect_err("should fail");
+        let err = reg.route(1, InboxMessage::Stop).expect_err("should fail");
         assert!(matches!(err, RouteError::InboxClosed), "got {err:?}");
     }
 
@@ -313,6 +324,31 @@ mod tests {
 
         let n = reg.broadcast_role(AgentRole::Composer, InboxMessage::Stop);
         assert_eq!(n, 0);
+    }
+
+    /// resolve() returns the handle for a Local ref and None for a Remote ref.
+    #[tokio::test]
+    async fn resolve_local_ref_returns_handle() {
+        use crate::peer_routing::{AnyAgentRef, PeerId};
+
+        let mut reg = AgentRegistry::new();
+        let (h, _rx) = fake_agent(5, AgentRole::Actor, "the-actor");
+        reg.register(h);
+
+        // Local ref → returns the handle.
+        let found = reg.resolve(&AnyAgentRef::Local(5));
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().agent_ref.id, 5);
+
+        // Unknown local id → None.
+        assert!(reg.resolve(&AnyAgentRef::Local(999)).is_none());
+
+        // Remote ref → always None (use AgentRouter instead).
+        let remote_ref = AnyAgentRef::Remote {
+            peer_id: PeerId::new("some-peer"),
+            agent_id: 5,
+        };
+        assert!(reg.resolve(&remote_ref).is_none());
     }
 
     /// find_by_label returns Some for an existing label and None for unknown.
