@@ -20,6 +20,18 @@ pub use notification_banner::{
     BannerSeverity, NotificationBanner, NOTIFICATION_BANNER_HEIGHT,
 };
 
+// Issue #21 — bottom-of-pane status strip (left / center / right slots).
+pub mod status_strip;
+pub use status_strip::{StatusStrip, STATUS_STRIP_HEIGHT};
+
+// Issue #22 — chat-style message block for agent panes.
+pub mod message_block;
+pub use message_block::{MessageBlock, MessageRole, AVATAR_GAP, AVATAR_W};
+
+// Issue #26 — thin separator line (horizontal / vertical).
+pub mod divider;
+pub use divider::{Divider, Orientation};
+
 // Issue #20 — generic bordered panel with optional title bar.
 pub mod panel;
 pub use panel::{Panel, TITLE_BAR_HEIGHT};
