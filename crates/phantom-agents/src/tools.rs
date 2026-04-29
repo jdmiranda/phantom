@@ -10,12 +10,11 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use wait_timeout::ChildExt;
 
 use phantom_semantic::{ParsedOutput, SemanticParser};
 
 use crate::role::{AgentRole, CapabilityClass};
-use crate::sandbox::SandboxPolicy;
+use crate::sandbox::{self as sandbox, SandboxPolicy};
 use crate::taint::TaintLevel;
 
 // ---------------------------------------------------------------------------
@@ -74,9 +73,9 @@ impl ToolType {
     /// Read-only observations (file reads, directory listings, git
     /// inspection) are [`CapabilityClass::Sense`]. Mutations of the user's
     /// world (writing files, editing files, running shell commands) are
-    /// [`CapabilityClass::Act`]. The value is consumed by [`execute_tool`]
-    /// and [`crate::dispatch::dispatch_tool`] to gate dispatch against the
-    /// calling agent's role manifest.
+    /// [`CapabilityClass::Act`]. The value is consumed by
+    /// [`crate::dispatch::dispatch_tool`] — the single source of truth for
+    /// capability gating — before the tool handler runs (issue #104).
     pub fn capability_class(&self) -> CapabilityClass {
         match self {
             Self::ReadFile
@@ -553,11 +552,10 @@ fn sandbox_path(working_dir: &Path, relative: &str) -> Result<PathBuf, String> {
 
 /// Execute a tool call and return the result.
 ///
-/// `role` is the calling agent's role; the tool's [`CapabilityClass`] is
-/// checked against the role's manifest *before* any side-effects run. A
-/// denied call returns a [`ToolResult`] with `success: false` and the
-/// canonical `"capability denied: <Class> not in <Role> manifest"` message
-/// — that's what the LLM sees in its next turn.
+/// **Capability gating is the caller's responsibility.** This function is an
+/// internal helper that assumes `dispatch.rs::dispatch_tool` (the single
+/// source of truth) has already checked the role manifest. It does not
+/// re-check capabilities (see issue #104).
 ///
 /// `working_dir` is the project root; all file operations are sandboxed to it.
 ///
@@ -577,6 +575,15 @@ pub fn execute_tool(
 /// `(tool_name, args_hash, source_event_id)` so the runtime can later
 /// reconstruct the chain of inputs that led to the call.
 ///
+/// # Internal — caller must pre-gate
+///
+/// This function is an **internal execution helper**. It does **not**
+/// check capabilities. The dispatch layer ([`crate::dispatch::dispatch_tool`])
+/// is the single source of truth for capability gating and must validate the
+/// caller's role manifest *before* invoking this function. Placing the gate
+/// here as well would create a duplicate check that could silently diverge
+/// from the dispatch gate under future refactors (see issue #104).
+///
 /// The dispatch path through `agent_pane::execute_pending_tools` populates
 /// `source_event_id` with the current `phantom_memory::event_log` id (or
 /// `None` if no event log is wired). The audit-style `args_hash` is the
@@ -590,13 +597,11 @@ pub fn execute_tool_with_provenance(
     role: &AgentRole,
     source_event_id: Option<u64>,
 ) -> ToolResult {
-    // Default-deny at dispatch time. The role's manifest is the single
-    // source of truth — we do NOT trust that the caller already filtered
-    // the model's tool list.
-    if let Err(err) = check_capability(role, tool.capability_class()) {
-        return tool_err(tool, err.to_tool_result_message())
-            .with_provenance(ToolProvenance::from_call(tool, args, source_event_id));
-    }
+    // NOTE: No capability check here — this is an internal helper.
+    // `dispatch.rs::dispatch_tool` is the single gate (issue #104).
+    // Callers outside the dispatch layer (e.g. MCP path) must perform
+    // their own pre-check before calling this function.
+    let _ = role; // role retained in signature for future provenance use
 
     let root = Path::new(working_dir);
 
@@ -794,7 +799,7 @@ fn execute_run_command(root: &Path, args: &serde_json::Value) -> ToolResult {
 pub(crate) fn execute_run_command_with_policy(
     root: &Path,
     args: &serde_json::Value,
-    _policy: SandboxPolicy,
+    policy: SandboxPolicy,
 ) -> ToolResult {
     let tool = ToolType::RunCommand;
 
@@ -802,77 +807,24 @@ pub(crate) fn execute_run_command_with_policy(
         return tool_err(tool, "missing required parameter: command".into());
     };
 
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command_str)
-        .current_dir(root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => return tool_err(tool, format!("cannot spawn command: {e}")),
-    };
-
-    match child.wait_timeout(COMMAND_TIMEOUT) {
-        Ok(Some(status)) => {
-            let stdout = child
-                .stdout
-                .take()
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    let _ = s.read_to_string(&mut buf);
-                    buf
-                })
-                .unwrap_or_default();
-
-            let stderr = child
-                .stderr
-                .take()
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    let _ = s.read_to_string(&mut buf);
-                    buf
-                })
-                .unwrap_or_default();
-
-            let mut output = String::new();
-            if !stdout.is_empty() {
-                output.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str("STDERR:\n");
-                output.push_str(&stderr);
-            }
-
+    match sandbox::execute_sandboxed(command_str, root, policy, COMMAND_TIMEOUT) {
+        Ok(cmd_output) => {
             // Classify and structure the output via phantom-semantic so agents
             // receive structured context rather than raw text alone.
-            let exit_code = status.code();
-            let semantic = SemanticParser::parse(command_str, &stdout, &stderr, exit_code);
+            let semantic = SemanticParser::parse(
+                command_str,
+                &cmd_output.output,
+                "",
+                None,
+            );
 
-            let mut result = if status.success() {
-                tool_ok(tool, output)
+            let mut result = if cmd_output.success {
+                tool_ok(tool, cmd_output.output)
             } else {
-                tool_err(tool, format!("command exited with {status}\n{output}"))
+                tool_err(tool, cmd_output.output)
             };
             result.semantic_output = Some(Box::new(semantic));
             result
-        }
-        Ok(None) => {
-            // Timed out — kill the child process and surface the error.
-            let _ = child.kill();
-            let _ = child.wait();
-            tool_err(
-                tool,
-                format!(
-                    "command timed out after {}s",
-                    COMMAND_TIMEOUT.as_secs()
-                ),
-            )
         }
         Err(e) => tool_err(tool, e.to_string()),
     }
@@ -1651,5 +1603,126 @@ mod tests {
         let recovered = result.provenance();
         assert_eq!(recovered.taint, TaintLevel::Tainted);
         assert_eq!(recovered.source_event_id, Some(99));
+    }
+
+    // -- Issue #104: duplicate capability gate --------------------------------
+    //
+    // `execute_tool_with_provenance` is an *internal* helper. The dispatch
+    // layer (`dispatch.rs::dispatch_tool`) is the single source of truth for
+    // capability gating. Therefore `execute_tool_with_provenance` must NOT
+    // contain its own `check_capability` call.
+    //
+    // TDD: the test below calls `execute_tool_with_provenance` directly with
+    // a role that LACKS the tool's capability class — simulating the dispatch
+    // layer having already pre-approved the call (e.g. via an allowlist
+    // override). Before the fix, the inner gate fires and returns a denial
+    // result (test fails). After the inner gate is removed, the tool runs and
+    // the test passes.
+
+    /// `execute_tool_with_provenance` must be a pass-through with no inner gate.
+    ///
+    /// Calls the function directly with `AgentRole::Watcher` (which has
+    /// `Sense` but NOT `Act`) against `ToolType::WriteFile` (`Act`-class).
+    /// This simulates the dispatch layer having pre-approved the call.
+    ///
+    /// **Before fix**: the inner `check_capability` call fires and returns
+    /// `"capability denied: Act not in Watcher manifest"` — `success: false`.
+    /// **After fix**: the inner gate is gone; the tool runs and writes the file
+    /// — `success: true`.
+    ///
+    /// This test is RED before the fix and GREEN after.
+    #[test]
+    fn execute_tool_with_provenance_has_no_inner_capability_gate() {
+        // Watcher lacks Act — but dispatch_tool would have already gated this.
+        // Calling execute_tool_with_provenance directly simulates "dispatch
+        // already passed; inner function must not re-check."
+        let tmp = TempDir::new().unwrap();
+
+        let result = execute_tool_with_provenance(
+            ToolType::WriteFile,
+            &serde_json::json!({ "path": "gate_test.txt", "content": "dispatch-pre-approved" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Watcher, // Watcher has Sense+Reflect+Compute, NOT Act
+            Some(42),
+        );
+
+        // After the fix the inner gate is removed: the tool runs and succeeds.
+        // Before the fix this assertion fails with:
+        //   "capability denied: Act not in Watcher manifest"
+        assert!(
+            result.success,
+            "execute_tool_with_provenance must not re-check capabilities \
+             (inner gate must be removed — see issue #104); got: {}",
+            result.output,
+        );
+        assert!(
+            !result.output.starts_with("capability denied:"),
+            "inner gate must be gone: got denial output '{}'",
+            result.output,
+        );
+        // Verify the file was actually written (tool ran).
+        let written = fs::read_to_string(tmp.path().join("gate_test.txt")).unwrap();
+        assert_eq!(written, "dispatch-pre-approved");
+    }
+
+    /// Regression: verify exactly ONE `capability denied` result is produced
+    /// by a single denied call through the full `dispatch_tool` path.
+    ///
+    /// `dispatch_tool` short-circuits at its outer gate and never reaches
+    /// `execute_tool_with_provenance` on a denied path. After the inner gate
+    /// is removed, a denied `dispatch_tool` call produces exactly one denial
+    /// result. This test pins the one-and-only-one contract.
+    #[test]
+    fn dispatch_path_produces_exactly_one_capability_denied_result() {
+        use crate::dispatch::{DispatchContext, dispatch_tool};
+        use crate::composer_tools::new_spawn_subagent_queue;
+        use crate::inbox::AgentRegistry;
+        use crate::role::SpawnSource;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let tmp = TempDir::new().unwrap();
+        let registry = Arc::new(Mutex::new(AgentRegistry::new()));
+        let pending_spawn = new_spawn_subagent_queue();
+        let self_ref = crate::role::AgentRef::new(
+            1,
+            AgentRole::Watcher,
+            "watcher",
+            SpawnSource::User,
+        );
+
+        let ctx = DispatchContext {
+            self_ref,
+            role: AgentRole::Watcher,
+            working_dir: tmp.path(),
+            registry,
+            event_log: None,
+            pending_spawn,
+            source_event_id: None,
+            quarantine: None,
+        };
+
+        // One call → must produce exactly one denial result.
+        let result = dispatch_tool(
+            "run_command",
+            &serde_json::json!({ "command": "echo SHOULD_NEVER_RUN" }),
+            &ctx,
+        );
+
+        assert!(!result.success, "must be denied: {}", result.output);
+        assert!(
+            result.output.starts_with("capability denied:"),
+            "must carry canonical denial wording: {}",
+            result.output,
+        );
+
+        // Count how many "capability denied:" substrings appear in the output.
+        // A double-gate that somehow surfaced both denials would produce two.
+        let denial_count = result.output.matches("capability denied:").count();
+        assert_eq!(
+            denial_count, 1,
+            "exactly ONE capability denial must appear in the output; got {denial_count}: '{}'",
+            result.output,
+        );
     }
 }
