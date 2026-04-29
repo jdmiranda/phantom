@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Enable live shader reload via the `notify` file-system watcher.
+# Active only in debug builds (`#[cfg(debug_assertions)]`); no runtime
+# overhead in release builds even when the feature is compiled in.
+live-reload = ["dep:notify"]
+
 [dependencies]
 wgpu.workspace = true
 winit.workspace = true
@@ -18,9 +24,18 @@ serde_json = "1"
 etagere = "0.2"
 png = "0.17"
 
+# Live shader reload (issue #84) — optional, gated behind the `live-reload` feature.
+# `notify` watches shaders/*.wgsl for file-system changes in debug builds.
+# `naga` validates WGSL on the CPU so a broken shader surfaces a log error
+# instead of a GPU driver panic.
+notify = { version = "6", optional = true }
+naga = { version = "25", features = ["wgsl-in"] }
+
 [dev-dependencies]
 tempfile = "3"
+# naga is also a dev-dependency for the existing WGSL shader validation tests.
 naga = { version = "25", features = ["wgsl-in"] }
+notify = "6"
 
 [lints]
 workspace = true
