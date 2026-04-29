@@ -4,6 +4,12 @@
 //! traits here lock the contract so search backends and LLM rewriters can
 //! land in parallel later.
 //!
+//! ## Vector query execution
+//!
+//! [`engine`] provides the concrete `InMemoryRecallEngine` which implements
+//! cosine-similarity search over an in-memory corpus using a deterministic
+//! mock embedder (384 dims). Use it for tests and offline development.
+//!
 //! ## Pipeline
 //!
 //! 1. [`QueryRewriter`] turns a natural-language phrase like
@@ -29,6 +35,8 @@
 //! equals "now" scores 1.0; one whose event is `half_life_days` in the past
 //! scores 0.5; events in the future or with a non-positive half-life clamp
 //! to 1.0.
+
+pub mod engine;
 
 use async_trait::async_trait;
 use phantom_bundles::BundleId;

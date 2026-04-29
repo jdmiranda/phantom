@@ -5479,6 +5479,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-recall"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "phantom-bundles",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "phantom-renderer"
 version = "0.1.0"
 dependencies = [
