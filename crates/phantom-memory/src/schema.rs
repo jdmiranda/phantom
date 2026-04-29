@@ -185,11 +185,15 @@ pub struct EventLogEntry {
     /// Empty for root events (no causal parent).
     source_chain: Vec<u64>,
     // ── v2 extension point ────────────────────────────────────────────────
-    // When schema v2 adds a field, add it here as `Option<T>` with
-    // `#[serde(default)]` and `#[serde(skip_serializing_if = "Option::is_none")]`.
-    // Example:
-    //   #[serde(default, skip_serializing_if = "Option::is_none")]
-    //   correlation_id: Option<String>,
+    /// Causality token linking this entry to the pipeline run that triggered
+    /// it.  The string form of a v4 UUID (hyphenated, 36 chars) matches the
+    /// `CorrelationId` wire representation from `phantom-agents`.
+    ///
+    /// `None` for entries that were not produced in a tracked pipeline run
+    /// (legacy / test paths).  Skip-serializing when absent keeps v1 logs
+    /// readable by v1 readers without a parse error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    correlation_id: Option<String>,
 }
 
 /// Errors produced when constructing or validating an [`EventLogEntry`].
@@ -226,7 +230,19 @@ impl EventLogEntry {
             kind,
             payload,
             source_chain,
+            correlation_id: None,
         })
+    }
+
+    /// Attach a correlation id to this entry, consuming `self` and returning
+    /// the updated entry.
+    ///
+    /// The id is stored as a `String` (hyphenated UUID) for serde
+    /// compatibility with the on-disk JSONL format.
+    #[must_use]
+    pub fn with_correlation_id(mut self, id: impl Into<String>) -> Self {
+        self.correlation_id = Some(id.into());
+        self
     }
 
     /// Monotonically increasing log id.
@@ -252,6 +268,14 @@ impl EventLogEntry {
     /// Ordered list of causal ancestor event ids.
     pub fn source_chain(&self) -> &[u64] {
         &self.source_chain
+    }
+
+    /// Causality token linking this entry to its pipeline run, if present.
+    ///
+    /// Returns the string form of the UUID (hyphenated, 36 chars) or `None`
+    /// for entries that were not produced in a tracked pipeline run.
+    pub fn correlation_id(&self) -> Option<&str> {
+        self.correlation_id.as_deref()
     }
 
     /// Validate this entry against the current schema.
