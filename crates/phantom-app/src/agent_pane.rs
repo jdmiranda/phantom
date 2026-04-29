@@ -323,7 +323,7 @@ impl AgentPane {
             event_log: None,
             pending_spawn: None,
             self_ref: None,
-            role: DEFAULT_AGENT_PANE_ROLE,
+            role: initial_role,
             agent: Agent::new(0, task),
             pending_tools: Vec::new(),
             working_dir: ".".into(),
@@ -418,6 +418,8 @@ impl AgentPane {
         denied_event_sink: Option<DeniedEventSink>,
     ) -> Self {
         let task = opts.task.clone();
+        // Capture the requested role before opts fields are consumed.
+        let initial_role = opts.role().unwrap_or(DEFAULT_AGENT_PANE_ROLE);
 
         // Resolve the chat model (explicit > env-var > default Claude).
         let resolved = opts.resolve_model();
@@ -1389,8 +1391,11 @@ impl App {
         &mut self,
         opts: AgentSpawnOpts,
     ) -> bool {
-        // Extract spawn_tag before opts is moved into spawn_with_opts.
+        // Extract metadata before opts is moved into spawn_with_opts.
         let spawn_tag = opts.spawn_tag;
+        // role/label carry Composer spawn_subagent metadata (#224).
+        let spawn_role = opts.role().unwrap_or(DEFAULT_AGENT_PANE_ROLE);
+        let spawn_label = opts.label().unwrap_or("agent-pane").to_string();
         let Some(claude_config) = ClaudeConfig::from_env() else {
             warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
             return false;
@@ -1463,10 +1468,11 @@ impl App {
         // [`DEFAULT_AGENT_PANE_ROLE`]; when the next phase wires Composer
         // panes through this path the role override will live on
         // [`AgentSpawnOpts`].
+        // Use spawn_role/spawn_label from opts (#224).
         let self_ref = phantom_agents::role::AgentRef::new(
             0,
-            DEFAULT_AGENT_PANE_ROLE,
-            "agent-pane",
+            spawn_role,
+            spawn_label,
             phantom_agents::role::SpawnSource::User,
         );
         agent_pane.set_substrate_handles(
@@ -1474,7 +1480,7 @@ impl App {
             self.runtime.event_log_handle(),
             self.pending_spawn_subagent.clone(),
             self_ref,
-            DEFAULT_AGENT_PANE_ROLE,
+            spawn_role,
         );
 
         // Wire the snapshot sink so the pane pushes an AgentSnapshot into the
