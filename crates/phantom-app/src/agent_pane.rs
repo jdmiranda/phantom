@@ -303,6 +303,16 @@ pub(crate) struct AgentPane {
     /// error or test environment without a real filesystem path). All journal
     /// writes are best-effort — a failure never aborts an agent spawn.
     journal: Option<phantom_memory::journal::AgentJournal>,
+    /// Sec.7.3 quarantine registry shared with the App orchestrator.
+    ///
+    /// When `Some`, [`build_dispatch_context`] passes the real registry into
+    /// the [`DispatchContext`], enabling the quarantine gate in
+    /// [`phantom_agents::dispatch::dispatch_tool`] to block quarantined agents
+    /// before any capability check or handler runs.
+    ///
+    /// `None` for legacy / test callers that do not wire a quarantine registry;
+    /// the gate skips the check (fail-open) so old paths are unaffected.
+    quarantine: Option<std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,7 +344,8 @@ impl AgentPane {
             event_log: None,
             pending_spawn: None,
             self_ref: None,
-            role: initial_role,
+            role: DEFAULT_AGENT_PANE_ROLE,
+            quarantine: None,
             agent: Agent::new(0, task),
             pending_tools: Vec::new(),
             working_dir: ".".into(),
@@ -568,6 +579,7 @@ impl AgentPane {
             agent_capture: None,
             capture_session_uuid: uuid::Uuid::nil(),
             capture_tool_calls: Vec::new(),
+            quarantine: None,
         }
     }
 
@@ -584,12 +596,14 @@ impl AgentPane {
         pending_spawn: phantom_agents::composer_tools::SpawnSubagentQueue,
         self_ref: phantom_agents::role::AgentRef,
         role: phantom_agents::role::AgentRole,
+        quarantine: std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>,
     ) {
         self.registry = Some(registry);
         self.event_log = Some(event_log);
         self.pending_spawn = Some(pending_spawn);
         self.self_ref = Some(self_ref);
         self.role = role;
+        self.quarantine = Some(quarantine);
     }
 
     /// Wire the shared snapshot queue so this pane pushes an [`AgentSnapshot`]
@@ -674,10 +688,10 @@ impl AgentPane {
             event_log: self.event_log.clone(),
             pending_spawn,
             source_event_id: None,
-            // No quarantine registry wired at this spawn site; the gate
-            // skips the quarantine check when this is `None`. The App-level
-            // quarantine registry will be plumbed in a follow-up. // see #3
-            quarantine: None,
+            // Sec.7.3 fix (#225): pass the real quarantine registry so the
+            // dispatch gate can block quarantined agents before any capability
+            // check or handler runs. `None` keeps legacy / test paths open.
+            quarantine: self.quarantine.clone(),
             correlation_id: None,
             ticket_dispatcher,
         })
@@ -1545,6 +1559,7 @@ impl App {
             self.pending_spawn_subagent.clone(),
             self_ref,
             spawn_role,
+            self.quarantine_registry.clone(),
         );
 
         // Wire the snapshot sink so the pane pushes an AgentSnapshot into the
@@ -1691,6 +1706,7 @@ mod tests {
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
             journal: None,
+            quarantine: None,
         };
         (pane, tx)
     }
@@ -1784,6 +1800,7 @@ mod tests {
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
             journal: None,
+            quarantine: None,
         };
         assert!(!pane.poll());
     }
@@ -2342,6 +2359,7 @@ mod tests {
             pending_spawn,
             self_ref,
             AgentRole::Dispatcher,
+            Arc::new(Mutex::new(phantom_agents::quarantine::QuarantineRegistry::default())),
         );
 
         // Wire the dispatcher (mock repo — no real gh calls in tests).
@@ -2389,6 +2407,7 @@ mod tests {
             pending_spawn,
             self_ref,
             AgentRole::Watcher,
+            Arc::new(Mutex::new(phantom_agents::quarantine::QuarantineRegistry::default())),
         );
 
         // Wire a dispatcher into a non-Dispatcher pane — should still be None
@@ -2403,6 +2422,105 @@ mod tests {
             ctx.ticket_dispatcher.is_none(),
             "DispatchContext for a non-Dispatcher-role pane must have \
              ticket_dispatcher = None regardless of what was set on the pane"
+        );
+    }
+
+    // ---- Sec.7.3 / #225: build_dispatch_context quarantine wiring ----------
+
+    /// Regression test for issue #225.
+    ///
+    /// Before the fix, `build_dispatch_context` always set `quarantine: None`
+    /// on the `DispatchContext`, so the Sec.7.3 gate was never reached and
+    /// quarantined agents could still dispatch tools. This test verifies that
+    /// after the fix:
+    ///
+    /// 1. `build_dispatch_context` produces a `DispatchContext` with a `Some`
+    ///    quarantine field when the pane's quarantine handle is set.
+    /// 2. A quarantined agent's `dispatch_tool` call returns `success: false`
+    ///    with "quarantined" in the output — not `Ok`.
+    #[test]
+    fn build_dispatch_context_passes_quarantine_registry_to_dispatch() {
+        use phantom_agents::composer_tools::new_spawn_subagent_queue;
+        use phantom_agents::dispatch::dispatch_tool;
+        use phantom_agents::inbox::AgentRegistry;
+        use phantom_agents::quarantine::{AutoQuarantinePolicy, QuarantineRegistry};
+        use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+        use phantom_agents::taint::TaintLevel;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("probe.txt"), "secret").unwrap();
+
+        let agent_id: u64 = 99;
+
+        // Build a quarantine registry and immediately quarantine the agent
+        // (threshold = 1 means the first Tainted observation quarantines).
+        let quarantine = Arc::new(Mutex::new(QuarantineRegistry::new_with_policy(
+            AutoQuarantinePolicy { threshold: 1 },
+        )));
+        quarantine
+            .lock()
+            .unwrap()
+            .check_and_escalate(agent_id, TaintLevel::Tainted, 0, "test-offense");
+        assert!(
+            quarantine.lock().unwrap().agent_is_quarantined(agent_id),
+            "agent must be quarantined before the dispatch test"
+        );
+
+        // Build a minimal AgentPane and wire the quarantine registry through
+        // set_substrate_handles — the path the fix closes.
+        let (mut pane, _tx) = agent_with_handle();
+        let registry = Arc::new(Mutex::new(AgentRegistry::new()));
+        let event_log = {
+            let log = phantom_memory::event_log::EventLog::open(
+                &tmp.path().join("events.jsonl"),
+            )
+            .unwrap();
+            Arc::new(Mutex::new(log))
+        };
+        let pending_spawn = new_spawn_subagent_queue();
+        let self_ref = AgentRef::new(agent_id, AgentRole::Conversational, "offender", SpawnSource::User);
+
+        pane.working_dir = tmp.path().to_string_lossy().into_owned();
+        pane.set_substrate_handles(
+            registry,
+            event_log,
+            pending_spawn,
+            self_ref,
+            AgentRole::Conversational,
+            quarantine,
+        );
+
+        // build_dispatch_context must return Some with a quarantine field.
+        let ctx = pane
+            .build_dispatch_context()
+            .expect("build_dispatch_context must return Some when handles are wired");
+
+        assert!(
+            ctx.quarantine.is_some(),
+            "DispatchContext::quarantine must be Some after the #225 fix; \
+             got None — the quarantine registry was not forwarded"
+        );
+
+        // The dispatched tool call must be denied because the agent is quarantined.
+        let res = dispatch_tool("read_file", &serde_json::json!({"path": "probe.txt"}), &ctx);
+
+        assert!(
+            !res.success,
+            "quarantined agent must have dispatch denied (success=false), got: {}",
+            res.output,
+        );
+        assert!(
+            res.output.contains("quarantined"),
+            "denial message must mention 'quarantined', got: {}",
+            res.output,
+        );
+        assert!(
+            res.output.contains(&agent_id.to_string()),
+            "denial message must name the agent id {}, got: {}",
+            agent_id,
+            res.output,
         );
     }
 
@@ -2521,6 +2639,7 @@ mod tests {
             role: DEFAULT_AGENT_PANE_ROLE,
             ticket_dispatcher: None,
             journal: None,
+            quarantine: None,
             snapshot_sink: None,
             last_failing_capability: None,
         };
