@@ -254,6 +254,14 @@ pub(crate) struct AgentPane {
     /// spawn time so a Composer pane gets the Coordinate class it needs to
     /// invoke `spawn_subagent` / `broadcast_to_role`.
     role: phantom_agents::role::AgentRole,
+    /// Issue #235: shared `GhTicketDispatcher` handle injected at spawn time
+    /// when the pane's role is `Dispatcher`.
+    ///
+    /// `None` for all non-Dispatcher roles and for any Dispatcher pane whose
+    /// parent `App` could not construct the dispatcher (e.g. `GITHUB_TOKEN`
+    /// absent). When `None`, the three Dispatcher tools return the canonical
+    /// `"ticket dispatcher not configured"` error so the model self-corrects.
+    ticket_dispatcher: Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +310,7 @@ impl AgentPane {
             blocked_event_sink: None,
             denied_event_sink: None,
             last_tool_error: None,
+            ticket_dispatcher: None,
         }
     }
 
@@ -495,6 +504,7 @@ impl AgentPane {
             pending_spawn: None,
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
+            ticket_dispatcher: None,
         }
     }
 
@@ -519,6 +529,21 @@ impl AgentPane {
         self.role = role;
     }
 
+    /// Wire the shared [`GhTicketDispatcher`] handle for Dispatcher-role panes.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` immediately after
+    /// `set_substrate_handles` when the spawned role is
+    /// [`phantom_agents::role::AgentRole::Dispatcher`] and the App has a
+    /// configured dispatcher. `None` is the safe default — the three
+    /// Dispatcher tools will return `"ticket dispatcher not configured"` to
+    /// the model instead of panicking.
+    pub(crate) fn set_ticket_dispatcher(
+        &mut self,
+        dispatcher: std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>,
+    ) {
+        self.ticket_dispatcher = Some(dispatcher);
+    }
+
     /// Build a [`phantom_agents::dispatch::DispatchContext`] from the
     /// pane's current substrate handles, if all required pieces are wired.
     ///
@@ -532,6 +557,16 @@ impl AgentPane {
         let registry = self.registry.clone()?;
         let pending_spawn = self.pending_spawn.clone()?;
         let self_ref = self.self_ref.clone()?;
+        // Issue #235: inject the ticket dispatcher only for Dispatcher-role
+        // panes. Non-Dispatcher agents receive `None` so the three Dispatcher
+        // tools remain unreachable to them (capability gate catches first, but
+        // defence-in-depth keeps the `None` path as the safe fallback).
+        let ticket_dispatcher = if self.role == phantom_agents::role::AgentRole::Dispatcher {
+            self.ticket_dispatcher.clone()
+        } else {
+            None
+        };
+
         Some(phantom_agents::dispatch::DispatchContext {
             self_ref,
             role: self.role,
@@ -545,7 +580,7 @@ impl AgentPane {
             // quarantine registry will be plumbed in a follow-up. // see #3
             quarantine: None,
             correlation_id: None,
-            ticket_dispatcher: None,
+            ticket_dispatcher,
         })
     }
 
@@ -1282,6 +1317,22 @@ impl App {
             DEFAULT_AGENT_PANE_ROLE,
         );
 
+        // Issue #235: inject the ticket dispatcher for Dispatcher-role panes.
+        // `agent_pane.role` was just set by `set_substrate_handles` above.
+        // For the current default (Conversational) this is a no-op. When a
+        // future spawn path sets role = Dispatcher this branch fires and the
+        // pane gains live access to the GH ticket queue.
+        if agent_pane.role == phantom_agents::role::AgentRole::Dispatcher {
+            if let Some(ref td) = self.ticket_dispatcher {
+                agent_pane.set_ticket_dispatcher(std::sync::Arc::clone(td));
+            } else {
+                warn!(
+                    "Spawning a Dispatcher-role agent pane but ticket_dispatcher is None \
+                     (GITHUB_TOKEN / GH_REPO not set); ticket tools will fail gracefully"
+                );
+            }
+        }
+
         let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
 
         let scene_node = self.scene.add_node(
@@ -1395,6 +1446,7 @@ mod tests {
             pending_spawn: None,
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
+            ticket_dispatcher: None,
         };
         (pane, tx)
     }
@@ -1484,6 +1536,7 @@ mod tests {
             pending_spawn: None,
             self_ref: None,
             role: DEFAULT_AGENT_PANE_ROLE,
+            ticket_dispatcher: None,
         };
         assert!(!pane.poll());
     }
@@ -1956,5 +2009,107 @@ mod tests {
                  SubstrateEvent side still validated."
             );
         }
+    }
+
+    // ---- Issue #235: GhTicketDispatcher wiring --------------------------------
+
+    /// Constructing a `DispatchContext` for a Dispatcher-role pane that has
+    /// a configured `GhTicketDispatcher` must yield `ticket_dispatcher: Some`.
+    ///
+    /// This is the acceptance test for the fix described in issue #235:
+    /// before the fix every `DispatchContext` literal had
+    /// `ticket_dispatcher: None`, so Dispatcher agents always received
+    /// `"ticket dispatcher not configured"` when calling any of the three
+    /// Dispatcher tools.
+    #[test]
+    fn dispatcher_role_pane_with_configured_dispatcher_has_some_in_ctx() {
+        use phantom_agents::dispatcher::GhTicketDispatcher;
+        use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+        use phantom_memory::event_log::EventLog;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        // Build a Dispatcher-role pane with all substrate handles wired.
+        let (mut pane, _tx) = agent_with_handle();
+
+        let registry = Arc::new(Mutex::new(
+            phantom_agents::inbox::AgentRegistry::new(),
+        ));
+        let event_log = Arc::new(Mutex::new(
+            EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+        ));
+        let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+        let self_ref = AgentRef::new(1, AgentRole::Dispatcher, "dispatcher-1", SpawnSource::User);
+
+        pane.set_substrate_handles(
+            registry,
+            event_log,
+            pending_spawn,
+            self_ref,
+            AgentRole::Dispatcher,
+        );
+
+        // Wire the dispatcher (mock repo — no real gh calls in tests).
+        let dispatcher = GhTicketDispatcher::new("test/repo").shared();
+        pane.set_ticket_dispatcher(Arc::clone(&dispatcher));
+
+        // Build a dispatch context; the ticket_dispatcher field must be Some.
+        let ctx = pane.build_dispatch_context()
+            .expect("build_dispatch_context must return Some for a fully-wired Dispatcher pane");
+
+        assert!(
+            ctx.ticket_dispatcher.is_some(),
+            "DispatchContext for a Dispatcher-role pane with a configured \
+             GhTicketDispatcher must have ticket_dispatcher = Some"
+        );
+    }
+
+    /// Constructing a `DispatchContext` for a *non*-Dispatcher-role pane must
+    /// always yield `ticket_dispatcher: None`, even if the pane somehow had a
+    /// dispatcher wired in (defence-in-depth).
+    #[test]
+    fn non_dispatcher_role_pane_always_has_none_in_ctx() {
+        use phantom_agents::dispatcher::GhTicketDispatcher;
+        use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+        use phantom_memory::event_log::EventLog;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+
+        let (mut pane, _tx) = agent_with_handle();
+
+        let registry = Arc::new(Mutex::new(
+            phantom_agents::inbox::AgentRegistry::new(),
+        ));
+        let event_log = Arc::new(Mutex::new(
+            EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+        ));
+        let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+        let self_ref = AgentRef::new(2, AgentRole::Watcher, "watcher-2", SpawnSource::User);
+
+        pane.set_substrate_handles(
+            registry,
+            event_log,
+            pending_spawn,
+            self_ref,
+            AgentRole::Watcher,
+        );
+
+        // Wire a dispatcher into a non-Dispatcher pane — should still be None
+        // in the resulting DispatchContext (capability gate + defence-in-depth).
+        let dispatcher = GhTicketDispatcher::new("test/repo").shared();
+        pane.set_ticket_dispatcher(Arc::clone(&dispatcher));
+
+        let ctx = pane.build_dispatch_context()
+            .expect("build_dispatch_context must return Some for a wired pane");
+
+        assert!(
+            ctx.ticket_dispatcher.is_none(),
+            "DispatchContext for a non-Dispatcher-role pane must have \
+             ticket_dispatcher = None regardless of what was set on the pane"
+        );
     }
 }

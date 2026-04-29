@@ -208,6 +208,12 @@ pub struct App {
     // -- Fullscreen pane toggle (stores AppId of the fullscreen adapter) --
     pub(crate) fullscreen_pane: Option<u32>,
 
+    // -- Issue #235: shared ticket dispatcher (constructed at startup if
+    //    GITHUB_TOKEN is set; None otherwise). Handed to Dispatcher-role agent
+    //    panes so they can call request_next_ticket / mark_ticket_in_progress /
+    //    mark_ticket_done via the gh CLI.
+    pub(crate) ticket_dispatcher: Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>>,
+
     // -- Inspector snapshot (shared with InspectorAdapter when a pane is open).
     //    `None` when no inspector pane has ever been spawned; `Some(Arc<RwLock<…>>)`
     //    once the user runs `inspect` and stays present so the adapter and the
@@ -693,6 +699,16 @@ impl App {
             }
         };
 
+        // -- Issue #235: ticket dispatcher (best-effort, graceful degradation).
+        // GH_REPO is the canonical "owner/repo" slug used by the gh CLI.
+        // GITHUB_TOKEN is already consumed by the gh CLI directly, but its
+        // presence signals that gh auth is configured so the dispatcher will
+        // actually work. Without both vars we log a single warning and leave
+        // `ticket_dispatcher: None` — no panic, Dispatcher agents see the
+        // "ticket dispatcher not configured" error from the dispatch layer and
+        // can self-correct.
+        let ticket_dispatcher = build_ticket_dispatcher();
+
         let now = Instant::now();
 
         Ok(Self {
@@ -778,6 +794,7 @@ impl App {
             settings_panel: crate::settings_ui::SettingsPanel::new(),
             bundle_store,
             capture_state: crate::capture::CaptureState::new(),
+            ticket_dispatcher,
         })
     }
 
@@ -981,6 +998,42 @@ impl App {
     // Pane management (see pane.rs for split/close)
     // Capture (see capture.rs for per-pane GPU readback + bundle persistence)
     // -----------------------------------------------------------------------
+}
+
+/// Construct a [`GhTicketDispatcher`] backed by the real `gh` CLI.
+///
+/// Returns `Some(Arc<GhTicketDispatcher>)` when both `GITHUB_TOKEN` and
+/// `GH_REPO` (format: `"owner/repo"`) are present in the environment,
+/// indicating that `gh auth` is configured and the dispatcher will actually
+/// work. Returns `None` with a `warn!` log line if either variable is absent
+/// — the rest of the app continues to boot and Dispatcher-role agents see
+/// `"ticket dispatcher not configured"` from the dispatch layer instead of
+/// a panic.
+fn build_ticket_dispatcher() -> Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>> {
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    let repo = std::env::var("GH_REPO").ok();
+
+    match (token, repo) {
+        (Some(_), Some(repo)) => {
+            let dispatcher = phantom_agents::dispatcher::GhTicketDispatcher::new(repo.clone());
+            info!("GhTicketDispatcher ready for repo {repo}");
+            Some(dispatcher.shared())
+        }
+        (None, _) => {
+            warn!(
+                "GITHUB_TOKEN not set — GhTicketDispatcher unavailable; \
+                 Dispatcher-role agents will see \"ticket dispatcher not configured\""
+            );
+            None
+        }
+        (Some(_), None) => {
+            warn!(
+                "GH_REPO not set — GhTicketDispatcher unavailable; \
+                 set GH_REPO=owner/repo to enable the Dispatcher role's ticket tools"
+            );
+            None
+        }
+    }
 }
 
 /// Open the encrypted bundle store at `$HOME/.config/phantom/bundles`,
