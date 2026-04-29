@@ -10,11 +10,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+use wait_timeout::ChildExt;
 
 use phantom_semantic::{ParsedOutput, SemanticParser};
 
 use crate::role::{AgentRole, CapabilityClass};
-use crate::sandbox::{self, SandboxPolicy};
+use crate::sandbox::SandboxPolicy;
 use crate::taint::TaintLevel;
 
 // ---------------------------------------------------------------------------
@@ -793,7 +794,7 @@ fn execute_run_command(root: &Path, args: &serde_json::Value) -> ToolResult {
 pub(crate) fn execute_run_command_with_policy(
     root: &Path,
     args: &serde_json::Value,
-    policy: SandboxPolicy,
+    _policy: SandboxPolicy,
 ) -> ToolResult {
     let tool = ToolType::RunCommand;
 
@@ -860,6 +861,18 @@ pub(crate) fn execute_run_command_with_policy(
             };
             result.semantic_output = Some(Box::new(semantic));
             result
+        }
+        Ok(None) => {
+            // Timed out — kill the child process and surface the error.
+            let _ = child.kill();
+            let _ = child.wait();
+            tool_err(
+                tool,
+                format!(
+                    "command timed out after {}s",
+                    COMMAND_TIMEOUT.as_secs()
+                ),
+            )
         }
         Err(e) => tool_err(tool, e.to_string()),
     }
