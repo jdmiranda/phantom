@@ -182,6 +182,40 @@ impl ProviderCatalog {
         self.profiles.insert(profile.id.clone(), profile);
     }
 
+    /// Insert or replace a profile (alias for [`insert`][ProviderCatalog::insert]).
+    ///
+    /// Provided for ergonomic compatibility with code that prefers the
+    /// `add_profile` naming convention.
+    pub fn add_profile(&mut self, profile: ProviderProfile) {
+        self.insert(profile);
+    }
+
+    /// Look up a profile by exact ID, returning `None` if absent.
+    ///
+    /// Unlike [`resolve`][ProviderCatalog::resolve], `get` does **not** fall
+    /// back to `"claude-default"` on a miss — it returns `None` directly.
+    /// This makes it suitable for presence checks and optional overrides.
+    pub fn get(&self, name: &str) -> Option<&ProviderProfile> {
+        self.profiles.get(name)
+    }
+
+    /// Return the built-in default profile (claude-sonnet, 4096-token budget).
+    ///
+    /// Constructs the profile on demand; callers that need a stable owned copy
+    /// can call `.clone()` on the result.
+    pub fn default_profile() -> ProviderProfile {
+        ProviderProfile::new(
+            "claude-default",
+            "claude -p --dangerously-skip-permissions",
+            "claude-sonnet-4-20250514",
+            vec![
+                "claude-sonnet-4-20250514".into(),
+                "claude-opus-4-5".into(),
+                "claude-haiku-4-5".into(),
+            ],
+        )
+    }
+
     /// Remove a profile by ID. Returns the removed profile, or `None` if it
     /// was not present.
     pub fn remove(&mut self, id: &str) -> Option<ProviderProfile> {
@@ -441,5 +475,64 @@ mod tests {
         assert!(cat.contains("claude-default"));
         assert!(cat.contains("claude-fast"));
         assert!(cat.contains("ollama-phi3.5"));
+    }
+
+    // -- Required named tests (Issue #61) -----------------------------------
+
+    /// The built-in "claude-fast" profile must use the haiku model.
+    #[test]
+    fn catalog_get_builtin_fast_profile() {
+        let cat = ProviderCatalog::with_builtins();
+        let p = cat.get("claude-fast").expect("claude-fast must be present");
+        assert!(
+            p.default_model().contains("haiku"),
+            "fast profile must use haiku, got {}",
+            p.default_model()
+        );
+    }
+
+    /// Inserting a custom profile with an existing ID shadows the built-in.
+    #[test]
+    fn catalog_custom_profile_overrides_builtin() {
+        let mut cat = ProviderCatalog::with_builtins();
+        // Replace "claude-fast" with a custom profile.
+        cat.add_profile(ProviderProfile::new(
+            "claude-fast",
+            "my-llm-runner",
+            "custom-fast-model",
+            vec!["custom-fast-model".into()],
+        ));
+        let p = cat
+            .get("claude-fast")
+            .expect("claude-fast must still be present after override");
+        assert_eq!(
+            p.runtime_command(),
+            "my-llm-runner",
+            "custom profile must shadow the built-in"
+        );
+        assert_eq!(p.default_model(), "custom-fast-model");
+        // Catalog length must not grow when replacing.
+        assert_eq!(cat.len(), 3, "length must not grow when overriding");
+    }
+
+    /// Requesting a non-existent profile via `get` returns `None`.
+    #[test]
+    fn catalog_get_missing_profile_returns_none() {
+        let cat = ProviderCatalog::with_builtins();
+        assert!(
+            cat.get("nonexistent-profile").is_none(),
+            "get must return None for absent profiles"
+        );
+    }
+
+    /// The default profile from `default_profile()` uses claude-sonnet.
+    #[test]
+    fn catalog_default_profile_has_sonnet() {
+        let p = ProviderCatalog::default_profile();
+        assert!(
+            p.default_model().contains("sonnet"),
+            "default profile must use sonnet, got {}",
+            p.default_model()
+        );
     }
 }
