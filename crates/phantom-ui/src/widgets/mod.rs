@@ -24,6 +24,10 @@ pub use notification_banner::{
 pub mod panel;
 pub use panel::{Panel, TITLE_BAR_HEIGHT};
 
+// Issue #16 — 8px vertical scrollbar with token-driven colors.
+pub mod scrollbar;
+pub use scrollbar::{ScrollState, Scrollbar, SCROLLBAR_WIDTH, track_y_to_offset};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------

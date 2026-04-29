@@ -40,6 +40,11 @@ pub struct AgentAdapter {
     /// in `update.rs` removes this pane from the coordinator after the user
     /// has acknowledged the output.
     dismissed: bool,
+    /// Lines scrolled above the live view (0 = bottom / live).
+    ///
+    /// Incremented by the `scroll` command (wheel), set by `scroll_to_offset`
+    /// (scrollbar click-jump). Clamped to `[0, total_lines - visible_rows]`.
+    scroll_offset: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +63,7 @@ impl AgentAdapter {
             input_buffer: String::new(),
             spawn_tag: None,
             dismissed: false,
+            scroll_offset: 0,
         }
     }
 
@@ -132,12 +138,16 @@ impl AppCore for AgentAdapter {
     }
 
     fn get_state(&self) -> serde_json::Value {
+        let total_lines = self.pane.cached_lines.len();
         json!({
             "type": "agent",
             "task": self.pane.task,
             "status": format!("{:?}", self.pane.status),
             "output_len": self.pane.output.len(),
             "alive": self.pane.status == AgentPaneStatus::Working,
+            // Exposed so scrollbar click-jump (scrollbar_y_to_offset) can
+            // calculate the correct target offset from a click position.
+            "history_size": total_lines,
         })
     }
 }
@@ -171,10 +181,18 @@ impl Renderable for AgentAdapter {
             color: OUTPUT_BG,
         });
 
-        // Render output lines (scrolled to bottom).
+        // Render output lines — respecting scroll_offset.
+        // scroll_offset 0 = bottom (live view), N = N lines scrolled up.
         let lines = &self.pane.cached_lines;
-        let start = lines.len().saturating_sub(output_max_lines);
-        let visible = &lines[start..];
+        let total_lines = lines.len();
+        let history_size = total_lines.saturating_sub(output_max_lines);
+        // Clamp in case scroll_offset drifted past the history.
+        let clamped_offset = self.scroll_offset.min(history_size);
+        // The window end (exclusive) is total_lines minus offset, the window
+        // start is end minus visible lines.
+        let window_end = total_lines.saturating_sub(clamped_offset);
+        let window_start = window_end.saturating_sub(output_max_lines);
+        let visible = &lines[window_start..window_end];
 
         for (i, line) in visible.iter().enumerate() {
             text_segments.push(TextData {
@@ -211,11 +229,22 @@ impl Renderable for AgentAdapter {
             color: INPUT_COLOR,
         });
 
+        // --- Scroll state for scrollbar rendering ---
+        let scroll = if history_size > 0 {
+            Some(phantom_adapter::adapter::ScrollState {
+                display_offset: clamped_offset,
+                history_size,
+                visible_rows: output_max_lines,
+            })
+        } else {
+            None
+        };
+
         RenderOutput {
             quads,
             text_segments,
             grid: None,
-            scroll: None,
+            scroll,
             selection: None,
         }
     }
@@ -299,6 +328,34 @@ impl Commandable for AgentAdapter {
                     }
                 }
                 Ok("ok".into())
+            }
+            "scroll" => {
+                // Wheel scroll: {"direction": "up"|"down", "lines": N}
+                let lines = args.get("lines")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3) as usize;
+                let direction = args.get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("down");
+                let total_lines = self.pane.cached_lines.len();
+                // Re-compute visible rows from the last rect (not available here;
+                // use a reasonable default of 20 lines so scrolling feels responsive).
+                let visible_approx: usize = 20;
+                let max_offset = total_lines.saturating_sub(visible_approx);
+                if direction == "up" {
+                    self.scroll_offset = (self.scroll_offset + lines).min(max_offset);
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+                }
+                Ok(format!("offset={}", self.scroll_offset))
+            }
+            "scroll_to_offset" => {
+                // Scrollbar click-jump: {"offset": N}
+                let offset = args.get("offset")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                self.scroll_offset = offset;
+                Ok(format!("offset={}", self.scroll_offset))
             }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
@@ -545,6 +602,112 @@ mod tests {
                 rect.y,
             );
         }
+    }
+
+    // ── Issue #16: scrollbar + agent scroll support ────────────────────
+
+    /// A newly-constructed AgentAdapter must start at scroll_offset=0 (live view).
+    #[test]
+    fn agent_adapter_scroll_offset_starts_at_zero() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::new(pane);
+        assert_eq!(adapter.scroll_offset, 0, "scroll must start at live view (bottom)");
+    }
+
+    /// `scroll` command with direction "up" increments scroll_offset.
+    #[test]
+    fn scroll_command_up_increments_offset() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let mut adapter = AgentAdapter::new(pane);
+
+        let result = adapter.accept_command("scroll", &serde_json::json!({
+            "direction": "up",
+            "lines": 5,
+        }));
+        assert!(result.is_ok());
+        assert!(adapter.scroll_offset > 0, "scroll_offset must increase on up scroll");
+    }
+
+    /// `scroll` command with direction "down" decrements scroll_offset
+    /// and clamps at 0.
+    #[test]
+    fn scroll_command_down_clamps_at_zero() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let mut adapter = AgentAdapter::new(pane);
+        adapter.scroll_offset = 3;
+
+        let _ = adapter.accept_command("scroll", &serde_json::json!({
+            "direction": "down",
+            "lines": 10,
+        }));
+        assert_eq!(adapter.scroll_offset, 0, "scroll must not go below 0");
+    }
+
+    /// `scroll_to_offset` command sets the exact offset.
+    #[test]
+    fn scroll_to_offset_command_sets_exact_offset() {
+        let lines: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let mut adapter = AgentAdapter::new(pane);
+
+        let _ = adapter.accept_command("scroll_to_offset", &serde_json::json!({"offset": 20}));
+        assert_eq!(adapter.scroll_offset, 20);
+    }
+
+    /// When there is scrollable history, `render()` must return a non-None scroll state.
+    #[test]
+    fn agent_render_provides_scroll_state_when_scrollable() {
+        // Create more lines than fit in a typical visible area.
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
+        let rect = Rect {
+            x: 0.0, y: 0.0,
+            width: 400.0, height: 300.0,
+            ..Default::default()
+        };
+        let output = adapter.render(&rect);
+        assert!(
+            output.scroll.is_some(),
+            "render must provide scroll state when there is more content than fits"
+        );
+    }
+
+    /// When all lines fit in the visible area, scroll state should be None.
+    #[test]
+    fn agent_render_no_scroll_state_when_short_content() {
+        let lines: Vec<String> = vec!["line 1".into(), "line 2".into()];
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
+        let rect = Rect {
+            x: 0.0, y: 0.0,
+            width: 400.0, height: 300.0,
+            ..Default::default()
+        };
+        let output = adapter.render(&rect);
+        // 2 lines fit easily in 300px height → no scrollbar needed.
+        assert!(
+            output.scroll.is_none(),
+            "render must not provide scroll state when content fits on screen"
+        );
+    }
+
+    /// `get_state()` must expose `history_size` so the scrollbar click-jump
+    /// can compute the correct offset from a pixel coordinate.
+    #[test]
+    fn agent_get_state_exposes_history_size() {
+        let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+        let state = adapter.get_state();
+        assert!(
+            state.get("history_size").is_some(),
+            "get_state must expose history_size for scrollbar click-jump"
+        );
+        assert_eq!(state["history_size"].as_u64(), Some(10));
     }
 
     /// `with_spawn_tag` preserves the tag so the reconciler can correlate
