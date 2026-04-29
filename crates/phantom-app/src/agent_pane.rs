@@ -48,9 +48,9 @@ pub(crate) const TOOL_BLOCK_THRESHOLD: u32 = 2;
 /// The `App` owns the canonical sink; each `AgentPane` is given a clone at
 /// spawn time. Panes push events into the queue when their consecutive-failure
 /// counter crosses [`TOOL_BLOCK_THRESHOLD`]; the App drains the queue each
-/// frame in `poll_agent_panes` and forwards into `runtime.push_event`. From
-/// there the `SpawnRuleRegistry` evaluates the event and queues a `Fixer`
-/// spawn action (the actual Fixer spawn is Phase 2.G).
+/// frame inline in `update.rs::update` (via `drain_blocked_events`) and
+/// forwards into `runtime.push_event`. From there the `SpawnRuleRegistry`
+/// evaluates the event and queues a `Fixer` spawn action (Phase 2.G).
 pub(crate) type BlockedEventSink = Arc<Mutex<Vec<SubstrateEvent>>>;
 
 /// Construct a fresh, empty `BlockedEventSink`.
@@ -66,9 +66,9 @@ pub(crate) fn new_blocked_event_sink() -> BlockedEventSink {
 /// pane is given a clone at spawn time. Whenever the Layer-2 dispatch gate
 /// refuses a tool call (e.g. a `Watcher` calls `run_command`), the pane
 /// builds a [`SubstrateEvent`] of kind [`EventKind::CapabilityDenied`] and
-/// pushes it here. `update.rs::poll_agent_panes` drains the queue each
-/// frame and forwards into `runtime.push_event`. The Defender spawn rule
-/// (Sec.4) reads these.
+/// pushes it here. The drain step is inline in `update.rs::update` and
+/// forwards into `runtime.push_event`. The Defender spawn rule (Sec.4)
+/// reads these.
 pub(crate) type DeniedEventSink = Arc<Mutex<Vec<SubstrateEvent>>>;
 
 /// Construct a fresh, empty `DeniedEventSink`.
@@ -861,8 +861,8 @@ impl AgentPane {
     /// `"capability denied: <Class> not in <Role> manifest"` prefix —
     /// produced by [`phantom_agents::tools::DispatchError::to_tool_result_message`]
     /// and stable across both `execute_tool` and `dispatch_tool`. We push the
-    /// event into the App-owned [`DeniedEventSink`] (drained next frame in
-    /// `update.rs::poll_agent_panes`) and emit a parallel audit-log record
+    /// event into the App-owned [`DeniedEventSink`] (drained next frame
+    /// inline in `update.rs::update`) and emit a parallel audit-log record
     /// with [`AuditOutcome::Denied`] so the on-disk audit trail and the
     /// substrate event log carry matching denial signals.
     ///
@@ -1208,8 +1208,8 @@ impl App {
         // when the agent's consecutive tool-call failure streak crosses
         // [`TOOL_BLOCK_THRESHOLD`], an `EventKind::AgentBlocked` substrate
         // event lands in `App.blocked_event_sink`. The drain step in
-        // `update.rs::update` picks those up each frame (after
-        // `poll_agent_panes`) and forwards them into the substrate runtime
+        // `update.rs::update` picks those up each frame and forwards them
+        // into the substrate runtime
         // where the Fixer spawn rule consumes them and queues a Fixer
         // `SpawnAction` — closing the producer→consumer loop.
         let mut agent_pane = AgentPane::spawn_with_opts(

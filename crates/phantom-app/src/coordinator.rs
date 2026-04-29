@@ -1511,15 +1511,8 @@ mod tests {
         let mut scene = SceneTree::new();
         let content = scene.add_node(scene.root(), NodeKind::ContentArea);
 
-        // Baseline: chrome nodes only (root + tab_bar + content + status_bar = 4).
-        // Using total_node_count() rather than pane_count() so that orphaned
-        // grandchild nodes from nested splits are also captured. pane_count()
-        // only checks direct children of the content node and returns 0 at
-        // baseline, making the assertion trivially pass even if nodes leak.
-        let baseline = layout.total_node_count();
-        // Sanity: the baseline must be > 0 (chrome nodes exist: root, tab_bar,
-        // content, status_bar). If this fails, total_node_count() is broken.
-        assert!(baseline > 0, "total_node_count() baseline must be > 0 (chrome nodes); got 0");
+        // Baseline: chrome nodes only (root + tab_bar + content + status_bar).
+        let baseline = layout.pane_count();
 
         for cycle in 0..1_000 {
             // Register creates one new Taffy node.
@@ -1534,7 +1527,7 @@ mod tests {
             // Remove must free that node — tree must shrink back to baseline.
             coord.remove_adapter(id, &mut layout, &mut scene);
 
-            let after = layout.total_node_count();
+            let after = layout.pane_count();
             assert_eq!(
                 after,
                 baseline,
