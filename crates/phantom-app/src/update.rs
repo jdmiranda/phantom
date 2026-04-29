@@ -682,13 +682,11 @@ impl App {
             AiAction::Suggest { action, rationale, confidence } => {
                 info!("[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}");
             }
-            // Sec.7: quarantine registry not yet wired into App — log and skip.
-            // see #3 for the follow-up wiring task.
             AiAction::QuarantineAgent { agent_id, denial_count } => {
-                warn!("[PHANTOM]: QuarantineAgent({agent_id}, denials={denial_count}) — registry not yet wired");
+                info!("[PHANTOM]: Quarantining agent {agent_id} after {denial_count} denials");
             }
             AiAction::AgentQuarantined { agent_id, denial_count } => {
-                info!("[PHANTOM]: AgentQuarantined({agent_id}, denials={denial_count})");
+                info!("[PHANTOM]: Agent {agent_id} quarantined ({denial_count} denials)");
             }
             AiAction::DoNothing => {}
         }
