@@ -155,9 +155,7 @@ fn valid_plugin_loads_correctly() {
         .expect("valid module (no WASI imports) must load");
 
     // The module exports `init() -> i32`; it returns 42.
-    let results = rt
-        .call("init", &[])
-        .expect("init export must be callable");
+    let results = rt.call("init", &[]).expect("init export must be callable");
 
     assert_eq!(results.len(), 1, "init must return one value");
     assert_eq!(

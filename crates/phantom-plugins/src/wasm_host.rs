@@ -26,7 +26,7 @@
 //!
 //! All exports are optional; missing exports are silently skipped.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use wasmtime::{Config, Engine, Instance, Module, Store, Val};
 
 use crate::host::{HookContext, HookResponse, PluginRuntime};
@@ -132,9 +132,7 @@ impl WasmHost {
             // can match on SandboxViolation specifically.
             let is_import_error = msg.contains("unknown import")
                 || msg.contains("Imports provided")
-                || msg.contains("expected")
-                    && msg.contains("imports")
-                    && msg.contains("found");
+                || msg.contains("expected") && msg.contains("imports") && msg.contains("found");
             if is_import_error {
                 anyhow::Error::new(SandboxViolation::UnsupportedImport(msg))
             } else {
@@ -612,9 +610,9 @@ mod tests {
                     "QA-#186: WASI import must produce Err, not Ok"
                 );
             }
-            Err(_) => panic!(
-                "QA-#186: WasmHost::load panicked on WASI import — must return Err instead"
-            ),
+            Err(_) => {
+                panic!("QA-#186: WasmHost::load panicked on WASI import — must return Err instead")
+            }
         }
     }
 }
