@@ -3,6 +3,8 @@ use std::sync::LazyLock;
 use phantom_context::ProjectContext;
 use regex::Regex;
 
+use crate::translate::{Intent, LlmBackend, translate};
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -125,8 +127,8 @@ impl NlpInterpreter {
         // Single well-known NLP verbs (build, test, run, etc.) are natural
         // language even without spaces.
         const SINGLE_WORD_NLP: &[&str] = &[
-            "build", "test", "lint", "format", "fmt", "run", "start",
-            "deploy", "status", "check", "explain",
+            "build", "test", "lint", "format", "fmt", "run", "start", "deploy", "status", "check",
+            "explain",
         ];
         if SINGLE_WORD_NLP.contains(&trimmed.to_lowercase().as_str()) {
             return true;
@@ -144,14 +146,143 @@ impl NlpInterpreter {
             .to_lowercase();
 
         const NL_STARTERS: &[&str] = &[
-            "what", "show", "is", "do", "run", "build", "test", "deploy",
-            "fix", "explain", "check", "find", "search", "list", "tell",
-            "how", "why", "where", "when", "which", "can", "could",
-            "please", "help", "start", "stop", "restart", "lint", "format",
-            "something", "recent", "get", "set", "open", "close",
+            "what",
+            "show",
+            "is",
+            "do",
+            "run",
+            "build",
+            "test",
+            "deploy",
+            "fix",
+            "explain",
+            "check",
+            "find",
+            "search",
+            "list",
+            "tell",
+            "how",
+            "why",
+            "where",
+            "when",
+            "which",
+            "can",
+            "could",
+            "please",
+            "help",
+            "start",
+            "stop",
+            "restart",
+            "lint",
+            "format",
+            "something",
+            "recent",
+            "get",
+            "set",
+            "open",
+            "close",
         ];
 
         NL_STARTERS.contains(&first_word.as_str())
+    }
+
+    /// Try to interpret natural language input as an action, falling back to
+    /// an LLM backend when none of the built-in regex patterns match.
+    ///
+    /// Stages 1–6 run identically to [`Self::interpret`]. When all stages
+    /// fail to produce a match (Stage 7), `backend` is called via
+    /// [`translate`] and the resulting [`Intent`] is mapped to a
+    /// [`ResolvedAction`]:
+    ///
+    /// | [`Intent`]       | [`ResolvedAction`]                                  |
+    /// |------------------|-----------------------------------------------------|
+    /// | `RunCommand`     | `RunCommand(cmd)`                                   |
+    /// | `SpawnAgent`     | `SpawnAgent(goal)`                                  |
+    /// | `SearchHistory`  | `RunCommand("git log --oneline -10")` (best effort) |
+    /// | `Clarify`        | `Ambiguous { input, options: vec![question] }`      |
+    ///
+    /// If the backend call itself fails (network / auth error), the error is
+    /// logged and the function returns [`ResolvedAction::PassThrough`] so that
+    /// the shell has a chance to handle the input.
+    ///
+    /// # Errors (none)
+    ///
+    /// This function is infallible — backend failures degrade gracefully to
+    /// `PassThrough`.
+    #[must_use]
+    pub fn interpret_with_backend(
+        input: &str,
+        ctx: &ProjectContext,
+        backend: &dyn LlmBackend,
+    ) -> ResolvedAction {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return ResolvedAction::PassThrough;
+        }
+
+        // Stages 1–2: hard pass-through for obvious shell commands / binaries.
+        if is_shell_command(trimmed) || is_known_binary(trimmed) {
+            return ResolvedAction::PassThrough;
+        }
+
+        let lower = trimmed.to_lowercase();
+
+        // Stage 3: project command patterns.
+        if let Some(action) = match_project_commands(&lower, ctx) {
+            return action;
+        }
+
+        // Stage 4: git / VCS patterns.
+        if let Some(action) = match_git_patterns(&lower) {
+            return action;
+        }
+
+        // Stage 5: deploy patterns.
+        if let Some(action) = match_deploy_patterns(&lower, trimmed) {
+            return action;
+        }
+
+        // Stage 6: agent delegation patterns.
+        if let Some(action) = match_agent_patterns(&lower) {
+            return action;
+        }
+
+        // Stage 7: nothing matched — route to the LLM backend.
+        match translate(trimmed, ctx, backend) {
+            Ok(intent) => intent_to_resolved_action(trimmed, intent),
+            Err(e) => {
+                log::warn!(
+                    "nlp: LLM fallback failed for {:?}: {}; falling back to PassThrough",
+                    trimmed,
+                    e
+                );
+                ResolvedAction::PassThrough
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Intent → ResolvedAction conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a [`translate`]-produced [`Intent`] into a [`ResolvedAction`].
+///
+/// Used by [`NlpInterpreter::interpret_with_backend`] to bridge the two type
+/// systems.
+fn intent_to_resolved_action(original_input: &str, intent: Intent) -> ResolvedAction {
+    match intent {
+        Intent::RunCommand { cmd } => ResolvedAction::RunCommand(cmd),
+        Intent::SpawnAgent { goal } => ResolvedAction::SpawnAgent(goal),
+        // SearchHistory → best-effort git log command.
+        Intent::SearchHistory { .. } => {
+            ResolvedAction::RunCommand("git log --oneline -10".to_string())
+        }
+        // Clarify → Ambiguous so the UI can prompt the user.
+        Intent::Clarify { question } => ResolvedAction::Ambiguous {
+            input: original_input.to_string(),
+            options: vec![question],
+        },
     }
 }
 
@@ -162,8 +293,9 @@ impl NlpInterpreter {
 static RE_BINARY_TOKEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9_-]*$").expect("static regex"));
 
-static RE_TEST: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?:test|tests|run\s+(?:the\s+)?tests?)$").expect("static regex"));
+static RE_TEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:test|tests|run\s+(?:the\s+)?tests?)$").expect("static regex")
+});
 
 static RE_RUN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -172,8 +304,9 @@ static RE_RUN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static regex")
 });
 
-static RE_LINT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?:lint|check|run\s+(?:the\s+)?linter?)$").expect("static regex"));
+static RE_LINT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:lint|check|run\s+(?:the\s+)?linter?)$").expect("static regex")
+});
 
 static RE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:format|fmt|format\s+(?:the\s+)?code|run\s+(?:the\s+)?formatter)$")
@@ -227,19 +360,12 @@ static RE_CI: LazyLock<Regex> = LazyLock::new(|| {
 /// Returns true if the input looks like a direct shell command.
 fn is_shell_command(input: &str) -> bool {
     // Starts with path-like prefixes.
-    if input.starts_with('/')
-        || input.starts_with("./")
-        || input.starts_with("~/")
-    {
+    if input.starts_with('/') || input.starts_with("./") || input.starts_with("~/") {
         return true;
     }
 
     // Contains shell operators.
-    if input.contains('|')
-        || input.contains('>')
-        || input.contains("&&")
-        || input.contains("||")
-    {
+    if input.contains('|') || input.contains('>') || input.contains("&&") || input.contains("||") {
         return true;
     }
 
@@ -260,24 +386,121 @@ fn is_known_binary(word: &str) -> bool {
     }
 
     const BINARIES: &[&str] = &[
-        "git", "ls", "cat", "cd", "cp", "mv", "rm", "mkdir", "rmdir",
-        "pwd", "echo", "grep", "find", "sed", "awk", "curl", "wget",
-        "ssh", "scp", "tar", "zip", "unzip", "man", "which", "whoami",
-        "ps", "top", "htop", "kill", "killall", "df", "du", "free",
-        "uname", "env", "export", "source", "chmod", "chown", "head",
-        "tail", "less", "more", "sort", "uniq", "wc", "diff", "patch",
-        "make", "cmake", "gcc", "g++", "clang", "rustc", "rustup",
-        "cargo", "node", "npm", "npx", "yarn", "pnpm", "bun", "deno",
-        "python", "python3", "pip", "pip3", "poetry", "uv",
-        "go", "java", "javac", "mvn", "gradle",
-        "ruby", "gem", "bundle", "rake",
-        "docker", "docker-compose", "kubectl", "helm",
-        "terraform", "ansible", "vagrant",
-        "vi", "vim", "nvim", "nano", "emacs", "code",
-        "tmux", "screen", "zsh", "bash", "sh", "fish",
-        "xargs", "tee", "touch", "file", "stat", "ln", "readlink",
-        "nmap", "nc", "netstat", "ss", "ip", "ifconfig", "ping",
-        "traceroute", "dig", "nslookup", "host",
+        "git",
+        "ls",
+        "cat",
+        "cd",
+        "cp",
+        "mv",
+        "rm",
+        "mkdir",
+        "rmdir",
+        "pwd",
+        "echo",
+        "grep",
+        "find",
+        "sed",
+        "awk",
+        "curl",
+        "wget",
+        "ssh",
+        "scp",
+        "tar",
+        "zip",
+        "unzip",
+        "man",
+        "which",
+        "whoami",
+        "ps",
+        "top",
+        "htop",
+        "kill",
+        "killall",
+        "df",
+        "du",
+        "free",
+        "uname",
+        "env",
+        "export",
+        "source",
+        "chmod",
+        "chown",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "sort",
+        "uniq",
+        "wc",
+        "diff",
+        "patch",
+        "make",
+        "cmake",
+        "gcc",
+        "g++",
+        "clang",
+        "rustc",
+        "rustup",
+        "cargo",
+        "node",
+        "npm",
+        "npx",
+        "yarn",
+        "pnpm",
+        "bun",
+        "deno",
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "poetry",
+        "uv",
+        "go",
+        "java",
+        "javac",
+        "mvn",
+        "gradle",
+        "ruby",
+        "gem",
+        "bundle",
+        "rake",
+        "docker",
+        "docker-compose",
+        "kubectl",
+        "helm",
+        "terraform",
+        "ansible",
+        "vagrant",
+        "vi",
+        "vim",
+        "nvim",
+        "nano",
+        "emacs",
+        "code",
+        "tmux",
+        "screen",
+        "zsh",
+        "bash",
+        "sh",
+        "fish",
+        "xargs",
+        "tee",
+        "touch",
+        "file",
+        "stat",
+        "ln",
+        "readlink",
+        "nmap",
+        "nc",
+        "netstat",
+        "ss",
+        "ip",
+        "ifconfig",
+        "ping",
+        "traceroute",
+        "dig",
+        "nslookup",
+        "host",
     ];
 
     BINARIES.contains(&word)
@@ -286,7 +509,10 @@ fn is_known_binary(word: &str) -> bool {
 /// Match against project commands: build, test, run, lint, format.
 fn match_project_commands(lower: &str, ctx: &ProjectContext) -> Option<ResolvedAction> {
     // Build
-    if matches!(lower, "build" | "build it" | "build the project" | "compile") {
+    if matches!(
+        lower,
+        "build" | "build it" | "build the project" | "compile"
+    ) {
         return ctx
             .commands
             .build
@@ -377,9 +603,7 @@ fn match_deploy_patterns(lower: &str, _original: &str) -> Option<ResolvedAction>
 fn match_agent_patterns(lower: &str) -> Option<ResolvedAction> {
     // "fix it" / "fix the error" / "fix this"
     if RE_FIX.is_match(lower) {
-        return Some(ResolvedAction::SpawnAgent(
-            "fix the last error".to_string(),
-        ));
+        return Some(ResolvedAction::SpawnAgent("fix the last error".to_string()));
     }
 
     // "explain" / "explain this" / "what happened"
@@ -801,6 +1025,105 @@ mod tests {
         assert_eq!(
             NlpInterpreter::interpret("deploy prod", &ctx),
             ResolvedAction::RunCommand("deploy production".into()),
+        );
+    }
+
+    // --- LLM fallback routing ------------------------------------------------
+
+    /// A scripted [`LlmBackend`] that records whether it was called.
+    struct SpyBackend {
+        reply: String,
+        called: std::sync::atomic::AtomicBool,
+    }
+
+    impl SpyBackend {
+        fn new(reply: impl Into<String>) -> Self {
+            Self {
+                reply: reply.into(),
+                called: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn was_called(&self) -> bool {
+            self.called.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl crate::translate::LlmBackend for SpyBackend {
+        fn name(&self) -> &'static str {
+            "spy"
+        }
+
+        fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_message: &str,
+        ) -> Result<String, crate::translate::TranslateError> {
+            self.called
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(self.reply.clone())
+        }
+    }
+
+    /// A [`LlmBackend`] that always returns an error.
+    struct ErrBackend;
+
+    impl crate::translate::LlmBackend for ErrBackend {
+        fn name(&self) -> &'static str {
+            "err"
+        }
+
+        fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_message: &str,
+        ) -> Result<String, crate::translate::TranslateError> {
+            Err(crate::translate::TranslateError::Transport(
+                "simulated network error".into(),
+            ))
+        }
+    }
+
+    /// When no regex stage matches, the backend must be called.
+    #[test]
+    fn nlp_unknown_command_routes_to_backend() {
+        let ctx = rust_ctx();
+        // "xyzzy frobnicate" matches no regex stage.
+        let backend = SpyBackend::new(
+            r#"{"intent":"Clarify","question":"What do you mean by 'xyzzy frobnicate'?"}"#,
+        );
+        let _ = NlpInterpreter::interpret_with_backend("xyzzy frobnicate", &ctx, &backend);
+        assert!(
+            backend.was_called(),
+            "backend must be called when no regex stage matches"
+        );
+    }
+
+    /// Mock returning a RunCommand response is correctly parsed.
+    #[test]
+    fn nlp_backend_response_parsed_to_correct_variant() {
+        let ctx = rust_ctx();
+        // Input that won't match any regex — backend decides the action.
+        let backend = SpyBackend::new(r#"{"intent":"RunCommand","cmd":"cargo build"}"#);
+        let action =
+            NlpInterpreter::interpret_with_backend("please compile everything now", &ctx, &backend);
+        assert_eq!(
+            action,
+            ResolvedAction::RunCommand("cargo build".into()),
+            "RunCommand intent must map to RunCommand action"
+        );
+    }
+
+    /// A backend error must not propagate — graceful fallback to PassThrough.
+    #[test]
+    fn nlp_backend_error_returns_unknown_command() {
+        let ctx = rust_ctx();
+        // Input that won't match any regex.
+        let action = NlpInterpreter::interpret_with_backend("zork zork zork", &ctx, &ErrBackend);
+        assert_eq!(
+            action,
+            ResolvedAction::PassThrough,
+            "backend error must degrade gracefully to PassThrough"
         );
     }
 }

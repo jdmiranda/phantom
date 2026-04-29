@@ -172,11 +172,7 @@ pub trait LlmBackend: Send + Sync {
     ///
     /// Implementations **must not** return an empty string on success — callers
     /// treat an empty reply as a parse failure and return [`Intent::Clarify`].
-    fn complete(
-        &self,
-        system_prompt: &str,
-        user_message: &str,
-    ) -> Result<String, TranslateError>;
+    fn complete(&self, system_prompt: &str, user_message: &str) -> Result<String, TranslateError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +201,8 @@ impl ClaudeLlmBackend {
     /// Returns [`TranslateError::NotConfigured`] when the variable is absent
     /// or empty.
     pub fn from_env() -> Result<Self, TranslateError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-            TranslateError::NotConfigured("ANTHROPIC_API_KEY is not set".into())
-        })?;
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| TranslateError::NotConfigured("ANTHROPIC_API_KEY is not set".into()))?;
         if api_key.is_empty() {
             return Err(TranslateError::NotConfigured(
                 "ANTHROPIC_API_KEY is empty".into(),
@@ -238,11 +233,7 @@ impl LlmBackend for ClaudeLlmBackend {
         "claude"
     }
 
-    fn complete(
-        &self,
-        system_prompt: &str,
-        user_message: &str,
-    ) -> Result<String, TranslateError> {
+    fn complete(&self, system_prompt: &str, user_message: &str) -> Result<String, TranslateError> {
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": 256,
@@ -448,7 +439,9 @@ fn parse_reply(raw: &str) -> Intent {
         "RunCommand" => {
             let cmd = parsed.cmd.unwrap_or_default();
             if cmd.is_empty() {
-                Intent::clarify("I understood the intent but couldn't determine which command to run.")
+                Intent::clarify(
+                    "I understood the intent but couldn't determine which command to run.",
+                )
             } else {
                 Intent::run_command(cmd)
             }
@@ -707,15 +700,20 @@ mod tests {
             MockLlmBackend::new(r#"{"intent":"SearchHistory","query":"recent git commits today"}"#);
         let intent = translate("what changed today", &ctx, &backend).unwrap();
         assert!(matches!(intent, Intent::SearchHistory { .. }));
-        assert!(intent.query().unwrap().contains("git") || intent.query().unwrap().contains("commit") || intent.query().unwrap().contains("recent"));
+        assert!(
+            intent.query().unwrap().contains("git")
+                || intent.query().unwrap().contains("commit")
+                || intent.query().unwrap().contains("recent")
+        );
     }
 
     /// Ambiguous input returns Clarify.
     #[test]
     fn ambiguous_input_clarifies() {
         let ctx = rust_ctx();
-        let backend =
-            MockLlmBackend::new(r#"{"intent":"Clarify","question":"What exactly do you want to do?"}"#);
+        let backend = MockLlmBackend::new(
+            r#"{"intent":"Clarify","question":"What exactly do you want to do?"}"#,
+        );
         let intent = translate("xyzzy frobnicate", &ctx, &backend).unwrap();
         assert!(matches!(intent, Intent::Clarify { .. }));
     }
@@ -727,7 +725,9 @@ mod tests {
         // Backend will panic if called — proves we short-circuit.
         struct PanicBackend;
         impl LlmBackend for PanicBackend {
-            fn name(&self) -> &'static str { "panic" }
+            fn name(&self) -> &'static str {
+                "panic"
+            }
             fn complete(&self, _: &str, _: &str) -> Result<String, TranslateError> {
                 panic!("backend should not be called for empty input");
             }
@@ -742,7 +742,9 @@ mod tests {
         let ctx = rust_ctx();
         struct PanicBackend;
         impl LlmBackend for PanicBackend {
-            fn name(&self) -> &'static str { "panic" }
+            fn name(&self) -> &'static str {
+                "panic"
+            }
             fn complete(&self, _: &str, _: &str) -> Result<String, TranslateError> {
                 panic!("backend should not be called for whitespace input");
             }
@@ -764,8 +766,7 @@ mod tests {
     #[test]
     fn fix_error_spawns_agent() {
         let ctx = rust_ctx();
-        let backend =
-            MockLlmBackend::new(r#"{"intent":"SpawnAgent","goal":"fix the last error"}"#);
+        let backend = MockLlmBackend::new(r#"{"intent":"SpawnAgent","goal":"fix the last error"}"#);
         let intent = translate("fix the error", &ctx, &backend).unwrap();
         assert_eq!(intent, Intent::spawn_agent("fix the last error"));
     }
@@ -866,7 +867,9 @@ mod tests {
     fn transport_error_propagates() {
         struct ErrBackend;
         impl LlmBackend for ErrBackend {
-            fn name(&self) -> &'static str { "err" }
+            fn name(&self) -> &'static str {
+                "err"
+            }
             fn complete(&self, _: &str, _: &str) -> Result<String, TranslateError> {
                 Err(TranslateError::Transport("connection refused".into()))
             }
@@ -880,7 +883,9 @@ mod tests {
     fn not_configured_error_propagates() {
         struct ErrBackend;
         impl LlmBackend for ErrBackend {
-            fn name(&self) -> &'static str { "err" }
+            fn name(&self) -> &'static str {
+                "err"
+            }
             fn complete(&self, _: &str, _: &str) -> Result<String, TranslateError> {
                 Err(TranslateError::NotConfigured("no key".into()))
             }

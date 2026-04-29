@@ -19,6 +19,9 @@ ureq = { version = "3", features = ["json", "platform-verifier"] }
 # Do NOT enable in production builds.
 # Declaring this feature closes #287 (undeclared `testing` cfg condition).
 testing = []
+# Alias used by the task spec and downstream integration-test harnesses.
+# Equivalent to `testing` — enables `MockLlmBackend`.
+test-utils = ["testing"]
 
 [dev-dependencies]
 # Derive `Default` for test fixtures without touching production code.
