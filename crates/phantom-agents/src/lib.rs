@@ -38,6 +38,7 @@ pub mod speech;
 pub mod spawn_rules;
 pub mod suggest;
 pub mod supervisor;
+pub mod skill_registry;
 pub mod system_prompt;
 pub mod taint;
 pub mod tools;
@@ -60,5 +61,7 @@ pub use quarantine::{
     DEFAULT_QUARANTINE_THRESHOLD,
 };
 pub use semantic_context::SemanticContext;
+pub use skill_registry::SkillRegistry;
+pub use system_prompt::SkillInjection;
 pub use taint::TaintLevel;
 pub use tools::*;
