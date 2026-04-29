@@ -373,8 +373,7 @@ impl NotificationStore {
         let data = serde_json::to_string_pretty(&self.notifications)
             .context("failed to serialize notifications")?;
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, &data)
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        fs::write(&tmp, &data).with_context(|| format!("failed to write {}", tmp.display()))?;
         fs::rename(&tmp, &self.path).with_context(|| {
             format!(
                 "failed to rename {} -> {}",
@@ -433,7 +432,12 @@ mod tests {
     fn all_fields_accessible_via_getters() {
         let (mut store, _dir) = tmp_store("/proj");
         let n = store
-            .push(NotificationKind::AgentFlatlined, "Flatline", "Agent died", Some(7))
+            .push(
+                NotificationKind::AgentFlatlined,
+                "Flatline",
+                "Agent died",
+                Some(7),
+            )
             .unwrap();
 
         assert_eq!(n.kind(), NotificationKind::AgentFlatlined);
@@ -566,7 +570,11 @@ mod tests {
 
         let running = store.by_kind(NotificationKind::AgentRunning);
         assert_eq!(running.len(), 2);
-        assert!(running.iter().all(|n| n.kind() == NotificationKind::AgentRunning));
+        assert!(
+            running
+                .iter()
+                .all(|n| n.kind() == NotificationKind::AgentRunning)
+        );
 
         let blocked = store.by_kind(NotificationKind::PipelineBlocked);
         assert_eq!(blocked.len(), 1);
@@ -665,7 +673,12 @@ mod tests {
         {
             let mut store = NotificationStore::open_in(project, dir.path()).unwrap();
             store
-                .push(NotificationKind::PlanReady, "Plan", "Ready to execute", None)
+                .push(
+                    NotificationKind::PlanReady,
+                    "Plan",
+                    "Ready to execute",
+                    None,
+                )
                 .unwrap();
             store
                 .push(NotificationKind::AgentRunning, "Agent", "Running", Some(42))
@@ -751,7 +764,10 @@ mod tests {
         assert_eq!(NotificationKind::PlanReady.to_string(), "plan_ready");
         assert_eq!(NotificationKind::AgentRunning.to_string(), "agent_running");
         assert_eq!(NotificationKind::AgentSynced.to_string(), "agent_synced");
-        assert_eq!(NotificationKind::AgentFlatlined.to_string(), "agent_flatlined");
+        assert_eq!(
+            NotificationKind::AgentFlatlined.to_string(),
+            "agent_flatlined"
+        );
         assert_eq!(
             NotificationKind::PipelineCompleted.to_string(),
             "pipeline_completed"

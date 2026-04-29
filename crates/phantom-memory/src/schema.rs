@@ -362,8 +362,8 @@ mod tests {
     fn all_known_kinds_round_trip_via_from_str() {
         for &kind in KnownKind::all() {
             let s = kind.as_str();
-            let back = KnownKind::from_str(s)
-                .unwrap_or_else(|| panic!("from_str({s:?}) returned None"));
+            let back =
+                KnownKind::from_str(s).unwrap_or_else(|| panic!("from_str({s:?}) returned None"));
             assert_eq!(back, kind, "round-trip failed for {s:?}");
         }
     }
@@ -394,23 +394,22 @@ mod tests {
     #[test]
     fn new_with_known_kind_succeeds() {
         for &k in KnownKind::all() {
-            let entry = EventLogEntry::new(
-                1,
-                1_000_000,
-                k.as_str(),
-                json!({}),
-                vec![],
-            )
-            .unwrap_or_else(|e| panic!("new failed for {}: {e}", k.as_str()));
+            let entry = EventLogEntry::new(1, 1_000_000, k.as_str(), json!({}), vec![])
+                .unwrap_or_else(|e| panic!("new failed for {}: {e}", k.as_str()));
             assert_eq!(entry.kind(), k.as_str());
         }
     }
 
     #[test]
     fn new_with_unknown_prefix_succeeds() {
-        let entry =
-            EventLogEntry::new(42, 2_000, "unknown.future_field", json!({"x": 1}), vec![1, 2])
-                .unwrap();
+        let entry = EventLogEntry::new(
+            42,
+            2_000,
+            "unknown.future_field",
+            json!({"x": 1}),
+            vec![1, 2],
+        )
+        .unwrap();
         assert_eq!(entry.id(), 42);
         assert_eq!(entry.kind(), "unknown.future_field");
         assert_eq!(entry.source_chain(), &[1, 2]);
@@ -418,8 +417,7 @@ mod tests {
 
     #[test]
     fn new_with_invalid_kind_returns_error() {
-        let err =
-            EventLogEntry::new(1, 0, "bad-kind-string", json!({}), vec![]).unwrap_err();
+        let err = EventLogEntry::new(1, 0, "bad-kind-string", json!({}), vec![]).unwrap_err();
         assert!(matches!(err, SchemaError::InvalidKind { .. }));
     }
 
@@ -435,8 +433,14 @@ mod tests {
     fn getters_return_constructor_values() {
         let chain = vec![10u64, 20, 30];
         let payload = json!({"agent_id": 7, "task": "test"});
-        let entry = EventLogEntry::new(99, 1_234_567_890, "agent.spawn", payload.clone(), chain.clone())
-            .unwrap();
+        let entry = EventLogEntry::new(
+            99,
+            1_234_567_890,
+            "agent.spawn",
+            payload.clone(),
+            chain.clone(),
+        )
+        .unwrap();
 
         assert_eq!(entry.id(), 99);
         assert_eq!(entry.timestamp_ms(), 1_234_567_890);
@@ -455,8 +459,7 @@ mod tests {
 
     #[test]
     fn validate_unknown_prefix_ok() {
-        let entry =
-            EventLogEntry::new(1, 0, "unknown.v3_feature", json!({}), vec![]).unwrap();
+        let entry = EventLogEntry::new(1, 0, "unknown.v3_feature", json!({}), vec![]).unwrap();
         assert!(entry.validate().is_ok());
     }
 
@@ -530,8 +533,7 @@ mod tests {
     #[test]
     fn source_chain_preserves_causal_order() {
         let chain = vec![1u64, 5, 9];
-        let entry =
-            EventLogEntry::new(10, 0, "agent.spawn", json!({}), chain.clone()).unwrap();
+        let entry = EventLogEntry::new(10, 0, "agent.spawn", json!({}), chain.clone()).unwrap();
         assert_eq!(entry.source_chain(), chain.as_slice());
     }
 
@@ -582,7 +584,13 @@ mod tests {
 
     #[test]
     fn kind_with_no_dot_and_no_unknown_prefix_rejected() {
-        let kinds = ["agentspawn", "AGENT.SPAWN", "agent", " agent.spawn", "agent.spawn "];
+        let kinds = [
+            "agentspawn",
+            "AGENT.SPAWN",
+            "agent",
+            " agent.spawn",
+            "agent.spawn ",
+        ];
         for bad in kinds {
             let err = EventLogEntry::new(1, 0, bad, json!({}), vec![]).unwrap_err();
             assert!(

@@ -95,21 +95,37 @@ impl HandoffEntry {
     }
 
     /// The agent that transferred the task.
-    pub fn from_agent(&self) -> u64 { self.from_agent }
+    pub fn from_agent(&self) -> u64 {
+        self.from_agent
+    }
     /// The agent that received the task.
-    pub fn to_agent(&self) -> u64 { self.to_agent }
+    pub fn to_agent(&self) -> u64 {
+        self.to_agent
+    }
     /// Application-level task identifier.
-    pub fn task_id(&self) -> &str { &self.task_id }
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
     /// Brief summary of what the from-agent accomplished.
-    pub fn summary(&self) -> &str { &self.summary }
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
     /// Descriptions of already-tried, already-failed approaches.
-    pub fn failed_attempts(&self) -> &[String] { &self.failed_attempts }
+    pub fn failed_attempts(&self) -> &[String] {
+        &self.failed_attempts
+    }
     /// Memory-block identifiers the receiving agent should consult.
-    pub fn memory_refs(&self) -> &[String] { &self.memory_refs }
+    pub fn memory_refs(&self) -> &[String] {
+        &self.memory_refs
+    }
     /// Optional causality token linking this handoff to a pipeline run.
-    pub fn correlation_id(&self) -> Option<&str> { self.correlation_id.as_deref() }
+    pub fn correlation_id(&self) -> Option<&str> {
+        self.correlation_id.as_deref()
+    }
     /// Wall-clock time in milliseconds since the Unix epoch.
-    pub fn ts_unix_ms(&self) -> i64 { self.ts_unix_ms }
+    pub fn ts_unix_ms(&self) -> i64 {
+        self.ts_unix_ms
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,8 +183,13 @@ impl HandoffLog {
     /// independent clock sources or test determinism.
     pub fn record(&mut self, entry: &HandoffEntry) -> Result<(), HandoffError> {
         let payload = serde_json::to_value(entry)?;
-        self.log
-            .append(EventSource::Agent { id: entry.from_agent }, KIND, payload)?;
+        self.log.append(
+            EventSource::Agent {
+                id: entry.from_agent,
+            },
+            KIND,
+            payload,
+        )?;
         Ok(())
     }
 
@@ -357,8 +378,7 @@ mod tests {
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 1, "one line per record");
 
-        let env: crate::event_log::EventEnvelope =
-            serde_json::from_str(lines[0]).unwrap();
+        let env: crate::event_log::EventEnvelope = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(env.kind, "agent.handoff");
 
         let entry: HandoffEntry = serde_json::from_value(env.payload).unwrap();
@@ -367,7 +387,10 @@ mod tests {
         assert_eq!(entry.task_id(), "t-persist");
         assert_eq!(entry.summary(), "wrote the thing");
         assert_eq!(entry.failed_attempts(), &["approach-A".to_string()]);
-        assert_eq!(entry.memory_refs(), &["mem-1".to_string(), "mem-2".to_string()]);
+        assert_eq!(
+            entry.memory_refs(),
+            &["mem-1".to_string(), "mem-2".to_string()]
+        );
         assert_eq!(entry.correlation_id(), Some("corr-xyz"));
         assert_eq!(entry.ts_unix_ms(), 1_700_000_000_000);
     }
@@ -379,8 +402,12 @@ mod tests {
         let (mut log, _, _dir) = mk_log("corr.jsonl");
 
         let entry = HandoffEntry::new(
-            1, 2, "t1", "done",
-            vec![], vec![],
+            1,
+            2,
+            "t1",
+            "done",
+            vec![],
+            vec![],
             Some("cid-abc-123".into()),
             0,
         );
@@ -416,7 +443,8 @@ mod tests {
         let cid = "corr-pipeline-42".to_string();
 
         log.record(&HandoffEntry::new(
-            1, 2,
+            1,
+            2,
             "pipeline-42",
             "scoped requirements",
             vec![],
@@ -427,7 +455,8 @@ mod tests {
         .unwrap();
 
         log.record(&HandoffEntry::new(
-            2, 3,
+            2,
+            3,
             "pipeline-42",
             "implemented core logic",
             vec!["mutex deadlock on naive impl".into()],
@@ -438,13 +467,21 @@ mod tests {
         .unwrap();
 
         let chain = log.by_task("pipeline-42");
-        assert_eq!(chain.len(), 2, "both hops must appear under the same task id");
+        assert_eq!(
+            chain.len(),
+            2,
+            "both hops must appear under the same task id"
+        );
 
         // Verify the chain is in chronological order.
         assert_eq!(chain[0].from_agent(), 1);
         assert_eq!(chain[1].from_agent(), 2);
 
         // Every hop in the chain shares the correlation id.
-        assert!(chain.iter().all(|e| e.correlation_id() == Some("corr-pipeline-42")));
+        assert!(
+            chain
+                .iter()
+                .all(|e| e.correlation_id() == Some("corr-pipeline-42"))
+        );
     }
 }
