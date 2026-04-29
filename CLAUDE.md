@@ -351,3 +351,17 @@ MIT License - See LICENSE file for details.
 ---
 
 Built with ❤️ by Jeremy Miranda and Claude Code.
+
+## Orchestration Rules
+
+Rules that govern how autonomous agents coordinate within the Phantom multi-agent pipeline.
+
+1. **Post-merge workspace check**: After every PR merge, an agent must run `cargo build --workspace` and `cargo test --workspace --no-run` on main before spawning new implementation agents that touch the same crates.
+
+2. **Pre-PR self-check**: Every implementation agent must run `./scripts/pre-pr-check.sh <crate-name>` before calling `gh pr create`. A PR must not be opened if the script fails.
+
+3. **Worktree cleanup**: After every 10 merges, a cleanup agent must be spawned to prune merged worktrees.
+
+4. **Long-running agent timeout**: Any implementation agent running for more than 30 minutes without opening a PR should be checked on by sending a status message.
+
+5. **Hot-file tracking**: Before spawning an agent on a crate, check `gh pr list -R jdmiranda/phantom --state open` to confirm no other open PR already modifies the same files.
