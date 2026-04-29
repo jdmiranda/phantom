@@ -20,6 +20,7 @@ png = "0.17"
 
 [dev-dependencies]
 tempfile = "3"
+naga = { version = "25", features = ["wgsl-in"] }
 
 [lints]
 workspace = true
