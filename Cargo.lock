@@ -5207,6 +5207,7 @@ dependencies = [
  "cosmic-text",
  "etagere",
  "log",
+ "naga",
  "png 0.17.16",
  "pollster",
  "serde",
