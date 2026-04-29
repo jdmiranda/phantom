@@ -49,10 +49,10 @@ pub struct WarmUpGate {
 impl Default for WarmUpGate {
     fn default() -> Self {
         Self {
-            git_context: 0,     // always available
-            memory_context: 3,  // after 3 tasks
-            failed_context: 5,  // after 5 tasks
-            skill_context: 8,   // after 8 tasks
+            git_context: 0,    // always available
+            memory_context: 3, // after 3 tasks
+            failed_context: 5, // after 5 tasks
+            skill_context: 8,  // after 8 tasks
         }
     }
 }
@@ -180,9 +180,15 @@ impl CurriculumGenerator {
         // -- Project commands --
         let cmds = &context.commands;
         let mut cmd_parts = Vec::new();
-        if let Some(ref b) = cmds.build { cmd_parts.push(format!("build: {b}")); }
-        if let Some(ref t) = cmds.test { cmd_parts.push(format!("test: {t}")); }
-        if let Some(ref l) = cmds.lint { cmd_parts.push(format!("lint: {l}")); }
+        if let Some(ref b) = cmds.build {
+            cmd_parts.push(format!("build: {b}"));
+        }
+        if let Some(ref t) = cmds.test {
+            cmd_parts.push(format!("test: {t}"));
+        }
+        if let Some(ref l) = cmds.lint {
+            cmd_parts.push(format!("lint: {l}"));
+        }
         if !cmd_parts.is_empty() {
             sections.push(format!("Commands: {}", cmd_parts.join(", ")));
         }
@@ -197,7 +203,8 @@ impl CurriculumGenerator {
 
         // -- Completed tasks --
         if !self.completed_tasks.is_empty() {
-            let recent: Vec<&str> = self.completed_tasks
+            let recent: Vec<&str> = self
+                .completed_tasks
                 .iter()
                 .rev()
                 .take(10)
@@ -206,13 +213,18 @@ impl CurriculumGenerator {
             sections.push(format!(
                 "Completed tasks (recent {}):\n{}",
                 recent.len(),
-                recent.iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n")
+                recent
+                    .iter()
+                    .map(|t| format!("  - {t}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ));
         }
 
         // -- Failed tasks (gated) --
         if progress >= self.warm_up.failed_context && !self.failed_tasks.is_empty() {
-            let recent_fails: Vec<&str> = self.failed_tasks
+            let recent_fails: Vec<&str> = self
+                .failed_tasks
                 .iter()
                 .rev()
                 .take(5)
@@ -220,7 +232,11 @@ impl CurriculumGenerator {
                 .collect();
             sections.push(format!(
                 "Failed tasks (avoid similar):\n{}",
-                recent_fails.iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n")
+                recent_fails
+                    .iter()
+                    .map(|t| format!("  - {t}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ));
         }
 
@@ -229,10 +245,7 @@ impl CurriculumGenerator {
             let skill_names = skill_store.list_skill_names();
             if !skill_names.is_empty() {
                 let display: Vec<&str> = skill_names.iter().take(10).map(|s| s.as_str()).collect();
-                sections.push(format!(
-                    "Known skills: {}",
-                    display.join(", ")
-                ));
+                sections.push(format!("Known skills: {}", display.join(", ")));
             }
         }
 
@@ -318,14 +331,19 @@ impl CurriculumGenerator {
 
         // Ordered list of bootstrap tasks -- propose the first one not yet completed.
         let bootstrap_sequence: Vec<(&str, &str)> = vec![
-            ("Detect project structure and record conventions to memory",
-             "First contact: learn the project layout"),
-            ("Run the build command and verify it compiles cleanly",
-             "Verify the project builds"),
-            ("Run the test suite and summarize results",
-             "Verify tests pass"),
-            ("Check for common linting issues",
-             "Code quality baseline"),
+            (
+                "Detect project structure and record conventions to memory",
+                "First contact: learn the project layout",
+            ),
+            (
+                "Run the build command and verify it compiles cleanly",
+                "Verify the project builds",
+            ),
+            (
+                "Run the test suite and summarize results",
+                "Verify tests pass",
+            ),
+            ("Check for common linting issues", "Code quality baseline"),
         ];
 
         for (task, reasoning) in bootstrap_sequence {
@@ -431,7 +449,10 @@ mod tests {
         let mut curriculum = CurriculumGenerator::new();
         curriculum.record_success("run tests");
         curriculum.record_failure("run tests");
-        assert!(curriculum.failed_tasks.is_empty(), "should not add completed task to failures");
+        assert!(
+            curriculum.failed_tasks.is_empty(),
+            "should not add completed task to failures"
+        );
     }
 
     #[test]
@@ -483,13 +504,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut memory = phantom_memory::MemoryStore::open_in("/tmp/test", dir.path()).unwrap();
         memory
-            .set("test_key", "test_value", phantom_memory::MemoryCategory::Convention, phantom_memory::MemorySource::Auto)
+            .set(
+                "test_key",
+                "test_value",
+                phantom_memory::MemoryCategory::Convention,
+                phantom_memory::MemorySource::Auto,
+            )
             .unwrap();
         let skill_store = SkillStore::new();
 
         // At progress 0, memory should NOT be included (gate = 3).
         let prompt = curriculum.build_prompt(&ctx, &memory, &skill_store);
-        assert!(!prompt.contains("test_key"), "memory should be gated at progress 0");
+        assert!(
+            !prompt.contains("test_key"),
+            "memory should be gated at progress 0"
+        );
     }
 }
 
@@ -582,7 +611,12 @@ mod hook_tests {
     use super::*;
 
     fn outcome(success: bool) -> TaskOutcome {
-        TaskOutcome { task_id: 0, difficulty: 1, success, duration_ms: 100 }
+        TaskOutcome {
+            task_id: 0,
+            difficulty: 1,
+            success,
+            duration_ms: 100,
+        }
     }
 
     #[test]

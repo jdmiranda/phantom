@@ -91,9 +91,7 @@ pub enum ResponseCurve {
     /// `score = value` regardless of input.
     ///
     /// Use for: baseline behaviors (DA:I's "follow the leader" at score 0).
-    Constant {
-        value: f32,
-    },
+    Constant { value: f32 },
 }
 
 impl ResponseCurve {
@@ -101,18 +99,34 @@ impl ResponseCurve {
     pub fn evaluate(&self, input: f32) -> f32 {
         let input = input.clamp(0.0, 1.0);
         match self {
-            Self::Linear { slope, intercept, max_score } => {
-                (slope * input + intercept).clamp(0.0, *max_score)
-            }
-            Self::Polynomial { exponent, coefficient, max_score } => {
-                (coefficient * input.powf(*exponent)).clamp(0.0, *max_score)
-            }
-            Self::Logistic { midpoint, steepness, max_score } => {
+            Self::Linear {
+                slope,
+                intercept,
+                max_score,
+            } => (slope * input + intercept).clamp(0.0, *max_score),
+            Self::Polynomial {
+                exponent,
+                coefficient,
+                max_score,
+            } => (coefficient * input.powf(*exponent)).clamp(0.0, *max_score),
+            Self::Logistic {
+                midpoint,
+                steepness,
+                max_score,
+            } => {
                 let exp = (-steepness * (input - midpoint)).exp();
                 (max_score / (1.0 + exp)).clamp(0.0, *max_score)
             }
-            Self::Step { threshold, on_value, off_value } => {
-                if input >= *threshold { *on_value } else { *off_value }
+            Self::Step {
+                threshold,
+                on_value,
+                off_value,
+            } => {
+                if input >= *threshold {
+                    *on_value
+                } else {
+                    *off_value
+                }
             }
             Self::Constant { value } => *value,
         }
@@ -363,11 +377,7 @@ impl Behavior {
         let base = self.class.base_score();
         let max_add = self.class.dynamic_range();
 
-        let consideration_total: f32 = self
-            .considerations
-            .iter()
-            .map(|c| c.evaluate(ctx))
-            .sum();
+        let consideration_total: f32 = self.considerations.iter().map(|c| c.evaluate(ctx)).sum();
 
         // Clamp the consideration contribution to the class dynamic range.
         base + consideration_total.min(max_add)
@@ -602,7 +612,7 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
                     name: "chattiness_penalty".into(),
                     filter: None,
                     input_fn: Box::new(|ctx| ctx.chattiness / 0.5), // normalize to [0, 1]
-                    curve: ResponseCurve::linear(9.0), // up to 9 more points
+                    curve: ResponseCurve::linear(9.0),              // up to 9 more points
                 },
             ],
         },
@@ -654,7 +664,9 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
         Behavior {
             id: "explain_error".into(),
             class: ActionClass::Support,
-            viable: Some(Box::new(|ctx| ctx.has_errors && ctx.idle_secs > 5.0 && !ctx.in_repl)),
+            viable: Some(Box::new(|ctx| {
+                ctx.has_errors && ctx.idle_secs > 5.0 && !ctx.in_repl
+            })),
             considerations: vec![
                 // User must have been idle after an error.
                 Consideration {
@@ -677,18 +689,18 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
         Behavior {
             id: "offer_help".into(),
             class: ActionClass::Support,
-            viable: Some(Box::new(|ctx| !ctx.has_errors && ctx.idle_secs > 30.0 && !ctx.in_repl)),
-            considerations: vec![
-                Consideration {
-                    name: "long_idle_no_errors".into(),
-                    filter: Some(Filter {
-                        name: "idle_gt_30_no_errors".into(),
-                        gate: Box::new(|ctx| !ctx.has_errors && ctx.idle_secs > 30.0 && !ctx.in_repl),
-                    }),
-                    input_fn: Box::new(|ctx| ((ctx.idle_secs - 30.0) / 60.0).clamp(0.0, 1.0)),
-                    curve: ResponseCurve::linear(10.0),
-                },
-            ],
+            viable: Some(Box::new(|ctx| {
+                !ctx.has_errors && ctx.idle_secs > 30.0 && !ctx.in_repl
+            })),
+            considerations: vec![Consideration {
+                name: "long_idle_no_errors".into(),
+                filter: Some(Filter {
+                    name: "idle_gt_30_no_errors".into(),
+                    gate: Box::new(|ctx| !ctx.has_errors && ctx.idle_secs > 30.0 && !ctx.in_repl),
+                }),
+                input_fn: Box::new(|ctx| ((ctx.idle_secs - 30.0) / 60.0).clamp(0.0, 1.0)),
+                curve: ResponseCurve::linear(10.0),
+            }],
         },
         // -- Update memory (Proactive class: 20-40) --
         // Viable only when a new pattern was detected.
@@ -696,17 +708,15 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             id: "update_memory".into(),
             class: ActionClass::Proactive,
             viable: Some(Box::new(|ctx| ctx.new_pattern_detected)),
-            considerations: vec![
-                Consideration {
-                    name: "new_pattern".into(),
-                    filter: Some(Filter {
-                        name: "new_pattern_detected".into(),
-                        gate: Box::new(|ctx| ctx.new_pattern_detected),
-                    }),
-                    input_fn: Box::new(|_| 1.0),
-                    curve: ResponseCurve::Constant { value: 15.0 },
-                },
-            ],
+            considerations: vec![Consideration {
+                name: "new_pattern".into(),
+                filter: Some(Filter {
+                    name: "new_pattern_detected".into(),
+                    gate: Box::new(|ctx| ctx.new_pattern_detected),
+                }),
+                input_fn: Box::new(|_| 1.0),
+                curve: ResponseCurve::Constant { value: 15.0 },
+            }],
         },
         // -- Watch build (Proactive class: 20-40) --
         // Viable only while an active process is running.
@@ -714,17 +724,15 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             id: "watch_build".into(),
             class: ActionClass::Proactive,
             viable: Some(Box::new(|ctx| ctx.has_active_process)),
-            considerations: vec![
-                Consideration {
-                    name: "active_process".into(),
-                    filter: Some(Filter {
-                        name: "has_active_process".into(),
-                        gate: Box::new(|ctx| ctx.has_active_process),
-                    }),
-                    input_fn: Box::new(|_| 1.0),
-                    curve: ResponseCurve::Constant { value: 10.0 },
-                },
-            ],
+            considerations: vec![Consideration {
+                name: "active_process".into(),
+                filter: Some(Filter {
+                    name: "has_active_process".into(),
+                    gate: Box::new(|ctx| ctx.has_active_process),
+                }),
+                input_fn: Box::new(|_| 1.0),
+                curve: ResponseCurve::Constant { value: 10.0 },
+            }],
         },
         // -- Notification: agent complete (Reaction class: 50-70) --
         // Viable only when an agent just completed.
@@ -732,17 +740,15 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             id: "notify_agent_complete".into(),
             class: ActionClass::Reaction,
             viable: Some(Box::new(|ctx| ctx.agent_just_completed)),
-            considerations: vec![
-                Consideration {
-                    name: "agent_completed".into(),
-                    filter: Some(Filter {
-                        name: "agent_just_completed".into(),
-                        gate: Box::new(|ctx| ctx.agent_just_completed),
-                    }),
-                    input_fn: Box::new(|_| 1.0),
-                    curve: ResponseCurve::Constant { value: 15.0 },
-                },
-            ],
+            considerations: vec![Consideration {
+                name: "agent_completed".into(),
+                filter: Some(Filter {
+                    name: "agent_just_completed".into(),
+                    gate: Box::new(|ctx| ctx.agent_just_completed),
+                }),
+                input_fn: Box::new(|_| 1.0),
+                curve: ResponseCurve::Constant { value: 15.0 },
+            }],
         },
         // -- Notification: file/git change (Proactive class: 20-40) --
         // Viable only when a file or git change was detected this frame.
@@ -750,17 +756,15 @@ pub fn build_default_behaviors() -> Vec<Behavior> {
             id: "notify_change".into(),
             class: ActionClass::Proactive,
             viable: Some(Box::new(|ctx| ctx.file_or_git_changed)),
-            considerations: vec![
-                Consideration {
-                    name: "file_or_git_changed".into(),
-                    filter: Some(Filter {
-                        name: "change_detected".into(),
-                        gate: Box::new(|ctx| ctx.file_or_git_changed),
-                    }),
-                    input_fn: Box::new(|_| 1.0),
-                    curve: ResponseCurve::Constant { value: 8.0 },
-                },
-            ],
+            considerations: vec![Consideration {
+                name: "file_or_git_changed".into(),
+                filter: Some(Filter {
+                    name: "change_detected".into(),
+                    gate: Box::new(|ctx| ctx.file_or_git_changed),
+                }),
+                input_fn: Box::new(|_| 1.0),
+                curve: ResponseCurve::Constant { value: 8.0 },
+            }],
         },
     ]
 }
@@ -868,7 +872,9 @@ pub struct ExponentialCurve {
 impl ExponentialCurve {
     /// Create a power-law curve with exponent `k`.
     pub fn new(k: f32) -> Self {
-        Self { k: k.max(f32::EPSILON) }
+        Self {
+            k: k.max(f32::EPSILON),
+        }
     }
 
     /// Quadratic ramp (`k = 2`): accelerating urgency.
@@ -922,17 +928,26 @@ pub struct LogisticCurve {
 impl LogisticCurve {
     /// Create a logistic curve with custom midpoint and steepness.
     pub fn new(midpoint: f32, steepness: f32) -> Self {
-        Self { midpoint, steepness }
+        Self {
+            midpoint,
+            steepness,
+        }
     }
 
     /// Standard sigmoid centered at 0.5 with moderate steepness (10).
     pub fn standard() -> Self {
-        Self { midpoint: 0.5, steepness: 10.0 }
+        Self {
+            midpoint: 0.5,
+            steepness: 10.0,
+        }
     }
 
     /// Sharp transition (steepness = 20) centered at 0.5.
     pub fn sharp() -> Self {
-        Self { midpoint: 0.5, steepness: 20.0 }
+        Self {
+            midpoint: 0.5,
+            steepness: 20.0,
+        }
     }
 }
 
@@ -975,24 +990,41 @@ pub struct StepCurve {
 impl StepCurve {
     /// Create a step with custom threshold and values.
     pub fn new(threshold: f32, on_value: f32, off_value: f32) -> Self {
-        Self { threshold, on_value: on_value.clamp(0.0, 1.0), off_value: off_value.clamp(0.0, 1.0) }
+        Self {
+            threshold,
+            on_value: on_value.clamp(0.0, 1.0),
+            off_value: off_value.clamp(0.0, 1.0),
+        }
     }
 
     /// Binary 0/1 step that activates at `threshold`.
     pub fn on_at(threshold: f32) -> Self {
-        Self { threshold, on_value: 1.0, off_value: 0.0 }
+        Self {
+            threshold,
+            on_value: 1.0,
+            off_value: 0.0,
+        }
     }
 
     /// Always-on constant (threshold = 0).
     pub fn always_on() -> Self {
-        Self { threshold: 0.0, on_value: 1.0, off_value: 1.0 }
+        Self {
+            threshold: 0.0,
+            on_value: 1.0,
+            off_value: 1.0,
+        }
     }
 }
 
 impl UtilityCurve for StepCurve {
     fn score(&self, x: f32) -> f32 {
         let x = x.clamp(0.0, 1.0);
-        if x >= self.threshold { self.on_value } else { self.off_value }.clamp(0.0, 1.0)
+        if x >= self.threshold {
+            self.on_value
+        } else {
+            self.off_value
+        }
+        .clamp(0.0, 1.0)
     }
 }
 
@@ -1021,7 +1053,9 @@ pub struct InvertedCurve {
 impl InvertedCurve {
     /// Wrap `curve` and invert its output.
     pub fn of<C: UtilityCurve + 'static>(curve: C) -> Self {
-        Self { inner: Box::new(curve) }
+        Self {
+            inner: Box::new(curve),
+        }
     }
 }
 
@@ -1294,14 +1328,12 @@ mod tests {
             id: "test".into(),
             class: ActionClass::Proactive, // base=20, range=20, max=40
             viable: None,
-            considerations: vec![
-                Consideration {
-                    name: "huge".into(),
-                    filter: None,
-                    input_fn: Box::new(|_| 1.0),
-                    curve: ResponseCurve::Constant { value: 100.0 }, // way over range
-                },
-            ],
+            considerations: vec![Consideration {
+                name: "huge".into(),
+                filter: None,
+                input_fn: Box::new(|_| 1.0),
+                curve: ResponseCurve::Constant { value: 100.0 }, // way over range
+            }],
         };
         let ctx = ScoringContext::default();
         // Clamped to 20 + 20 = 40.
@@ -1555,7 +1587,10 @@ mod tests {
         let falling = LinearCurve::falling();
         for x in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
             let sum = rising.score(x) + falling.score(x);
-            assert!((sum - 1.0).abs() < 1e-6, "rising + falling should sum to 1 at x={x}, got {sum}");
+            assert!(
+                (sum - 1.0).abs() < 1e-6,
+                "rising + falling should sum to 1 at x={x}, got {sum}"
+            );
         }
     }
 
@@ -1589,7 +1624,10 @@ mod tests {
     fn exponential_quadratic_at_half_is_below_linear() {
         let c = ExponentialCurve::quadratic();
         // x^2 at 0.5 = 0.25, which is less than linear 0.5
-        assert!(c.score(0.5) < 0.5, "quadratic should score below linear midpoint");
+        assert!(
+            c.score(0.5) < 0.5,
+            "quadratic should score below linear midpoint"
+        );
         assert!((c.score(0.5) - 0.25).abs() < 1e-6);
     }
 
@@ -1597,7 +1635,10 @@ mod tests {
     fn exponential_sqrt_at_half_is_above_linear() {
         let c = ExponentialCurve::sqrt();
         // sqrt(0.5) ≈ 0.707 > 0.5
-        assert!(c.score(0.5) > 0.5, "sqrt should score above linear midpoint");
+        assert!(
+            c.score(0.5) > 0.5,
+            "sqrt should score above linear midpoint"
+        );
     }
 
     #[test]
@@ -1618,20 +1659,32 @@ mod tests {
     #[test]
     fn logistic_at_zero_is_low() {
         let c = LogisticCurve::standard();
-        assert!(c.score(0.0) < 0.1, "logistic at x=0 should be < 0.1, got {}", c.score(0.0));
+        assert!(
+            c.score(0.0) < 0.1,
+            "logistic at x=0 should be < 0.1, got {}",
+            c.score(0.0)
+        );
     }
 
     #[test]
     fn logistic_at_half_is_midpoint() {
         let c = LogisticCurve::standard();
         // Sigmoid(0) = 0.5 exactly.
-        assert!((c.score(0.5) - 0.5).abs() < 1e-5, "logistic at midpoint should be 0.5, got {}", c.score(0.5));
+        assert!(
+            (c.score(0.5) - 0.5).abs() < 1e-5,
+            "logistic at midpoint should be 0.5, got {}",
+            c.score(0.5)
+        );
     }
 
     #[test]
     fn logistic_at_one_is_high() {
         let c = LogisticCurve::standard();
-        assert!(c.score(1.0) > 0.9, "logistic at x=1 should be > 0.9, got {}", c.score(1.0));
+        assert!(
+            c.score(1.0) > 0.9,
+            "logistic at x=1 should be > 0.9, got {}",
+            c.score(1.0)
+        );
     }
 
     #[test]
@@ -1643,7 +1696,8 @@ mod tests {
             assert!(
                 c.score(hi) > c.score(lo),
                 "LogisticCurve should be strictly increasing: score({hi})={} < score({lo})={}",
-                c.score(hi), c.score(lo)
+                c.score(hi),
+                c.score(lo)
             );
         }
     }
@@ -1653,7 +1707,10 @@ mod tests {
         let c = LogisticCurve::new(0.5, 50.0); // very steep
         for x in [0.0f32, 0.499, 0.5, 0.501, 1.0] {
             let s = c.score(x);
-            assert!(s >= 0.0 && s <= 1.0, "logistic output {s} out of [0,1] at x={x}");
+            assert!(
+                s >= 0.0 && s <= 1.0,
+                "logistic output {s} out of [0,1] at x={x}"
+            );
         }
     }
 
@@ -1711,7 +1768,10 @@ mod tests {
         let c = InvertedCurve::of(LogisticCurve::sharp());
         for x in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
             let s = c.score(x);
-            assert!(s >= 0.0 && s <= 1.0, "inverted output {s} out of [0,1] at x={x}");
+            assert!(
+                s >= 0.0 && s <= 1.0,
+                "inverted output {s} out of [0,1] at x={x}"
+            );
         }
     }
 
@@ -1722,7 +1782,8 @@ mod tests {
         let c = CompositeCurve::build(vec![
             (Box::new(LinearCurve::rising()), 0.5),
             (Box::new(LogisticCurve::standard()), 0.5),
-        ]).unwrap();
+        ])
+        .unwrap();
         // Both curves score ~0 at x=0; weighted avg is also ~0.
         assert!(c.score(0.0) < 0.1);
     }
@@ -1730,9 +1791,10 @@ mod tests {
     #[test]
     fn composite_at_half() {
         let c = CompositeCurve::build(vec![
-            (Box::new(LinearCurve::rising()), 1.0),  // 0.5
-            (Box::new(LinearCurve::rising()), 1.0),  // 0.5
-        ]).unwrap();
+            (Box::new(LinearCurve::rising()), 1.0), // 0.5
+            (Box::new(LinearCurve::rising()), 1.0), // 0.5
+        ])
+        .unwrap();
         assert!((c.score(0.5) - 0.5).abs() < 1e-6);
     }
 
@@ -1741,7 +1803,8 @@ mod tests {
         let c = CompositeCurve::build(vec![
             (Box::new(LinearCurve::rising()), 0.6),
             (Box::new(ExponentialCurve::quadratic()), 0.4),
-        ]).unwrap();
+        ])
+        .unwrap();
         // Both score 1.0 at x=1; composite should also be 1.0.
         assert!((c.score(1.0) - 1.0).abs() < 1e-6);
     }
@@ -1750,9 +1813,12 @@ mod tests {
     fn composite_weights_sum_guard_rejects_negative() {
         let result = CompositeCurve::build(vec![
             (Box::new(LinearCurve::rising()), 0.6),
-            (Box::new(LinearCurve::rising()), -0.1),  // negative weight
+            (Box::new(LinearCurve::rising()), -0.1), // negative weight
         ]);
-        assert!(result.is_err(), "CompositeCurve::build should reject negative weights");
+        assert!(
+            result.is_err(),
+            "CompositeCurve::build should reject negative weights"
+        );
     }
 
     #[test]
@@ -1761,10 +1827,14 @@ mod tests {
             (Box::new(LinearCurve::rising()), 0.3),
             (Box::new(LogisticCurve::standard()), 0.4),
             (Box::new(ExponentialCurve::sqrt()), 0.3),
-        ]).unwrap();
+        ])
+        .unwrap();
         for x in [0.0f32, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
             let s = c.score(x);
-            assert!(s >= 0.0 && s <= 1.0, "composite output {s} out of [0,1] at x={x}");
+            assert!(
+                s >= 0.0 && s <= 1.0,
+                "composite output {s} out of [0,1] at x={x}"
+            );
         }
     }
 
@@ -1775,7 +1845,8 @@ mod tests {
         let c = CompositeCurve::build(vec![
             (Box::new(StepCurve::always_on()), 0.9),
             (Box::new(LinearCurve::rising()), 0.1),
-        ]).unwrap();
+        ])
+        .unwrap();
         let score = c.score(0.5);
         // weighted avg = (0.9 * 1.0 + 0.1 * 0.5) / 1.0 = 0.95
         assert!((score - 0.95).abs() < 1e-6, "expected 0.95, got {score}");
@@ -1792,7 +1863,8 @@ mod tests {
         let c = CompositeCurve::build(vec![
             (Box::new(LinearCurve::rising()), 0.5),
             (Box::new(ExponentialCurve::quadratic()), 0.5),
-        ]).unwrap();
+        ])
+        .unwrap();
         let samples = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0];
         for window in samples.windows(2) {
             let (lo, hi) = (window[0], window[1]);

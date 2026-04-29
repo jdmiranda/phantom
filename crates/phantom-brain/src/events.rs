@@ -20,7 +20,6 @@ use phantom_semantic::ParsedOutput;
 #[derive(Debug, Clone)]
 pub enum AiEvent {
     // -- Terminal I/O --------------------------------------------------------
-
     /// A command finished executing and its output has been semantically parsed.
     CommandComplete(ParsedOutput),
 
@@ -28,7 +27,6 @@ pub enum AiEvent {
     OutputChunk(String),
 
     // -- User ----------------------------------------------------------------
-
     /// The user pressed the interrupt key (e.g. `!`) with an optional command.
     Interrupt(String),
 
@@ -36,7 +34,6 @@ pub enum AiEvent {
     AgentRequest(AgentTask),
 
     // -- Agents --------------------------------------------------------------
-
     /// An agent finished its work.
     AgentComplete {
         id: AgentId,
@@ -49,13 +46,9 @@ pub enum AiEvent {
     },
 
     /// An agent needs user input before it can continue.
-    AgentNeedsInput {
-        id: AgentId,
-        question: String,
-    },
+    AgentNeedsInput { id: AgentId, question: String },
 
     // -- Environment ---------------------------------------------------------
-
     /// A watched file changed on disk.
     FileChanged(String),
 
@@ -63,7 +56,6 @@ pub enum AiEvent {
     GitStateChanged,
 
     // -- Timers --------------------------------------------------------------
-
     /// The user has been idle for `seconds` since their last input.
     UserIdle { seconds: f32 },
 
@@ -71,7 +63,6 @@ pub enum AiEvent {
     WatcherTick { agent_id: AgentId },
 
     // -- System --------------------------------------------------------------
-
     /// User set a goal for the brain to pursue autonomously.
     GoalSet {
         objective: String,

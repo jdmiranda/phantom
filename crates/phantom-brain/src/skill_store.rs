@@ -133,18 +133,19 @@ impl SkillStore {
         );
 
         let key = format!("{SKILL_PREFIX}{name}");
-        memory.set(&key, &value, MemoryCategory::Convention, MemorySource::Agent)?;
+        memory.set(
+            &key,
+            &value,
+            MemoryCategory::Convention,
+            MemorySource::Agent,
+        )?;
         self.skills.insert(name.to_owned(), entry);
 
         Ok(())
     }
 
     /// Record a successful use of an existing skill.
-    pub fn record_use(
-        &mut self,
-        name: &str,
-        memory: &mut MemoryStore,
-    ) -> anyhow::Result<()> {
+    pub fn record_use(&mut self, name: &str, memory: &mut MemoryStore) -> anyhow::Result<()> {
         let Some(skill) = self.skills.get_mut(name) else {
             return Ok(());
         };
@@ -158,7 +159,12 @@ impl SkillStore {
         );
 
         let key = format!("{SKILL_PREFIX}{name}");
-        memory.set(&key, &value, MemoryCategory::Convention, MemorySource::Agent)?;
+        memory.set(
+            &key,
+            &value,
+            MemoryCategory::Convention,
+            MemorySource::Agent,
+        )?;
 
         Ok(())
     }
@@ -423,8 +429,12 @@ mod tests {
         let mut store = SkillStore::new();
         let (mut memory, _dir) = tmp_memory();
 
-        store.add_skill("a", "code", "desc", "task", &mut memory).unwrap();
-        store.add_skill("b", "code", "desc", "task", &mut memory).unwrap();
+        store
+            .add_skill("a", "code", "desc", "task", &mut memory)
+            .unwrap();
+        store
+            .add_skill("b", "code", "desc", "task", &mut memory)
+            .unwrap();
 
         let names = store.list_skill_names();
         assert_eq!(names.len(), 2);

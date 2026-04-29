@@ -161,9 +161,7 @@ impl GoalPursuit {
              Perform one task for this objective: {objective}\n"
         );
         if !context.is_empty() {
-            prompt.push_str(&format!(
-                "Previously completed tasks:\n{context}\n"
-            ));
+            prompt.push_str(&format!("Previously completed tasks:\n{context}\n"));
         }
         prompt.push_str(&format!("\nYour task: {}\n", task.name));
         prompt
@@ -206,19 +204,25 @@ pub fn build_task_creation_prompt(
     );
     if !incomplete_tasks.is_empty() {
         let list = incomplete_tasks.join(", ");
-        prompt.push_str(&format!("Incomplete tasks: {list}\n\
-             New tasks must not overlap with incomplete tasks.\n"));
+        prompt.push_str(&format!(
+            "Incomplete tasks: {list}\n\
+             New tasks must not overlap with incomplete tasks.\n"
+        ));
     }
     prompt.push_str(
         "Return new tasks as a numbered list (one per line). \
-         If no new tasks needed, write \"No new tasks.\"\n"
+         If no new tasks needed, write \"No new tasks.\"\n",
     );
     prompt
 }
 
 /// Build the prioritization prompt for the LLM.
 pub fn build_prioritization_prompt(objective: &str, task_names: &[&str]) -> String {
-    let list = task_names.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n");
+    let list = task_names
+        .iter()
+        .map(|t| format!("- {t}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "Prioritize these tasks for the objective: {objective}\n\n\
          Tasks:\n{list}\n\n\
@@ -233,9 +237,13 @@ pub fn parse_task_list(response: &str) -> Vec<String> {
     let mut tasks = Vec::new();
     for line in response.lines() {
         let trimmed = line.trim();
-        let Some((num_part, name_part)) = trimmed.split_once('.') else { continue };
+        let Some((num_part, name_part)) = trimmed.split_once('.') else {
+            continue;
+        };
         let has_digit = num_part.chars().any(|c| c.is_ascii_digit());
-        if !has_digit { continue; }
+        if !has_digit {
+            continue;
+        }
         let name: String = name_part.trim().to_string();
         if !name.is_empty() && !name.to_lowercase().starts_with("no new task") {
             tasks.push(name);
@@ -313,16 +321,13 @@ impl ReflexionMemory {
 }
 
 /// Build the self-reflection prompt (Reflexion paper, exact pattern).
-pub fn build_reflection_prompt(
-    failed_trajectory: &str,
-    prior_reflections: &[&str],
-) -> String {
+pub fn build_reflection_prompt(failed_trajectory: &str, prior_reflections: &[&str]) -> String {
     let mut prompt = String::from(
         "You will be given the history of a failed task attempt in a terminal environment. \
          Do not summarize the environment. Think about the strategy and path you took. \
          Devise a concise new plan that accounts for your mistake, referencing specific \
          actions you should have taken.\n\n\
-         Failed attempt:\n"
+         Failed attempt:\n",
     );
     prompt.push_str(failed_trajectory);
 
@@ -337,11 +342,7 @@ pub fn build_reflection_prompt(
 }
 
 /// Inject reflections into an execution prompt.
-pub fn inject_reflections(
-    base_prompt: &str,
-    task_info: &str,
-    memory: &ReflexionMemory,
-) -> String {
+pub fn inject_reflections(base_prompt: &str, task_info: &str, memory: &ReflexionMemory) -> String {
     let mut prompt = base_prompt.to_string();
     let reflections = memory.get_reflection_texts();
     if !reflections.is_empty() {
@@ -408,8 +409,18 @@ mod tests {
         q.push("b".into(), TaskOrigin::User);
 
         let new_tasks = vec![
-            BrainTask { id: 10, name: "x".into(), origin: TaskOrigin::User, result: None },
-            BrainTask { id: 11, name: "y".into(), origin: TaskOrigin::User, result: None },
+            BrainTask {
+                id: 10,
+                name: "x".into(),
+                origin: TaskOrigin::User,
+                result: None,
+            },
+            BrainTask {
+                id: 11,
+                name: "y".into(),
+                origin: TaskOrigin::User,
+                result: None,
+            },
         ];
         q.replace(new_tasks);
 
@@ -421,7 +432,10 @@ mod tests {
     fn parse_task_list_numbered() {
         let response = "1. Fix the compiler error\n2. Run tests\n3. Update docs\n";
         let tasks = parse_task_list(response);
-        assert_eq!(tasks, vec!["Fix the compiler error", "Run tests", "Update docs"]);
+        assert_eq!(
+            tasks,
+            vec!["Fix the compiler error", "Run tests", "Update docs"]
+        );
     }
 
     #[test]
@@ -450,11 +464,14 @@ mod tests {
         let task = gp.queue.pop_front().unwrap();
         assert_eq!(task.name, "run cargo test");
 
-        gp.record_completion(task, TaskResult {
-            data: "3 tests failed".into(),
-            success: false,
-            timestamp_secs: 0,
-        });
+        gp.record_completion(
+            task,
+            TaskResult {
+                data: "3 tests failed".into(),
+                success: false,
+                timestamp_secs: 0,
+            },
+        );
 
         assert_eq!(gp.current_cycle, 1);
         assert!(gp.queue.is_empty()); // No new tasks yet
@@ -489,10 +506,8 @@ mod tests {
 
     #[test]
     fn reflection_prompt_includes_trajectory() {
-        let prompt = build_reflection_prompt(
-            "> cargo test\n3 failures\n",
-            &["tried fixing imports"],
-        );
+        let prompt =
+            build_reflection_prompt("> cargo test\n3 failures\n", &["tried fixing imports"]);
         assert!(prompt.contains("cargo test"));
         assert!(prompt.contains("3 failures"));
         assert!(prompt.contains("tried fixing imports"));

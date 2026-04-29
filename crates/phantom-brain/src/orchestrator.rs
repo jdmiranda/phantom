@@ -19,8 +19,8 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
-use phantom_agents::dispatch::Disposition;
 use phantom_agents::AgentTask;
+use phantom_agents::dispatch::Disposition;
 
 // ---------------------------------------------------------------------------
 // Fact classification (task ledger knowledge categories)
@@ -344,8 +344,7 @@ impl TaskLedger {
     /// Promote a guess to verified when an agent confirms it.
     pub fn verify_fact(&mut self, content_prefix: &str) {
         for fact in &mut self.facts {
-            if fact.confidence == FactConfidence::Guess
-                && fact.content.starts_with(content_prefix)
+            if fact.confidence == FactConfidence::Guess && fact.content.starts_with(content_prefix)
             {
                 fact.confidence = FactConfidence::Verified;
                 fact.updated_at = Instant::now();
@@ -373,13 +372,10 @@ impl TaskLedger {
         self.plan = steps;
         self.stall_counter = 0;
         if self.has_cycle() {
-            log::error!(
-                "TaskLedger::set_plan — dependency cycle detected; blocking all steps"
-            );
+            log::error!("TaskLedger::set_plan — dependency cycle detected; blocking all steps");
             for step in &mut self.plan {
                 step.status = StepStatus::Failed;
-                step.result_summary =
-                    Some("blocked: dependency cycle detected in plan".into());
+                step.result_summary = Some("blocked: dependency cycle detected in plan".into());
             }
         }
     }
@@ -462,7 +458,7 @@ impl TaskLedger {
                     }
 
                     match color[dep] {
-                        1 => return true,  // back-edge → cycle
+                        1 => return true, // back-edge → cycle
                         0 => {
                             // Tree-edge: push and colour grey.
                             color[dep] = 1;
@@ -554,8 +550,7 @@ impl TaskLedger {
         let counts = self.step_counts();
 
         // Q1: Complete if all steps done and no pending work.
-        let is_complete =
-            counts.pending == 0 && counts.active == 0 && counts.done > 0;
+        let is_complete = counts.pending == 0 && counts.active == 0 && counts.done > 0;
 
         // Q2: Loop detection via output similarity.
         let is_looping = self.detect_loop();
@@ -576,12 +571,12 @@ impl TaskLedger {
         };
 
         // Q4 & Q5: Next step.
-        let (next_step_idx, next_instruction) =
-            if let Some((idx, step)) = self.next_pending_step() {
-                (Some(idx), Some(step.description.clone()))
-            } else {
-                (None, None)
-            };
+        let (next_step_idx, next_instruction) = if let Some((idx, step)) = self.next_pending_step()
+        {
+            (Some(idx), Some(step.description.clone()))
+        } else {
+            (None, None)
+        };
 
         // Update stall counter.
         if !has_progress && !is_complete {
@@ -616,10 +611,7 @@ impl TaskLedger {
         // Terminal: exhausted all re-plan attempts.
         if self.replan_count >= self.max_replans {
             return ReplanDecision::GiveUp {
-                reason: format!(
-                    "exhausted {} re-plan attempts",
-                    self.max_replans
-                ),
+                reason: format!("exhausted {} re-plan attempts", self.max_replans),
             };
         }
 
@@ -631,11 +623,7 @@ impl TaskLedger {
             }
             // Some steps failed -- re-plan with lessons learned.
             return ReplanDecision::Replan {
-                reason: format!(
-                    "{} of {} steps failed",
-                    counts.failed,
-                    self.plan.len()
-                ),
+                reason: format!("{} of {} steps failed", counts.failed, self.plan.len()),
                 failed_steps: self
                     .plan
                     .iter()
@@ -716,8 +704,7 @@ impl TaskLedger {
                 .iter()
                 .filter(|o| {
                     let prefix_len = last.len().min(o.len()).min(50);
-                    prefix_len > 0
-                        && last[..prefix_len] == o.as_str()[..prefix_len]
+                    prefix_len > 0 && last[..prefix_len] == o.as_str()[..prefix_len]
                 })
                 .count();
             if similar >= 3 {
@@ -1109,7 +1096,11 @@ mod tests {
         let mut ledger = TaskLedger::new("test");
         ledger.add_fact("error is in main.rs", FactConfidence::Verified, "agent-1");
         ledger.add_fact("might be a type mismatch", FactConfidence::Guess, "brain");
-        ledger.add_fact("need to check Cargo.toml", FactConfidence::ToLookUp, "brain");
+        ledger.add_fact(
+            "need to check Cargo.toml",
+            FactConfidence::ToLookUp,
+            "brain",
+        );
 
         assert_eq!(ledger.facts_at(FactConfidence::Verified).len(), 1);
         assert_eq!(ledger.facts_at(FactConfidence::Guess).len(), 1);
@@ -1544,7 +1535,9 @@ mod tests {
         let s2 = PlanStep::new("pending step", free_task("p"));
         orch.set_plan(vec![s1, s2]);
 
-        let step = orch.dispatch_next_step().expect("should return pending step");
+        let step = orch
+            .dispatch_next_step()
+            .expect("should return pending step");
         assert_eq!(step.description, "pending step");
     }
 
@@ -1743,8 +1736,10 @@ mod tests {
         // All three steps should be eligible: s0 and s1 have no deps,
         // s2 has only an OOB dep (treated as satisfied).
         assert_eq!(eligible.len(), 3, "OOB dep index must not block the step");
-        let descriptions: Vec<&str> =
-            eligible.iter().map(|(_, s)| s.description.as_str()).collect();
+        let descriptions: Vec<&str> = eligible
+            .iter()
+            .map(|(_, s)| s.description.as_str())
+            .collect();
         assert!(
             descriptions.contains(&"s2-oob"),
             "s2-oob must appear in eligible_next output"

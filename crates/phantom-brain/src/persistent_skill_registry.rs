@@ -401,11 +401,7 @@ impl PersistentSkillRegistry {
     pub async fn top_n(&self, n: usize) -> Vec<Skill> {
         let idx = self.index.read().await;
         let mut skills: Vec<Skill> = idx.values().cloned().collect();
-        skills.sort_by(|a, b| {
-            b.provenance
-                .success_count
-                .cmp(&a.provenance.success_count)
-        });
+        skills.sort_by(|a, b| b.provenance.success_count.cmp(&a.provenance.success_count));
         skills.truncate(n);
         skills
     }
@@ -479,13 +475,7 @@ impl PersistentSkillRegistry {
 
         tokio::fs::rename(&tmp_path, &self.path)
             .await
-            .with_context(|| {
-                format!(
-                    "rename {} -> {}",
-                    tmp_path.display(),
-                    self.path.display()
-                )
-            })?;
+            .with_context(|| format!("rename {} -> {}", tmp_path.display(), self.path.display()))?;
 
         Ok(())
     }
@@ -676,9 +666,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sense_skills = registry
-            .search_by_capability(CapabilityClass::Sense)
-            .await;
+        let sense_skills = registry.search_by_capability(CapabilityClass::Sense).await;
         assert_eq!(sense_skills.len(), 2);
         for s in &sense_skills {
             assert_eq!(s.capability(), CapabilityClass::Sense);

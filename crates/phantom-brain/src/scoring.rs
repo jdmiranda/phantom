@@ -7,8 +7,8 @@
 //!
 //! Inspired by game AI utility systems — see `docs/research/ai-control-loop.md`.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -92,18 +92,20 @@ impl UtilityScorer {
     /// Check if a suggestion text was recently shown (within dedup window).
     fn is_duplicate(&self, text: &str) -> bool {
         let now = Instant::now();
-        self.recent_suggestions.iter().any(|(t, when)| {
-            t == text && now.duration_since(*when).as_secs() < DEDUP_WINDOW_SECS
-        })
+        self.recent_suggestions
+            .iter()
+            .any(|(t, when)| t == text && now.duration_since(*when).as_secs() < DEDUP_WINDOW_SECS)
     }
 
     /// Record a suggestion that was emitted (for dedup tracking).
     fn record_suggestion(&mut self, text: &str) {
         let now = Instant::now();
         // Evict expired entries.
-        while self.recent_suggestions.front().is_some_and(|(_, when)| {
-            now.duration_since(*when).as_secs() >= DEDUP_WINDOW_SECS
-        }) {
+        while self
+            .recent_suggestions
+            .front()
+            .is_some_and(|(_, when)| now.duration_since(*when).as_secs() >= DEDUP_WINDOW_SECS)
+        {
             self.recent_suggestions.pop_front();
         }
         self.recent_suggestions.push_back((text.to_string(), now));
@@ -115,9 +117,8 @@ impl UtilityScorer {
 
     /// Returns true if the action cooldown has not yet elapsed.
     fn on_cooldown(&self) -> bool {
-        self.last_action_time.is_some_and(|t| {
-            t.elapsed().as_secs_f32() < ACTION_COOLDOWN_SECS
-        })
+        self.last_action_time
+            .is_some_and(|t| t.elapsed().as_secs_f32() < ACTION_COOLDOWN_SECS)
     }
 
     // -----------------------------------------------------------------------
@@ -194,8 +195,8 @@ impl UtilityScorer {
     pub fn explain_score(&self, parsed: &ParsedOutput, idle_time: f32) -> ScoredAction {
         // Suppress "user stuck" heuristic when inside a REPL session.
         const REPL_COMMANDS: &[&str] = &[
-            "python", "python3", "node", "irb", "ghci", "psql", "mysql",
-            "sqlite3", "lua", "julia", "erl", "iex",
+            "python", "python3", "node", "irb", "ghci", "psql", "mysql", "sqlite3", "lua", "julia",
+            "erl", "iex",
         ];
         if let Some(ref cmd) = self.last_command {
             let first_word = cmd.split_whitespace().next().unwrap_or("");
@@ -223,8 +224,18 @@ impl UtilityScorer {
                 action: AiAction::ShowSuggestion {
                     text: "Want me to explain this error?".into(),
                     options: vec![
-                        SuggestionOption { key: 'y', label: "Yes, explain".into(), action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))) },
-                        SuggestionOption { key: 'n', label: "No thanks".into(), action: None },
+                        SuggestionOption {
+                            key: 'y',
+                            label: "Yes, explain".into(),
+                            action: Some(Box::new(AiAction::ConsoleReply(
+                                "Let me explain...".into(),
+                            ))),
+                        },
+                        SuggestionOption {
+                            key: 'n',
+                            label: "No thanks".into(),
+                            action: None,
+                        },
                     ],
                 },
                 score: 0.7,
@@ -237,8 +248,18 @@ impl UtilityScorer {
                 action: AiAction::ShowSuggestion {
                     text: "Need help with anything?".into(),
                     options: vec![
-                        SuggestionOption { key: 'y', label: "Yes".into(), action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))) },
-                        SuggestionOption { key: 'n', label: "No".into(), action: None },
+                        SuggestionOption {
+                            key: 'y',
+                            label: "Yes".into(),
+                            action: Some(Box::new(AiAction::ConsoleReply(
+                                "Let me explain...".into(),
+                            ))),
+                        },
+                        SuggestionOption {
+                            key: 'n',
+                            label: "No".into(),
+                            action: None,
+                        },
                     ],
                 },
                 score: 0.3,
@@ -261,7 +282,14 @@ impl UtilityScorer {
         match event {
             AiEvent::CommandComplete(parsed) => {
                 // Detect a potential new pattern: the command type as a memory key.
-                let key = format!("cmd:{}", parsed.command.split_whitespace().next().unwrap_or("unknown"));
+                let key = format!(
+                    "cmd:{}",
+                    parsed
+                        .command
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("unknown")
+                );
 
                 if memory.get(&key).is_none() {
                     ScoredAction {
@@ -417,7 +445,11 @@ impl UtilityScorer {
         // Pick the highest-scoring action.
         let mut best = candidates
             .into_iter()
-            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .unwrap_or_else(|| self.quiet_score());
 
         // --- Spam prevention gates ---
@@ -426,10 +458,14 @@ impl UtilityScorer {
         // heavily dampen all non-urgent scores.
         if self.suggestions_since_input >= MAX_SUGGESTIONS_WITHOUT_INPUT
             && !matches!(best.action, AiAction::DoNothing)
-            && best.score < 0.8 // Allow truly urgent actions (agent complete, etc.)
+            && best.score < 0.8
+        // Allow truly urgent actions (agent complete, etc.)
         {
             best.score *= 0.2;
-            best.reason = format!("{} (dampened: {} suggestions without input)", best.reason, self.suggestions_since_input);
+            best.reason = format!(
+                "{} (dampened: {} suggestions without input)",
+                best.reason, self.suggestions_since_input
+            );
         }
 
         // Gate 2: Dedup — suppress if we recently showed the same suggestion text.
@@ -503,9 +539,27 @@ impl UtilityScorer {
         AiAction::ShowSuggestion {
             text: format!("Fix: {error_summary}"),
             options: vec![
-                SuggestionOption { key: 'f', label: "Fix it".into(), action: Some(Box::new(AiAction::SpawnAgent { task: phantom_agents::AgentTask::FreeForm { prompt: error_summary }, spawn_tag: None, disposition: phantom_agents::dispatch::Disposition::BugFix })) },
-                SuggestionOption { key: 'e', label: "Explain".into(), action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))) },
-                SuggestionOption { key: 'd', label: "Dismiss".into(), action: None },
+                SuggestionOption {
+                    key: 'f',
+                    label: "Fix it".into(),
+                    action: Some(Box::new(AiAction::SpawnAgent {
+                        task: phantom_agents::AgentTask::FreeForm {
+                            prompt: error_summary,
+                        },
+                        spawn_tag: None,
+                        disposition: phantom_agents::dispatch::Disposition::BugFix,
+                    })),
+                },
+                SuggestionOption {
+                    key: 'e',
+                    label: "Explain".into(),
+                    action: Some(Box::new(AiAction::ConsoleReply("Let me explain...".into()))),
+                },
+                SuggestionOption {
+                    key: 'd',
+                    label: "Dismiss".into(),
+                    action: None,
+                },
             ],
         }
     }

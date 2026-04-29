@@ -451,7 +451,10 @@ mod tests {
         }
         let router = BrainRouter::new(config);
         let backends = router.route(TaskComplexity::Complex);
-        assert!(!backends.is_empty(), "should have a complex-capable backend");
+        assert!(
+            !backends.is_empty(),
+            "should have a complex-capable backend"
+        );
         // Claude is the only backend with Complex capability.
         assert_eq!(backends.last().unwrap().name, "claude-sonnet");
     }
@@ -499,10 +502,7 @@ mod tests {
         let router = BrainRouter::new(config);
         // Heuristic only handles Trivial, not Complex.
         let backends = router.route(TaskComplexity::Complex);
-        assert!(
-            backends.is_empty(),
-            "heuristic cannot handle Complex tasks"
-        );
+        assert!(backends.is_empty(), "heuristic cannot handle Complex tasks");
     }
 
     #[test]
@@ -523,7 +523,12 @@ mod tests {
         let mut router = BrainRouter::new(RouterConfig::default());
         // First call sets latency directly.
         router.record_result("heuristic", 100.0, true);
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             (backend.avg_latency_ms - 100.0).abs() < f32::EPSILON,
             "first call should set latency directly"
@@ -531,7 +536,12 @@ mod tests {
 
         // Second call applies EMA: 100 * 0.8 + 200 * 0.2 = 120.
         router.record_result("heuristic", 200.0, true);
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             (backend.avg_latency_ms - 120.0).abs() < 0.01,
             "EMA should be 120, got {}",
@@ -547,7 +557,12 @@ mod tests {
 
         router.record_result("heuristic", 50.0, false);
 
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             !backend.available,
             "failed backend should be marked unavailable"
@@ -562,7 +577,12 @@ mod tests {
 
         router.health_check();
 
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             backend.available,
             "health_check should restore heuristic availability"
@@ -634,7 +654,12 @@ mod tests {
         // Should not panic or change any state.
         router.record_result("nonexistent-backend", 100.0, true);
         // Verify existing backends are unchanged.
-        let heuristic = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let heuristic = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert_eq!(heuristic.avg_latency_ms, 0.0);
     }
 }
