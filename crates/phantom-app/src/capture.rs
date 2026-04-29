@@ -505,6 +505,31 @@ impl crate::app::App {
             pane_state.consecutive_identical = 0;
             pane_state.last_dhash = Some(hash);
 
+            // Issue #79 item 7: emit FrameCaptured to the event bus.
+            //
+            // The frame has passed the perceptual-hash dedup gate and will be
+            // stored in the bundle. Notify subscribers (brain, tests) via the
+            // typed event bus so they can react without polling the bundle store.
+            let frame_timestamp_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            {
+                use phantom_adapter::BusMessage;
+                use phantom_protocol::Event;
+                let msg = BusMessage {
+                    topic_id: self.topic_capture_frame,
+                    sender: u32::from(app_id),
+                    event: Event::FrameCaptured {
+                        pane_id: u32::from(app_id),
+                        timestamp_ms: frame_timestamp_ms,
+                    },
+                    frame: 0,
+                    timestamp: frame_timestamp_ms,
+                };
+                self.coordinator.bus_mut().emit(msg);
+            }
+
             // Open a fresh bundle if we don't have one. Wall-clock is
             // captured here so frame offsets are relative to bundle start.
             if pane_state.open_bundle.is_none() {

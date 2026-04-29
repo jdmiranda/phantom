@@ -1482,6 +1482,38 @@ fn open_agent_journal(agent_id: u64) -> Option<phantom_memory::journal::AgentJou
 }
 
 // ---------------------------------------------------------------------------
+// API-key resolution per backend
+// ---------------------------------------------------------------------------
+
+/// Check that the correct API key is present for the requested `model`.
+///
+/// * `ChatModel::Claude(_)` → `ANTHROPIC_API_KEY` must be set
+/// * `ChatModel::OpenAi(_)` → `OPENAI_API_KEY` must be set
+///
+/// Returns `Some(ClaudeConfig)` on success (for OpenAI, a placeholder config
+/// is returned because only `max_tokens` is used downstream; the real OpenAI
+/// key lives inside the `ChatBackend` built by `build_backend`).
+/// Returns `None` and emits a `warn!` when the required key is missing.
+pub(crate) fn resolve_api_config(model: &ChatModel) -> Option<ClaudeConfig> {
+    match model {
+        ChatModel::Claude(_) => {
+            let config = ClaudeConfig::from_env();
+            if config.is_none() {
+                warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+            }
+            config
+        }
+        ChatModel::OpenAi(_) => {
+            let key = std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty());
+            if key.is_none() {
+                warn!("Cannot spawn agent: OPENAI_API_KEY not set");
+            }
+            key.map(|_| ClaudeConfig::new("__openai__"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // App integration
 // ---------------------------------------------------------------------------
 
@@ -1509,8 +1541,9 @@ impl App {
         // role/label carry Composer spawn_subagent metadata (#224).
         let spawn_role = opts.role().unwrap_or(DEFAULT_AGENT_PANE_ROLE);
         let spawn_label = opts.label().unwrap_or("agent-pane").to_string();
-        let Some(claude_config) = ClaudeConfig::from_env() else {
-            warn!("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+        let resolved_model = opts.resolve_model();
+        let Some(claude_config) = resolve_api_config(&resolved_model) else {
+            warn!("Cannot spawn agent: no API key configured for model {:?}", resolved_model);
             return false;
         };
 
@@ -2886,6 +2919,127 @@ mod tests {
             mgr.get(id3).unwrap().status,
             AgentStatus::Done,
             "terminal agent must not be affected by kill_all"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_api_config tests (issue #157)
+    // -----------------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    /// Serialise all env-var-mutating tests behind a single process-wide lock
+    /// so concurrent test threads do not race on `ANTHROPIC_API_KEY` /
+    /// `OPENAI_API_KEY`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Set `var` to `value` (or remove it when `value` is None), run `f`,
+    /// then restore the original state.  Must be called while holding
+    /// `ENV_LOCK`.
+    fn with_env_locked<F: FnOnce()>(var: &str, value: Option<&str>, f: F) {
+        let original = std::env::var(var).ok();
+        match value {
+            Some(v) => unsafe { std::env::set_var(var, v) },
+            None => unsafe { std::env::remove_var(var) },
+        }
+        f();
+        match original {
+            Some(orig) => unsafe { std::env::set_var(var, orig) },
+            None => unsafe { std::env::remove_var(var) },
+        }
+    }
+
+    #[test]
+    fn resolve_api_config_claude_returns_some_when_key_present() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        with_env_locked("ANTHROPIC_API_KEY", Some("sk-ant-test-key"), || {
+            let model = ChatModel::Claude("claude-3-5-sonnet-20241022".into());
+            let result = resolve_api_config(&model);
+            assert!(result.is_some(), "Claude model + ANTHROPIC_API_KEY set → should return Some");
+        });
+    }
+
+    #[test]
+    fn resolve_api_config_claude_returns_none_without_key() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        with_env_locked("ANTHROPIC_API_KEY", None, || {
+            let model = ChatModel::Claude("claude-3-5-sonnet-20241022".into());
+            let result = resolve_api_config(&model);
+            assert!(result.is_none(), "Claude model + no ANTHROPIC_API_KEY → should return None");
+        });
+    }
+
+    #[test]
+    fn resolve_api_config_openai_returns_some_when_key_present() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        with_env_locked("OPENAI_API_KEY", Some("sk-openai-test-key"), || {
+            let model = ChatModel::OpenAi("gpt-4o".into());
+            let result = resolve_api_config(&model);
+            assert!(result.is_some(), "OpenAI model + OPENAI_API_KEY set → should return Some");
+        });
+    }
+
+    #[test]
+    fn resolve_api_config_openai_returns_none_without_key() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        with_env_locked("OPENAI_API_KEY", None, || {
+            let model = ChatModel::OpenAi("gpt-4o".into());
+            let result = resolve_api_config(&model);
+            assert!(result.is_none(), "OpenAI model + no OPENAI_API_KEY → should return None");
+        });
+    }
+
+    #[test]
+    fn resolve_api_config_openai_rejects_wrong_key() {
+        // OPENAI_API_KEY absent; only ANTHROPIC_API_KEY is set.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_openai = std::env::var("OPENAI_API_KEY").ok();
+        let orig_anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
+        }
+        let model = ChatModel::OpenAi("gpt-4o".into());
+        let result = resolve_api_config(&model);
+        // Restore.
+        match orig_openai {
+            Some(v) => unsafe { std::env::set_var("OPENAI_API_KEY", v) },
+            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
+        }
+        match orig_anthropic {
+            Some(v) => unsafe { std::env::set_var("ANTHROPIC_API_KEY", v) },
+            None => unsafe { std::env::remove_var("ANTHROPIC_API_KEY") },
+        }
+        assert!(
+            result.is_none(),
+            "OpenAI model + only ANTHROPIC_API_KEY set → must return None"
+        );
+    }
+
+    #[test]
+    fn resolve_api_config_claude_rejects_wrong_key() {
+        // ANTHROPIC_API_KEY absent; only OPENAI_API_KEY is set.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
+        let orig_openai = std::env::var("OPENAI_API_KEY").ok();
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::set_var("OPENAI_API_KEY", "sk-openai-test-key");
+        }
+        let model = ChatModel::Claude("claude-3-5-sonnet-20241022".into());
+        let result = resolve_api_config(&model);
+        // Restore.
+        match orig_anthropic {
+            Some(v) => unsafe { std::env::set_var("ANTHROPIC_API_KEY", v) },
+            None => unsafe { std::env::remove_var("ANTHROPIC_API_KEY") },
+        }
+        match orig_openai {
+            Some(v) => unsafe { std::env::set_var("OPENAI_API_KEY", v) },
+            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
+        }
+        assert!(
+            result.is_none(),
+            "Claude model + only OPENAI_API_KEY set → must return None"
         );
     }
 }

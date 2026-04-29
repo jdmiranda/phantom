@@ -757,6 +757,7 @@ impl AgentSpawnOpts {
     }
 
 
+
     /// Resolve the effective chat model for this spawn.
     ///
     /// Resolution order:
