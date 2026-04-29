@@ -8,13 +8,17 @@
 //!   Phantom's own agents can use third-party tools.
 //!
 //! The wire format is JSON-RPC 2.0 as defined by the MCP specification.
+//! The client transport is WebSocket (text frames containing JSON-RPC 2.0
+//! objects). The server uses Unix domain sockets (newline-delimited JSON).
 
 pub mod client;
+pub mod error;
 pub mod listener;
 pub mod protocol;
 pub mod server;
 
-pub use client::McpClient;
+pub use client::{McpClient, McpResourceDef, McpToolDef};
+pub use error::McpError;
 pub use listener::{spawn as spawn_listener, AppCommand, McpListener, ScreenshotReply};
 pub use protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpResource, McpTool,
