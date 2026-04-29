@@ -14,6 +14,7 @@
 
 pub mod assembler;
 pub mod events;
+pub mod session;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -28,7 +29,7 @@ pub type PaneId = u64;
 /// readers can detect mismatches.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Errors produced when validating a bundle.
+/// Errors produced when validating or assembling a bundle.
 #[derive(Debug, Error)]
 pub enum BundleError {
     /// The bundle was produced by an incompatible schema version.
@@ -39,6 +40,17 @@ pub enum BundleError {
         /// The version stored in the bundle.
         found: u32,
     },
+
+    /// [`session::CaptureSession::finalize`] was called with no frames.
+    ///
+    /// A bundle with no visual frames has no useful retrieval anchor and must
+    /// not be persisted.
+    #[error("capture session has no frames; add at least one frame before finalizing")]
+    NoFrames,
+
+    /// The system clock returned a pre-epoch value.
+    #[error("system clock error: {0}")]
+    ClockError(String),
 }
 
 /// A reference to a captured frame blob.
