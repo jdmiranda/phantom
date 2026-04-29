@@ -41,10 +41,12 @@
 
 pub mod attention;
 pub mod brain;
+pub mod chat_backend;
 pub mod claude;
 pub mod curriculum;
 pub mod curves;
 pub mod decompose;
+pub mod dispatch;
 pub mod events;
 pub mod goal;
 pub mod goals;
@@ -61,9 +63,14 @@ pub mod skill_store;
 
 pub use attention::{Attention, PaneSnapshot};
 pub use brain::*;
+pub use chat_backend::{
+    ChatBackend as UnifiedChatBackend, ChatOptions, ChatResponse, ClaudeBackend,
+    Message as ChatMessage, OllamaBackend, OpenAiBackend, RoutingCatalog,
+};
 pub use curriculum::*;
 pub use curves::*;
 pub use decompose::{DecompositionResult, DecompositionStep, GoalDecomposer};
+pub use dispatch::ActionHandler;
 pub use events::*;
 pub use goal::{ChatBackend, ClaudeChatBackend, Goal, Step, parse_steps};
 pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};

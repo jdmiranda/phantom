@@ -26,6 +26,7 @@ phantom-bundles = { path = "../phantom-bundles" }
 phantom-bundle-store = { path = "../phantom-bundle-store" }
 phantom-embeddings = { path = "../phantom-embeddings" }
 phantom-stt = { path = "../phantom-stt" }
+phantom-dag = { path = "../phantom-dag" }
 
 winit.workspace = true
 wgpu.workspace = true

@@ -22,6 +22,7 @@
 
 use crate::role::AgentRef;
 use crate::semantic_context::SemanticContext;
+use crate::skill_registry::SkillRegistry;
 
 /// Trailing instruction that closes every built prompt. Centralized as a
 /// constant so tests can assert exact match without duplicating the literal.
@@ -57,6 +58,20 @@ Protocol:
 
 You CANNOT use Act-class tools (write_file, run_command, send_key, etc.). If a step requires acting on the user's world, the user must spawn an Actor agent and grant explicit consent.";
 
+/// A single skill module that has been injected into a system prompt.
+///
+/// Produced by [`SystemPromptBuilder::inject_skills`] and stored on the
+/// builder so [`build`] can append each skill's `content` as its own section.
+///
+/// [`build`]: SystemPromptBuilder::build
+#[derive(Debug, Clone)]
+pub struct SkillInjection {
+    /// The canonical name of the skill (e.g. `"tdd"`, `"planning"`).
+    pub name: String,
+    /// The Markdown content to inject verbatim into the system prompt.
+    pub content: String,
+}
+
 /// Fluent builder that assembles an agent's system-prompt block.
 ///
 /// Construct with [`SystemPromptBuilder::new`] giving the agent's [`AgentRef`],
@@ -87,6 +102,11 @@ pub struct SystemPromptBuilder {
     /// rendered under `## Recent command output` so the agent can reason
     /// about prior command results without re-reading raw terminal text.
     pub semantic_context: Option<String>,
+    /// Skill modules injected via [`inject_skills`]. Each entry's `content`
+    /// is appended as its own section during [`build`].
+    ///
+    /// [`inject_skills`]: SystemPromptBuilder::inject_skills
+    pub injected_skills: Vec<SkillInjection>,
 }
 
 impl SystemPromptBuilder {
@@ -101,6 +121,7 @@ impl SystemPromptBuilder {
             tool_summary: None,
             other_agents: None,
             semantic_context: None,
+            injected_skills: Vec::new(),
         }
     }
 
@@ -153,6 +174,36 @@ impl SystemPromptBuilder {
     /// [`build`]: SystemPromptBuilder::build
     pub fn with_semantic_context(mut self, ctx: &SemanticContext) -> Self {
         self.semantic_context = ctx.as_prompt_section();
+        self
+    }
+
+    /// Inject skills from `registry` for the given `disposition`.
+    ///
+    /// Looks up `disposition` in the registry and appends each matching skill
+    /// as a [`SkillInjection`] on the builder.  Subsequent calls accumulate;
+    /// call once per agent spawn.
+    ///
+    /// Skills are logged at `debug` level (no I/O path required).  The
+    /// injected content surfaces in [`build`] between the semantic-context
+    /// section and the closing line.
+    ///
+    /// [`build`]: SystemPromptBuilder::build
+    pub fn inject_skills(
+        &mut self,
+        registry: &SkillRegistry,
+        disposition: &crate::dispatch::Disposition,
+    ) -> &mut Self {
+        let skills = registry.skills_for(disposition);
+        for (name, content) in skills {
+            log::debug!(
+                "agent {}: injecting skill '{name}' for disposition {disposition:?}",
+                self.agent.id
+            );
+            self.injected_skills.push(SkillInjection {
+                name: name.to_string(),
+                content: content.to_string(),
+            });
+        }
         self
     }
 
@@ -241,10 +292,41 @@ impl SystemPromptBuilder {
             sections.push(ctx_section.clone());
         }
 
+        // 7b. Injected skill modules (from SkillRegistry::inject_skills).
+        for skill in &self.injected_skills {
+            sections.push(skill.content.clone());
+        }
+
         // 8. Closing line.
         sections.push(CLOSING_LINE.to_string());
 
         sections.join("\n\n")
+    }
+
+    /// Build the final system prompt and store it on `agent`.
+    ///
+    /// Equivalent to calling [`build`] and then [`Agent::store_prompt`] in one
+    /// step, so the fully-assembled prompt is always persisted before the first
+    /// LLM call. Returns the prompt text so the caller can also push it into
+    /// the conversation history or log it.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use phantom_agents::agent::{Agent, AgentTask};
+    /// # use phantom_agents::system_prompt::SystemPromptBuilder;
+    /// # use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+    /// let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+    /// let agent_ref = AgentRef::new(1, AgentRole::Conversational, "chat", SpawnSource::User);
+    /// let text = SystemPromptBuilder::new(agent_ref).build_and_store(&mut agent);
+    /// assert!(agent.prompt_text().is_some());
+    /// ```
+    ///
+    /// [`build`]: SystemPromptBuilder::build
+    pub fn build_and_store(&self, agent: &mut crate::agent::Agent) -> String {
+        let text = self.build();
+        agent.store_prompt(text.clone());
+        text
     }
 }
 
@@ -537,5 +619,42 @@ mod tests {
         let task_idx = prompt.find("## Task").expect("task heading");
         assert!(boundary_idx < peers_idx, "peers must follow boundary");
         assert!(peers_idx < task_idx, "peers must precede task");
+    }
+
+    // --- build_and_store (#42) -----------------------------------------------
+
+    #[test]
+    fn build_and_store_sets_prompt_text_on_agent() {
+        use crate::agent::{Agent, AgentTask};
+        let mut a = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        let text = SystemPromptBuilder::new(agent(AgentRole::Conversational, "chat", 1))
+            .with_task("do the thing".into())
+            .build_and_store(&mut a);
+
+        assert!(
+            a.prompt_text().is_some(),
+            "build_and_store must set prompt_text on the agent",
+        );
+        assert_eq!(
+            a.prompt_text(),
+            Some(text.as_str()),
+            "stored prompt must match the returned text",
+        );
+    }
+
+    #[test]
+    fn build_and_store_returns_same_text_as_build() {
+        use crate::agent::{Agent, AgentTask};
+        let mut a = Agent::new(2, AgentTask::FreeForm { prompt: "x".into() });
+        let builder = SystemPromptBuilder::new(agent(AgentRole::Actor, "act", 2))
+            .with_task("run cargo test".into());
+
+        let via_build = builder.build();
+        let via_store = builder.build_and_store(&mut a);
+
+        assert_eq!(
+            via_build, via_store,
+            "build_and_store must return the same text as build",
+        );
     }
 }

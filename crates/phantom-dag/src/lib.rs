@@ -9,9 +9,11 @@ mod edge;
 mod node;
 mod persist;
 mod union_find;
+pub mod overlay;
 
 pub use edge::{DagEdge, EdgeKind};
 pub use node::{DagNode, NodeKind};
+pub use overlay::{NodeOverlay, OverlayIndex, build_overlay};
 
 use std::collections::HashMap;
 

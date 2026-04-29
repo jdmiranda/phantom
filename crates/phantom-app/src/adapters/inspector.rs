@@ -34,7 +34,10 @@ use phantom_adapter::{
 };
 
 use phantom_agents::inspector::InspectorView;
+use phantom_dag::CodeDag;
 use phantom_ui::tokens::Tokens;
+
+use crate::adapters::dag_viewer::DagViewerState;
 
 /// Number of events shown at the bottom of the pane (fixed cap, separate from
 /// the snapshot's `recent_events` cap).
@@ -43,6 +46,39 @@ const VISIBLE_EVENT_ROWS: usize = 20;
 /// capped at `MAX_RECENT_DENIALS = 20`; this fixed cap is independent so the
 /// renderer can stop laying out rows once the pane runs out of vertical room.
 const VISIBLE_DENIAL_ROWS: usize = 20;
+
+// ---------------------------------------------------------------------------
+// Tab enum
+// ---------------------------------------------------------------------------
+
+/// Which inspector tab is currently visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectorTab {
+    /// Agents / events / denials overview (default).
+    #[default]
+    Overview,
+    /// Live crate dependency graph with ticket-instability colours.
+    Dag,
+}
+
+impl InspectorTab {
+    /// Cycle to the next tab in declaration order.
+    fn next(self) -> Self {
+        match self {
+            Self::Overview => Self::Dag,
+            Self::Dag => Self::Overview,
+        }
+    }
+
+    /// Human-readable tab name for future tab-bar rendering.
+    #[allow(dead_code)]
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Dag => "DAG",
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Adapter
@@ -57,10 +93,22 @@ const VISIBLE_DENIAL_ROWS: usize = 20;
 /// Also holds an `Arc<RwLock<Tokens>>` so that theme changes propagate to
 /// the inspector UI in real time: any write to the shared token lock is
 /// visible at the next `render()` call without restarting the adapter.
+///
+/// The pane has two tabs ([`InspectorTab`]):
+/// - **Overview** — agents, events, denials (original view).
+/// - **DAG** — force-directed crate dependency graph with instability colours.
+///
+/// Press `Tab` to cycle between tabs.
 pub struct InspectorAdapter {
     snapshot: Arc<RwLock<InspectorView>>,
     tokens: Arc<RwLock<Tokens>>,
     app_id: u32,
+    /// Currently visible tab.
+    active_tab: InspectorTab,
+    /// Force-directed layout state for the DAG tab.
+    dag_viewer: DagViewerState,
+    /// The DAG being visualised. `None` until one is loaded.
+    dag: Option<CodeDag>,
 }
 
 impl InspectorAdapter {
@@ -74,7 +122,18 @@ impl InspectorAdapter {
             snapshot,
             tokens,
             app_id: 0,
+            active_tab: InspectorTab::Overview,
+            dag_viewer: DagViewerState::new(),
+            dag: None,
         }
+    }
+
+    /// Load a [`CodeDag`] into the DAG tab and compute the initial
+    /// force-directed layout. Call this after acquiring a DAG from disk or
+    /// from the planning pipeline.
+    pub fn load_dag(&mut self, dag: CodeDag) {
+        self.dag_viewer.compute_layout(&dag);
+        self.dag = Some(dag);
     }
 
     /// Test-only constructor that wraps an existing view with phosphor tokens.
@@ -89,6 +148,135 @@ impl InspectorAdapter {
     #[cfg(test)]
     pub(crate) fn with_view_and_tokens(view: InspectorView, tokens: Tokens) -> Self {
         Self::new(Arc::new(RwLock::new(view)), Arc::new(RwLock::new(tokens)))
+    }
+
+    // -----------------------------------------------------------------------
+    // DAG tab rendering
+    // -----------------------------------------------------------------------
+
+    /// Render the DAG tab into `quads` and `text_segments` vectors.
+    ///
+    /// When no DAG has been loaded, renders a centered "No DAG loaded" hint
+    /// rather than panicking.
+    fn render_dag_tab(
+        &self,
+        rect: &Rect,
+        quads: &mut Vec<QuadData>,
+        text_segments: &mut Vec<TextData>,
+        colors: phantom_ui::tokens::ColorRoles,
+    ) {
+        let cell_w = if rect.cell_size.0 > 0.0 { rect.cell_size.0 } else { 8.0 };
+        let cell_h = if rect.cell_size.1 > 0.0 { rect.cell_size.1 } else { 16.0 };
+        let pad_x = cell_w;
+        let pad_y = cell_h * 0.4;
+
+        // Header bar.
+        let header_h = cell_h * 1.6;
+        quads.push(QuadData {
+            x: rect.x,
+            y: rect.y,
+            w: rect.width,
+            h: header_h,
+            color: colors.surface_recessed,
+        });
+        text_segments.push(TextData {
+            text: "INSPECTOR — DAG  [Tab] switch tab".to_string(),
+            x: rect.x + pad_x,
+            y: rect.y + pad_y,
+            color: colors.text_accent,
+        });
+
+        let content_y = rect.y + header_h + pad_y;
+
+        match &self.dag {
+            None => {
+                // Empty state — no DAG loaded yet.
+                text_segments.push(TextData {
+                    text: "No DAG loaded".to_string(),
+                    x: rect.x + pad_x,
+                    y: content_y,
+                    color: colors.text_secondary,
+                });
+                text_segments.push(TextData {
+                    text: "Load a CodeDag via InspectorAdapter::load_dag()".to_string(),
+                    x: rect.x + pad_x,
+                    y: content_y + cell_h,
+                    color: colors.text_dim,
+                });
+            }
+            Some(dag) => {
+                // Render node/edge quads from the force-directed layout.
+                // The layout uses world-space coordinates; offset them by
+                // the pane origin so they land inside the pane rectangle.
+                //
+                // We translate world positions by (rect.x, content_y) so
+                // the DAG renders within the pane bounds.
+                let origin_x = rect.x + rect.width * 0.5;
+                let origin_y = content_y + (rect.height - header_h) * 0.5;
+
+                for mut qi in self.dag_viewer.render_quads(dag) {
+                    // Centre the DAG within the pane.
+                    qi.pos[0] += origin_x;
+                    qi.pos[1] += origin_y;
+
+                    // Skip quads that fall entirely outside the pane.
+                    if qi.pos[0] + qi.size[0] < rect.x
+                        || qi.pos[0] > rect.x + rect.width
+                        || qi.pos[1] + qi.size[1] < content_y
+                        || qi.pos[1] > rect.y + rect.height
+                    {
+                        continue;
+                    }
+
+                    quads.push(QuadData {
+                        x: qi.pos[0],
+                        y: qi.pos[1],
+                        w: qi.size[0],
+                        h: qi.size[1],
+                        color: qi.color,
+                    });
+                }
+
+                // Node label overlays.
+                for node in dag.nodes() {
+                    let Some(&[wx, wy]) = self.dag_viewer.positions.get(node.id()) else { continue };
+
+                    let sx = wx * self.dag_viewer.zoom
+                        + self.dag_viewer.viewport_offset[0]
+                        + origin_x;
+                    let sy = wy * self.dag_viewer.zoom
+                        + self.dag_viewer.viewport_offset[1]
+                        + origin_y;
+
+                    if sx < rect.x || sx > rect.x + rect.width
+                        || sy < content_y || sy > rect.y + rect.height
+                    {
+                        continue;
+                    }
+
+                    // Shorten the label to the crate/module leaf.
+                    let label = node.id().split("::").last().unwrap_or(node.id());
+                    text_segments.push(TextData {
+                        text: label.to_string(),
+                        x: sx + cell_w * 0.3,
+                        y: sy + cell_h * 0.2,
+                        color: colors.text_primary,
+                    });
+                }
+
+                // Node count summary line below the graph.
+                text_segments.push(TextData {
+                    text: format!(
+                        "{} nodes  {} edges",
+                        dag.node_count(),
+                        dag.edge_count()
+                    ),
+                    x: rect.x + pad_x,
+                    y: rect.y + rect.height - cell_h * 1.5,
+                    color: colors.text_dim,
+                });
+            }
+        }
     }
 }
 
@@ -135,6 +323,26 @@ impl Renderable for InspectorAdapter {
             let tok = self.tokens.read().expect("inspector tokens lock");
             tok.colors
         };
+
+        // ── Dispatch to active tab ─────────────────────────────────────
+        if self.active_tab == InspectorTab::Dag {
+            // Pane background.
+            quads.push(QuadData {
+                x: rect.x,
+                y: rect.y,
+                w: rect.width,
+                h: rect.height,
+                color: [0.0_f32, 0.0, 0.0, 0.0],
+            });
+            self.render_dag_tab(rect, &mut quads, &mut text_segments, colors);
+            return RenderOutput {
+                quads,
+                text_segments,
+                grid: None,
+                scroll: None,
+                selection: None,
+            };
+        }
 
         // Derive role-specific colors from the live token palette.
         let header_bg = colors.surface_recessed;
@@ -411,14 +619,20 @@ impl Renderable for InspectorAdapter {
 }
 
 impl InputHandler for InspectorAdapter {
-    fn handle_input(&mut self, _key: &str) -> bool {
-        // Read-only pane. A future phase can add scroll or "kill agent"
-        // actions; for now no key is consumed.
+    fn handle_input(&mut self, key: &str) -> bool {
+        // Tab key cycles between inspector tabs.
+        if key == "Tab" {
+            self.active_tab = self.active_tab.next();
+            return true;
+        }
+        // All other keys are not consumed — the inspector remains read-only.
         false
     }
 
     fn accepts_input(&self) -> bool {
-        false
+        // Accept Tab key for switching tabs; all other input is rejected at
+        // the caller by checking `handle_input`'s return value.
+        true
     }
 }
 
@@ -647,10 +861,18 @@ mod tests {
     }
 
     #[test]
-    fn inspector_adapter_does_not_accept_input() {
+    fn inspector_adapter_tab_key_cycles_tabs() {
         let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
-        assert!(!adapter.accepts_input());
+        // Tab key is accepted and cycles between tabs.
+        assert!(adapter.accepts_input());
+        assert_eq!(adapter.active_tab, InspectorTab::Overview);
+        assert!(adapter.handle_input("Tab"));
+        assert_eq!(adapter.active_tab, InspectorTab::Dag);
+        assert!(adapter.handle_input("Tab"));
+        assert_eq!(adapter.active_tab, InspectorTab::Overview);
+        // Other keys are not consumed.
         assert!(!adapter.handle_input("q"));
+        assert!(!adapter.handle_input("Enter"));
     }
 
     #[test]
