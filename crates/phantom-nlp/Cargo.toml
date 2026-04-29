@@ -17,6 +17,7 @@ ureq = { version = "3", features = ["json", "platform-verifier"] }
 [features]
 # Exposes `MockLlmBackend` for integration tests in downstream crates.
 # Do NOT enable in production builds.
+# Declaring this feature closes #287 (undeclared `testing` cfg condition).
 testing = []
 
 [dev-dependencies]

@@ -12,7 +12,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid.workspace = true
 chrono.workspace = true
-fs2 = "0.4"
+fs2 = "0.4"       # file locking for HistoryStore — closes #286
 
 [dev-dependencies]
 tempfile = "3"

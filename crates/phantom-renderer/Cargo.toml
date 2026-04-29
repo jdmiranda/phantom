@@ -13,6 +13,7 @@ license.workspace = true
 ## last-good shader stays active.
 ##
 ## Usage: `PHANTOM_HOT_SHADERS=1 cargo run -p phantom --features phantom-renderer/live-reload`
+## Declaring this feature closes #288 (undeclared `live-reload` cfg condition).
 live-reload = ["dep:notify", "dep:naga"]
 
 [dependencies]

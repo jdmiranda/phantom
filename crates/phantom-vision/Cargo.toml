@@ -14,6 +14,9 @@ png = "0.17"
 reqwest = { version = "0.12", features = ["json"] }
 
 [features]
+# Exposes `MockVisionBackend` for integration tests in downstream crates.
+# Declaring this feature closes #285/#291 (undeclared `test-utils` cfg +
+# avoids std::env::remove_var in tests by using MockVisionBackend instead).
 test-utils = []
 
 [dev-dependencies]
