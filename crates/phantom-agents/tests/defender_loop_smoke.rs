@@ -90,6 +90,7 @@ async fn defender_challenge_loop_smoke() {
         event_log: Some(event_log.clone()),
         pending_spawn: new_spawn_queue(),
         source_event_id: None,
+        quarantine: None,
     };
 
     let denied_result = dispatch_tool(
@@ -225,6 +226,7 @@ async fn defender_challenge_loop_smoke() {
         event_log: Some(event_log.clone()),
         pending_spawn: new_spawn_queue(),
         source_event_id: None,
+        quarantine: None,
     };
 
     let challenge_result = dispatch_tool(
@@ -346,6 +348,7 @@ fn offender_cannot_call_challenge_agent() {
         event_log: None,
         pending_spawn: new_spawn_queue(),
         source_event_id: None,
+        quarantine: None,
     };
 
     let result = dispatch_tool(

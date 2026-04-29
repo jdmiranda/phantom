@@ -74,6 +74,7 @@ use crate::composer_tools::{
 };
 use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
 use crate::inbox::{AgentRegistry, AgentStatus};
+use crate::quarantine::QuarantineRegistry;
 use crate::role::{AgentId, AgentRef, AgentRole, CapabilityClass};
 use crate::taint::TaintLevel;
 use crate::tools::{ToolResult, ToolType, execute_tool};
@@ -158,6 +159,16 @@ pub struct DispatchContext<'a> {
     /// `None` disables the chain walk — the correct behaviour for legacy /
     /// test paths that have not wired an event log.
     pub source_event_id: Option<u64>,
+    /// Sec.7.3: quarantine registry.
+    ///
+    /// When `Some`, [`dispatch_tool`] checks whether the calling agent
+    /// (`self_ref.id`) is quarantined before routing the tool. A quarantined
+    /// agent's dispatch is denied with a `DispatchError::Quarantined`-style
+    /// message regardless of capability class.
+    ///
+    /// `None` skips the quarantine gate — the correct behaviour for legacy /
+    /// test paths that have not wired a quarantine registry.
+    pub quarantine: Option<Arc<Mutex<QuarantineRegistry>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +284,17 @@ fn agent_is_quarantined(id: AgentId, registry: &Arc<Mutex<AgentRegistry>>) -> bo
         .unwrap_or(false)
 }
 
+/// Sec.7.3: Returns `true` iff the agent identified by `id` is quarantined
+/// according to the [`QuarantineRegistry`].
+///
+/// Returns `false` when the registry lock is poisoned — conservative and safe.
+fn quarantine_registry_blocks(id: AgentId, quarantine: &Arc<Mutex<QuarantineRegistry>>) -> bool {
+    let Ok(guard) = quarantine.lock() else {
+        return false;
+    };
+    guard.agent_is_quarantined(id)
+}
+
 // ---------------------------------------------------------------------------
 // dispatch_tool
 // ---------------------------------------------------------------------------
@@ -321,6 +343,25 @@ pub fn dispatch_tool(
     args: &serde_json::Value,
     ctx: &DispatchContext<'_>,
 ) -> ToolResult {
+    // ---- Sec.7.3: Quarantine gate ------------------------------------------
+    //
+    // If the calling agent is quarantined, deny all tool dispatches before any
+    // capability check or handler runs. The quarantine registry is checked via
+    // its own lock; if the lock is poisoned, we fail open (conservative) to
+    // avoid wedging the dispatch path.
+    if let Some(quarantine) = ctx.quarantine.as_ref() {
+        if quarantine_registry_blocks(ctx.self_ref.id, quarantine) {
+            return result(
+                PLACEHOLDER_TOOL,
+                false,
+                format!(
+                    "agent quarantined: all tool dispatches denied for agent {}",
+                    ctx.self_ref.id
+                ),
+            );
+        }
+    }
+
     // ---- Route to the appropriate tool surface -----------------------------
     let mut tool_result = if let Some(tool) = ToolType::from_api_name(name) {
         // ---- File / git tools ----------------------------------------------
@@ -534,6 +575,7 @@ mod tests {
             event_log: None,
             pending_spawn,
             source_event_id: None,
+            quarantine: None,
         }
     }
 
@@ -581,6 +623,7 @@ mod tests {
             event_log: None,
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
+            quarantine: None,
         };
 
         let result = dispatch_tool(
@@ -713,6 +756,7 @@ mod tests {
             event_log: None,
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
+            quarantine: None,
         };
 
         let result = dispatch_tool(
@@ -770,6 +814,7 @@ mod tests {
             event_log: Some(log),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(upstream_id),
+            quarantine: None,
         };
 
         // Act.
@@ -819,6 +864,7 @@ mod tests {
             event_log: Some(log),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(denied_event_id),
+            quarantine: None,
         };
 
         // Act.
@@ -879,6 +925,7 @@ mod tests {
             event_log: Some(log),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(upstream_id),
+            quarantine: None,
         };
 
         // Act.
@@ -941,6 +988,7 @@ mod tests {
             event_log: Some(log),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: Some(event_id),
+            quarantine: None,
         };
 
         // This call must return — any infinite loop would cause the test to hang
@@ -954,5 +1002,111 @@ mod tests {
             crate::taint::TaintLevel::Clean,
             "self-referential clean chain must not elevate taint",
         );
+    }
+
+    // ---- Sec.7.3: QuarantineRegistry dispatch gate -------------------------
+
+    /// Sec.7.3: A quarantined agent must have all tool dispatches denied,
+    /// regardless of capability class or tool name.
+    ///
+    /// When `DispatchContext::quarantine` holds a registry that reports the
+    /// calling agent as quarantined, `dispatch_tool` must short-circuit with
+    /// `success: false` before any capability check or handler runs.
+    #[test]
+    fn dispatch_denied_for_quarantined_agent() {
+        use crate::quarantine::{AutoQuarantinePolicy, QuarantineRegistry};
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("probe.txt"), "hello").unwrap();
+
+        let agent_id = 55u64;
+
+        // Build a registry and quarantine the agent immediately (threshold=1).
+        let quarantine = Arc::new(Mutex::new(QuarantineRegistry::new_with_policy(
+            AutoQuarantinePolicy { threshold: 1 },
+        )));
+        quarantine
+            .lock()
+            .unwrap()
+            .check_and_escalate(agent_id, TaintLevel::Tainted, 0, "repeated violation");
+
+        // Confirm the agent is quarantined in the registry.
+        assert!(quarantine.lock().unwrap().agent_is_quarantined(agent_id));
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(
+                agent_id,
+                AgentRole::Conversational,
+                "offender",
+                SpawnSource::User,
+            ),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: Some(quarantine),
+        };
+
+        // A normal file-read that would otherwise succeed must be denied.
+        let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
+
+        assert!(
+            !res.success,
+            "quarantined agent must have dispatch denied, got success=true"
+        );
+        assert!(
+            res.output.contains("quarantined"),
+            "denial message must mention 'quarantined', got: {}",
+            res.output,
+        );
+        assert!(
+            res.output.contains(&agent_id.to_string()),
+            "denial message must name the agent id, got: {}",
+            res.output,
+        );
+    }
+
+    /// Sec.7.3: A non-quarantined agent must still dispatch normally even
+    /// when a quarantine registry is wired into the context.
+    ///
+    /// The gate must be transparent for agents that are `Clean`.
+    #[test]
+    fn dispatch_allowed_for_clean_agent_with_quarantine_registry() {
+        use crate::quarantine::QuarantineRegistry;
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("probe.txt"), "clean-agent-data").unwrap();
+
+        let clean_agent_id = 66u64;
+
+        // Build an empty quarantine registry — the agent has never been recorded.
+        let quarantine = Arc::new(Mutex::new(QuarantineRegistry::new()));
+
+        let ctx = DispatchContext {
+            self_ref: AgentRef::new(
+                clean_agent_id,
+                AgentRole::Conversational,
+                "clean-agent",
+                SpawnSource::User,
+            ),
+            role: AgentRole::Conversational,
+            working_dir: tmp.path(),
+            registry: Arc::new(Mutex::new(AgentRegistry::new())),
+            event_log: None,
+            pending_spawn: new_spawn_subagent_queue(),
+            source_event_id: None,
+            quarantine: Some(quarantine),
+        };
+
+        let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
+
+        assert!(
+            res.success,
+            "clean agent must still dispatch normally when quarantine registry is wired: {}",
+            res.output,
+        );
+        assert_eq!(res.output, "clean-agent-data");
     }
 }

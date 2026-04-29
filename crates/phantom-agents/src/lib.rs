@@ -24,6 +24,7 @@ pub mod inspector;
 pub mod manager;
 pub mod mcp_tools;
 pub mod permissions;
+pub mod quarantine;
 pub mod render;
 pub mod role;
 pub mod router;
