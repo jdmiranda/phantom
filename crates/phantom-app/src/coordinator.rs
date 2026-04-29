@@ -1820,7 +1820,9 @@ mod tests {
 
         // Start with one pane.
         let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "original");
-        let p_a = coord.pane_id_for(id_a).expect("original pane must have a PaneId");
+        let p_a = coord
+            .pane_id_for(id_a)
+            .expect("original pane must have a PaneId");
         assert_eq!(coord.adapter_count(), 1);
         assert_eq!(coord.focused(), Some(id_a));
 
@@ -1840,14 +1842,22 @@ mod tests {
         coord.set_focus(id_b);
 
         // Two adapters now registered.
-        assert_eq!(coord.adapter_count(), 2, "expected 2 adapters after H-split");
+        assert_eq!(
+            coord.adapter_count(),
+            2,
+            "expected 2 adapters after H-split"
+        );
 
         // Both must have unique, valid IDs.
         assert_ne!(id_a, id_b, "both adapters must have distinct IDs");
 
         // PaneIds must be distinct.
-        let pane_a = coord.pane_id_for(id_a).expect("original adapter must have a PaneId");
-        let pane_b = coord.pane_id_for(id_b).expect("new adapter must have a PaneId");
+        let pane_a = coord
+            .pane_id_for(id_a)
+            .expect("original adapter must have a PaneId");
+        let pane_b = coord
+            .pane_id_for(id_b)
+            .expect("new adapter must have a PaneId");
         assert_ne!(pane_a, pane_b, "both adapters must own different PaneIds");
 
         // Focus must be on the newly created pane.
@@ -1857,8 +1867,14 @@ mod tests {
         layout.resize(800.0, 600.0).unwrap();
         let rect_a = layout.get_pane_rect(pane_a).unwrap();
         let rect_b = layout.get_pane_rect(pane_b).unwrap();
-        assert!(rect_a.width > 0.0 && rect_a.height > 0.0, "original pane must have positive area");
-        assert!(rect_b.width > 0.0 && rect_b.height > 0.0, "new pane must have positive area");
+        assert!(
+            rect_a.width > 0.0 && rect_a.height > 0.0,
+            "original pane must have positive area"
+        );
+        assert!(
+            rect_b.width > 0.0 && rect_b.height > 0.0,
+            "new pane must have positive area"
+        );
     }
 
     // ── QA #160: Vertical split with three panes ──────────────────────────────
@@ -1906,11 +1922,18 @@ mod tests {
         coord.set_focus(id_c);
 
         // Three adapters must exist.
-        assert_eq!(coord.adapter_count(), 3, "expected 3 adapters after V-split");
+        assert_eq!(
+            coord.adapter_count(),
+            3,
+            "expected 3 adapters after V-split"
+        );
 
         // All must have distinct IDs and PaneIds.
         let ids = [id_a, id_b, id_c];
-        let pane_ids: Vec<_> = ids.iter().map(|&id| coord.pane_id_for(id).unwrap()).collect();
+        let pane_ids: Vec<_> = ids
+            .iter()
+            .map(|&id| coord.pane_id_for(id).unwrap())
+            .collect();
         for i in 0..3 {
             for j in (i + 1)..3 {
                 assert_ne!(ids[i], ids[j], "adapter IDs must be unique");
@@ -1924,7 +1947,8 @@ mod tests {
             let rect = layout.get_pane_rect(pid).unwrap();
             assert!(
                 rect.width > 0.0 && rect.height > 0.0,
-                "pane[{idx}] must have positive area: {:?}", rect,
+                "pane[{idx}] must have positive area: {:?}",
+                rect,
             );
         }
 
@@ -1978,7 +2002,10 @@ mod tests {
         );
 
         // The survivor must be the original adapter.
-        assert_eq!(survivor, id_a, "the surviving pane must be the original pane");
+        assert_eq!(
+            survivor, id_a,
+            "the surviving pane must be the original pane"
+        );
     }
 
     /// Closing the last pane must not set focus to a non-existent adapter.
@@ -1996,7 +2023,11 @@ mod tests {
 
         coord.remove_adapter(id, &mut layout, &mut scene);
 
-        assert_eq!(coord.focused(), None, "focus must be None after closing the last pane");
+        assert_eq!(
+            coord.focused(),
+            None,
+            "focus must be None after closing the last pane"
+        );
         assert!(coord.all_app_ids().is_empty(), "no adapters must remain");
     }
 

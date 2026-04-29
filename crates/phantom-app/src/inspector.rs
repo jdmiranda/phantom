@@ -332,10 +332,16 @@ mod tests {
             .with_denial(denial(2, 2_000))
             .with_denial(denial(1, 3_000))
             .build();
-        let agent1_denials: Vec<_> = view.denials.iter()
+        let agent1_denials: Vec<_> = view
+            .denials
+            .iter()
             .filter(|d| d.role == "agent-1")
             .collect();
-        assert_eq!(agent1_denials.len(), 2, "expected exactly 2 denials for agent-1");
+        assert_eq!(
+            agent1_denials.len(),
+            2,
+            "expected exactly 2 denials for agent-1"
+        );
         for d in &agent1_denials {
             assert_eq!(d.role, "agent-1");
         }
@@ -347,7 +353,9 @@ mod tests {
         let view = InspectorBuilder::new()
             .with_denial(denial(1, 1_000))
             .build();
-        let unknown: Vec<_> = view.denials.iter()
+        let unknown: Vec<_> = view
+            .denials
+            .iter()
             .filter(|d| d.role == "agent-999")
             .collect();
         assert!(unknown.is_empty());

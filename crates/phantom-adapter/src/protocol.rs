@@ -381,7 +381,9 @@ mod tests {
             .map(|_| {
                 let id_gen = Arc::clone(&id_gen);
                 std::thread::spawn(move || {
-                    (0..IDS_PER_THREAD).map(|_| id_gen.next().get()).collect::<Vec<u64>>()
+                    (0..IDS_PER_THREAD)
+                        .map(|_| id_gen.next().get())
+                        .collect::<Vec<u64>>()
                 })
             })
             .collect();
@@ -475,10 +477,18 @@ mod tests {
     #[test]
     fn adapter_event_non_exhaustive_match_all_variants() {
         let events = vec![
-            AdapterEvent::Spawned { id: AdapterId::new(1) },
-            AdapterEvent::Closed { id: AdapterId::new(2) },
-            AdapterEvent::Focused { id: AdapterId::new(3) },
-            AdapterEvent::ContentChanged { id: AdapterId::new(4) },
+            AdapterEvent::Spawned {
+                id: AdapterId::new(1),
+            },
+            AdapterEvent::Closed {
+                id: AdapterId::new(2),
+            },
+            AdapterEvent::Focused {
+                id: AdapterId::new(3),
+            },
+            AdapterEvent::ContentChanged {
+                id: AdapterId::new(4),
+            },
         ];
         for ev in events {
             // Every variant is handled — proof of coverage.
@@ -562,7 +572,9 @@ mod tests {
         let mut stream = EventStream::new();
         // Fill to capacity with Spawned events tagged with sequential ids.
         for i in 0..MAX_STREAM_CAPACITY as u64 {
-            stream.push(AdapterEvent::Spawned { id: AdapterId::new(i) });
+            stream.push(AdapterEvent::Spawned {
+                id: AdapterId::new(i),
+            });
         }
         // Push one more Closed event — this should evict the oldest Spawned.
         let newest_id = AdapterId::new(9999);
@@ -571,12 +583,16 @@ mod tests {
         let events = stream.drain();
         // The newest event must be present.
         assert!(
-            events.iter().any(|e| matches!(e, AdapterEvent::Closed { id } if *id == newest_id)),
+            events
+                .iter()
+                .any(|e| matches!(e, AdapterEvent::Closed { id } if *id == newest_id)),
             "newest event must survive capacity eviction",
         );
         // The very first Spawned (id=0) must have been evicted.
         assert!(
-            !events.iter().any(|e| matches!(e, AdapterEvent::Spawned { id } if id.get() == 0)),
+            !events
+                .iter()
+                .any(|e| matches!(e, AdapterEvent::Spawned { id } if id.get() == 0)),
             "oldest event (id=0) must have been evicted at capacity",
         );
     }

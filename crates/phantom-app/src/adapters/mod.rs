@@ -1,9 +1,11 @@
 pub mod agent;
+pub mod alt_screen_view;
 pub mod inspector;
 pub mod monitor;
 pub mod terminal;
 pub mod video;
 pub use agent::AgentAdapter;
+pub use alt_screen_view::AltScreenViewAdapter;
 pub use monitor::MonitorAdapter;
 pub use terminal::TerminalAdapter;
 pub use video::VideoAdapter;

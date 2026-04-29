@@ -92,7 +92,9 @@ fn history_recent_limit_exceeds_total() {
     let (mut store, _dir) = temp_store();
     let session = Uuid::new_v4();
 
-    store.append(&make_entry("only-one", session)).expect("append");
+    store
+        .append(&make_entry("only-one", session))
+        .expect("append");
     let recent = store.recent(100).expect("recent");
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].command(), "only-one");

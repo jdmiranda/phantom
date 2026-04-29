@@ -35,14 +35,14 @@ use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::{OodaConfig, OodaLoop};
 use phantom_context::ProjectContext;
 use phantom_history::{AgentOutputCapture, HistoryStore};
+use phantom_mcp::{AppCommand, McpListener, spawn_listener};
 use phantom_memory::MemoryStore;
+use phantom_nlp::{ClaudeLlmBackend, LlmBackend};
 use phantom_plugins::PluginRegistry;
 use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
-use phantom_session::session::{is_session_restore, SessionManager, SessionState, PaneState};
+use phantom_session::session::{PaneState, SessionManager, SessionState, is_session_restore};
 use phantom_session::{AgentStatePersister, GoalStatePersister};
-use phantom_mcp::{spawn_listener, AppCommand, McpListener};
-use phantom_nlp::{ClaudeLlmBackend, LlmBackend};
 
 use crate::boot::BootSequence;
 use crate::boot_order::ShutdownGuard;
@@ -248,7 +248,8 @@ pub struct App {
     //    GITHUB_TOKEN is set; None otherwise). Handed to Dispatcher-role agent
     //    panes so they can call request_next_ticket / mark_ticket_in_progress /
     //    mark_ticket_done via the gh CLI.
-    pub(crate) ticket_dispatcher: Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>>,
+    pub(crate) ticket_dispatcher:
+        Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>>,
 
     // -- Inspector snapshot (shared with InspectorAdapter when a pane is open).
     //    `None` when no inspector pane has ever been spawned; `Some(Arc<RwLock<…>>)`
@@ -290,7 +291,8 @@ pub struct App {
     //    time via `set_substrate_handles`; the dispatch gate in
     //    `phantom_agents::dispatch::dispatch_tool` checks it before routing
     //    any tool call.
-    pub(crate) quarantine_registry: std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>,
+    pub(crate) quarantine_registry:
+        std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>,
 
     // -- Sec.8 user-visible notification center. Watches denial timestamps
     //    per agent and pushes a top-of-screen `Severity::Danger` banner
@@ -415,6 +417,28 @@ pub struct App {
     //    `Event::CommandComplete` handler in `drain_bus_to_brain` can write
     //    a `HistoryEntry` with the actual command string and exit code.
     pub(crate) pending_command_text: std::collections::HashMap<phantom_adapter::AppId, String>,
+
+    // -- Issue #323: alt-screen split-pane state --
+    //
+    // Maps primary adapter AppId → secondary (view) adapter AppId.  An entry
+    // exists for the lifetime of a split pane, from the moment a terminal
+    // enters alt-screen mode until the secondary pane is fully collapsed.
+    pub(crate) alt_screen_secondaries:
+        std::collections::HashMap<phantom_adapter::AppId, phantom_adapter::AppId>,
+
+    // Previous `is_detached` state per adapter, used for edge detection in
+    // `poll_alt_screen_transitions` (rising edge → split, falling edge → collapse).
+    pub(crate) prev_detached: std::collections::HashMap<phantom_adapter::AppId, bool>,
+
+    // Per secondary-pane collapse animation progress (0.0 → 1.0 over 300 ms).
+    // Keyed by secondary adapter AppId.  Entries are created on collapse trigger
+    // and removed once the fade completes and the pane is removed.
+    pub(crate) alt_screen_fade: std::collections::HashMap<phantom_adapter::AppId, f32>,
+
+    // Queue of secondary adapter AppIds whose collapse animations have
+    // completed and are ready for `remove_adapter`.  Drained by
+    // `tick_alt_screen_fade` into `collapse_alt_screen_pane`.
+    pub(crate) alt_screen_pending_collapses: Vec<phantom_adapter::AppId>,
 }
 
 /// An active suggestion from the AI brain.
@@ -550,19 +574,20 @@ impl App {
         };
 
         // -- Notification store (persistent per-project) --
-        let notification_store = match phantom_memory::notifications::NotificationStore::open(&project_dir) {
-            Ok(s) => {
-                info!(
-                    "Notification store ready ({} existing notifications)",
-                    s.count()
-                );
-                Some(s)
-            }
-            Err(e) => {
-                warn!("Failed to open notification store: {e}");
-                None
-            }
-        };
+        let notification_store =
+            match phantom_memory::notifications::NotificationStore::open(&project_dir) {
+                Ok(s) => {
+                    info!(
+                        "Notification store ready ({} existing notifications)",
+                        s.count()
+                    );
+                    Some(s)
+                }
+                Err(e) => {
+                    warn!("Failed to open notification store: {e}");
+                    None
+                }
+            };
 
         // -- History store + agent capture sidecar --
         // Both live under `~/.local/share/phantom/history/<session_uuid>[...].jsonl`.
@@ -750,9 +775,9 @@ impl App {
                     // Initialise persister pair from the latest session file
                     // path so agent / goal sidecar files land next to it.
                     if let Ok(Some(session_path)) = sm.latest_path(&project_dir) {
-                        let ap = AgentStatePersister::new(
-                            AgentStatePersister::sidecar_path(&session_path),
-                        );
+                        let ap = AgentStatePersister::new(AgentStatePersister::sidecar_path(
+                            &session_path,
+                        ));
                         match ap.load() {
                             Ok(Some(ref file)) => {
                                 let n = file.agent_count();
@@ -766,9 +791,9 @@ impl App {
                         }
                         agent_persister = Some(ap);
 
-                        let gp = GoalStatePersister::new(
-                            GoalStatePersister::sidecar_path(&session_path),
-                        );
+                        let gp = GoalStatePersister::new(GoalStatePersister::sidecar_path(
+                            &session_path,
+                        ));
                         match gp.load() {
                             Ok(Some(ref file)) => {
                                 let n = file.goal_count();
@@ -1036,6 +1061,10 @@ impl App {
             agent_capture,
             session_uuid,
             pending_command_text: std::collections::HashMap::new(),
+            alt_screen_secondaries: std::collections::HashMap::new(),
+            prev_detached: std::collections::HashMap::new(),
+            alt_screen_fade: std::collections::HashMap::new(),
+            alt_screen_pending_collapses: Vec::new(),
         })
     }
 
@@ -1110,7 +1139,9 @@ impl App {
                     if !queue_snaps.is_empty() {
                         let file = phantom_session::AgentStateFile::new(queue_snaps);
                         match file.save(ap.path()) {
-                            Ok(()) => info!("Agent state saved ({} snapshot(s))", file.agent_count()),
+                            Ok(()) => {
+                                info!("Agent state saved ({} snapshot(s))", file.agent_count())
+                            }
                             Err(e) => warn!("Failed to save agent state: {e}"),
                         }
                     } else {
@@ -1247,7 +1278,7 @@ impl App {
     /// once a session file exists and the persister has been created.
     pub(crate) fn persist_goal(&mut self, objective: &str) {
         use phantom_session::{
-            GoalSnapshot, PlanStepBuilder, SavedFactConfidence, SavedFact, SavedStepStatus,
+            GoalSnapshot, PlanStepBuilder, SavedFact, SavedFactConfidence, SavedStepStatus,
         };
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1263,22 +1294,28 @@ impl App {
 
         let initial_step = PlanStepBuilder::new(
             objective,
-            phantom_agents::AgentTask::FreeForm { prompt: objective.to_owned() },
+            phantom_agents::AgentTask::FreeForm {
+                prompt: objective.to_owned(),
+            },
         )
         .status(SavedStepStatus::Pending)
         .build();
 
         let snapshot = GoalSnapshot::new(
             objective.to_owned(),
-            vec![SavedFact::new("goal set by user", SavedFactConfidence::Verified, "commands")],
+            vec![SavedFact::new(
+                "goal set by user",
+                SavedFactConfidence::Verified,
+                "commands",
+            )],
             vec![initial_step],
-            vec![],   // plan_history: no prior plans yet
-            0,        // stall_counter
-            2,        // stall_threshold (matches brain default)
-            0,        // replan_count
-            5,        // max_replans (matches brain default)
+            vec![], // plan_history: no prior plans yet
+            0,      // stall_counter
+            2,      // stall_threshold (matches brain default)
+            0,      // replan_count
+            5,      // max_replans (matches brain default)
             created_at_secs,
-            None,     // last_replan_at_secs
+            None, // last_replan_at_secs
         );
 
         match gp.save_goals(vec![snapshot]) {
@@ -1379,7 +1416,8 @@ impl App {
 /// — the rest of the app continues to boot and Dispatcher-role agents see
 /// `"ticket dispatcher not configured"` from the dispatch layer instead of
 /// a panic.
-fn build_ticket_dispatcher() -> Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>> {
+fn build_ticket_dispatcher()
+-> Option<std::sync::Arc<phantom_agents::dispatcher::GhTicketDispatcher>> {
     let token = std::env::var("GITHUB_TOKEN").ok();
     let repo = std::env::var("GH_REPO").ok();
 

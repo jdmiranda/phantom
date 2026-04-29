@@ -8,14 +8,14 @@ use std::time::Instant;
 use anyhow::Result;
 use log::{debug, info, warn};
 
+use crate::app::{App, AppState, SuggestionOverlay};
+use crate::input::chrono_time_string;
 use phantom_brain::events::{AiAction, AiEvent};
 use phantom_brain::ooda::WorldState;
-use phantom_protocol::Event;
 use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AppCommand, ScreenshotReply};
-use crate::app::{App, AppState, SuggestionOverlay};
-use crate::input::chrono_time_string;
+use phantom_protocol::Event;
 
 impl App {
     /// Per-frame update: read PTY data, advance boot sequence, update widgets.
@@ -35,6 +35,11 @@ impl App {
 
         // Coordinator: tick all registered adapters and deliver bus messages.
         self.coordinator.update_all(dt_duration);
+
+        // Issue #323: poll terminal adapters for alt-screen transitions and
+        // manage the secondary split-pane lifecycle.
+        self.poll_alt_screen_transitions();
+        self.tick_alt_screen_fade(dt);
 
         // Substrate runtime: reap dead supervisor children, drain pending
         // substrate events into the on-disk log, and evaluate spawn rules.
@@ -123,10 +128,16 @@ impl App {
 
             while let Some(action) = brain.try_recv_action() {
                 Self::execute_brain_action(
-                    action, now, &mut self.suggestion, &mut self.memory,
+                    action,
+                    now,
+                    &mut self.suggestion,
+                    &mut self.memory,
                     &mut self.notification_store,
-                    &mut self.console, &mut self.coordinator, &mut self.layout,
-                    &mut self.scene, &mut tasks_to_spawn,
+                    &mut self.console,
+                    &mut self.coordinator,
+                    &mut self.layout,
+                    &mut self.scene,
+                    &mut tasks_to_spawn,
                 );
             }
         }
@@ -154,10 +165,16 @@ impl App {
             let ooda_actions = self.ooda_loop.tick(&world, dt_ms);
             for action in ooda_actions {
                 Self::execute_brain_action(
-                    action, now, &mut self.suggestion, &mut self.memory,
+                    action,
+                    now,
+                    &mut self.suggestion,
+                    &mut self.memory,
                     &mut self.notification_store,
-                    &mut self.console, &mut self.coordinator, &mut self.layout,
-                    &mut self.scene, &mut tasks_to_spawn,
+                    &mut self.console,
+                    &mut self.coordinator,
+                    &mut self.layout,
+                    &mut self.scene,
+                    &mut tasks_to_spawn,
                 );
             }
         }
@@ -166,10 +183,16 @@ impl App {
         let pending = std::mem::take(&mut self.pending_brain_actions);
         for action in pending {
             Self::execute_brain_action(
-                action, now, &mut self.suggestion, &mut self.memory,
+                action,
+                now,
+                &mut self.suggestion,
+                &mut self.memory,
                 &mut self.notification_store,
-                &mut self.console, &mut self.coordinator, &mut self.layout,
-                &mut self.scene, &mut tasks_to_spawn,
+                &mut self.console,
+                &mut self.coordinator,
+                &mut self.layout,
+                &mut self.scene,
+                &mut tasks_to_spawn,
             );
         }
 
@@ -183,10 +206,16 @@ impl App {
                     self.console.system(res.display);
                     if let Some(action) = res.action {
                         Self::execute_brain_action(
-                            action, now, &mut self.suggestion, &mut self.memory,
+                            action,
+                            now,
+                            &mut self.suggestion,
+                            &mut self.memory,
                             &mut self.notification_store,
-                            &mut self.console, &mut self.coordinator, &mut self.layout,
-                            &mut self.scene, &mut tasks_to_spawn,
+                            &mut self.console,
+                            &mut self.coordinator,
+                            &mut self.layout,
+                            &mut self.scene,
+                            &mut tasks_to_spawn,
                         );
                     }
                 }
@@ -216,7 +245,9 @@ impl App {
             Err(_) => Vec::new(),
         };
         for req in pending_subagents {
-            let task = phantom_agents::AgentTask::FreeForm { prompt: req.task.clone() };
+            let task = phantom_agents::AgentTask::FreeForm {
+                prompt: req.task.clone(),
+            };
             // Wire role / label / chat_model from the SpawnSubagentRequest into
             // AgentSpawnOpts so the spawned pane runs under the requested role
             // and displays the requested label. Fixes #224 where these fields
@@ -523,12 +554,11 @@ impl App {
                     self.pane_last_command.insert(*app_id, command.clone());
                 }
                 Event::CommandComplete { app_id, exit_code } => {
-                    let command_text = self
-                        .pending_command_text
-                        .remove(app_id)
-                        .unwrap_or_default();
+                    let command_text = self.pending_command_text.remove(app_id).unwrap_or_default();
                     if let Some(ref mut store) = self.history {
-                        let cwd = self.context.as_ref()
+                        let cwd = self
+                            .context
+                            .as_ref()
                             .map(|c| std::path::PathBuf::from(&c.root))
                             .unwrap_or_else(|| std::path::PathBuf::from("."));
                         let entry = HistoryEntry::builder(&command_text, cwd, self.session_uuid)
@@ -570,22 +600,23 @@ impl App {
                         );
                         Some(AiEvent::CommandComplete(parsed))
                     }
-                    Event::AgentTaskComplete { agent_id, success, summary, spawn_tag } => {
-                        Some(AiEvent::AgentComplete {
-                            id: *agent_id,
-                            success: *success,
-                            summary: summary.clone(),
-                            spawn_tag: *spawn_tag,
-                        })
-                    }
-                    Event::AgentError { agent_id, error } => {
-                        Some(AiEvent::AgentComplete {
-                            id: *agent_id,
-                            success: false,
-                            summary: error.clone(),
-                            spawn_tag: None,
-                        })
-                    }
+                    Event::AgentTaskComplete {
+                        agent_id,
+                        success,
+                        summary,
+                        spawn_tag,
+                    } => Some(AiEvent::AgentComplete {
+                        id: *agent_id,
+                        success: *success,
+                        summary: summary.clone(),
+                        spawn_tag: *spawn_tag,
+                    }),
+                    Event::AgentError { agent_id, error } => Some(AiEvent::AgentComplete {
+                        id: *agent_id,
+                        success: false,
+                        summary: error.clone(),
+                        spawn_tag: None,
+                    }),
                     _ => None,
                 };
                 if let Some(event) = ai_event {
@@ -652,15 +683,19 @@ impl App {
                     );
                 }
             }
-            AiAction::SpawnAgent { task, spawn_tag, disposition } => {
+            AiAction::SpawnAgent {
+                task,
+                spawn_tag,
+                disposition,
+            } => {
                 info!(
                     "[PHANTOM]: Spawning agent \
                      (spawn_tag={spawn_tag:?}, disposition={disposition:?}, \
                      auto_approve={})...",
                     disposition.auto_approve(),
                 );
-                let mut opts = phantom_agents::AgentSpawnOpts::new(task)
-                    .with_disposition(disposition);
+                let mut opts =
+                    phantom_agents::AgentSpawnOpts::new(task).with_disposition(disposition);
                 opts.spawn_tag = spawn_tag;
                 tasks_to_spawn.push(opts);
             }
@@ -685,13 +720,25 @@ impl App {
             AiAction::AgentFlatlined { id, reason } => {
                 info!("[PHANTOM]: Agent {id} flatlined: {reason}");
             }
-            AiAction::Suggest { action, rationale, confidence } => {
-                info!("[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}");
+            AiAction::Suggest {
+                action,
+                rationale,
+                confidence,
+            } => {
+                info!(
+                    "[PHANTOM]: Proactive suggestion (confidence={confidence:.2}): {action} — {rationale}"
+                );
             }
-            AiAction::QuarantineAgent { agent_id, denial_count } => {
+            AiAction::QuarantineAgent {
+                agent_id,
+                denial_count,
+            } => {
                 info!("[PHANTOM]: Quarantining agent {agent_id} after {denial_count} denials");
             }
-            AiAction::AgentQuarantined { agent_id, denial_count } => {
+            AiAction::AgentQuarantined {
+                agent_id,
+                denial_count,
+            } => {
                 info!("[PHANTOM]: Agent {agent_id} quarantined ({denial_count} denials)");
             }
             AiAction::DoNothing => {}
@@ -927,19 +974,21 @@ impl App {
         use phantom_renderer::shader_loader::ShaderEvent;
 
         loop {
-            let Some(event) = self.shader_reloader.poll() else { break };
+            let Some(event) = self.shader_reloader.poll() else {
+                break;
+            };
             match event {
-                ShaderEvent::Reloaded { ref name, ref source } if name == "crt" => {
-                    match self.postfx.reload_shader(&self.gpu.device, source) {
-                        Ok(()) => log::info!("live-reload: crt.wgsl pipeline swapped"),
-                        Err(msg) => {
-                            let message = format!(
-                                "crt.wgsl hot-swap failed — {msg}. Last-good shader active."
-                            );
-                            self.push_shader_error_banner(message, now_ms);
-                        }
+                ShaderEvent::Reloaded {
+                    ref name,
+                    ref source,
+                } if name == "crt" => match self.postfx.reload_shader(&self.gpu.device, source) {
+                    Ok(()) => log::info!("live-reload: crt.wgsl pipeline swapped"),
+                    Err(msg) => {
+                        let message =
+                            format!("crt.wgsl hot-swap failed — {msg}. Last-good shader active.");
+                        self.push_shader_error_banner(message, now_ms);
                     }
-                }
+                },
                 ShaderEvent::Reloaded { name, .. } => {
                     log::debug!("live-reload: {name}.wgsl reloaded (no pipeline swap yet)");
                 }
@@ -955,12 +1004,118 @@ impl App {
 
     /// Push a Severity::Warn banner from a shader reload failure.
     fn push_shader_error_banner(&mut self, message: String, now_ms: u64) {
-        use crate::notifications::{Banner, Severity, DEFAULT_BANNER_TTL_MS};
+        use crate::notifications::{Banner, DEFAULT_BANNER_TTL_MS, Severity};
         self.notifications.push_banner(Banner {
             message,
             severity: Severity::Warn,
             expires_at_ms: now_ms.saturating_add(DEFAULT_BANNER_TTL_MS),
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #323 — alt-screen split-pane lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Poll all terminal adapters for alt-screen transitions.
+    ///
+    /// On rising edge (`is_detached` false → true): triggers `split_for_alt_screen`.
+    /// On falling edge (`is_detached` true → false): queues the secondary pane for
+    /// fade-out via `alt_screen_fade`.
+    pub(crate) fn poll_alt_screen_transitions(&mut self) {
+        let all_ids: Vec<phantom_adapter::AppId> = self.coordinator.all_app_ids();
+
+        // Collect transitions (avoid borrow conflict with self.coordinator).
+        let mut to_split: Vec<(phantom_adapter::AppId, String)> = Vec::new();
+
+        for app_id in &all_ids {
+            let app_id = *app_id;
+            let state = self
+                .coordinator
+                .registry()
+                .get_adapter(app_id)
+                .map(|a: &dyn phantom_adapter::AppAdapter| a.get_state());
+            let Some(state) = state else { continue };
+
+            let is_terminal = state
+                .get("type")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                == Some("terminal");
+            if !is_terminal {
+                continue;
+            }
+
+            let is_detached = state
+                .get("is_detached")
+                .and_then(|v: &serde_json::Value| v.as_bool())
+                .unwrap_or(false);
+            let label = state
+                .get("detached_label")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .unwrap_or("interactive")
+                .to_owned();
+
+            let prev = self.prev_detached.get(&app_id).copied().unwrap_or(false);
+            self.prev_detached.insert(app_id, is_detached);
+
+            // Rising edge: terminal just entered alt-screen.
+            if is_detached && !prev && !self.alt_screen_secondaries.contains_key(&app_id) {
+                to_split.push((app_id, label));
+            }
+
+            // Falling edge: terminal just left alt-screen.
+            if !is_detached && prev {
+                if let Some(&secondary_id) = self.alt_screen_secondaries.get(&app_id) {
+                    // Start fade animation if not already fading.
+                    self.alt_screen_fade.entry(secondary_id).or_insert(0.0);
+                }
+            }
+        }
+
+        for (primary_id, label) in to_split {
+            self.split_for_alt_screen(primary_id, label);
+        }
+    }
+
+    /// Advance the 300 ms collapse fade for secondary alt-screen panes.
+    ///
+    /// Once a secondary pane's fade reaches 1.0 it is added to
+    /// `alt_screen_pending_collapses` so the pane can be cleaned up.
+    pub(crate) fn tick_alt_screen_fade(&mut self, dt: f32) {
+        const FADE_DURATION: f32 = 0.3; // 300 ms
+
+        // Collect secondaries whose fade is complete this frame.
+        let mut completed: Vec<phantom_adapter::AppId> = Vec::new();
+        for (secondary_id, progress) in self.alt_screen_fade.iter_mut() {
+            *progress += dt / FADE_DURATION;
+            if *progress >= 1.0 {
+                completed.push(*secondary_id);
+            }
+        }
+
+        // Build reverse map (secondary → primary) so we can pass both to collapse.
+        let reverse: std::collections::HashMap<phantom_adapter::AppId, phantom_adapter::AppId> =
+            self.alt_screen_secondaries
+                .iter()
+                .map(|(&primary, &secondary)| (secondary, primary))
+                .collect();
+
+        // Drain completed fades into pending_collapses (deduped).
+        for secondary_id in completed {
+            if !self.alt_screen_pending_collapses.contains(&secondary_id) {
+                self.alt_screen_pending_collapses.push(secondary_id);
+            }
+        }
+
+        // Collapse any ready panes.
+        let collapsing: Vec<_> = self.alt_screen_pending_collapses.drain(..).collect();
+        for secondary_id in collapsing {
+            if let Some(&primary_id) = reverse.get(&secondary_id) {
+                self.collapse_alt_screen_pane(primary_id, secondary_id);
+            } else {
+                // Primary already gone — clean up orphaned fade entry.
+                self.alt_screen_fade.remove(&secondary_id);
+            }
+        }
     }
 }
 
@@ -1166,11 +1321,9 @@ mod tests {
 
         // ---- replicate the timeout guard from App::update ----
         if git_refresh_handle.is_some() {
-            let timed_out = git_refresh_spawned_at
-                .is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
-            let finished = git_refresh_handle
-                .as_ref()
-                .is_some_and(|h| h.is_finished());
+            let timed_out =
+                git_refresh_spawned_at.is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
+            let finished = git_refresh_handle.as_ref().is_some_and(|h| h.is_finished());
             if timed_out {
                 git_refresh_handle = None;
                 git_refresh_spawned_at = None;
@@ -1219,11 +1372,9 @@ mod tests {
         let mut git_refresh_spawned_at: Option<Instant> = spawned_at;
 
         if git_refresh_handle.is_some() {
-            let timed_out = git_refresh_spawned_at
-                .is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
-            let finished = git_refresh_handle
-                .as_ref()
-                .is_some_and(|h| h.is_finished());
+            let timed_out =
+                git_refresh_spawned_at.is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
+            let finished = git_refresh_handle.as_ref().is_some_and(|h| h.is_finished());
             if timed_out {
                 git_refresh_handle = None;
                 git_refresh_spawned_at = None;
