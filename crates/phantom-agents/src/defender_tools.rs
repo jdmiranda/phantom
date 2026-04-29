@@ -430,6 +430,7 @@ mod tests {
             event_log: None,
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
+            quarantine: None,
         };
 
         let result = dispatch_tool(
