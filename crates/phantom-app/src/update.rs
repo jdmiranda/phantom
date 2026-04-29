@@ -188,17 +188,21 @@ impl App {
         };
         for req in pending_subagents {
             let task = phantom_agents::AgentTask::FreeForm { prompt: req.task.clone() };
-            // The current `spawn_agent_pane` doesn't take role / label / chat_model
-            // because the underlying `AgentPane::spawn` predates the role+chat_model
-            // fields wired into `composer_tools::SpawnSubagentRequest`. We dispatch
-            // the spawn through the existing path; the role/label/chat_model
-            // metadata is preserved on the queue entry for the next phase wiring.
-            let _ = req.role; // silence unused-field warnings until full wiring lands
-            let _ = req.label;
-            let _ = req.chat_model;
+            // Wire role / label / chat_model from the SpawnSubagentRequest into
+            // AgentSpawnOpts so the spawned pane runs under the requested role
+            // and displays the requested label. Fixes #224 where these fields
+            // were silently discarded and Conversational / "agent-pane" defaults
+            // were used instead.
+            let mut opts = phantom_agents::AgentSpawnOpts::new(task)
+                .with_role(req.role)
+                .with_label(req.label.clone());
+            if let Some(model) = req.chat_model.clone() {
+                opts = opts.with_chat_model(model);
+            }
+            // parent and assigned_id are substrate-level correlation fields.
             let _ = req.parent;
             let _ = req.assigned_id;
-            let _ = self.spawn_agent_pane(task);
+            let _ = self.spawn_agent_pane_with_opts(opts);
         }
 
         // Expire stale suggestions (save to history before clearing).

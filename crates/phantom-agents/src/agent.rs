@@ -607,6 +607,16 @@ pub struct AgentSpawnOpts {
     /// back to the correct `active_dispatches` entry. `None` for
     /// user-initiated spawns that are not tracked by the reconciler.
     pub spawn_tag: Option<u64>,
+    /// Role the spawned agent should run under. `None` falls back to the pane
+    /// default (`DEFAULT_AGENT_PANE_ROLE`, currently `Conversational`).
+    ///
+    /// Previously silently dropped from `SpawnSubagentRequest` — wired in for #224.
+    pub role: Option<crate::role::AgentRole>,
+    /// User-visible display label for the agent. `None` falls back to the
+    /// generic `"agent-pane"` label assigned at substrate-handle wiring time.
+    ///
+    /// Previously silently dropped from `SpawnSubagentRequest` — wired in for #224.
+    pub label: Option<String>,
 }
 
 impl AgentSpawnOpts {
@@ -618,7 +628,37 @@ impl AgentSpawnOpts {
             task,
             chat_model: None,
             spawn_tag: None,
+            role: None,
+            label: None,
         }
+    }
+
+    /// Override the agent role. Replaces the pane default (`Conversational`).
+    #[must_use]
+    pub fn with_role(mut self, role: crate::role::AgentRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    /// Set the user-visible label for this agent pane.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Override the chat model.
+    #[must_use]
+    pub fn with_chat_model(mut self, model: crate::chat::ChatModel) -> Self {
+        self.chat_model = Some(model);
+        self
+    }
+
+    /// Tag this spawn for the reconciler.
+    #[must_use]
+    pub fn with_spawn_tag(mut self, tag: u64) -> Self {
+        self.spawn_tag = Some(tag);
+        self
     }
 
     /// Resolve the effective chat model for this spawn.
@@ -1485,5 +1525,67 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
         let latest = agent.semantic_ctx().latest().expect("ring-buffer has entries");
         assert_eq!(latest.command, "git status");
+    }
+
+    // ---- AgentSpawnOpts role/label wiring (#224) ----------------------------
+
+    #[test]
+    fn spawn_opts_new_defaults_role_and_label_to_none() {
+        let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "task".into() });
+        assert!(opts.role.is_none(), "AgentSpawnOpts::new must default role to None");
+        assert!(opts.label.is_none(), "AgentSpawnOpts::new must default label to None");
+    }
+
+    #[test]
+    fn spawn_opts_with_role_defender_is_preserved() {
+        use crate::role::AgentRole;
+        let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "sec".into() })
+            .with_role(AgentRole::Defender);
+        assert_eq!(
+            opts.role,
+            Some(AgentRole::Defender),
+            "with_role(Defender) must set opts.role = Some(Defender)",
+        );
+    }
+
+    #[test]
+    fn spawn_opts_with_label_is_preserved() {
+        let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "work".into() })
+            .with_label("custom-defender");
+        assert_eq!(
+            opts.label.as_deref(),
+            Some("custom-defender"),
+            "with_label must set opts.label = Some(custom-defender)",
+        );
+    }
+
+    #[test]
+    fn spawn_subagent_request_carries_role_and_label_through_queue() {
+        use crate::composer_tools::{new_spawn_subagent_queue, spawn_subagent};
+        use crate::role::AgentRole;
+        use serde_json::json;
+
+        let queue = new_spawn_subagent_queue();
+        let args = json!({
+            "role": "defender",
+            "label": "sec-watcher",
+            "task": "observe denial",
+        });
+        let id = spawn_subagent(&args, 1, &queue).expect("spawn_subagent must succeed");
+
+        let q = queue.lock().expect("queue lock");
+        assert_eq!(q.len(), 1);
+        let req = &q[0];
+        assert_eq!(req.assigned_id, id, "assigned_id must match returned id");
+        assert_eq!(
+            req.role,
+            AgentRole::Defender,
+            "SpawnSubagentRequest.role must be Defender, not Conversational",
+        );
+        assert_eq!(
+            req.label,
+            "sec-watcher",
+            "SpawnSubagentRequest.label must be sec-watcher",
+        );
     }
 }

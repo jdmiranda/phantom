@@ -185,6 +185,9 @@ fn parse_role(name: &str) -> Option<AgentRole> {
         "actor" => Some(AgentRole::Actor),
         "composer" => Some(AgentRole::Composer),
         "fixer" => Some(AgentRole::Fixer),
+        // #224: Defender and Dispatcher were missing; callers got "unknown role".
+        "defender" => Some(AgentRole::Defender),
+        "dispatcher" => Some(AgentRole::Dispatcher),
         _ => None,
     }
 }
