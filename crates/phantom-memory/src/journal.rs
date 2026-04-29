@@ -323,6 +323,24 @@ impl AgentJournal {
         )
     }
 
+    /// Record the fully-assembled system prompt that was sent to the agent.
+    ///
+    /// Called once per agent run, immediately before the first LLM request.
+    /// The `prompt_text` is stored verbatim so any run can be replayed exactly
+    /// by feeding the same prompt back to the model.
+    pub fn record_prompt_snapshot(
+        &mut self,
+        agent_id: AgentId,
+        prompt_text: impl Into<String>,
+    ) -> Result<JournalEntry, JournalError> {
+        self.record(
+            agent_id,
+            Phase::Planning,
+            Level::Debug,
+            format!("prompt_snapshot: {}", prompt_text.into()),
+        )
+    }
+
     // ── Query API ─────────────────────────────────────────────────────────
 
     /// Most-recent `n` journal entries, in chronological order (oldest first).
@@ -829,5 +847,41 @@ mod tests {
         let path = dir.path().join("path_test.jsonl");
         let j = AgentJournal::open(&path).unwrap();
         assert_eq!(j.path(), path.as_path());
+    }
+
+    // ── prompt_snapshot (#42) ─────────────────────────────────────────────────
+
+    #[test]
+    fn record_prompt_snapshot_planning_debug() {
+        let (mut j, _, _dir) = mk_journal("prompt_snap.jsonl");
+        let e = j
+            .record_prompt_snapshot(7, "You are an AI assistant.\n\n## Task\ndo the thing")
+            .unwrap();
+
+        assert_eq!(e.agent_id(), 7);
+        assert_eq!(e.phase(), Phase::Planning);
+        assert_eq!(e.level(), Level::Debug);
+        assert!(
+            e.message().starts_with("prompt_snapshot:"),
+            "message must have the prompt_snapshot prefix; got: {}",
+            e.message(),
+        );
+        assert!(
+            e.message().contains("do the thing"),
+            "message must include prompt content; got: {}",
+            e.message(),
+        );
+    }
+
+    #[test]
+    fn record_prompt_snapshot_appears_in_filter_by_phase_planning() {
+        let (mut j, _, _dir) = mk_journal("snap_phase.jsonl");
+        j.record_spawn(1, "task").unwrap();
+        j.record_prompt_snapshot(1, "system prompt text").unwrap();
+        j.record_tool_call(1, "ReadFile", "src/main.rs").unwrap();
+
+        let planning = j.filter_by_phase(Phase::Planning);
+        assert_eq!(planning.len(), 1, "only the prompt_snapshot should be in Planning");
+        assert!(planning[0].message().contains("system prompt text"));
     }
 }

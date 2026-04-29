@@ -488,6 +488,7 @@ impl AgentPane {
 
         let mut agent = Agent::new(0, task.clone());
         let sys_prompt = agent.system_prompt();
+        agent.store_prompt(sys_prompt.clone());
         agent.push_message(AgentMessage::System(sys_prompt));
 
         // Inject codebase context so the agent knows where it lives.

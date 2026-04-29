@@ -246,6 +246,32 @@ impl SystemPromptBuilder {
 
         sections.join("\n\n")
     }
+
+    /// Build the final system prompt and store it on `agent`.
+    ///
+    /// Equivalent to calling [`build`] and then [`Agent::store_prompt`] in one
+    /// step, so the fully-assembled prompt is always persisted before the first
+    /// LLM call. Returns the prompt text so the caller can also push it into
+    /// the conversation history or log it.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use phantom_agents::agent::{Agent, AgentTask};
+    /// # use phantom_agents::system_prompt::SystemPromptBuilder;
+    /// # use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+    /// let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+    /// let agent_ref = AgentRef::new(1, AgentRole::Conversational, "chat", SpawnSource::User);
+    /// let text = SystemPromptBuilder::new(agent_ref).build_and_store(&mut agent);
+    /// assert!(agent.prompt_text().is_some());
+    /// ```
+    ///
+    /// [`build`]: SystemPromptBuilder::build
+    pub fn build_and_store(&self, agent: &mut crate::agent::Agent) -> String {
+        let text = self.build();
+        agent.store_prompt(text.clone());
+        text
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -537,5 +563,42 @@ mod tests {
         let task_idx = prompt.find("## Task").expect("task heading");
         assert!(boundary_idx < peers_idx, "peers must follow boundary");
         assert!(peers_idx < task_idx, "peers must precede task");
+    }
+
+    // --- build_and_store (#42) -----------------------------------------------
+
+    #[test]
+    fn build_and_store_sets_prompt_text_on_agent() {
+        use crate::agent::{Agent, AgentTask};
+        let mut a = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        let text = SystemPromptBuilder::new(agent(AgentRole::Conversational, "chat", 1))
+            .with_task("do the thing".into())
+            .build_and_store(&mut a);
+
+        assert!(
+            a.prompt_text().is_some(),
+            "build_and_store must set prompt_text on the agent",
+        );
+        assert_eq!(
+            a.prompt_text(),
+            Some(text.as_str()),
+            "stored prompt must match the returned text",
+        );
+    }
+
+    #[test]
+    fn build_and_store_returns_same_text_as_build() {
+        use crate::agent::{Agent, AgentTask};
+        let mut a = Agent::new(2, AgentTask::FreeForm { prompt: "x".into() });
+        let builder = SystemPromptBuilder::new(agent(AgentRole::Actor, "act", 2))
+            .with_task("run cargo test".into());
+
+        let via_build = builder.build();
+        let via_store = builder.build_and_store(&mut a);
+
+        assert_eq!(
+            via_build, via_store,
+            "build_and_store must return the same text as build",
+        );
     }
 }

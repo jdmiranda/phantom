@@ -218,6 +218,12 @@ pub struct Agent {
     /// [`Agent::semantic_prompt_section`] so the model can reason about
     /// structured command history rather than raw terminal text.
     semantic_ctx: SemanticContext,
+    /// The exact assembled system-prompt text this agent received at spawn time.
+    ///
+    /// Stored before the first LLM call for auditability and replay. `None`
+    /// until [`Agent::store_prompt`] (or [`SystemPromptBuilder::build_and_store`])
+    /// is called.
+    pub prompt_text: Option<String>,
 }
 
 impl Agent {
@@ -239,6 +245,7 @@ impl Agent {
             correlation_id: None,
             parent_id: None,
             semantic_ctx: SemanticContext::new(),
+            prompt_text: None,
         }
     }
 
@@ -360,6 +367,25 @@ impl Agent {
     /// Immutable access to the agent's semantic context.
     pub fn semantic_ctx(&self) -> &SemanticContext {
         &self.semantic_ctx
+    }
+
+    /// Return the assembled system-prompt text, if it has been stored.
+    ///
+    /// `None` until [`Agent::store_prompt`] or
+    /// [`crate::system_prompt::SystemPromptBuilder::build_and_store`] is called.
+    #[must_use]
+    pub fn prompt_text(&self) -> Option<&str> {
+        self.prompt_text.as_deref()
+    }
+
+    /// Store the fully-assembled system-prompt text on this agent.
+    ///
+    /// Called automatically by
+    /// [`crate::system_prompt::SystemPromptBuilder::build_and_store`]. Direct
+    /// callers that build the prompt via [`Agent::system_prompt`] should call
+    /// this immediately after so the prompt is always persisted.
+    pub fn store_prompt(&mut self, text: impl Into<String>) {
+        self.prompt_text = Some(text.into());
     }
 
     /// Append a message to the conversation history.
@@ -1779,6 +1805,33 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 "{disposition:?} must remain Queued when try_auto_approve returns false",
             );
         }
+    }
+
+    // ---- prompt persistence (#42) ------------------------------------------
+
+    #[test]
+    fn new_agent_prompt_text_is_none() {
+        let agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        assert!(
+            agent.prompt_text().is_none(),
+            "prompt_text must be None on a freshly constructed agent",
+        );
+    }
+
+    #[test]
+    fn store_prompt_sets_prompt_text() {
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.store_prompt("my assembled prompt");
+        assert_eq!(agent.prompt_text(), Some("my assembled prompt"));
+    }
+
+    #[test]
+    fn store_prompt_is_idempotent_overwrite() {
+        // Calling store_prompt a second time overwrites the previous value.
+        let mut agent = Agent::new(1, AgentTask::FreeForm { prompt: "task".into() });
+        agent.store_prompt("first");
+        agent.store_prompt("second");
+        assert_eq!(agent.prompt_text(), Some("second"));
     }
 
     #[test]
