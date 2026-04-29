@@ -520,4 +520,128 @@ mod tests {
             Some("why did you attempt write_file?"),
         );
     }
+
+    // ---- Issue #188: challenge_agent round-trip -----------------------------
+
+    /// Defender (id=99) sends a challenge; target (id=42) replies back to the
+    /// defender's inbox via the registry. Both legs must succeed: forward
+    /// delivery verified by reading target's inbox, reply verified by reading
+    /// defender's inbox.
+    #[tokio::test]
+    async fn challenge_agent_round_trip_defender_sends_target_replies() {
+        let (defender_handle, mut defender_rx) =
+            fake_agent(99, AgentRole::Defender, "defender");
+        let (target_handle, mut target_rx) =
+            fake_agent(42, AgentRole::Watcher, "offender");
+
+        let mut reg = AgentRegistry::new();
+        reg.register(defender_handle);
+        reg.register(target_handle);
+        let registry = Arc::new(Mutex::new(reg));
+
+        let defender_ref =
+            AgentRef::new(99, AgentRole::Defender, "defender", SpawnSource::Substrate);
+        let ctx = DefenderToolContext::new(defender_ref.clone(), registry.clone(), None);
+
+        // Forward leg: Defender challenges the target.
+        let result = challenge_agent(
+            &json!({
+                "target_agent_id": 42u32,
+                "denial_event_id": 99u64,
+                "question": "why did you call run_command?",
+            }),
+            &ctx,
+        )
+        .expect("forward challenge must succeed");
+        assert!(
+            result.contains("42"),
+            "success message must mention target id: {result}"
+        );
+
+        // Verify target inbox received the challenge from the defender.
+        let forward = timeout(Duration::from_millis(100), target_rx.recv())
+            .await
+            .expect("target receive timed out")
+            .expect("target channel closed");
+        match &forward {
+            InboxMessage::AgentSpeak { from, body } => {
+                assert_eq!(from.id, 99, "challenge must be from Defender id=99");
+                assert_eq!(from.role, AgentRole::Defender);
+                assert!(
+                    body.contains("[defender challenge re: denial #99]"),
+                    "body must contain canonical framing, got: {body}"
+                );
+            }
+            other => panic!("expected AgentSpeak in target inbox, got {other:?}"),
+        }
+
+        // Reply leg: target looks up the defender in the registry and replies.
+        let target_ref = AgentRef::new(42, AgentRole::Watcher, "offender", SpawnSource::Substrate);
+        let reply_body = "I was executing an approved build step.".to_string();
+        {
+            let reg_guard = registry.lock().unwrap();
+            let defender_inbox = reg_guard
+                .get(99)
+                .expect("defender must still be in registry");
+            defender_inbox
+                .inbox
+                .try_send(InboxMessage::AgentSpeak {
+                    from: target_ref,
+                    body: reply_body.clone(),
+                })
+                .expect("reply to defender must not fail");
+        }
+
+        // Verify defender inbox received the reply from the target.
+        let reply = timeout(Duration::from_millis(100), defender_rx.recv())
+            .await
+            .expect("defender receive timed out")
+            .expect("defender channel closed");
+        match reply {
+            InboxMessage::AgentSpeak { from, body } => {
+                assert_eq!(from.id, 42, "reply must be tagged from target id=42");
+                assert_eq!(body, reply_body);
+            }
+            other => panic!("expected AgentSpeak reply in defender inbox, got {other:?}"),
+        }
+    }
+
+    /// When the target's inbox is at capacity, `challenge_agent` must return
+    /// an `Err` containing the target id — no panic.
+    #[tokio::test]
+    async fn challenge_agent_full_inbox_returns_err_not_panic() {
+        // Channel capacity=1, pre-filled with Stop to make try_send fail.
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(InboxMessage::Stop)
+            .expect("pre-fill must succeed");
+
+        let (_status_tx, status_rx) = watch::channel(AgentStatus::Idle);
+        let target_handle = AgentHandle {
+            agent_ref: AgentRef::new(77, AgentRole::Watcher, "busy-offender", SpawnSource::Substrate),
+            inbox: tx,
+            status: status_rx,
+        };
+
+        let mut reg = AgentRegistry::new();
+        reg.register(target_handle);
+        let registry = Arc::new(Mutex::new(reg));
+
+        let defender_ref =
+            AgentRef::new(1, AgentRole::Defender, "defender", SpawnSource::Substrate);
+        let ctx = DefenderToolContext::new(defender_ref, registry, None);
+
+        let err = challenge_agent(
+            &json!({
+                "target_agent_id": 77u32,
+                "denial_event_id": 5u64,
+                "question": "why?",
+            }),
+            &ctx,
+        )
+        .expect_err("must fail when inbox is full");
+        assert!(
+            err.contains("77"),
+            "error must mention target id 77, got: {err}"
+        );
+    }
 }

@@ -439,6 +439,109 @@ mod tests {
         assert!(matches!(action, AiAction::AgentFlatlined { .. }));
     }
 
+    // -- Issue #183: heartbeat flatline reason + id fields --------------------
+
+    /// `AgentFlatlined` must carry a non-empty `reason` that mentions the stall
+    /// or retry count, and its `id` must match the synthetic spawn_tag so the
+    /// UI can highlight the correct agent row.
+    #[test]
+    fn heartbeat_flatline_carries_reason_and_matching_id() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState {
+            stall_timeout: Duration::from_millis(1),
+            ..ReconcilerState::new()
+        };
+        let mut ledger = make_ledger(&["compile step"]);
+        ledger.plan[0].max_attempts = 1;
+
+        // Dispatch: emits SpawnAgent with spawn_tag.
+        state.tick(&mut ledger, &tx);
+        let spawn_tag = match rx.try_recv().expect("expected SpawnAgent") {
+            AiAction::SpawnAgent { spawn_tag, .. } => {
+                spawn_tag.expect("reconciler must stamp a spawn_tag")
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        };
+
+        // Let the stall timeout expire, then tick to trigger stall detection.
+        std::thread::sleep(Duration::from_millis(5));
+        state.tick(&mut ledger, &tx);
+
+        let flatline = rx.try_recv().expect("expected AgentFlatlined after stall");
+        match flatline {
+            AiAction::AgentFlatlined { id, reason } => {
+                // id must match the synthetic agent id so consumers can correlate.
+                assert_eq!(
+                    id as u64, spawn_tag,
+                    "flatlined id must match the spawn_tag"
+                );
+                // reason must be descriptive — not empty, not a placeholder.
+                assert!(!reason.is_empty(), "AgentFlatlined must carry a non-empty reason");
+                assert!(
+                    reason.contains("stall") || reason.contains("attempt"),
+                    "reason must mention stall or attempts, got: {reason}"
+                );
+            }
+            other => panic!("expected AgentFlatlined, got {other:?}"),
+        }
+
+        // The active dispatch must be cleared after flatline.
+        assert!(
+            state.active_dispatches.is_empty(),
+            "dispatch must be removed after flatline"
+        );
+    }
+
+    /// When max_attempts > 1, the first stall re-queues (step stays Active),
+    /// and only the final stall emits `AgentFlatlined` and marks the step Failed.
+    #[test]
+    fn heartbeat_stall_requeues_before_final_flatline() {
+        // dispatch_pending increments step.attempts (+1), so each stall check also
+        // increments via record_failure (+1). With max_attempts=3:
+        //   dispatch → attempts=1  (< 3, Active)
+        //   stall #1 → attempts=2  (< 3, still_retrying=true, re-queued, Active)
+        //   stall #2 → attempts=3  (= 3, still_retrying=false, Failed + Flatlined)
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState {
+            stall_timeout: Duration::from_millis(1),
+            ..ReconcilerState::new()
+        };
+        let mut ledger = make_ledger(&["flaky step"]);
+        ledger.plan[0].max_attempts = 3;
+
+        // First dispatch.
+        state.tick(&mut ledger, &tx);
+        let _ = rx.try_recv().expect("expected first SpawnAgent");
+
+        // First stall: should re-queue (no Flatlined yet).
+        std::thread::sleep(Duration::from_millis(5));
+        state.tick(&mut ledger, &tx);
+        // Drain any re-dispatch SpawnAgent.
+        let _ = rx.try_recv();
+
+        // Step must NOT be Failed yet.
+        assert_ne!(
+            ledger.plan[0].status,
+            StepStatus::Failed,
+            "step must not be Failed after first stall (still retrying)"
+        );
+
+        // Second stall: should now exhaust retries and flatline.
+        std::thread::sleep(Duration::from_millis(5));
+        state.tick(&mut ledger, &tx);
+
+        let flatline = rx.try_recv().expect("expected AgentFlatlined after second stall");
+        assert!(
+            matches!(flatline, AiAction::AgentFlatlined { .. }),
+            "expected AgentFlatlined on final stall, got {flatline:?}"
+        );
+        assert_eq!(
+            ledger.plan[0].status,
+            StepStatus::Failed,
+            "step must be Failed after final stall"
+        );
+    }
+
     #[test]
     fn sequential_steps_dispatch_in_order() {
         let (tx, rx) = mpsc::channel();
