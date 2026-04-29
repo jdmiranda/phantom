@@ -4,6 +4,7 @@
 //! Both are passed over `std::sync::mpsc` channels between the brain thread
 //! and the rest of the application.
 
+use phantom_agents::dispatch::Disposition;
 use phantom_agents::{AgentId, AgentTask};
 use phantom_semantic::ParsedOutput;
 
@@ -126,10 +127,17 @@ pub enum AiAction {
     /// `AgentComplete` event can be matched back to the correct
     /// `active_dispatches` entry regardless of the AgentManager's own
     /// sequential ID assignment. Non-reconciler callers leave it `None`.
+    ///
+    /// `disposition` carries the step's intent classification (Issue #49).
+    /// When `disposition.auto_approve()` is `true`, the app layer skips the
+    /// `AwaitingApproval` state and goes `Queued → Working` directly.
     SpawnAgent {
         task: AgentTask,
         /// Reconciler-assigned synthetic ID; `None` for user-initiated spawns.
         spawn_tag: Option<u64>,
+        /// Intent classification forwarded from the [`crate::orchestrator::PlanStep`].
+        /// Defaults to [`Disposition::Chat`] for non-reconciler spawns.
+        disposition: Disposition,
     },
 
     /// Persist a key-value pair to project memory.

@@ -19,6 +19,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
+use phantom_agents::dispatch::Disposition;
 use phantom_agents::AgentTask;
 
 // ---------------------------------------------------------------------------
@@ -122,10 +123,20 @@ pub struct PlanStep {
     /// When `Some`, the dispatch layer resolves this ID in the
     /// `ProviderCatalog`. Unknown IDs fall back to `"claude-default"`.
     preferred_provider: Option<String>,
+    /// Intent classification for this step (Issue #49).
+    ///
+    /// Read-only dispositions (`Chat`, `Synthesize`, `Decompose`, `Audit`)
+    /// satisfy [`Disposition::auto_approve`] and bypass `AwaitingApproval` in
+    /// the app layer — the agent goes `Queued → Working` directly.
+    pub disposition: Disposition,
 }
 
 impl PlanStep {
     /// Create a new pending plan step with no dependencies.
+    ///
+    /// The disposition defaults to [`Disposition::Chat`] (read-only / safe).
+    /// Use [`PlanStep::with_disposition`] to override it when the step requires
+    /// a write-side intent (e.g. `Feature`, `BugFix`).
     pub fn new(description: impl Into<String>, task: AgentTask) -> Self {
         Self {
             description: description.into(),
@@ -137,7 +148,25 @@ impl PlanStep {
             result_summary: None,
             depends_on: Vec::new(),
             preferred_provider: None,
+            disposition: Disposition::default(),
         }
+    }
+
+    /// Attach an explicit [`Disposition`] to this step (builder-style, Issue #49).
+    ///
+    /// Read-only dispositions (`Chat`, `Synthesize`, `Decompose`, `Audit`)
+    /// enable the auto-approve fast path in the app layer so the spawned agent
+    /// skips `AwaitingApproval` and goes straight to `Working`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let step = PlanStep::new("summarise diff", task)
+    ///     .with_disposition(Disposition::Synthesize);
+    /// ```
+    #[must_use]
+    pub fn with_disposition(mut self, disposition: Disposition) -> Self {
+        self.disposition = disposition;
+        self
     }
 
     /// Create a pending step that must wait for `depends_on` steps to finish.

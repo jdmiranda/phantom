@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use phantom_agents::dispatch::Disposition;
 use phantom_agents::{AgentId, AgentTask};
 
 use crate::events::AiAction;
@@ -217,17 +218,24 @@ impl ReconcilerState {
     ///
     /// Each eligible step gets its own synthetic agent ID and its own
     /// `SpawnAgent` action. Completions are routed back via `spawn_tag`.
+    ///
+    /// The step's [`Disposition`] is forwarded in the `SpawnAgent` action
+    /// (Issue #49). The app layer reads `disposition.auto_approve()` and, when
+    /// `true`, skips `AwaitingApproval` — the agent goes `Queued → Working`
+    /// directly without human-in-the-loop delay.
     fn dispatch_pending(&mut self, ledger: &mut TaskLedger, action_tx: &mpsc::Sender<AiAction>) {
         // Collect eligible steps into an owned Vec so we can mutate `ledger`
         // inside the loop without holding a borrow on it.
-        let eligible: Vec<(usize, AgentTask, String)> = ledger
+        let eligible: Vec<(usize, AgentTask, Disposition, String)> = ledger
             .eligible_next()
             .into_iter()
             .filter(|(idx, _)| !self.active_dispatches.contains_key(idx))
-            .map(|(idx, step)| (idx, step.assigned_task.clone(), step.description.clone()))
+            .map(|(idx, step)| {
+                (idx, step.assigned_task.clone(), step.disposition, step.description.clone())
+            })
             .collect();
 
-        for (idx, task, description) in eligible {
+        for (idx, task, disposition, description) in eligible {
             let agent_id: AgentId = self.next_agent_id;
             self.next_agent_id = self
                 .next_agent_id
@@ -245,12 +253,15 @@ impl ReconcilerState {
             self.active_dispatches.insert(idx, (agent_id, Instant::now()));
 
             log::info!(
-                "Reconciler: dispatching step {idx} (agent_id={agent_id}) — {description}"
+                "Reconciler: dispatching step {idx} (agent_id={agent_id}, \
+                 disposition={disposition:?}, auto_approve={}) — {description}",
+                disposition.auto_approve(),
             );
 
             let _ = action_tx.send(AiAction::SpawnAgent {
                 task,
                 spawn_tag: Some(agent_id),
+                disposition,
             });
         }
     }
@@ -938,6 +949,55 @@ mod tests {
         state.tick(&mut ledger, &tx);
         assert!(rx.try_recv().is_err(), "must not re-dispatch an Active step");
         assert_eq!(state.active_dispatches.len(), 1, "dispatch count must not grow");
+    }
+
+    // -- Issue #49: auto-approve fast path for safe dispositions ------------------
+
+    /// A Chat-disposition step dispatched by the reconciler must carry
+    /// `Disposition::Chat` in the emitted `SpawnAgent` action so the app layer
+    /// can apply the auto-approve fast path and skip `AwaitingApproval`.
+    ///
+    /// This is the TDD anchor for Issue #49: the test is written first and
+    /// drives the shape of the implementation.
+    #[test]
+    fn auto_approve_disposition_skips_awaiting_approval() {
+        use phantom_agents::dispatch::Disposition;
+
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        let mut ledger = TaskLedger::new("synthesize report");
+
+        // Build a step with Chat disposition (read-only — should auto-approve).
+        let step = PlanStep::new(
+            "chat step",
+            AgentTask::FreeForm { prompt: "summarise the diff".into() },
+        )
+        .with_disposition(Disposition::Chat);
+        ledger.set_plan(vec![step]);
+
+        // Tick dispatches the step.
+        state.tick(&mut ledger, &tx);
+
+        // The emitted action must carry Disposition::Chat.
+        let action = rx.try_recv().expect("expected SpawnAgent action");
+        let AiAction::SpawnAgent { disposition, .. } = action else {
+            panic!("expected SpawnAgent variant, got {action:?}");
+        };
+
+        assert_eq!(
+            disposition,
+            Disposition::Chat,
+            "reconciler must forward Chat disposition so the app can auto-approve",
+        );
+
+        // Because Chat is auto-approvable, no AwaitingApproval state is needed:
+        // the app layer reads `disposition.auto_approve()` == true and goes
+        // Queued → Working directly.  We verify the predicate holds here to keep
+        // the invariant explicit in the test suite.
+        assert!(
+            disposition.auto_approve(),
+            "Chat disposition must satisfy auto_approve() so the fast path fires",
+        );
     }
 
     // -- Issue #273: AgentId unified as u64 — no narrowing cast at dispatch --------

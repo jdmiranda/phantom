@@ -232,6 +232,7 @@ impl SelfTestRunner {
                             context: repair_prompt,
                         },
                         spawn_tag: None,
+                        disposition: phantom_agents::dispatch::Disposition::BugFix,
                     });
 
                 self.heal_stage = HealStage::Repairing;

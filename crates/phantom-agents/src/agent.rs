@@ -180,7 +180,8 @@ pub struct Agent {
     id: AgentId,
     /// The task this agent was spawned to perform.
     task: AgentTask,
-    #[allow(dead_code)] // Intent classification — read by tests; production use comes with Sec.8+ disposition routing.
+    /// Intent classification. Read by [`Agent::try_auto_approve`] to decide
+    /// whether to skip `AwaitingApproval` (Issue #49 auto-approve fast path).
     disposition: Disposition,
     /// Current lifecycle status.
     status: AgentStatus,
@@ -398,6 +399,25 @@ impl Agent {
     /// Append visible output text (shown in the agent pane).
     pub fn log(&mut self, text: &str) {
         self.output_log.push(text.to_owned());
+    }
+
+    /// Fast-path entry from `Queued` → `Working` for auto-approvable dispositions.
+    ///
+    /// When `self.disposition.auto_approve()` is `true` (i.e. `Chat`,
+    /// `Synthesize`, `Decompose`, or `Audit`), the agent skips the
+    /// `Planning → AwaitingApproval` gate and goes directly to `Working`.
+    /// Write-side dispositions (`Feature`, `BugFix`, `Refactor`, `Chore`)
+    /// return `false` so the caller falls through to the normal plan gate.
+    ///
+    /// Returns `true` if the agent is now `Working`, `false` if the
+    /// disposition is not auto-approvable or the FSM transition failed.
+    #[must_use]
+    pub fn try_auto_approve(&mut self) -> bool {
+        if !self.disposition.auto_approve() {
+            return false;
+        }
+        // Queued → Working is a valid FSM transition (the no-gate fast path).
+        self.approve_plan()
     }
 
     /// Transition into the `Planning` state.
@@ -673,7 +693,9 @@ fn truncate(s: &str, max_len: usize) -> String {
 pub struct AgentSpawnOpts {
     /// What the agent is being spawned to do.
     pub task: AgentTask,
-    #[allow(dead_code)] // Intent classification — read by tests; production use comes with Sec.8+ disposition routing.
+    /// Intent classification forwarded to the spawned [`Agent`].
+    /// Read by [`Agent::try_auto_approve`] to determine if the agent should
+    /// skip `AwaitingApproval` (Issue #49).
     disposition: Disposition,
     /// Optional chat-model override. `None` falls through to the env-var
     /// resolver (`PHANTOM_AGENT_MODEL`), and ultimately to default Claude.
@@ -1686,8 +1708,78 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         );
     }
 
-    // ---- Disposition wiring (#38) -------------------------------------------
+    // ---- Disposition wiring (#38 / #49) ------------------------------------
 
+    /// Chat-disposition agents must jump Queued → Working via `try_auto_approve`,
+    /// never visiting `AwaitingApproval`. This is the agent-level anchor for the
+    /// auto-approve fast path (Issue #49).
+    #[test]
+    fn try_auto_approve_chat_goes_queued_to_working_directly() {
+        let mut agent = Agent::with_disposition(
+            1,
+            AgentTask::FreeForm { prompt: "summarise".into() },
+            Disposition::Chat,
+        );
+        assert_eq!(agent.status(), AgentStatus::Queued);
+
+        let approved = agent.try_auto_approve();
+
+        assert!(approved, "try_auto_approve must return true for Chat disposition");
+        assert_eq!(
+            agent.status(),
+            AgentStatus::Working,
+            "Chat agent must be Working after try_auto_approve, not AwaitingApproval",
+        );
+    }
+
+    /// `try_auto_approve` on Synthesize, Decompose, and Audit must also
+    /// short-circuit to Working (all satisfy `auto_approve()`).
+    #[test]
+    fn try_auto_approve_synthesize_decompose_audit_go_to_working() {
+        for disposition in [Disposition::Synthesize, Disposition::Decompose, Disposition::Audit] {
+            let mut agent = Agent::with_disposition(
+                1,
+                AgentTask::FreeForm { prompt: "task".into() },
+                disposition,
+            );
+            assert!(
+                agent.try_auto_approve(),
+                "{disposition:?} must auto-approve",
+            );
+            assert_eq!(
+                agent.status(),
+                AgentStatus::Working,
+                "{disposition:?} must end up Working, not AwaitingApproval",
+            );
+        }
+    }
+
+    /// Write-side dispositions (Feature, BugFix, Refactor, Chore) must NOT
+    /// auto-approve — they require the full plan gate.
+    #[test]
+    fn try_auto_approve_returns_false_for_write_dispositions() {
+        for disposition in [
+            Disposition::Feature,
+            Disposition::BugFix,
+            Disposition::Refactor,
+            Disposition::Chore,
+        ] {
+            let mut agent = Agent::with_disposition(
+                1,
+                AgentTask::FreeForm { prompt: "task".into() },
+                disposition,
+            );
+            assert!(
+                !agent.try_auto_approve(),
+                "{disposition:?} must not auto-approve",
+            );
+            assert_eq!(
+                agent.status(),
+                AgentStatus::Queued,
+                "{disposition:?} must remain Queued when try_auto_approve returns false",
+            );
+        }
+    }
 
     #[test]
     fn new_agent_defaults_to_chat_disposition() {

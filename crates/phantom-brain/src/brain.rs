@@ -655,6 +655,7 @@ fn enhance_with_investigation(
                                 context,
                             },
                             spawn_tag: None,
+                            disposition: phantom_agents::dispatch::Disposition::BugFix,
                         })),
                     },
                     crate::events::SuggestionOption {
@@ -757,6 +758,7 @@ fn enhance_with_ollama(
                                 prompt: "Fix it".into(),
                             },
                             spawn_tag: None,
+                            disposition: phantom_agents::dispatch::Disposition::BugFix,
                         })),
                     },
                     crate::events::SuggestionOption {
@@ -834,6 +836,7 @@ fn enhance_with_claude(
                                 prompt: "Fix it".into(),
                             },
                             spawn_tag: None,
+                            disposition: phantom_agents::dispatch::Disposition::BugFix,
                         })),
                     },
                     crate::events::SuggestionOption {
@@ -1059,6 +1062,7 @@ mod tests {
             action_name(&AiAction::SpawnAgent {
                 task: phantom_agents::AgentTask::FreeForm { prompt: "x".into() },
                 spawn_tag: None,
+                disposition: phantom_agents::dispatch::Disposition::Chat,
             }),
             "spawn_agent"
         );
