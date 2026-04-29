@@ -332,6 +332,12 @@ impl Agent {
         self.parent_id
     }
 
+    /// Return the spawn-intent classification for this agent.
+    #[must_use]
+    pub fn disposition(&self) -> Disposition {
+        self.disposition
+    }
+
     /// Push a `ParsedOutput` from a `RunCommand` tool result into the
     /// agent's semantic ring-buffer.
     ///
@@ -667,7 +673,8 @@ fn truncate(s: &str, max_len: usize) -> String {
 pub struct AgentSpawnOpts {
     /// What the agent is being spawned to do.
     pub task: AgentTask,
-    pub disposition: Disposition,
+    #[allow(dead_code)] // Intent classification — read by tests; production use comes with Sec.8+ disposition routing.
+    disposition: Disposition,
     /// Optional chat-model override. `None` falls through to the env-var
     /// resolver (`PHANTOM_AGENT_MODEL`), and ultimately to default Claude.
     pub chat_model: Option<crate::chat::ChatModel>,
@@ -1679,6 +1686,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     // ---- Disposition wiring (#38) -------------------------------------------
+
 
     #[test]
     fn new_agent_defaults_to_chat_disposition() {
