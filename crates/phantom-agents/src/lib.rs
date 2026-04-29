@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod api;
 pub mod audit;
+pub mod lifecycle;
 pub mod correlation;
 pub mod handoff;
 pub mod chat;
@@ -59,6 +60,7 @@ pub use quarantine::{
     AgentRuntime, AutoQuarantinePolicy, QuarantineRegistry, QuarantineState,
     DEFAULT_QUARANTINE_THRESHOLD,
 };
+pub use lifecycle::{LifecycleEvent, LifecycleHook, LifecycleHooks};
 pub use semantic_context::SemanticContext;
 pub use taint::TaintLevel;
 pub use tools::*;
