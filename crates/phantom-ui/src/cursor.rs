@@ -63,6 +63,10 @@ pub struct CursorBlink {
 impl CursorBlink {
     /// Construct a blink timer with a custom period, anchored to `t = 0`.
     ///
+    /// The timer always starts at timestamp zero so that callers can simply
+    /// pass wall-clock milliseconds to [`tick`](CursorBlink::tick) without
+    /// needing to supply the construction time.
+    ///
     /// # Panics
     ///
     /// Panics if `period_ms` is zero, as a zero period would cause a
@@ -113,7 +117,7 @@ impl CursorBlink {
 
     /// Advance the timer to `now_ms` and return the current visibility.
     ///
-    /// Toggles [`visible`](CursorBlink::is_visible) each time a full `period_ms`
+    /// Toggles the internal visible state each time a full `period_ms`
     /// has elapsed since the last toggle. Multiple periods elapsed in one call
     /// are folded correctly — only the parity of elapsed periods matters.
     ///
@@ -376,7 +380,7 @@ mod tests {
 
     #[test]
     fn new_anchors_to_zero() {
-        // Timer starts at t=0; a tick at t=529 is sub-period → no toggle.
+        // Timer always starts at t=0; a tick at t=529 is sub-period → no toggle.
         let mut b = CursorBlink::new(DEFAULT_PERIOD_MS);
         assert!(b.tick(529));
         // Tick at t=530 (exactly one period from anchor) → hidden.
