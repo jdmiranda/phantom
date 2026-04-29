@@ -4,6 +4,8 @@
 //! participate in layout negotiation, event bus messaging, and command
 //! dispatch alongside terminals and other adapters.
 
+use std::cell::Cell;
+
 use serde_json::json;
 
 use phantom_adapter::adapter::{QuadData, Rect, RenderOutput, TextData};
@@ -40,6 +42,20 @@ pub struct AgentAdapter {
     /// in `update.rs` removes this pane from the coordinator after the user
     /// has acknowledged the output.
     dismissed: bool,
+    /// Lines scrolled above the live view (0 = bottom / live).
+    ///
+    /// Incremented by the `scroll` command (wheel), set by `scroll_to_offset`
+    /// (scrollbar click-jump). Clamped to `[0, total_lines - visible_rows]`.
+    scroll_offset: usize,
+    /// Number of lines visible in the output area as of the last `render()` call.
+    ///
+    /// Cached so that `scroll` / `scroll_to_offset` commands (which have no
+    /// access to the rect) use the same `output_max_lines` value that `render()`
+    /// passed to `ScrollState`, keeping `get_state()["history_size"]` in sync.
+    ///
+    /// Uses `Cell` because `render()` takes `&self` (required by the trait) but
+    /// needs to update this value so command handlers stay consistent with it.
+    cached_output_max_lines: Cell<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -58,6 +74,9 @@ impl AgentAdapter {
             input_buffer: String::new(),
             spawn_tag: None,
             dismissed: false,
+            scroll_offset: 0,
+            // Default to 20 until the first render() call provides the real value.
+            cached_output_max_lines: Cell::new(20),
         }
     }
 
@@ -132,12 +151,21 @@ impl AppCore for AgentAdapter {
     }
 
     fn get_state(&self) -> serde_json::Value {
+        // history_size must match what render() passes to ScrollState:
+        //   total_lines.saturating_sub(output_max_lines)
+        // Using cached_output_max_lines keeps this consistent so that
+        // mouse.rs click-jump math doesn't overshoot by up to output_max_lines.
+        let history_size = self.pane.cached_lines.len()
+            .saturating_sub(self.cached_output_max_lines.get());
         json!({
             "type": "agent",
             "task": self.pane.task,
             "status": format!("{:?}", self.pane.status),
             "output_len": self.pane.output.len(),
             "alive": self.pane.status == AgentPaneStatus::Working,
+            // Exposed so scrollbar click-jump (scrollbar_y_to_offset) can
+            // calculate the correct target offset from a click position.
+            "history_size": history_size,
         })
     }
 }
@@ -163,6 +191,9 @@ impl Renderable for AgentAdapter {
         // --- Output area: top of rect to (bottom - INPUT_BAR_HEIGHT) ---
         let output_height = (rect.height - INPUT_BAR_HEIGHT - pad).max(LINE_HEIGHT);
         let output_max_lines = (output_height / LINE_HEIGHT).floor().max(1.0) as usize;
+        // Cache for command handlers (scroll / scroll_to_offset / get_state) so
+        // they use the same visible-row count that ScrollState was built with.
+        self.cached_output_max_lines.set(output_max_lines);
 
         // Output background.
         quads.push(QuadData {
@@ -171,10 +202,18 @@ impl Renderable for AgentAdapter {
             color: OUTPUT_BG,
         });
 
-        // Render output lines (scrolled to bottom).
+        // Render output lines — respecting scroll_offset.
+        // scroll_offset 0 = bottom (live view), N = N lines scrolled up.
         let lines = &self.pane.cached_lines;
-        let start = lines.len().saturating_sub(output_max_lines);
-        let visible = &lines[start..];
+        let total_lines = lines.len();
+        let history_size = total_lines.saturating_sub(output_max_lines);
+        // Clamp in case scroll_offset drifted past the history.
+        let clamped_offset = self.scroll_offset.min(history_size);
+        // The window end (exclusive) is total_lines minus offset, the window
+        // start is end minus visible lines.
+        let window_end = total_lines.saturating_sub(clamped_offset);
+        let window_start = window_end.saturating_sub(output_max_lines);
+        let visible = &lines[window_start..window_end];
 
         for (i, line) in visible.iter().enumerate() {
             text_segments.push(TextData {
@@ -211,11 +250,22 @@ impl Renderable for AgentAdapter {
             color: INPUT_COLOR,
         });
 
+        // --- Scroll state for scrollbar rendering ---
+        let scroll = if history_size > 0 {
+            Some(phantom_adapter::adapter::ScrollState {
+                display_offset: clamped_offset,
+                history_size,
+                visible_rows: output_max_lines,
+            })
+        } else {
+            None
+        };
+
         RenderOutput {
             quads,
             text_segments,
             grid: None,
-            scroll: None,
+            scroll,
             selection: None,
         }
     }
@@ -299,6 +349,37 @@ impl Commandable for AgentAdapter {
                     }
                 }
                 Ok("ok".into())
+            }
+            "scroll" => {
+                // Wheel scroll: {"direction": "up"|"down", "lines": N}
+                let lines = args.get("lines")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3) as usize;
+                let direction = args.get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("down");
+                let total_lines = self.pane.cached_lines.len();
+                // Use the visible-row count from the last render() call so that
+                // max_offset here matches history_size in ScrollState exactly.
+                let max_offset = total_lines.saturating_sub(self.cached_output_max_lines.get());
+                if direction == "up" {
+                    self.scroll_offset = (self.scroll_offset + lines).min(max_offset);
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+                }
+                Ok(format!("offset={}", self.scroll_offset))
+            }
+            "scroll_to_offset" => {
+                // Scrollbar click-jump: {"offset": N}
+                // Clamp to max_offset so an oversized click-jump cannot leave the
+                // thumb stuck past the end of the history.
+                let offset = args.get("offset")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let total_lines = self.pane.cached_lines.len();
+                let max_offset = total_lines.saturating_sub(self.cached_output_max_lines.get());
+                self.scroll_offset = offset.min(max_offset);
+                Ok(format!("offset={}", self.scroll_offset))
             }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
@@ -545,6 +626,184 @@ mod tests {
                 rect.y,
             );
         }
+    }
+
+    // ── Issue #16: scrollbar + agent scroll support ────────────────────
+
+    /// A newly-constructed AgentAdapter must start at scroll_offset=0 (live view).
+    #[test]
+    fn agent_adapter_scroll_offset_starts_at_zero() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let adapter = AgentAdapter::new(pane);
+        assert_eq!(adapter.scroll_offset, 0, "scroll must start at live view (bottom)");
+    }
+
+    /// `scroll` command with direction "up" increments scroll_offset.
+    #[test]
+    fn scroll_command_up_increments_offset() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let mut adapter = AgentAdapter::new(pane);
+
+        let result = adapter.accept_command("scroll", &serde_json::json!({
+            "direction": "up",
+            "lines": 5,
+        }));
+        assert!(result.is_ok());
+        assert!(adapter.scroll_offset > 0, "scroll_offset must increase on up scroll");
+    }
+
+    /// `scroll` command with direction "down" decrements scroll_offset
+    /// and clamps at 0.
+    #[test]
+    fn scroll_command_down_clamps_at_zero() {
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
+        let mut adapter = AgentAdapter::new(pane);
+        adapter.scroll_offset = 3;
+
+        let _ = adapter.accept_command("scroll", &serde_json::json!({
+            "direction": "down",
+            "lines": 10,
+        }));
+        assert_eq!(adapter.scroll_offset, 0, "scroll must not go below 0");
+    }
+
+    /// `scroll_to_offset` command sets the exact offset.
+    #[test]
+    fn scroll_to_offset_command_sets_exact_offset() {
+        let lines: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let mut adapter = AgentAdapter::new(pane);
+
+        let _ = adapter.accept_command("scroll_to_offset", &serde_json::json!({"offset": 20}));
+        assert_eq!(adapter.scroll_offset, 20);
+    }
+
+    /// Bug-1 regression guard: `scroll_to_offset` with an offset larger than
+    /// `max_offset` must clamp to `max_offset`, not leave the thumb stuck past end.
+    ///
+    /// With 50 lines and cached_output_max_lines=20 (default), max_offset=30.
+    /// An oversized offset of 999 must be clamped to 30.
+    #[test]
+    fn scroll_to_offset_clamps_to_max_offset() {
+        let lines: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let mut adapter = AgentAdapter::new(pane);
+        // cached_output_max_lines defaults to 20 → max_offset = 50 - 20 = 30.
+
+        let _ = adapter.accept_command("scroll_to_offset", &serde_json::json!({"offset": 999}));
+        assert!(
+            adapter.scroll_offset <= 30,
+            "scroll_to_offset must clamp to max_offset (30), got {}",
+            adapter.scroll_offset
+        );
+    }
+
+    /// Bug-2 regression guard: after `render()`, `get_state()["history_size"]`
+    /// must match the `history_size` value in the `ScrollState` that `render()`
+    /// produced.  Before the fix, `get_state` returned `cached_lines.len()` while
+    /// `render` used `total_lines - output_max_lines`, causing overshoot.
+    #[test]
+    fn get_state_history_size_matches_scroll_state_after_render() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
+        let rect = Rect {
+            x: 0.0, y: 0.0,
+            width: 400.0, height: 300.0,
+            ..Default::default()
+        };
+        let render_out = adapter.render(&rect);
+        let scroll = render_out.scroll.expect("scroll state must be Some for 100 lines");
+
+        let state = adapter.get_state();
+        let state_history = state["history_size"].as_u64().expect("history_size must be present");
+        assert_eq!(
+            state_history,
+            scroll.history_size as u64,
+            "get_state history_size ({}) must equal ScrollState.history_size ({}) \
+             so mouse.rs click-jump math doesn't overshoot",
+            state_history, scroll.history_size,
+        );
+    }
+
+    /// When there is scrollable history, `render()` must return a non-None scroll state.
+    #[test]
+    fn agent_render_provides_scroll_state_when_scrollable() {
+        // Create more lines than fit in a typical visible area.
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
+        let rect = Rect {
+            x: 0.0, y: 0.0,
+            width: 400.0, height: 300.0,
+            ..Default::default()
+        };
+        let output = adapter.render(&rect);
+        assert!(
+            output.scroll.is_some(),
+            "render must provide scroll state when there is more content than fits"
+        );
+    }
+
+    /// When all lines fit in the visible area, scroll state should be None.
+    #[test]
+    fn agent_render_no_scroll_state_when_short_content() {
+        let lines: Vec<String> = vec!["line 1".into(), "line 2".into()];
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
+        let rect = Rect {
+            x: 0.0, y: 0.0,
+            width: 400.0, height: 300.0,
+            ..Default::default()
+        };
+        let output = adapter.render(&rect);
+        // 2 lines fit easily in 300px height → no scrollbar needed.
+        assert!(
+            output.scroll.is_none(),
+            "render must not provide scroll state when content fits on screen"
+        );
+    }
+
+    /// `get_state()` must expose `history_size` so the scrollbar click-jump
+    /// can compute the correct offset from a pixel coordinate.
+    ///
+    /// After a `render()` call, `get_state()["history_size"]` must equal the
+    /// `history_size` field inside the `ScrollState` that `render()` returned.
+    /// This is the Bug-2 regression guard: before the fix, `get_state` returned
+    /// `cached_lines.len()` while `render` used `total_lines - output_max_lines`,
+    /// causing click-jump to overshoot by up to `output_max_lines` lines.
+    #[test]
+    fn agent_get_state_exposes_history_size() {
+        // Use enough lines to exceed the visible area so ScrollState is Some.
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
+        let adapter = AgentAdapter::new(pane);
+
+        let rect = Rect {
+            x: 0.0, y: 0.0,
+            width: 400.0, height: 300.0,
+            ..Default::default()
+        };
+        // render() must be called first so cached_output_max_lines is populated.
+        let render_out = adapter.render(&rect);
+        let scroll = render_out.scroll.expect("must have scroll state");
+
+        let state = adapter.get_state();
+        assert!(
+            state.get("history_size").is_some(),
+            "get_state must expose history_size for scrollbar click-jump"
+        );
+        // history_size from get_state() must exactly match the value render()
+        // put in ScrollState — otherwise click-jump math in mouse.rs overshoots.
+        assert_eq!(
+            state["history_size"].as_u64(),
+            Some(scroll.history_size as u64),
+            "get_state history_size must match ScrollState.history_size from render()"
+        );
     }
 
     /// `with_spawn_tag` preserves the tag so the reconciler can correlate
