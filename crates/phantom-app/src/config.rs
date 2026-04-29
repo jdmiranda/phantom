@@ -32,6 +32,14 @@ pub struct PhantomConfig {
     /// `nlp_llm = false` / `nlp_llm = 0` in the config file) to disable the
     /// network call and fall back directly to spawning an agent.
     pub(crate) nlp_llm_enabled: bool,
+    /// Privacy mode: hard block on all outbound cloud API calls.
+    ///
+    /// When `true`, any attempt to invoke a cloud provider (Claude, OpenAI, …)
+    /// is rejected with [`phantom_agents::ChatError::PrivacyModeViolation`]
+    /// before a network connection is made.  Local backends (Ollama) are
+    /// unaffected.  Enable via `privacy_mode = true` in config or the
+    /// `ghost privacy on` runtime command.
+    pub privacy_mode: bool,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -54,6 +62,7 @@ impl Default for PhantomConfig {
             skip_boot: false,
             demo_mode: false,
             nlp_llm_enabled: true,
+            privacy_mode: false,
         }
     }
 }
@@ -140,6 +149,9 @@ impl PhantomConfig {
                         // LLM translate call; anything else leaves it enabled.
                         config.nlp_llm_enabled = !matches!(value, "false" | "0" | "no");
                     }
+                    "privacy_mode" => {
+                        config.privacy_mode = matches!(value, "true" | "1" | "yes");
+                    }
                     _ => {
                         warn!("Unknown config key: {key}");
                     }
@@ -192,6 +204,14 @@ impl PhantomConfig {
         self.nlp_llm_enabled
     }
 
+    /// Returns whether privacy mode is active.
+    ///
+    /// When `true`, all cloud API calls are blocked before any network
+    /// connection is made.
+    pub fn privacy_mode(&self) -> bool {
+        self.privacy_mode
+    }
+
     /// Write a default config file to the standard path.
     pub fn write_default() -> Result<PathBuf> {
         let path = config_path();
@@ -237,6 +257,11 @@ font_size = 14.0
 
 # Boot animation (also auto-skipped on session restore)
 # skip_boot = false
+
+# Privacy mode: hard block on all cloud API calls (Claude, OpenAI, etc.)
+# When enabled, only local backends (Ollama) are allowed.
+# Toggle at runtime with: ghost privacy on / ghost privacy off
+# privacy_mode = false
 "#;
 
 // ---------------------------------------------------------------------------
@@ -319,5 +344,46 @@ mod tests {
     fn parse_nlp_llm_true_stays_enabled() {
         let config = PhantomConfig::parse("nlp_llm = true").unwrap();
         assert!(config.nlp_llm_enabled);
+    }
+
+    #[test]
+    fn privacy_mode_defaults_to_false() {
+        let config = PhantomConfig::default();
+        assert!(
+            !config.privacy_mode,
+            "privacy_mode must default to false so cloud APIs work out of the box"
+        );
+    }
+
+    #[test]
+    fn parse_privacy_mode_true_enables_it() {
+        let config = PhantomConfig::parse("privacy_mode = true").unwrap();
+        assert!(config.privacy_mode);
+    }
+
+    #[test]
+    fn parse_privacy_mode_one_enables_it() {
+        let config = PhantomConfig::parse("privacy_mode = 1").unwrap();
+        assert!(config.privacy_mode);
+    }
+
+    #[test]
+    fn parse_privacy_mode_false_leaves_disabled() {
+        let config = PhantomConfig::parse("privacy_mode = false").unwrap();
+        assert!(!config.privacy_mode);
+    }
+
+    #[test]
+    fn parse_empty_config_privacy_mode_is_false() {
+        let config = PhantomConfig::parse("").unwrap();
+        assert!(!config.privacy_mode);
+    }
+
+    #[test]
+    fn privacy_mode_accessor_matches_field() {
+        let mut config = PhantomConfig::default();
+        assert!(!config.privacy_mode());
+        config.privacy_mode = true;
+        assert!(config.privacy_mode());
     }
 }

@@ -11,18 +11,18 @@
 pub mod agent;
 pub mod api;
 pub mod audit;
-pub mod correlation;
-pub mod handoff;
 pub mod chat;
 pub mod chat_tools;
 pub mod cli;
 pub mod composer_tools;
+pub mod correlation;
 pub mod defender;
 pub mod defender_tools;
 pub mod dispatch;
 pub mod dispatcher;
 pub mod failure_store;
 pub mod fixer;
+pub mod handoff;
 pub mod inbox;
 pub mod inspector;
 pub mod manager;
@@ -34,8 +34,8 @@ pub mod role;
 pub mod router;
 pub mod sandbox;
 pub mod semantic_context;
-pub mod speech;
 pub mod spawn_rules;
+pub mod speech;
 pub mod suggest;
 pub mod supervisor;
 pub mod system_prompt;
@@ -43,21 +43,21 @@ pub mod taint;
 pub mod tools;
 
 pub use agent::*;
-pub use correlation::CorrelationId;
-pub use dispatch::Disposition;
 pub use chat::{
-    ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend,
-    OpenAiChatBackend, build_backend,
+    ChatBackend, ChatError, ChatModel, ChatRequest, ChatResponse, ClaudeBackend, OpenAiChatBackend,
+    PrivacyGuard, build_backend, build_backend_with_privacy,
 };
-pub use failure_store::{FailureRecord, FailureStore};
+pub use correlation::CorrelationId;
 pub use defender::defender_spawn_rule;
+pub use dispatch::Disposition;
+pub use failure_store::{FailureRecord, FailureStore};
 pub use manager::*;
+pub use quarantine::{
+    AgentRuntime, AutoQuarantinePolicy, DEFAULT_QUARANTINE_THRESHOLD, QuarantineRegistry,
+    QuarantineState,
+};
 pub use role::{
     AgentId as RoleAgentId, AgentRef, AgentRole, CapabilityClass, RoleManifest, SpawnSource,
-};
-pub use quarantine::{
-    AgentRuntime, AutoQuarantinePolicy, QuarantineRegistry, QuarantineState,
-    DEFAULT_QUARANTINE_THRESHOLD,
 };
 pub use semantic_context::SemanticContext;
 pub use taint::TaintLevel;

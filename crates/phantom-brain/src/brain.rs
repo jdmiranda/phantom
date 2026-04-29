@@ -89,6 +89,12 @@ pub struct BrainConfig {
     ///
     /// Defaults to [`ProviderCatalog::with_builtins`] when `None`.
     pub catalog: Option<ProviderCatalog>,
+    /// Privacy mode: when `true`, cloud backends are excluded from routing.
+    ///
+    /// Mirrors the `privacy_mode` flag from `PhantomConfig`. When active,
+    /// the brain's [`BrainRouter`] skips cloud backends so no outbound API
+    /// calls are made by the OODA loop.
+    pub privacy_mode: bool,
 }
 
 impl Default for BrainConfig {
@@ -98,6 +104,7 @@ impl Default for BrainConfig {
             enable_suggestions: true,
             enable_memory: true,
             quiet_threshold: 0.5,
+            privacy_mode: false,
             router: None,
             catalog: None,
         }
@@ -167,6 +174,7 @@ fn brain_supervised(
     let enable_suggestions = config.enable_suggestions;
     let enable_memory = config.enable_memory;
     let quiet_threshold = config.quiet_threshold;
+    let privacy_mode = config.privacy_mode;
     // RouterConfig is not Clone, so we consume it on the first iteration only.
     let mut router: Option<crate::router::RouterConfig> = config.router;
     // ProviderCatalog is Clone; use the configured catalog or fall back to
@@ -225,6 +233,7 @@ fn brain_supervised(
             enable_suggestions,
             enable_memory,
             quiet_threshold,
+            privacy_mode,
             router: router.take(), // `None` on second and subsequent restarts.
             // Clone the catalog for each iteration — it is cheaply clonable.
             catalog: Some(catalog.clone()),
@@ -306,7 +315,14 @@ fn brain_loop(
     });
     let mut scorer = UtilityScorer::new();
     let mut proactive = ProactiveSuggester::default_triggers();
-    let mut router = BrainRouter::new(config.router.unwrap_or_default());
+    let mut router = {
+        let mut r = BrainRouter::new(config.router.unwrap_or_default());
+        r.set_privacy_mode(config.privacy_mode);
+        if config.privacy_mode {
+            log::info!("AI brain: privacy mode active — cloud backends excluded from routing");
+        }
+        r
+    };
     // Provider catalog: resolve named model-routing profiles for PlanStep dispatch.
     let _catalog: ProviderCatalog = config
         .catalog

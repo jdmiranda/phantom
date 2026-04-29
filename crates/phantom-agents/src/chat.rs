@@ -49,6 +49,14 @@ pub enum ChatError {
     /// The HTTP transport failed.
     #[error("transport error: {0}")]
     Transport(String),
+    /// Privacy mode is active and this backend is a cloud provider.
+    ///
+    /// The call was blocked before any network connection was made.
+    #[error("privacy mode active: cloud provider '{provider}' is blocked")]
+    PrivacyModeViolation {
+        /// The provider name (e.g. `"claude"`, `"openai"`).
+        provider: String,
+    },
     /// Other error.
     #[error("{0}")]
     Other(String),
@@ -127,6 +135,13 @@ impl ChatResponse {
 pub trait ChatBackend: Send + Sync {
     /// Stable name used for logging and tests.
     fn name(&self) -> &'static str;
+
+    /// Whether this backend sends data to a remote cloud provider.
+    ///
+    /// Returns `true` for backends that make outbound HTTP calls to third-party
+    /// APIs (Claude, OpenAI, …).  Returns `false` for purely local backends
+    /// (Ollama, mock).  Used by [`PrivacyGuard`] to enforce privacy mode.
+    fn is_cloud_provider(&self) -> bool;
 
     /// Issue one round of chat completion.
     fn complete(&self, request: ChatRequest<'_>) -> Result<ChatResponse, ChatError>;
@@ -227,6 +242,72 @@ pub fn build_backend(model: &ChatModel) -> Result<Box<dyn ChatBackend>, ChatErro
 }
 
 // ---------------------------------------------------------------------------
+// PrivacyGuard — centralized cloud-call interceptor
+// ---------------------------------------------------------------------------
+
+/// A [`ChatBackend`] wrapper that enforces privacy mode.
+///
+/// When privacy mode is enabled, any call to a cloud provider is rejected
+/// with [`ChatError::PrivacyModeViolation`] — no network connection is made.
+/// Local backends (Ollama, mock) pass through unchanged.
+///
+/// ## Usage
+///
+/// Wrap any backend before handing it to the agent loop:
+///
+/// ```ignore
+/// let backend = build_backend(&model)?;
+/// let guarded = PrivacyGuard::new(backend, privacy_mode_enabled);
+/// ```
+pub struct PrivacyGuard {
+    inner: Box<dyn ChatBackend>,
+    privacy_mode: bool,
+}
+
+impl PrivacyGuard {
+    /// Wrap `inner` with a privacy guard.
+    ///
+    /// When `privacy_mode` is `false` the guard is a zero-cost pass-through.
+    pub fn new(inner: Box<dyn ChatBackend>, privacy_mode: bool) -> Self {
+        Self {
+            inner,
+            privacy_mode,
+        }
+    }
+}
+
+impl ChatBackend for PrivacyGuard {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn is_cloud_provider(&self) -> bool {
+        self.inner.is_cloud_provider()
+    }
+
+    fn complete(&self, request: ChatRequest<'_>) -> Result<ChatResponse, ChatError> {
+        if self.privacy_mode && self.inner.is_cloud_provider() {
+            return Err(ChatError::PrivacyModeViolation {
+                provider: self.inner.name().to_string(),
+            });
+        }
+        self.inner.complete(request)
+    }
+}
+
+/// Build a backend wrapped in a [`PrivacyGuard`].
+///
+/// Equivalent to `build_backend` followed by `PrivacyGuard::new`.  When
+/// `privacy_mode` is `false` the guard is a zero-cost pass-through.
+pub fn build_backend_with_privacy(
+    model: &ChatModel,
+    privacy_mode: bool,
+) -> Result<Box<dyn ChatBackend>, ChatError> {
+    let inner = build_backend(model)?;
+    Ok(Box::new(PrivacyGuard::new(inner, privacy_mode)))
+}
+
+// ---------------------------------------------------------------------------
 // ClaudeBackend
 // ---------------------------------------------------------------------------
 
@@ -242,9 +323,8 @@ pub struct ClaudeBackend {
 impl ClaudeBackend {
     /// Load credentials from `ANTHROPIC_API_KEY`.
     pub fn from_env() -> Result<Self, ChatError> {
-        let config = ClaudeConfig::from_env().ok_or_else(|| {
-            ChatError::NotConfigured("ANTHROPIC_API_KEY missing or empty".into())
-        })?;
+        let config = ClaudeConfig::from_env()
+            .ok_or_else(|| ChatError::NotConfigured("ANTHROPIC_API_KEY missing or empty".into()))?;
         Ok(Self { config })
     }
 
@@ -270,16 +350,15 @@ impl ChatBackend for ClaudeBackend {
         "claude"
     }
 
+    fn is_cloud_provider(&self) -> bool {
+        true
+    }
+
     fn complete(&self, request: ChatRequest<'_>) -> Result<ChatResponse, ChatError> {
         // Honour the per-request max_tokens override.
         let mut config = self.config.clone();
         config.max_tokens = request.max_tokens;
-        let handle = api::send_message(
-            &config,
-            request.agent,
-            request.tools,
-            request.tool_use_ids,
-        );
+        let handle = api::send_message(&config, request.agent, request.tools, request.tool_use_ids);
         Ok(ChatResponse::from_handle(handle))
     }
 }
@@ -301,9 +380,8 @@ pub struct OpenAiChatBackend {
 impl OpenAiChatBackend {
     /// Load credentials from `OPENAI_API_KEY`.
     pub fn from_env() -> Result<Self, ChatError> {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            ChatError::NotConfigured("OPENAI_API_KEY missing or empty".into())
-        })?;
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| ChatError::NotConfigured("OPENAI_API_KEY missing or empty".into()))?;
         if api_key.is_empty() {
             return Err(ChatError::NotConfigured(
                 "OPENAI_API_KEY missing or empty".into(),
@@ -333,6 +411,10 @@ impl OpenAiChatBackend {
 impl ChatBackend for OpenAiChatBackend {
     fn name(&self) -> &'static str {
         "openai"
+    }
+
+    fn is_cloud_provider(&self) -> bool {
+        true
     }
 
     fn complete(&self, request: ChatRequest<'_>) -> Result<ChatResponse, ChatError> {
@@ -382,9 +464,8 @@ impl ChatBackend for OpenAiChatBackend {
                     Ok(text) => match serde_json::from_str::<Value>(&text) {
                         Ok(json) => parse_openai_response(&json, &tx),
                         Err(e) => {
-                            let _ = tx.send(ApiEvent::Error(format!(
-                                "failed to parse response: {e}"
-                            )));
+                            let _ =
+                                tx.send(ApiEvent::Error(format!("failed to parse response: {e}")));
                         }
                     },
                     Err(e) => {
@@ -508,8 +589,8 @@ fn build_openai_messages(agent: &Agent, tool_use_ids: &[String]) -> Vec<Value> {
                             .get(tool_idx)
                             .cloned()
                             .unwrap_or_else(|| format!("call_{tool_idx}"));
-                        let arguments = serde_json::to_string(&tc.args)
-                            .unwrap_or_else(|_| "{}".to_owned());
+                        let arguments =
+                            serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_owned());
                         tool_calls.push(serde_json::json!({
                             "id": id,
                             "type": "function",
@@ -602,9 +683,7 @@ fn parse_openai_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
     };
 
     let Some(message) = choice.get("message") else {
-        let _ = tx.send(ApiEvent::Error(
-            "OpenAI response missing message".into(),
-        ));
+        let _ = tx.send(ApiEvent::Error("OpenAI response missing message".into()));
         return;
     };
 
@@ -643,10 +722,7 @@ fn parse_openai_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                 }
             };
 
-            let name = function
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = function.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
             // `arguments` must be a JSON-encoded string per the OpenAI spec.
             // A missing field, a non-string value, or invalid JSON all indicate
@@ -677,9 +753,7 @@ fn parse_openai_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     call: ToolCall { tool, args },
                 });
             } else {
-                let _ = tx.send(ApiEvent::Error(format!(
-                    "unknown tool in response: {name}"
-                )));
+                let _ = tx.send(ApiEvent::Error(format!("unknown tool in response: {name}")));
             }
         }
     }
@@ -695,7 +769,7 @@ fn parse_openai_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
 mod tests {
     use super::*;
     use crate::agent::{Agent, AgentMessage, AgentTask};
-    use crate::tools::{available_tools, ToolCall, ToolResult, ToolType};
+    use crate::tools::{ToolCall, ToolResult, ToolType, available_tools};
 
     fn make_agent() -> Agent {
         Agent::new(
@@ -975,12 +1049,7 @@ mod tests {
         let body = build_openai_request_body("gpt-4o", 256, &agent, &[], &ids);
         let messages = body["messages"].as_array().unwrap();
         let tool_msg = messages.iter().find(|m| m["role"] == "tool").unwrap();
-        assert!(
-            tool_msg["content"]
-                .as_str()
-                .unwrap()
-                .starts_with("ERROR:")
-        );
+        assert!(tool_msg["content"].as_str().unwrap().starts_with("ERROR:"));
     }
 
     #[test]
@@ -1038,9 +1107,11 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         parse_openai_response(&response, &tx);
         let events: Vec<_> = rx.try_iter().collect();
-        assert!(events.iter().any(
-            |e| matches!(e, ApiEvent::Error(m) if m.contains("nonexistent_tool"))
-        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ApiEvent::Error(m) if m.contains("nonexistent_tool")))
+        );
     }
 
     // -- ChatModel::from_env --------------------------------------------------
@@ -1105,7 +1176,9 @@ mod tests {
         let events: Vec<_> = rx.try_iter().collect();
         // Must get an explicit error, not a ToolUse with empty id.
         assert!(
-            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing or empty id"))),
+            events
+                .iter()
+                .any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing or empty id"))),
             "expected missing-id error, got: {events:?}",
         );
         assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
@@ -1130,7 +1203,9 @@ mod tests {
         parse_openai_response(&response, &tx);
         let events: Vec<_> = rx.try_iter().collect();
         assert!(
-            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing function object"))),
+            events
+                .iter()
+                .any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing function object"))),
             "expected missing-function error, got: {events:?}",
         );
         assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
@@ -1159,7 +1234,9 @@ mod tests {
         parse_openai_response(&response, &tx);
         let events: Vec<_> = rx.try_iter().collect();
         assert!(
-            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("failed to parse arguments"))),
+            events.iter().any(
+                |e| matches!(e, ApiEvent::Error(m) if m.contains("failed to parse arguments"))
+            ),
             "expected parse-arguments error, got: {events:?}",
         );
         assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
@@ -1188,7 +1265,9 @@ mod tests {
         parse_openai_response(&response, &tx);
         let events: Vec<_> = rx.try_iter().collect();
         assert!(
-            events.iter().any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing or not a string"))),
+            events
+                .iter()
+                .any(|e| matches!(e, ApiEvent::Error(m) if m.contains("missing or not a string"))),
             "expected arguments-not-string error, got: {events:?}",
         );
         assert!(!events.iter().any(|e| matches!(e, ApiEvent::ToolUse { .. })));
@@ -1250,8 +1329,8 @@ mod tests {
     #[test]
     fn model_flag_haiku_parses_and_resolves() {
         use crate::agent::{AgentSpawnOpts, AgentTask};
-        use crate::cli::parse_agent_command;
         use crate::cli::AgentCommand;
+        use crate::cli::parse_agent_command;
 
         let cmd = parse_agent_command(
             r#"agent --model claude:claude-haiku-4-5-20251001 "fix the tests""#,
@@ -1271,7 +1350,9 @@ mod tests {
         );
 
         // Wire SpawnFlags.model → AgentSpawnOpts.chat_model.
-        let task = AgentTask::FreeForm { prompt: "fix the tests".into() };
+        let task = AgentTask::FreeForm {
+            prompt: "fix the tests".into(),
+        };
         let mut opts = AgentSpawnOpts::new(task);
         opts.chat_model = flags.model.clone();
 
@@ -1305,7 +1386,9 @@ mod tests {
             other => panic!("expected SpawnWithFlags, got {other:?}"),
         };
 
-        let task = AgentTask::FreeForm { prompt: "refactor parser".into() };
+        let task = AgentTask::FreeForm {
+            prompt: "refactor parser".into(),
+        };
         let mut opts = AgentSpawnOpts::new(task);
         opts.chat_model = flags.model;
 
@@ -1340,7 +1423,9 @@ mod tests {
             return; // skip — env override active
         }
 
-        let task = AgentTask::FreeForm { prompt: "do something".into() };
+        let task = AgentTask::FreeForm {
+            prompt: "do something".into(),
+        };
         let opts = AgentSpawnOpts::new(task); // chat_model: None
 
         let resolved = opts.resolve_model();
@@ -1361,19 +1446,21 @@ mod tests {
     fn phantom_agent_model_env_var_is_parsed_by_resolve_logic() {
         // Simulate what resolve_model() does when PHANTOM_AGENT_MODEL="openai:gpt-4o".
         let env_val = "openai:gpt-4o";
-        let parsed = ChatModel::from_env_str(env_val)
-            .expect("from_env_str must parse 'openai:gpt-4o'");
+        let parsed =
+            ChatModel::from_env_str(env_val).expect("from_env_str must parse 'openai:gpt-4o'");
         assert_eq!(parsed, ChatModel::OpenAi("gpt-4o".into()));
 
         // Simulate PHANTOM_AGENT_MODEL="claude" (shorthand).
-        let parsed_claude = ChatModel::from_env_str("claude")
-            .expect("from_env_str must parse 'claude'");
+        let parsed_claude =
+            ChatModel::from_env_str("claude").expect("from_env_str must parse 'claude'");
         assert_eq!(parsed_claude, ChatModel::default_claude());
 
         // Simulate an explicit chat_model field overriding the env var.
         // Explicit > env var: AgentSpawnOpts resolves explicit first.
         use crate::agent::{AgentSpawnOpts, AgentTask};
-        let task = AgentTask::FreeForm { prompt: "test".into() };
+        let task = AgentTask::FreeForm {
+            prompt: "test".into(),
+        };
         let mut opts = AgentSpawnOpts::new(task);
         opts.chat_model = Some(ChatModel::Claude("claude-haiku-4-5-20251001".into()));
         // Even if we pretend PHANTOM_AGENT_MODEL is set to openai, the explicit
@@ -1398,10 +1485,202 @@ mod tests {
 
         // The model must survive the round-trip through ClaudeBackend.
         assert_eq!(
-            backend.config().model, model_id,
+            backend.config().model,
+            model_id,
             "ClaudeBackend::config().model must match the flag-specified id"
         );
         assert_eq!(backend.name(), "claude");
+    }
+
+    // =========================================================================
+    // Privacy mode / PrivacyGuard tests
+    // =========================================================================
+
+    /// A minimal local backend for testing (does not call any network).
+    struct LocalMockBackend;
+
+    impl ChatBackend for LocalMockBackend {
+        fn name(&self) -> &'static str {
+            "local-mock"
+        }
+        fn is_cloud_provider(&self) -> bool {
+            false
+        }
+        fn complete(&self, _request: ChatRequest<'_>) -> Result<ChatResponse, ChatError> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = tx.send(crate::api::ApiEvent::Done);
+            Ok(ChatResponse::from_receiver(rx))
+        }
+    }
+
+    #[test]
+    fn chat_error_privacy_mode_violation_message() {
+        let err = ChatError::PrivacyModeViolation {
+            provider: "claude".into(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("privacy mode"),
+            "error message must mention 'privacy mode'"
+        );
+        assert!(
+            msg.contains("claude"),
+            "error message must mention the provider"
+        );
+    }
+
+    #[test]
+    fn claude_backend_is_cloud_provider() {
+        let b = ClaudeBackend::from_config(crate::api::ClaudeConfig::new("sk-test"));
+        assert!(b.is_cloud_provider());
+    }
+
+    #[test]
+    fn openai_backend_is_cloud_provider() {
+        let b = OpenAiChatBackend::from_api_key("sk-test");
+        assert!(b.is_cloud_provider());
+    }
+
+    #[test]
+    fn local_backend_is_not_cloud_provider() {
+        let b = LocalMockBackend;
+        assert!(!b.is_cloud_provider());
+    }
+
+    #[test]
+    fn privacy_guard_blocks_cloud_backend_when_privacy_on() {
+        let inner = Box::new(ClaudeBackend::from_config(crate::api::ClaudeConfig::new(
+            "sk-test",
+        )));
+        let guard = PrivacyGuard::new(inner, true);
+        let agent = make_agent();
+        let request = ChatRequest {
+            agent: &agent,
+            tools: &[],
+            tool_use_ids: &[],
+            max_tokens: 64,
+        };
+        let result = guard.complete(request);
+        let is_violation = matches!(
+            result,
+            Err(ChatError::PrivacyModeViolation { ref provider }) if provider == "claude"
+        );
+        assert!(
+            is_violation,
+            "PrivacyGuard must block cloud backend when privacy_mode=true"
+        );
+    }
+
+    #[test]
+    fn privacy_guard_blocks_openai_backend_when_privacy_on() {
+        let inner = Box::new(OpenAiChatBackend::from_api_key("sk-test"));
+        let guard = PrivacyGuard::new(inner, true);
+        let agent = make_agent();
+        let request = ChatRequest {
+            agent: &agent,
+            tools: &[],
+            tool_use_ids: &[],
+            max_tokens: 64,
+        };
+        let result = guard.complete(request);
+        let is_violation = matches!(
+            result,
+            Err(ChatError::PrivacyModeViolation { ref provider }) if provider == "openai"
+        );
+        assert!(
+            is_violation,
+            "PrivacyGuard must block OpenAI when privacy_mode=true"
+        );
+    }
+
+    #[test]
+    fn privacy_guard_passes_local_backend_through_when_privacy_on() {
+        let inner = Box::new(LocalMockBackend);
+        let guard = PrivacyGuard::new(inner, true);
+        let agent = make_agent();
+        let request = ChatRequest {
+            agent: &agent,
+            tools: &[],
+            tool_use_ids: &[],
+            max_tokens: 64,
+        };
+        let result = guard.complete(request);
+        assert!(
+            result.is_ok(),
+            "PrivacyGuard must allow local backends through even when privacy_mode=true"
+        );
+    }
+
+    #[test]
+    fn privacy_guard_allows_cloud_backend_when_privacy_off() {
+        // With privacy mode OFF, the guard must pass through.
+        // We use a ClaudeBackend with a fake key; the call will fail at the
+        // network layer (NotConfigured or transport error), but it must NOT
+        // return PrivacyModeViolation.
+        let inner = Box::new(ClaudeBackend::from_config(crate::api::ClaudeConfig::new(
+            "sk-fake",
+        )));
+        let guard = PrivacyGuard::new(inner, false);
+        let agent = make_agent();
+        let request = ChatRequest {
+            agent: &agent,
+            tools: &[],
+            tool_use_ids: &[],
+            max_tokens: 1,
+        };
+        // complete() dispatches to a background thread; we just verify it does
+        // NOT return PrivacyModeViolation synchronously.
+        match guard.complete(request) {
+            Err(ChatError::PrivacyModeViolation { .. }) => {
+                panic!("PrivacyGuard must not block when privacy_mode=false");
+            }
+            _ => {} // Ok or other error — both acceptable
+        }
+    }
+
+    #[test]
+    fn privacy_guard_name_delegates_to_inner() {
+        let guard = PrivacyGuard::new(Box::new(LocalMockBackend), false);
+        assert_eq!(guard.name(), "local-mock");
+    }
+
+    #[test]
+    fn privacy_guard_is_cloud_provider_delegates_to_inner() {
+        let local_guard = PrivacyGuard::new(Box::new(LocalMockBackend), true);
+        assert!(!local_guard.is_cloud_provider());
+
+        let cloud_guard = PrivacyGuard::new(
+            Box::new(ClaudeBackend::from_config(crate::api::ClaudeConfig::new(
+                "sk-test",
+            ))),
+            false,
+        );
+        assert!(cloud_guard.is_cloud_provider());
+    }
+
+    #[test]
+    fn build_backend_with_privacy_blocks_cloud_when_on() {
+        // This test only runs when ANTHROPIC_API_KEY is set (otherwise
+        // build_backend itself would return NotConfigured first).
+        if std::env::var("ANTHROPIC_API_KEY").is_err() {
+            return;
+        }
+        let model = ChatModel::Claude("claude-opus-4-7".into());
+        let backend = build_backend_with_privacy(&model, true).expect("build must succeed");
+        let agent = make_agent();
+        let request = ChatRequest {
+            agent: &agent,
+            tools: &[],
+            tool_use_ids: &[],
+            max_tokens: 1,
+        };
+        assert!(
+            matches!(
+                backend.complete(request),
+                Err(ChatError::PrivacyModeViolation { .. })
+            ),
+            "build_backend_with_privacy must block cloud calls when privacy_mode=true"
+        );
     }
 
     /// Verify the full chain: --model flag → OpenAiChatBackend carries the model id
@@ -1436,8 +1715,7 @@ mod tests {
 
         let claude_cmd =
             parse_agent_command(r#"agent --model claude:claude-opus-4-7 "task A""#).unwrap();
-        let openai_cmd =
-            parse_agent_command(r#"agent --model openai:gpt-4o "task B""#).unwrap();
+        let openai_cmd = parse_agent_command(r#"agent --model openai:gpt-4o "task B""#).unwrap();
 
         let claude_model = match claude_cmd {
             AgentCommand::SpawnWithFlags { flags, .. } => flags.model.unwrap(),

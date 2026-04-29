@@ -43,6 +43,17 @@ pub enum BackendKind {
     OpenAICompat { base_url: String, model: String },
 }
 
+impl BackendKind {
+    /// Whether this backend sends requests to a remote cloud service.
+    ///
+    /// Returns `true` for [`BackendKind::Claude`] and
+    /// [`BackendKind::OpenAICompat`]; `false` for [`BackendKind::Heuristic`]
+    /// and [`BackendKind::Ollama`] (which run locally).
+    pub fn is_cloud_provider(&self) -> bool {
+        matches!(self, Self::Claude { .. } | Self::OpenAICompat { .. })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ModelBackend
 // ---------------------------------------------------------------------------
@@ -187,22 +198,48 @@ impl TaskClassifier {
 /// Routes tasks to the best available backend using a cost-aware cascade.
 pub struct BrainRouter {
     config: RouterConfig,
+    /// When `true`, cloud backends are excluded from routing.
+    privacy_mode: bool,
 }
 
 impl BrainRouter {
     /// Create a new router with the given configuration.
     pub fn new(config: RouterConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            privacy_mode: false,
+        }
+    }
+
+    /// Enable or disable privacy mode.
+    ///
+    /// When `enabled` is `true`, cloud backends are excluded from routing so
+    /// no outbound API calls are made.  Local backends (Ollama, heuristic)
+    /// continue to be routed normally.
+    pub fn set_privacy_mode(&mut self, enabled: bool) {
+        self.privacy_mode = enabled;
+    }
+
+    /// Whether privacy mode is currently active.
+    pub fn privacy_mode(&self) -> bool {
+        self.privacy_mode
     }
 
     /// Select the best backend for a task.
     /// Returns backends in cascade order (cheapest capable first).
+    ///
+    /// When privacy mode is active, cloud backends are excluded from the
+    /// candidate set — only local backends (heuristic, Ollama) are returned.
     pub fn route(&self, complexity: TaskComplexity) -> Vec<&ModelBackend> {
         let mut candidates: Vec<&ModelBackend> = self
             .config
             .backends
             .iter()
-            .filter(|b| b.available && b.capabilities.contains(&complexity))
+            .filter(|b| {
+                b.available
+                    && b.capabilities.contains(&complexity)
+                    && !(self.privacy_mode && b.kind.is_cloud_provider())
+            })
             .collect();
 
         // Sort by cost, then latency.
@@ -451,7 +488,10 @@ mod tests {
         }
         let router = BrainRouter::new(config);
         let backends = router.route(TaskComplexity::Complex);
-        assert!(!backends.is_empty(), "should have a complex-capable backend");
+        assert!(
+            !backends.is_empty(),
+            "should have a complex-capable backend"
+        );
         // Claude is the only backend with Complex capability.
         assert_eq!(backends.last().unwrap().name, "claude-sonnet");
     }
@@ -499,10 +539,7 @@ mod tests {
         let router = BrainRouter::new(config);
         // Heuristic only handles Trivial, not Complex.
         let backends = router.route(TaskComplexity::Complex);
-        assert!(
-            backends.is_empty(),
-            "heuristic cannot handle Complex tasks"
-        );
+        assert!(backends.is_empty(), "heuristic cannot handle Complex tasks");
     }
 
     #[test]
@@ -523,7 +560,12 @@ mod tests {
         let mut router = BrainRouter::new(RouterConfig::default());
         // First call sets latency directly.
         router.record_result("heuristic", 100.0, true);
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             (backend.avg_latency_ms - 100.0).abs() < f32::EPSILON,
             "first call should set latency directly"
@@ -531,7 +573,12 @@ mod tests {
 
         // Second call applies EMA: 100 * 0.8 + 200 * 0.2 = 120.
         router.record_result("heuristic", 200.0, true);
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             (backend.avg_latency_ms - 120.0).abs() < 0.01,
             "EMA should be 120, got {}",
@@ -547,7 +594,12 @@ mod tests {
 
         router.record_result("heuristic", 50.0, false);
 
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             !backend.available,
             "failed backend should be marked unavailable"
@@ -562,7 +614,12 @@ mod tests {
 
         router.health_check();
 
-        let backend = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let backend = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert!(
             backend.available,
             "health_check should restore heuristic availability"
@@ -634,7 +691,137 @@ mod tests {
         // Should not panic or change any state.
         router.record_result("nonexistent-backend", 100.0, true);
         // Verify existing backends are unchanged.
-        let heuristic = router.config.backends.iter().find(|b| b.name == "heuristic").unwrap();
+        let heuristic = router
+            .config
+            .backends
+            .iter()
+            .find(|b| b.name == "heuristic")
+            .unwrap();
         assert_eq!(heuristic.avg_latency_ms, 0.0);
+    }
+
+    // =======================================================================
+    // Privacy mode tests
+    // =======================================================================
+
+    #[test]
+    fn backend_kind_is_cloud_provider_correct() {
+        assert!(!BackendKind::Heuristic.is_cloud_provider());
+        assert!(
+            !BackendKind::Ollama {
+                model: "phi3.5".into()
+            }
+            .is_cloud_provider()
+        );
+        assert!(
+            BackendKind::Claude {
+                model: "claude-sonnet".into()
+            }
+            .is_cloud_provider()
+        );
+        assert!(
+            BackendKind::OpenAICompat {
+                base_url: "https://api.openai.com".into(),
+                model: "gpt-4o".into()
+            }
+            .is_cloud_provider()
+        );
+    }
+
+    #[test]
+    fn privacy_mode_defaults_to_false() {
+        let router = BrainRouter::new(RouterConfig::default());
+        assert!(!router.privacy_mode());
+    }
+
+    #[test]
+    fn set_privacy_mode_toggles_correctly() {
+        let mut router = BrainRouter::new(RouterConfig::default());
+        router.set_privacy_mode(true);
+        assert!(router.privacy_mode());
+        router.set_privacy_mode(false);
+        assert!(!router.privacy_mode());
+    }
+
+    #[test]
+    fn privacy_mode_excludes_cloud_backends_from_routing() {
+        let mut config = RouterConfig::default();
+        // Make all backends available.
+        for b in &mut config.backends {
+            b.available = true;
+        }
+        let mut router = BrainRouter::new(config);
+        router.set_privacy_mode(true);
+
+        // With privacy mode on, Claude should not appear in Complex routing.
+        let backends = router.route(TaskComplexity::Complex);
+        assert!(
+            backends.iter().all(|b| !b.kind.is_cloud_provider()),
+            "privacy mode must exclude cloud backends; got: {:?}",
+            backends.iter().map(|b| &b.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn privacy_mode_does_not_exclude_local_backends() {
+        let mut config = RouterConfig::default();
+        // Make all backends available, including Ollama.
+        for b in &mut config.backends {
+            b.available = true;
+        }
+        let mut router = BrainRouter::new(config);
+        router.set_privacy_mode(true);
+
+        // Heuristic (local) must still route for Trivial tasks.
+        let backends = router.route(TaskComplexity::Trivial);
+        assert!(
+            !backends.is_empty(),
+            "privacy mode must not block local (heuristic) backend"
+        );
+        assert!(
+            backends.iter().any(|b| b.name == "heuristic"),
+            "heuristic backend must remain available in privacy mode"
+        );
+    }
+
+    #[test]
+    fn privacy_mode_off_still_routes_to_claude() {
+        let mut config = RouterConfig::default();
+        // Force Claude available.
+        for b in &mut config.backends {
+            if b.name == "claude-sonnet" {
+                b.available = true;
+            }
+        }
+        let mut router = BrainRouter::new(config);
+        router.set_privacy_mode(false); // privacy mode OFF
+
+        let backends = router.route(TaskComplexity::Complex);
+        assert!(
+            backends.iter().any(|b| b.name == "claude-sonnet"),
+            "with privacy mode off, Claude must be routable"
+        );
+    }
+
+    #[test]
+    fn privacy_mode_complex_task_returns_empty_without_local_model() {
+        // Only Claude in the config; privacy mode on → empty route for Complex.
+        let config = RouterConfig {
+            backends: vec![{
+                let mut b = ModelBackend::claude_default();
+                b.available = true;
+                b
+            }],
+            cascade: true,
+            confidence_threshold: 0.7,
+        };
+        let mut router = BrainRouter::new(config);
+        router.set_privacy_mode(true);
+
+        let backends = router.route(TaskComplexity::Complex);
+        assert!(
+            backends.is_empty(),
+            "with privacy mode on and only Claude, Complex must return empty"
+        );
     }
 }

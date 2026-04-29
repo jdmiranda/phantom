@@ -137,6 +137,9 @@ pub struct StatusBar {
     branch: String,
     time: String,
     activity: Option<String>,
+    /// When `true`, a lock indicator is rendered to signal that cloud APIs are
+    /// blocked.  Set via [`StatusBar::set_privacy_mode`].
+    privacy_mode: bool,
 }
 
 impl StatusBar {
@@ -147,7 +150,18 @@ impl StatusBar {
             branch: String::from("main"),
             time: String::from("00:00"),
             activity: None,
+            privacy_mode: false,
         }
+    }
+
+    /// Enable or disable the privacy mode lock indicator.
+    pub fn set_privacy_mode(&mut self, enabled: bool) {
+        self.privacy_mode = enabled;
+    }
+
+    /// Whether the privacy mode indicator is currently shown.
+    pub fn privacy_mode(&self) -> bool {
+        self.privacy_mode
     }
 
     /// Update the displayed working directory.
@@ -209,16 +223,41 @@ impl Widget for StatusBar {
     }
 
     fn render_text(&self, rect: &Rect) -> Vec<TextSegment> {
-        let mut segments = Vec::with_capacity(3);
+        let mut segments = Vec::with_capacity(4);
         // Padding scales with screen width so content survives CRT barrel
         // distortion at edges. ~1.5% of width handles curvature up to ~0.06.
         let padding = (rect.width * 0.015).max(8.0);
         let text_y = rect.y + (rect.height * 0.5) - 1.0;
 
-        // -- Right: time (anchored to right edge with CRT margin) --
+        // -- Right: optional privacy lock + time --
+        // When privacy mode is on, prepend "[P]" immediately left of the clock.
+        let privacy_label = "[P] ";
+        let privacy_width = privacy_label.len() as f32 * CHAR_WIDTH;
         let time_width = self.time.len() as f32 * CHAR_WIDTH;
-        let time_x = rect.x + rect.width - time_width - padding;
 
+        // Total right-block width: time always present; lock only when active.
+        let right_block_width = if self.privacy_mode {
+            privacy_width + time_width
+        } else {
+            time_width
+        };
+        let right_block_x = rect.x + rect.width - right_block_width - padding;
+
+        if self.privacy_mode {
+            segments.push(TextSegment {
+                text: privacy_label.to_owned(),
+                x: right_block_x,
+                y: text_y,
+                color: STATUS_BAR_FG,
+            });
+        }
+
+        let time_x = right_block_x
+            + if self.privacy_mode {
+                privacy_width
+            } else {
+                0.0
+            };
         segments.push(TextSegment {
             text: self.time.clone(),
             x: time_x,
