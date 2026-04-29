@@ -35,13 +35,31 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 use phantom_agents::policy::AgentPolicy;
 use phantom_agents::{AgentId, AgentTask};
 
-use crate::events::AiAction;
+use crate::events::{AiAction, ConnectionState};
 use crate::orchestrator::{ReplanDecision, StepStatus, TaskLedger};
 
+/// How often the reconciler checks whether a paused agent's backend has
+/// become available again.
+const BACKEND_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+// ---------------------------------------------------------------------------
+// PausedAgentEntry
+// ---------------------------------------------------------------------------
+
+/// Tracks an agent that has been paused because its backend became unavailable.
+struct PausedAgentEntry {
+    agent_id: AgentId,
+    /// The reason the agent was paused; kept for diagnostics and future
+    /// reason-specific retry logic (e.g. different poll intervals per reason).
+    #[allow(dead_code)]
+    reason: PauseReason,
+    last_polled: Instant,
+}
 // ---------------------------------------------------------------------------
 // ReconcilerState
 // ---------------------------------------------------------------------------
@@ -68,6 +86,12 @@ pub struct ReconcilerState {
     /// tick to override the timeout or retry budget for all subsequently
     /// dispatched agents. Production code leaves this at `AgentPolicy::default()`.
     pub agent_policy: AgentPolicy,
+    /// Agents that are currently paused waiting for their backend to recover.
+    paused_agents: Vec<PausedAgentEntry>,
+    /// Optional availability probe injected in tests to avoid real I/O.
+    /// When `Some`, `poll_paused_agents` calls this instead of
+    /// `ChatBackend::is_available()`.
+    pub availability_probe: Option<Box<dyn Fn(AgentId) -> bool + Send>>,
 }
 
 impl ReconcilerState {
@@ -76,12 +100,15 @@ impl ReconcilerState {
             active_dispatches: HashMap::new(),
             next_agent_id: 10_000_u64,
             agent_policy: AgentPolicy::default(),
+            paused_agents: Vec::new(),
+            availability_probe: None,
         }
     }
 
     /// Reset all tracking — called when a new goal replaces the current one.
     pub fn reset(&mut self) {
         self.active_dispatches.clear();
+        self.paused_agents.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -95,6 +122,7 @@ impl ReconcilerState {
     /// Returns `true` if the ledger is still active (caller should keep it),
     /// `false` if the goal reached a terminal state (caller should drop the ledger).
     pub fn tick(&mut self, ledger: &mut TaskLedger, action_tx: &mpsc::Sender<AiAction>) -> bool {
+        self.poll_paused_agents(action_tx);
         self.check_stalled(ledger, action_tx);
 
         match ledger.should_replan() {
@@ -206,6 +234,103 @@ impl ReconcilerState {
                 }
             }
             ledger.record_output(summary);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / resume API
+    // -----------------------------------------------------------------------
+
+    /// Notify the reconciler that `agent_id`'s backend has become unavailable.
+    ///
+    /// The agent is added to the paused list and a [`AiAction::PauseAgent`] is
+    /// emitted. If the agent is already in the paused list this is a no-op.
+    pub fn on_backend_unavailable(
+        &mut self,
+        agent_id: AgentId,
+        reason: PauseReason,
+        action_tx: &mpsc::Sender<AiAction>,
+    ) {
+        if self.paused_agents.iter().any(|e| e.agent_id == agent_id) {
+            return;
+        }
+
+        let state = connection_state_for_reason(&reason);
+        self.paused_agents.push(PausedAgentEntry {
+            agent_id,
+            reason: reason.clone(),
+            last_polled: Instant::now(),
+        });
+
+        log::warn!("Reconciler: pausing agent {agent_id} — {reason:?}");
+        let _ = action_tx.send(AiAction::PauseAgent { agent_id, reason });
+        let _ = action_tx.send(AiAction::UpdateConnectionState { state });
+    }
+
+    /// Notify the reconciler that a backend has recovered and all paused agents
+    /// should be resumed.
+    ///
+    /// Emits [`AiAction::ResumeAgent`] for every agent in the paused list and
+    /// clears the list. Also emits [`AiAction::UpdateConnectionState`] with
+    /// [`ConnectionState::Connected`].
+    pub fn on_backend_available(&mut self, action_tx: &mpsc::Sender<AiAction>) {
+        for entry in self.paused_agents.drain(..) {
+            log::info!("Reconciler: resuming agent {} — backend restored", entry.agent_id);
+            let _ = action_tx.send(AiAction::ResumeAgent { agent_id: entry.agent_id });
+        }
+        let _ = action_tx.send(AiAction::UpdateConnectionState {
+            state: ConnectionState::Connected,
+        });
+    }
+
+    /// Number of agents currently paused waiting for backend recovery.
+    pub fn paused_agent_count(&self) -> usize {
+        self.paused_agents.len()
+    }
+
+    /// Poll every paused agent to see if its backend has recovered.
+    ///
+    /// Called at the start of each [`tick`]. For each paused agent whose
+    /// `last_polled` timestamp has exceeded [`BACKEND_POLL_INTERVAL`], the
+    /// reconciler checks availability (via `availability_probe` if set, or
+    /// always-available default) and emits [`AiAction::ResumeAgent`] if the
+    /// backend is back.
+    pub fn poll_paused_agents(&mut self, action_tx: &mpsc::Sender<AiAction>) {
+        if self.paused_agents.is_empty() {
+            return;
+        }
+
+        let mut to_resume: Vec<AgentId> = Vec::new();
+
+        for entry in &mut self.paused_agents {
+            if entry.last_polled.elapsed() >= BACKEND_POLL_INTERVAL {
+                entry.last_polled = Instant::now();
+
+                let available = if let Some(probe) = &self.availability_probe {
+                    probe(entry.agent_id)
+                } else {
+                    // Default: no real probe wired in; never auto-resume
+                    // without an explicit `on_backend_available` call.
+                    false
+                };
+
+                if available {
+                    to_resume.push(entry.agent_id);
+                }
+            }
+        }
+
+        if !to_resume.is_empty() {
+            self.paused_agents.retain(|e| !to_resume.contains(&e.agent_id));
+            for agent_id in to_resume {
+                log::info!("Reconciler: resuming agent {agent_id} — probe confirmed available");
+                let _ = action_tx.send(AiAction::ResumeAgent { agent_id });
+            }
+            if self.paused_agents.is_empty() {
+                let _ = action_tx.send(AiAction::UpdateConnectionState {
+                    state: ConnectionState::Connected,
+                });
+            }
         }
     }
 
@@ -322,6 +447,21 @@ impl ReconcilerState {
 impl Default for ReconcilerState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Derive a [`ConnectionState`] from a [`PauseReason`].
+fn connection_state_for_reason(reason: &PauseReason) -> ConnectionState {
+    match reason {
+        PauseReason::NetworkUnavailable => ConnectionState::Offline,
+        PauseReason::BackendDegraded { provider } => ConnectionState::Degraded {
+            provider: provider.clone(),
+        },
+        PauseReason::UserRequested => ConnectionState::Connected,
     }
 }
 
@@ -1010,6 +1150,154 @@ mod tests {
         assert!(
             disposition.auto_approve(),
             "Chat disposition must satisfy auto_approve() so the fast path fires",
+        );
+    }
+
+    // -- Issue #321: graceful pause / resume on backend unavailability -----------
+
+    /// `on_backend_unavailable` adds the agent to the paused list and emits
+    /// `PauseAgent` + `UpdateConnectionState(Offline)` for `NetworkUnavailable`.
+    #[test]
+    fn on_backend_unavailable_emits_pause_and_connection_state() {
+        use phantom_agents::agent::PauseReason;
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+
+        state.on_backend_unavailable(1, PauseReason::NetworkUnavailable, &tx);
+
+        assert_eq!(state.paused_agent_count(), 1);
+
+        let actions: Vec<_> = rx.try_iter().collect();
+        assert_eq!(actions.len(), 2, "expected PauseAgent + UpdateConnectionState");
+
+        assert!(matches!(&actions[0], AiAction::PauseAgent { agent_id: 1, .. }));
+        assert!(
+            matches!(&actions[1], AiAction::UpdateConnectionState { state } if *state == crate::events::ConnectionState::Offline)
+        );
+    }
+
+    /// Calling `on_backend_unavailable` twice for the same agent is a no-op
+    /// the second time — no duplicate entries in the paused list.
+    #[test]
+    fn on_backend_unavailable_is_idempotent_for_same_agent() {
+        use phantom_agents::agent::PauseReason;
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+
+        state.on_backend_unavailable(5, PauseReason::NetworkUnavailable, &tx);
+        state.on_backend_unavailable(5, PauseReason::NetworkUnavailable, &tx);
+
+        assert_eq!(state.paused_agent_count(), 1, "must not double-register same agent");
+        let actions: Vec<_> = rx.try_iter().collect();
+        // Only 2 actions from the first call, second is a no-op.
+        assert_eq!(actions.len(), 2);
+    }
+
+    /// `on_backend_available` emits `ResumeAgent` for every paused agent and
+    /// clears the paused list, then emits `UpdateConnectionState(Connected)`.
+    #[test]
+    fn on_backend_available_resumes_all_paused_agents() {
+        use phantom_agents::agent::PauseReason;
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+
+        state.on_backend_unavailable(1, PauseReason::NetworkUnavailable, &tx);
+        state.on_backend_unavailable(2, PauseReason::NetworkUnavailable, &tx);
+        // Drain the pause actions.
+        let _: Vec<_> = rx.try_iter().collect();
+
+        state.on_backend_available(&tx);
+
+        assert_eq!(state.paused_agent_count(), 0, "paused list must be cleared");
+
+        let actions: Vec<_> = rx.try_iter().collect();
+        // 2 ResumeAgent + 1 UpdateConnectionState(Connected)
+        assert_eq!(actions.len(), 3, "expected 2 ResumeAgent + UpdateConnectionState");
+
+        let resume_count = actions
+            .iter()
+            .filter(|a| matches!(a, AiAction::ResumeAgent { .. }))
+            .count();
+        assert_eq!(resume_count, 2);
+
+        assert!(actions.iter().any(
+            |a| matches!(a, AiAction::UpdateConnectionState { state } if *state == crate::events::ConnectionState::Connected)
+        ));
+    }
+
+    /// `poll_paused_agents` with an always-true probe auto-resumes agents
+    /// whose `last_polled` has exceeded `BACKEND_POLL_INTERVAL`.
+    #[test]
+    fn poll_paused_agents_resumes_when_probe_returns_true() {
+        use phantom_agents::agent::PauseReason;
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        // Install an always-available probe.
+        state.availability_probe = Some(Box::new(|_| true));
+
+        state.on_backend_unavailable(7, PauseReason::NetworkUnavailable, &tx);
+        // Drain pause actions.
+        let _: Vec<_> = rx.try_iter().collect();
+
+        // Force the last_polled stamp to the past so the interval has elapsed.
+        if let Some(entry) = state.paused_agents.first_mut() {
+            entry.last_polled = Instant::now()
+                .checked_sub(BACKEND_POLL_INTERVAL + Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+        }
+
+        state.poll_paused_agents(&tx);
+
+        assert_eq!(state.paused_agent_count(), 0, "agent must be auto-resumed");
+        let actions: Vec<_> = rx.try_iter().collect();
+        assert!(actions.iter().any(|a| matches!(a, AiAction::ResumeAgent { agent_id: 7 })));
+        assert!(actions.iter().any(
+            |a| matches!(a, AiAction::UpdateConnectionState { state } if *state == crate::events::ConnectionState::Connected)
+        ));
+    }
+
+    /// `poll_paused_agents` with an always-false probe does NOT auto-resume.
+    #[test]
+    fn poll_paused_agents_does_not_resume_when_probe_returns_false() {
+        use phantom_agents::agent::PauseReason;
+        let (tx, rx) = mpsc::channel();
+        let mut state = ReconcilerState::new();
+        state.availability_probe = Some(Box::new(|_| false));
+
+        state.on_backend_unavailable(9, PauseReason::NetworkUnavailable, &tx);
+        let _: Vec<_> = rx.try_iter().collect();
+
+        // Force the elapsed time to exceed the poll interval.
+        if let Some(entry) = state.paused_agents.first_mut() {
+            entry.last_polled = Instant::now()
+                .checked_sub(BACKEND_POLL_INTERVAL + Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+        }
+
+        state.poll_paused_agents(&tx);
+
+        assert_eq!(state.paused_agent_count(), 1, "agent must remain paused");
+        let actions: Vec<_> = rx.try_iter().collect();
+        assert!(actions.is_empty(), "no actions when backend still unavailable");
+    }
+
+    /// `connection_state_for_reason` maps `PauseReason` to `ConnectionState`.
+    #[test]
+    fn connection_state_for_reason_maps_correctly() {
+        use phantom_agents::agent::PauseReason;
+        use crate::events::ConnectionState;
+
+        assert_eq!(
+            connection_state_for_reason(&PauseReason::NetworkUnavailable),
+            ConnectionState::Offline,
+        );
+        assert_eq!(
+            connection_state_for_reason(&PauseReason::BackendDegraded { provider: "openai".into() }),
+            ConnectionState::Degraded { provider: "openai".into() },
+        );
+        assert_eq!(
+            connection_state_for_reason(&PauseReason::UserRequested),
+            ConnectionState::Connected,
         );
     }
 

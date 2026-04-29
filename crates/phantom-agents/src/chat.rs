@@ -130,6 +130,18 @@ pub trait ChatBackend: Send + Sync {
 
     /// Issue one round of chat completion.
     fn complete(&self, request: ChatRequest<'_>) -> Result<ChatResponse, ChatError>;
+
+    /// Whether the backend is currently reachable.
+    ///
+    /// Returns `true` by default. Implementations that can detect transient
+    /// network unavailability (e.g. by checking a cached health-check result)
+    /// should override this to return `false` while the provider is down.
+    ///
+    /// The reconciler polls this every 30 seconds for paused agents and
+    /// auto-resumes them when it flips back to `true`.
+    fn is_available(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------

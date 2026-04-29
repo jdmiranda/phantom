@@ -16,9 +16,10 @@
 //! implement `ActionHandler`.
 
 use phantom_agents::{AgentId, AgentTask};
+use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 
-use crate::events::{AiAction, SuggestionOption};
+use crate::events::{AiAction, ConnectionState, SuggestionOption};
 
 // ---------------------------------------------------------------------------
 // ActionHandler trait
@@ -70,6 +71,21 @@ pub trait ActionHandler {
     fn checkpoint_reached(&mut self, step_idx: usize, description: String) {
         let _ = (step_idx, description);
     }
+
+    /// Pause a running agent because its backend became unavailable.
+    fn pause_agent(&mut self, agent_id: AgentId, reason: PauseReason) {
+        let _ = (agent_id, reason);
+    }
+
+    /// Resume a previously paused agent because its backend is available again.
+    fn resume_agent(&mut self, agent_id: AgentId) {
+        let _ = agent_id;
+    }
+
+    /// Update the connection state indicator in the status bar.
+    fn update_connection_state(&mut self, state: ConnectionState) {
+        let _ = state;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +136,15 @@ impl AiAction {
             }
             AiAction::CheckpointReached { step_idx, description } => {
                 handler.checkpoint_reached(step_idx, description);
+            }
+            AiAction::PauseAgent { agent_id, reason } => {
+                handler.pause_agent(agent_id, reason);
+            }
+            AiAction::ResumeAgent { agent_id } => {
+                handler.resume_agent(agent_id);
+            }
+            AiAction::UpdateConnectionState { state } => {
+                handler.update_connection_state(state);
             }
             AiAction::DoNothing => {}
         }

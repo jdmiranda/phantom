@@ -641,6 +641,7 @@ fn status_tag(status: AgentStatus) -> &'static str {
         AgentStatus::Done => "DONE",
         AgentStatus::Failed => "FAILED",
         AgentStatus::Flatline => "FLATLINE",
+        AgentStatus::Paused { .. } => "PAUSED",
     }
 }
 

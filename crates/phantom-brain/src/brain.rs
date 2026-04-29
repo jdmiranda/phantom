@@ -1029,6 +1029,9 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::QuarantineAgent { .. } => "quarantine_agent",
         AiAction::AgentQuarantined { .. } => "agent_quarantined",
         AiAction::CheckpointReached { .. } => "checkpoint_reached",
+        AiAction::PauseAgent { .. } => "pause_agent",
+        AiAction::ResumeAgent { .. } => "resume_agent",
+        AiAction::UpdateConnectionState { .. } => "update_connection_state",
         AiAction::DoNothing => "quiet",
     }
 }

@@ -10,9 +10,10 @@ use std::time::Instant;
 use log::{info, warn};
 
 use phantom_agents::{AgentId, AgentSpawnOpts, AgentTask};
+use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 use phantom_brain::dispatch::ActionHandler;
-use phantom_brain::events::SuggestionOption;
+use phantom_brain::events::{ConnectionState, SuggestionOption};
 
 use crate::app::SuggestionOverlay;
 use crate::console::Console;
@@ -133,5 +134,17 @@ impl ActionHandler for AppActionHandler<'_> {
 
     fn agent_quarantined(&mut self, agent_id: AgentId, denial_count: usize) {
         info!("[PHANTOM]: Agent {agent_id} quarantined ({denial_count} denials)");
+    }
+
+    fn pause_agent(&mut self, agent_id: AgentId, reason: PauseReason) {
+        info!("[PHANTOM]: Pausing agent {agent_id} ({reason:?})");
+    }
+
+    fn resume_agent(&mut self, agent_id: AgentId) {
+        info!("[PHANTOM]: Resuming agent {agent_id}");
+    }
+
+    fn update_connection_state(&mut self, state: ConnectionState) {
+        info!("[PHANTOM]: Connection state updated: {state:?}");
     }
 }

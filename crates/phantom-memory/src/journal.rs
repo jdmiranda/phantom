@@ -341,6 +341,30 @@ impl AgentJournal {
         )
     }
 
+    /// Record a conversation checkpoint when an agent is paused mid-task.
+    ///
+    /// Snapshots the current conversation state so it can be restored when the
+    /// agent resumes. `pause_reason` is a human-readable description of why the
+    /// agent was paused (e.g. `"network_unavailable"`). `message_count` is the
+    /// number of messages in the conversation at the time of the checkpoint.
+    /// `conversation_json` is a serialized snapshot of the conversation history.
+    ///
+    /// Returns the journal entry that was written.
+    pub fn record_conversation_checkpoint(
+        &mut self,
+        agent_id: AgentId,
+        pause_reason: impl Into<String>,
+        message_count: usize,
+        conversation_json: serde_json::Value,
+    ) -> Result<JournalEntry, JournalError> {
+        let reason = pause_reason.into();
+        let message = format!(
+            "checkpoint: pause_reason={reason} message_count={message_count} snapshot={}",
+            conversation_json
+        );
+        self.record(agent_id, Phase::Lifecycle, Level::Warn, message)
+    }
+
     // ── Query API ─────────────────────────────────────────────────────────
 
     /// Most-recent `n` journal entries, in chronological order (oldest first).
