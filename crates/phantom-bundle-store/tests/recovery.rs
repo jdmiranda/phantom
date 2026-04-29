@@ -14,7 +14,11 @@ use tempfile::TempDir;
 
 fn embedding(vec: Vec<f32>) -> Embedding {
     let dim = vec.len();
-    Embedding { vec, dim, model: "test".into() }
+    Embedding {
+        vec,
+        dim,
+        model: "test".into(),
+    }
 }
 
 /// After a clean write-and-reopen cycle no bundles are swept (none are
@@ -186,8 +190,12 @@ fn sweep_cleans_orphaned_vectors_and_leaked_rows_table() {
     //   • an orphan id that has no matching SQLite row (should be dropped)
     let orphan_id = uuid::Uuid::from_u128(0xDEAD_BEEF_CAFE_0000_0000_0000_0000_0001);
     let vectors = InMemoryVectorIndex::new();
-    vectors.upsert(real_id, "text", &[1.0, 0.0, 0.0]).expect("upsert real");
-    vectors.upsert(orphan_id, "text", &[0.0, 1.0, 0.0]).expect("upsert orphan");
+    vectors
+        .upsert(real_id, "text", &[1.0, 0.0, 0.0])
+        .expect("upsert real");
+    vectors
+        .upsert(orphan_id, "text", &[0.0, 1.0, 0.0])
+        .expect("upsert orphan");
 
     // Also inject a leaked_rows record to confirm the sweep clears it.
     let db_path = tmp.path().join("bundles.db");
@@ -199,8 +207,14 @@ fn sweep_cleans_orphaned_vectors_and_leaked_rows_table() {
 
     // The real bundle's vector must still be in the index.
     let surviving = vectors.ids_for_modality("text");
-    assert!(surviving.contains(&real_id), "real bundle must survive sweep");
-    assert!(!surviving.contains(&orphan_id), "orphan must be gone after sweep");
+    assert!(
+        surviving.contains(&real_id),
+        "real bundle must survive sweep"
+    );
+    assert!(
+        !surviving.contains(&orphan_id),
+        "orphan must be gone after sweep"
+    );
 }
 
 /// Synthesize a `StoreError::Keyring` error and verify that its `Display`

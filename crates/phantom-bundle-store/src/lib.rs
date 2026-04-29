@@ -35,9 +35,9 @@
 
 #![allow(clippy::result_large_err)]
 
-use std::path::PathBuf;
 #[cfg(any(test, feature = "testing"))]
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use phantom_bundles::{Bundle, BundleId};
@@ -47,11 +47,16 @@ use thiserror::Error;
 
 mod crypto;
 mod lance;
+#[cfg(feature = "lancedb")]
+mod lancedb_index;
+pub mod migrate;
 pub mod recovery;
 mod sqlite;
 
 pub use crypto::{BlobEnvelope, MasterKey};
 pub use lance::{InMemoryVectorIndex, VectorHit, VectorIndex};
+#[cfg(feature = "lancedb")]
+pub use lancedb_index::LanceDbIndex;
 
 /// Schema version of the unified store. Independent of
 /// [`phantom_bundles::SCHEMA_VERSION`] — the bundle payload schema and the
@@ -170,7 +175,10 @@ impl std::fmt::Debug for BundleStore {
 
 struct Inner {
     sqlite: sqlite::Connection,
-    vectors: InMemoryVectorIndex,
+    /// Active vector backend. `Box<dyn VectorIndex>` lets us swap between
+    /// `InMemoryVectorIndex` (default) and `LanceDbIndex` (`lancedb` feature)
+    /// without generics polluting the public API.
+    vectors: Box<dyn VectorIndex>,
     root: PathBuf,
     master_key: MasterKey,
 }
@@ -191,7 +199,22 @@ impl BundleStore {
         sqlite::init_schema(&sqlite)?;
         sqlite::check_schema_version(&sqlite)?;
 
-        let vectors = InMemoryVectorIndex::default();
+        // Build the vector index — real LanceDB when the feature is on, else
+        // in-memory stub.
+        #[cfg(feature = "lancedb")]
+        let vectors: Box<dyn VectorIndex> = {
+            let ldb_path = config.root.join("vectors");
+            let idx = LanceDbIndex::open(&ldb_path)?;
+            // Cold-start migration: import any serialized in-memory index from
+            // a previous shutdown without the lancedb feature.
+            if let Err(err) = migrate::import_migration_file(&idx) {
+                tracing::warn!(?err, "migration import failed; continuing without it");
+            }
+            Box::new(idx)
+        };
+        #[cfg(not(feature = "lancedb"))]
+        let vectors: Box<dyn VectorIndex> = Box::new(InMemoryVectorIndex::default());
+
         let inner = Inner {
             sqlite,
             vectors,
@@ -201,12 +224,14 @@ impl BundleStore {
 
         // Best-effort recovery: surface but don't fail open if recovery hits
         // a bundle we can't reseat. The next write will retry.
-        let leaked = recovery::sweep_leaked_rows(&inner.sqlite, &inner.vectors);
+        let leaked = recovery::sweep_leaked_rows(&inner.sqlite, inner.vectors.as_ref());
         if let Err(err) = leaked {
             tracing::warn!(?err, "leaked-rows sweep failed");
         }
 
-        Ok(Self { inner: Mutex::new(inner) })
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
     }
 
     /// Persist a bundle and its embeddings atomically.
@@ -235,7 +260,10 @@ impl BundleStore {
         let mut indexed = Vec::with_capacity(embeddings.len());
         let mut vector_failed: Option<StoreError> = None;
         for emb in embeddings {
-            match inner.vectors.upsert(bundle.id, &emb.modality, &emb.embedding.vec) {
+            match inner
+                .vectors
+                .upsert(bundle.id, &emb.modality, &emb.embedding.vec)
+            {
                 Ok(()) => indexed.push(emb.modality.clone()),
                 Err(err) => {
                     vector_failed = Some(err);
@@ -263,12 +291,13 @@ impl BundleStore {
         sqlite::read_bundle(&guard.sqlite, id)
     }
 
-    /// Vector similarity search. Backed by [`InMemoryVectorIndex`] under the
-    /// default feature, or LanceDB when `vector_search_lancedb` is enabled
-    /// (currently scaffolded only — see crate-level docs).
+    /// Vector similarity search. Backed by [`LanceDbIndex`] when the `lancedb`
+    /// feature is enabled, or [`InMemoryVectorIndex`] otherwise.
     pub fn search_vectors(&self, query: &VectorQuery) -> Result<Vec<VectorHit>, StoreError> {
         let guard = self.inner.lock().expect("bundle store poisoned");
-        guard.vectors.search(&query.modality, &query.vector, query.limit)
+        guard
+            .vectors
+            .search(&query.modality, &query.vector, query.limit)
     }
 
     /// FTS5 search over the `transcripts_fts` virtual table.
@@ -367,7 +396,10 @@ pub mod testing {
 
     /// Open a fresh store at a tempdir-style root using `master`.
     pub fn open_at(root: &Path, master: MasterKey) -> Result<BundleStore, StoreError> {
-        BundleStore::open(StoreConfig { root: root.to_path_buf(), master_key: master })
+        BundleStore::open(StoreConfig {
+            root: root.to_path_buf(),
+            master_key: master,
+        })
     }
 
     /// Run [`recovery::sweep_leaked_rows`] against the SQLite database at
@@ -410,7 +442,11 @@ mod tests {
 
     fn embedding(vec: Vec<f32>) -> Embedding {
         let dim = vec.len();
-        Embedding { vec, dim, model: "test".into() }
+        Embedding {
+            vec,
+            dim,
+            model: "test".into(),
+        }
     }
 
     fn open_tmp() -> (TempDir, BundleStore) {
@@ -508,22 +544,31 @@ mod tests {
         b_c.seal(Some("c".into()), vec![], 0.5);
 
         store
-            .write_bundle(&b_a, &[BundleEmbeddings {
-                modality: "text".into(),
-                embedding: embedding(vec![1.0, 0.0, 0.0]),
-            }])
+            .write_bundle(
+                &b_a,
+                &[BundleEmbeddings {
+                    modality: "text".into(),
+                    embedding: embedding(vec![1.0, 0.0, 0.0]),
+                }],
+            )
             .unwrap();
         store
-            .write_bundle(&b_b, &[BundleEmbeddings {
-                modality: "text".into(),
-                embedding: embedding(vec![0.0, 1.0, 0.0]),
-            }])
+            .write_bundle(
+                &b_b,
+                &[BundleEmbeddings {
+                    modality: "text".into(),
+                    embedding: embedding(vec![0.0, 1.0, 0.0]),
+                }],
+            )
             .unwrap();
         store
-            .write_bundle(&b_c, &[BundleEmbeddings {
-                modality: "text".into(),
-                embedding: embedding(vec![0.0, 0.0, 1.0]),
-            }])
+            .write_bundle(
+                &b_c,
+                &[BundleEmbeddings {
+                    modality: "text".into(),
+                    embedding: embedding(vec![0.0, 0.0, 1.0]),
+                }],
+            )
             .unwrap();
 
         let hits = store
@@ -567,7 +612,10 @@ mod tests {
         store.write_bundle(&bundle, &[emb]).unwrap();
 
         let intent_hits = store.search_fts("ci-success", 10).expect("fts");
-        assert!(intent_hits.iter().any(|h| h.bundle_id == bundle.id), "intent");
+        assert!(
+            intent_hits.iter().any(|h| h.bundle_id == bundle.id),
+            "intent"
+        );
 
         let tag_hits = store.search_fts("green", 10).expect("fts");
         assert!(tag_hits.iter().any(|h| h.bundle_id == bundle.id), "tag");
@@ -615,10 +663,13 @@ mod tests {
         let mut a = Bundle::new(1);
         a.seal(Some("first".into()), vec![], 0.1);
         store
-            .write_bundle(&a, &[BundleEmbeddings {
-                modality: "text".into(),
-                embedding: embedding(vec![1.0, 2.0, 3.0]),
-            }])
+            .write_bundle(
+                &a,
+                &[BundleEmbeddings {
+                    modality: "text".into(),
+                    embedding: embedding(vec![1.0, 2.0, 3.0]),
+                }],
+            )
             .expect("first write ok");
 
         let mut b = Bundle::new(1);
@@ -674,7 +725,9 @@ mod tests {
                         model: "test".into(),
                     },
                 };
-                store.write_bundle(&bundle, &[emb]).expect("concurrent write");
+                store
+                    .write_bundle(&bundle, &[emb])
+                    .expect("concurrent write");
                 bundle.id
             }));
         }
@@ -708,7 +761,10 @@ mod tests {
         let err = testing::open_at(tmp.path(), key).expect_err("must mismatch");
         assert!(matches!(
             err,
-            StoreError::SchemaVersionMismatch { expected: 1, found: 999 }
+            StoreError::SchemaVersionMismatch {
+                expected: 1,
+                found: 999
+            }
         ));
     }
 }
