@@ -364,6 +364,10 @@ impl PostFxPipeline {
     /// Returns Err(String) if wgpu rejects the shader module so the caller
     /// can surface it as a NotificationCenter banner and keep the last-good
     /// pipeline alive.
+    // FIXME(#84): wgpu pipeline creation errors are delivered asynchronously via
+    // Device::push_error_scope/pop_error_scope, not as a return value. This fn
+    // currently always returns Ok(()) — wire error-scope polling to surface real
+    // GPU rejection errors.
     pub fn reload_shader(&mut self, device: &Device, source: &str) -> Result<(), String> {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("postfx-shader-hot"),
