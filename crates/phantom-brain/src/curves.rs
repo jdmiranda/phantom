@@ -782,9 +782,9 @@ pub trait UtilityCurve: Send + Sync {
 #[derive(Debug, Clone, Copy)]
 pub struct LinearCurve {
     /// Slope (rise per unit input).
-    pub m: f32,
+    m: f32,
     /// Y-intercept (score at x=0 before clamping).
-    pub b: f32,
+    b: f32,
 }
 
 impl LinearCurve {
@@ -832,7 +832,7 @@ impl UtilityCurve for LinearCurve {
 #[derive(Debug, Clone, Copy)]
 pub struct ExponentialCurve {
     /// The exponent `k`. Must be positive.
-    pub k: f32,
+    k: f32,
 }
 
 impl ExponentialCurve {
@@ -884,9 +884,9 @@ impl UtilityCurve for ExponentialCurve {
 #[derive(Debug, Clone, Copy)]
 pub struct LogisticCurve {
     /// The x-value at the inflection point (score = 0.5).
-    pub midpoint: f32,
+    midpoint: f32,
     /// Controls the transition sharpness. Higher = steeper S.
-    pub steepness: f32,
+    steepness: f32,
 }
 
 impl LogisticCurve {
@@ -935,11 +935,11 @@ impl UtilityCurve for LogisticCurve {
 #[derive(Debug, Clone, Copy)]
 pub struct StepCurve {
     /// The input threshold. At or above this value, output is `on_value`.
-    pub threshold: f32,
+    threshold: f32,
     /// Output when `x >= threshold`.
-    pub on_value: f32,
+    on_value: f32,
     /// Output when `x < threshold`.
-    pub off_value: f32,
+    off_value: f32,
 }
 
 impl StepCurve {
@@ -962,7 +962,7 @@ impl StepCurve {
 impl UtilityCurve for StepCurve {
     fn score(&self, x: f32) -> f32 {
         let x = x.clamp(0.0, 1.0);
-        if x >= self.threshold { self.on_value } else { self.off_value }
+        if x >= self.threshold { self.on_value } else { self.off_value }.clamp(0.0, 1.0)
     }
 }
 
