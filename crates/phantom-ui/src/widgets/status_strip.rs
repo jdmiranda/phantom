@@ -468,7 +468,6 @@ mod tests {
         assert_eq!(texts.len(), 1);
 
         let text_w = "RIGHT".chars().count() as f32 * ctx.cell_w();
-        let _expected_x = wide_rect().width - TOKEN_PAD - text_w;
         let slot_w = wide_rect().width / 3.0;
         let right_slot_x = slot_w * 2.0;
         let actual_expected = right_slot_x + slot_w - TOKEN_PAD - text_w;
