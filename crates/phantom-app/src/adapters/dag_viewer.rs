@@ -477,6 +477,8 @@ mod tests {
         s.overlay.insert("hot".to_owned(), NodeOverlay {
             instability_score: 1.0,
             open_tickets: vec![42],
+            in_progress_tickets: vec![],
+            tickets_closed_last_30d: 0,
         });
 
         let unstable_quads = s.render_quads(&dag);
