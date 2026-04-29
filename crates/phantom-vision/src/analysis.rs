@@ -34,24 +34,91 @@ pub const MAX_IMAGE_BYTES: usize = 100 * 1024; // 100 KB
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiElement {
     /// Human-readable label, e.g. `"Submit button"`, `"Terminal pane"`.
-    pub label: String,
+    label: String,
     /// Confidence in `[0.0, 1.0]`.
-    pub confidence: f32,
+    confidence: f32,
     /// Optional bounding-box in pixels `(x, y, width, height)`.
-    pub bounding_box: Option<(u32, u32, u32, u32)>,
+    bounding_box: Option<(u32, u32, u32, u32)>,
+}
+
+impl UiElement {
+    /// Build a new [`UiElement`].
+    #[must_use]
+    pub fn new(
+        label: String,
+        confidence: f32,
+        bounding_box: Option<(u32, u32, u32, u32)>,
+    ) -> Self {
+        Self { label, confidence, bounding_box }
+    }
+
+    /// Human-readable label, e.g. `"Submit button"` or `"Terminal pane"`.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Confidence score in `[0.0, 1.0]`.
+    #[must_use]
+    pub fn confidence(&self) -> f32 {
+        self.confidence
+    }
+
+    /// Optional bounding-box in pixels `(x, y, width, height)`.
+    #[must_use]
+    pub fn bounding_box(&self) -> Option<(u32, u32, u32, u32)> {
+        self.bounding_box
+    }
 }
 
 /// Structured output produced by a [`VisionBackend`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Analysis {
     /// All readable text extracted from the frame.
-    pub text_content: String,
+    text_content: String,
     /// UI elements detected (may be empty when the prompt is not UI-oriented).
-    pub ui_elements: Vec<UiElement>,
+    ui_elements: Vec<UiElement>,
     /// One-sentence summary of the frame.
-    pub summary: String,
+    summary: String,
     /// Optional embedding vector for downstream vector search.
-    pub embedding: Vec<f32>,
+    embedding: Vec<f32>,
+}
+
+impl Analysis {
+    /// Build a new [`Analysis`].
+    #[must_use]
+    pub fn new(
+        text_content: String,
+        ui_elements: Vec<UiElement>,
+        summary: String,
+        embedding: Vec<f32>,
+    ) -> Self {
+        Self { text_content, ui_elements, summary, embedding }
+    }
+
+    /// All readable text extracted from the frame.
+    #[must_use]
+    pub fn text_content(&self) -> &str {
+        &self.text_content
+    }
+
+    /// UI elements detected (may be empty when the prompt is not UI-oriented).
+    #[must_use]
+    pub fn ui_elements(&self) -> &[UiElement] {
+        &self.ui_elements
+    }
+
+    /// One-sentence summary of the frame.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Optional embedding vector for downstream vector search.
+    #[must_use]
+    pub fn embedding(&self) -> &[f32] {
+        &self.embedding
+    }
 }
 
 /// Canned prompt templates understood by all backends.
@@ -318,12 +385,7 @@ impl VisionBackend for OpenAiVisionBackend {
             .and_then(|c| c.message.content)
             .unwrap_or_default();
 
-        Ok(Analysis {
-            text_content: content.clone(),
-            ui_elements: Vec::new(),
-            summary: content,
-            embedding: Vec::new(),
-        })
+        Ok(Analysis::new(content.clone(), Vec::new(), content, Vec::new()))
     }
 }
 
@@ -333,8 +395,13 @@ impl VisionBackend for OpenAiVisionBackend {
 ///
 /// Always returns a fixed [`Analysis`] derived from the prompt string and the
 /// screenshot dimensions. Never makes network calls.
+///
+/// Only compiled when the `test-utils` feature is enabled or in `#[cfg(test)]`
+/// contexts — never compiled into a production binary.
+#[cfg(any(test, feature = "test-utils"))]
 pub struct MockVisionBackend;
 
+#[cfg(any(test, feature = "test-utils"))]
 #[async_trait]
 impl VisionBackend for MockVisionBackend {
     fn name(&self) -> &'static str {
@@ -356,16 +423,12 @@ impl VisionBackend for MockVisionBackend {
         }
 
         let summary = format!("Mock analysis of {w}x{h} frame: {prompt}");
-        Ok(Analysis {
-            text_content: format!("Text from mock {w}x{h}"),
-            ui_elements: vec![UiElement {
-                label: "mock element".to_string(),
-                confidence: 1.0,
-                bounding_box: Some((0, 0, w, h)),
-            }],
+        Ok(Analysis::new(
+            format!("Text from mock {w}x{h}"),
+            vec![UiElement::new("mock element".to_string(), 1.0, Some((0, 0, w, h)))],
             summary,
-            embedding: vec![0.0_f32; 16],
-        })
+            vec![0.0_f32; 16],
+        ))
     }
 }
 
@@ -401,9 +464,9 @@ mod tests {
         let s = small_screenshot();
         let backend = MockVisionBackend;
         let result = backend.analyze(&s, "summarize this").await.unwrap();
-        assert!(!result.summary.is_empty());
-        assert!(!result.text_content.is_empty());
-        assert_eq!(result.embedding.len(), 16);
+        assert!(!result.summary().is_empty());
+        assert!(!result.text_content().is_empty());
+        assert_eq!(result.embedding().len(), 16);
     }
 
     #[tokio::test]
@@ -412,9 +475,9 @@ mod tests {
         let backend = MockVisionBackend;
         let result = backend.analyze(&s, "summarize").await.unwrap();
         assert!(
-            result.summary.contains("8x8"),
+            result.summary().contains("8x8"),
             "summary should mention dimensions: {}",
-            result.summary
+            result.summary()
         );
     }
 
@@ -426,8 +489,8 @@ mod tests {
             .analyze_with_template(&s, PromptTemplate::IdentifyUiElements)
             .await
             .unwrap();
-        assert_eq!(result.ui_elements.len(), 1);
-        assert_eq!(result.ui_elements[0].label, "mock element");
+        assert_eq!(result.ui_elements().len(), 1);
+        assert_eq!(result.ui_elements()[0].label(), "mock element");
     }
 
     #[tokio::test]
@@ -458,9 +521,9 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            result.summary.contains("anomal"),
+            result.summary().contains("anomal"),
             "terminal anomalies template should surface in mock summary: {}",
-            result.summary
+            result.summary()
         );
     }
 
@@ -553,28 +616,24 @@ mod tests {
 
     #[test]
     fn ui_element_serde_round_trips() {
-        let el = UiElement {
-            label: "Terminal pane".into(),
-            confidence: 0.95,
-            bounding_box: Some((10, 20, 640, 480)),
-        };
+        let el = UiElement::new("Terminal pane".into(), 0.95, Some((10, 20, 640, 480)));
         let json = serde_json::to_string(&el).unwrap();
         let back: UiElement = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.label, el.label);
-        assert!((back.confidence - el.confidence).abs() < 1e-6);
-        assert_eq!(back.bounding_box, el.bounding_box);
+        assert_eq!(back.label(), el.label());
+        assert!((back.confidence() - el.confidence()).abs() < 1e-6);
+        assert_eq!(back.bounding_box(), el.bounding_box());
     }
 
     #[test]
     fn analysis_embedding_storable_as_vec_f32() {
-        let a = Analysis {
-            text_content: "hello".into(),
-            ui_elements: Vec::new(),
-            summary: "a frame".into(),
-            embedding: vec![0.1, 0.2, 0.3],
-        };
+        let a = Analysis::new(
+            "hello".into(),
+            Vec::new(),
+            "a frame".into(),
+            vec![0.1, 0.2, 0.3],
+        );
         let json = serde_json::to_string(&a).unwrap();
         let back: Analysis = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.embedding.len(), 3);
+        assert_eq!(back.embedding().len(), 3);
     }
 }

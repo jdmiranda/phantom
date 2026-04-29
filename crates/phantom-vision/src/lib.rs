@@ -23,9 +23,10 @@ pub mod format;
 
 // Re-export commonly used types.
 pub use analysis::{
-    Analysis, MockVisionBackend, OpenAiVisionBackend, PromptTemplate, UiElement, VisionBackend,
-    MAX_IMAGE_BYTES,
+    Analysis, OpenAiVisionBackend, PromptTemplate, UiElement, VisionBackend, MAX_IMAGE_BYTES,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use analysis::MockVisionBackend;
 pub use format::{Screenshot, ScreenshotSource};
 
 /// Type alias matching the issue #71 spec name for the OpenAI backend.
