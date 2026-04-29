@@ -15,6 +15,7 @@ use std::pin::Pin;
 use futures_core::Stream;
 
 pub mod openai;
+pub mod stream;
 
 /// A single transcription event emitted by a backend.
 ///

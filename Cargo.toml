@@ -30,7 +30,7 @@ members = [
     "crates/phantom-voice",
     # Code dependency graph — DAG extraction + .planning/dag.json schema.
     "crates/phantom-dag",
-    # Speech-to-text backends.
+    # Speech-to-text backend abstraction (issues #56, #68).
     "crates/phantom-stt",
 ]
 resolver = "2"
