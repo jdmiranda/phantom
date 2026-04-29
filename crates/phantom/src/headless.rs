@@ -17,7 +17,8 @@ use phantom_agents::tools::{available_tools, execute_tool};
 use phantom_agents::{AgentMessage, AgentStatus};
 use phantom_app::config::PhantomConfig;
 use phantom_brain::brain::{BrainConfig, spawn_brain};
-use phantom_brain::events::{AiAction, AiEvent};
+use phantom_brain::dispatch::ActionHandler;
+use phantom_brain::events::{AiEvent, SuggestionOption};
 use phantom_context::ProjectContext;
 use phantom_history::{HistoryEntry, HistoryStore};
 use phantom_memory::MemoryStore;
@@ -54,6 +55,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         enable_memory: true,
         quiet_threshold: 0.5,
         router: None,
+        catalog: None,
     });
 
     // Agent manager (max 5 concurrent agents).
@@ -451,40 +453,63 @@ fn run_agent_loop(
 // Brain drain — print any pending brain actions
 // ---------------------------------------------------------------------------
 
+/// Headless handler: each [`AiAction`] variant is printed to stdout.
+struct HeadlessActionHandler;
+
+impl ActionHandler for HeadlessActionHandler {
+    fn show_suggestion(&mut self, text: String, _options: Vec<SuggestionOption>) {
+        println!("[BRAIN]: {text}");
+    }
+
+    fn show_notification(&mut self, msg: String) {
+        println!("[PHANTOM]: {msg}");
+    }
+
+    fn update_memory(&mut self, key: String, value: String) {
+        println!("[MEMORY]: {key} = {value}");
+    }
+
+    fn spawn_agent(
+        &mut self,
+        task: phantom_agents::AgentTask,
+        spawn_tag: Option<u64>,
+        disposition: phantom_agents::dispatch::Disposition,
+    ) {
+        println!("[BRAIN]: suggested agent: {task:?} (spawn_tag={spawn_tag:?}, disposition={disposition:?})");
+    }
+
+    fn console_reply(&mut self, reply: String) {
+        println!("[PHANTOM]: {reply}");
+    }
+
+    fn run_command(&mut self, cmd: String) {
+        println!("[BRAIN]: suggested command: {cmd}");
+    }
+
+    fn dismiss_adapter(&mut self, app_id: u32) {
+        println!("[BRAIN]: dismiss adapter {app_id}");
+    }
+
+    fn agent_flatlined(&mut self, id: phantom_agents::AgentId, reason: String) {
+        println!("[BRAIN]: agent {id} flatlined: {reason}");
+    }
+
+    fn suggest(&mut self, action: String, rationale: String, confidence: f32) {
+        println!("[BRAIN]: proactive suggestion ({confidence:.2}): {action} — {rationale}");
+    }
+
+    fn quarantine_agent(&mut self, agent_id: phantom_agents::AgentId, denial_count: usize) {
+        println!("[BRAIN]: quarantine agent {agent_id} after {denial_count} denials");
+    }
+
+    fn agent_quarantined(&mut self, agent_id: phantom_agents::AgentId, denial_count: usize) {
+        println!("[BRAIN]: agent {agent_id} quarantined after {denial_count} denials");
+    }
+}
+
 fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
     while let Some(action) = brain.try_recv_action() {
-        match action {
-            AiAction::ShowSuggestion { text, .. } => println!("[BRAIN]: {text}"),
-            AiAction::ShowNotification(n) => println!("[PHANTOM]: {n}"),
-            AiAction::UpdateMemory { key, value } => {
-                println!("[MEMORY]: {key} = {value}");
-            }
-            AiAction::RunCommand(cmd) => {
-                println!("[BRAIN]: suggested command: {cmd}");
-            }
-            AiAction::SpawnAgent { task, spawn_tag, disposition } => {
-                println!("[BRAIN]: suggested agent: {task:?} (spawn_tag={spawn_tag:?}, disposition={disposition:?})");
-            }
-            AiAction::ConsoleReply(reply) => {
-                println!("[PHANTOM]: {reply}");
-            }
-            AiAction::DismissAdapter { app_id } => {
-                println!("[BRAIN]: dismiss adapter {app_id}");
-            }
-            AiAction::AgentFlatlined { id, reason } => {
-                println!("[BRAIN]: agent {id} flatlined: {reason}");
-            }
-            AiAction::Suggest { action, rationale, confidence } => {
-                println!("[BRAIN]: proactive suggestion ({confidence:.2}): {action} — {rationale}");
-            }
-            AiAction::QuarantineAgent { agent_id, denial_count } => {
-                println!("[BRAIN]: quarantine agent {agent_id} after {denial_count} denials");
-            }
-            AiAction::AgentQuarantined { agent_id, denial_count } => {
-                println!("[BRAIN]: agent {agent_id} quarantined after {denial_count} denials");
-            }
-            AiAction::DoNothing => {}
-        }
+        action.execute(&mut HeadlessActionHandler);
     }
 }
 

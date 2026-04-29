@@ -46,6 +46,7 @@ pub mod claude;
 pub mod curriculum;
 pub mod curves;
 pub mod decompose;
+pub mod dispatch;
 pub mod events;
 pub mod goal;
 pub mod goals;
@@ -69,6 +70,7 @@ pub use chat_backend::{
 pub use curriculum::*;
 pub use curves::*;
 pub use decompose::{DecompositionResult, DecompositionStep, GoalDecomposer};
+pub use dispatch::ActionHandler;
 pub use events::*;
 pub use goal::{ChatBackend, ClaudeChatBackend, Goal, Step, parse_steps};
 pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};
