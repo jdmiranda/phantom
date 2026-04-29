@@ -492,3 +492,181 @@ mod tests {
         assert!(!prompt.contains("test_key"), "memory should be gated at progress 0");
     }
 }
+
+// ===========================================================================
+// CurriculumHook — difficulty-based task progression
+// ===========================================================================
+
+/// Record of a single task execution, consumed by [`CurriculumHook`] to
+/// determine whether the agent is ready to advance to harder tasks.
+#[derive(Debug, Clone)]
+pub struct TaskOutcome {
+    /// Unique identifier for the task.
+    pub task_id: u64,
+    /// Difficulty of the task in `[1, 10]`.
+    pub difficulty: u8,
+    /// Whether the task completed successfully.
+    pub success: bool,
+    /// Wall-clock duration in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// Policy hook that decides when the curriculum advances to the next
+/// difficulty tier and what that tier should be.
+///
+/// Implementations must be `Send + Sync` so they can live behind an `Arc`
+/// and be called from the brain's background thread.
+pub trait CurriculumHook: Send + Sync {
+    /// Return `true` when `history` demonstrates enough mastery to advance.
+    fn should_advance(&self, history: &[TaskOutcome]) -> bool;
+
+    /// Given the agent's current difficulty tier, return the difficulty to
+    /// use for the next task. Values must stay in `[1, 10]`.
+    fn next_difficulty(&self, current: u8) -> u8;
+}
+
+// ---------------------------------------------------------------------------
+// ProgressiveCurriculum — rolling-window success-rate implementation
+// ---------------------------------------------------------------------------
+
+/// Advances difficulty when the rolling success rate over the last `window`
+/// outcomes meets or exceeds `threshold`.
+///
+/// # Behaviour
+///
+/// - An empty history always returns `false` from `should_advance`.
+/// - `next_difficulty` increments by 1, clamped to 10.
+#[derive(Debug, Clone)]
+pub struct ProgressiveCurriculum {
+    /// Minimum success rate `[0.0, 1.0]` required to advance.
+    threshold: f64,
+    /// Number of most-recent outcomes to consider.
+    window: usize,
+}
+
+impl ProgressiveCurriculum {
+    /// Create a new `ProgressiveCurriculum` with explicit parameters.
+    pub fn new(threshold: f64, window: usize) -> Self {
+        Self { threshold, window }
+    }
+}
+
+impl Default for ProgressiveCurriculum {
+    fn default() -> Self {
+        Self::new(0.7, 10)
+    }
+}
+
+impl CurriculumHook for ProgressiveCurriculum {
+    fn should_advance(&self, history: &[TaskOutcome]) -> bool {
+        if history.is_empty() {
+            return false;
+        }
+        let window = &history[history.len().saturating_sub(self.window)..];
+        let successes = window.iter().filter(|o| o.success).count();
+        let rate = successes as f64 / window.len() as f64;
+        rate >= self.threshold
+    }
+
+    fn next_difficulty(&self, current: u8) -> u8 {
+        current.saturating_add(1).min(10)
+    }
+}
+
+// ===========================================================================
+// Tests for CurriculumHook / ProgressiveCurriculum
+// ===========================================================================
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    fn outcome(success: bool) -> TaskOutcome {
+        TaskOutcome { task_id: 0, difficulty: 1, success, duration_ms: 100 }
+    }
+
+    #[test]
+    fn should_advance_false_on_empty_history() {
+        let hook = ProgressiveCurriculum::default();
+        assert!(!hook.should_advance(&[]), "empty history must not advance");
+    }
+
+    #[test]
+    fn should_advance_false_below_threshold() {
+        let hook = ProgressiveCurriculum::new(0.7, 10);
+        // 6/10 = 0.60 < 0.70
+        let history: Vec<TaskOutcome> = (0..10).map(|i| outcome(i < 6)).collect();
+        assert!(!hook.should_advance(&history));
+    }
+
+    #[test]
+    fn should_advance_true_at_threshold() {
+        let hook = ProgressiveCurriculum::new(0.7, 10);
+        // 7/10 = 0.70 >= 0.70
+        let history: Vec<TaskOutcome> = (0..10).map(|i| outcome(i < 7)).collect();
+        assert!(hook.should_advance(&history));
+    }
+
+    #[test]
+    fn should_advance_true_above_threshold() {
+        let hook = ProgressiveCurriculum::new(0.7, 10);
+        // 9/10 = 0.90 >= 0.70
+        let history: Vec<TaskOutcome> = (0..10).map(|i| outcome(i < 9)).collect();
+        assert!(hook.should_advance(&history));
+    }
+
+    #[test]
+    fn should_advance_uses_rolling_window() {
+        // window = 5; first 10 outcomes are failures, last 5 are successes.
+        let hook = ProgressiveCurriculum::new(0.7, 5);
+        let mut history: Vec<TaskOutcome> = (0..15).map(|_| outcome(false)).collect();
+        for o in history.iter_mut().skip(10) {
+            o.success = true;
+        }
+        // Rolling window = last 5 = all successes = 1.0 >= 0.7
+        assert!(hook.should_advance(&history));
+    }
+
+    #[test]
+    fn next_difficulty_increments_by_one() {
+        let hook = ProgressiveCurriculum::default();
+        assert_eq!(hook.next_difficulty(5), 6);
+    }
+
+    #[test]
+    fn next_difficulty_clamps_at_ten() {
+        let hook = ProgressiveCurriculum::default();
+        assert_eq!(hook.next_difficulty(10), 10);
+        assert_eq!(hook.next_difficulty(9), 10);
+    }
+
+    #[test]
+    fn next_difficulty_from_one() {
+        let hook = ProgressiveCurriculum::default();
+        assert_eq!(hook.next_difficulty(1), 2);
+    }
+
+    #[test]
+    fn progressive_curriculum_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ProgressiveCurriculum>();
+    }
+
+    #[test]
+    fn task_outcome_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<TaskOutcome>();
+    }
+
+    #[test]
+    fn should_advance_single_success_small_window() {
+        let hook = ProgressiveCurriculum::new(0.7, 1);
+        assert!(hook.should_advance(&[outcome(true)]));
+    }
+
+    #[test]
+    fn should_advance_single_failure_small_window() {
+        let hook = ProgressiveCurriculum::new(0.7, 1);
+        assert!(!hook.should_advance(&[outcome(false)]));
+    }
+}
