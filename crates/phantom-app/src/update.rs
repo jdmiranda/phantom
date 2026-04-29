@@ -169,6 +169,26 @@ impl App {
             );
         }
 
+        // Drain NLP translate results: each result was produced off-thread by
+        // `try_nlp_translate_or_spawn_agent` and carries a display message and
+        // an optional AiAction. We show the message immediately and dispatch
+        // the action through the standard brain-action pipeline.
+        loop {
+            match self.nlp_translate_rx.try_recv() {
+                Ok(res) => {
+                    self.console.system(res.display);
+                    if let Some(action) = res.action {
+                        Self::execute_brain_action(
+                            action, now, &mut self.suggestion, &mut self.memory,
+                            &mut self.console, &mut self.coordinator, &mut self.layout,
+                            &mut self.scene, &mut tasks_to_spawn,
+                        );
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+
         // Spawn agent panes (deferred from brain action loop to avoid borrow conflict).
         for opts in tasks_to_spawn {
             let _ = self.spawn_agent_pane_with_opts(opts);

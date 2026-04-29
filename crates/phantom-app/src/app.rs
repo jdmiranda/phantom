@@ -41,6 +41,7 @@ use phantom_scene::tree::SceneTree;
 use phantom_session::session::{is_session_restore, SessionManager, SessionState, PaneState};
 use phantom_session::{AgentStatePersister, GoalStatePersister};
 use phantom_mcp::{spawn_listener, AppCommand, McpListener};
+use phantom_nlp::{ClaudeLlmBackend, LlmBackend};
 
 use crate::boot::BootSequence;
 use crate::boot_order::ShutdownGuard;
@@ -188,6 +189,16 @@ pub struct App {
 
     // -- Pending brain actions queued by suggestion option selection --
     pub(crate) pending_brain_actions: Vec<phantom_brain::events::AiAction>,
+
+    // -- NLP LLM translate pipeline --
+    //    When the heuristic NlpInterpreter returns PassThrough, a short-lived
+    //    background thread calls `phantom_nlp::translate()` (synchronous ureq)
+    //    and sends the result back here.  Bounded at 8 to prevent a backlog of
+    //    network calls when the user is typing fast.
+    pub(crate) nlp_translate_rx: std::sync::mpsc::Receiver<NlpTranslateResult>,
+    pub(crate) nlp_translate_tx: std::sync::mpsc::SyncSender<NlpTranslateResult>,
+    /// `None` when `nlp_llm_enabled = false` in config or ANTHROPIC_API_KEY is absent.
+    pub(crate) nlp_backend: Option<std::sync::Arc<dyn LlmBackend + Send + Sync>>,
 
     // -- Pending sub-agent spawn requests from a Composer's `spawn_subagent`
     //    tool. The Composer pushes onto this queue from its tool handler
@@ -372,6 +383,17 @@ pub(crate) struct SuggestionOverlay {
     pub(crate) shown_at: Instant,
 }
 
+/// Result delivered back to the main thread after an off-thread LLM NLP call.
+///
+/// The background thread builds this from the `Intent` the LLM returned;
+/// `update.rs` drains the channel each frame and dispatches the action.
+pub(crate) struct NlpTranslateResult {
+    /// Human-readable text shown in the console (e.g. "Running: git status").
+    pub(crate) display: String,
+    /// The action to execute (may be `None` when the LLM asked for clarification).
+    pub(crate) action: Option<phantom_brain::events::AiAction>,
+}
+
 impl App {
     /// Create the application, initializing all subsystems.
     ///
@@ -508,6 +530,28 @@ impl App {
             router: None,
         });
         info!("AI brain spawned");
+
+        // -- NLP translate channel (bounded at 8 outstanding requests) --
+        let (nlp_translate_tx, nlp_translate_rx) =
+            std::sync::mpsc::sync_channel::<NlpTranslateResult>(8);
+
+        // Build the LLM backend only when the feature is enabled and the key is present.
+        let nlp_backend: Option<std::sync::Arc<dyn LlmBackend + Send + Sync>> =
+            if config.nlp_llm_enabled {
+                match ClaudeLlmBackend::from_env() {
+                    Ok(backend) => {
+                        info!("NLP LLM backend: ClaudeLlmBackend (key present)");
+                        Some(std::sync::Arc::new(backend))
+                    }
+                    Err(e) => {
+                        debug!("NLP LLM backend: disabled ({e})");
+                        None
+                    }
+                }
+            } else {
+                debug!("NLP LLM backend: disabled by config (nlp_llm = false)");
+                None
+            };
 
         // -- Substrate runtime (supervisor, event log, agent registry, memory
         //    blocks, spawn rules). The seed rule list is empty; the runtime
@@ -840,6 +884,9 @@ impl App {
             suggestion: None,
             suggestion_history: VecDeque::with_capacity(10),
             pending_brain_actions: Vec::new(),
+            nlp_translate_rx,
+            nlp_translate_tx,
+            nlp_backend,
             pending_spawn_subagent: phantom_agents::composer_tools::new_spawn_subagent_queue(),
             context_menu: crate::context_menu::ContextMenu::new(),
             float_interaction: None,
