@@ -155,17 +155,17 @@ fn now_unix_ms() -> u64 {
 /// An active agent running in a GUI pane.
 pub(crate) struct AgentPane {
     /// The agent's task description.
-    pub(crate) task: String,
+    task: String,
     /// Current status.
-    pub(crate) status: AgentPaneStatus,
+    status: AgentPaneStatus,
     /// Accumulated output text (streamed from Claude API).
-    pub(crate) output: String,
+    output: String,
     /// Handle to the background API thread.
     api_handle: Option<ApiHandle>,
     /// Tool use IDs for multi-turn conversations.
     tool_use_ids: Vec<String>,
     /// Cached tail lines for rendering (avoids re-splitting every frame).
-    pub(crate) cached_lines: Vec<String>,
+    cached_lines: Vec<String>,
     /// Output length at last cache rebuild.
     cached_len: usize,
     /// The agent's conversation state (owns the message history).
@@ -540,6 +540,9 @@ impl AgentPane {
             event_log: self.event_log.clone(),
             pending_spawn,
             source_event_id: None,
+            // No quarantine registry wired at this spawn site; the gate
+            // skips the quarantine check when this is `None`. The App-level
+            // quarantine registry will be plumbed in a follow-up. // see #3
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
@@ -931,6 +934,40 @@ impl AgentPane {
         } else {
             warn!("denied_event_sink mutex poisoned; dropping CapabilityDenied event");
         }
+    }
+
+    /// Return the task description for this agent pane.
+    pub(crate) fn task(&self) -> &str {
+        &self.task
+    }
+
+    /// Return the current execution status.
+    pub(crate) fn status(&self) -> AgentPaneStatus {
+        self.status
+    }
+
+    /// Return the length of the accumulated output in bytes.
+    pub(crate) fn output_len(&self) -> usize {
+        self.output.len()
+    }
+
+    /// Return the cached tail lines slice.
+    ///
+    /// This is the rendering surface: `AgentAdapter` reads these each frame
+    /// to avoid re-splitting the full output on every render call. The slice
+    /// is stale until the next [`AgentPane::tail_lines`] call, which is
+    /// driven by `AgentAdapter::update`.
+    pub(crate) fn cached_lines(&self) -> &[String] {
+        &self.cached_lines
+    }
+
+    /// Override the status field from adapter-side command handling.
+    ///
+    /// The `"dismiss"` command in `AgentAdapter` forces the pane to `Done`
+    /// before marking it dismissed. Kept narrow so only the adapter can call
+    /// it from outside this module.
+    pub(crate) fn set_status(&mut self, status: AgentPaneStatus) {
+        self.status = status;
     }
 
     /// Test-only accessor for the consecutive failure counter.
@@ -1768,41 +1805,38 @@ mod tests {
 
     // ---- Sec.1: CapabilityDenied substrate-event producer ------------------
 
-    /// When `execute_tool` (Layer-2 dispatch gate) refuses a tool because
-    /// the agent's role manifest does not include the tool's capability
-    /// class, the pane MUST push a `SubstrateEvent` of kind
-    /// `CapabilityDenied` into the App-owned `DeniedEventSink`. The
-    /// scenario: a `Watcher` agent invokes `run_command` (Act) — gate
-    /// rejects, `maybe_emit_capability_denied_event` records the denial.
+    /// When the dispatch gate refuses a tool call because the agent's role
+    /// manifest does not include the tool's capability class, the pane MUST
+    /// push a `SubstrateEvent` of kind `CapabilityDenied` into the App-owned
+    /// `DeniedEventSink`. The scenario: a `Watcher` agent invokes
+    /// `run_command` (Act) — gate rejects, `maybe_emit_capability_denied_event`
+    /// records the denial.
+    ///
+    /// `execute_tool` is an internal helper that does not check capabilities
+    /// (see issue #104 — `dispatch_tool` is the single gate). We construct
+    /// the canonical denial ToolResult directly to test the producer logic
+    /// in isolation from the gate.
     #[test]
     fn dispatch_denial_pushes_event_to_sink() {
         use phantom_agents::role::CapabilityClass;
-        use phantom_agents::tools::{execute_tool, ToolType};
+        use phantom_agents::tools::ToolType;
 
-        let tmp = tempfile::TempDir::new().unwrap();
         let (mut pane, _tx) = agent_with_handle();
         pane.set_role_for_test(AgentRole::Watcher);
         let sink = new_denied_event_sink();
         pane.set_denied_event_sink_for_test(sink.clone());
 
-        // Invoke execute_tool with a Watcher agent calling run_command
-        // (Act). The dispatch gate must short-circuit and produce a
-        // ToolResult whose output starts with the canonical
-        // "capability denied: …" prefix — the same message the model
-        // sees in its `tool_result` block.
+        // Simulate a denial result — the canonical prefix that dispatch_tool
+        // produces when a Watcher calls run_command (Act-class). We construct
+        // it directly because execute_tool is a capability-agnostic helper
+        // (the gate lives in dispatch_tool; see issue #104).
         let args = serde_json::json!({"command": "echo SHOULD_NEVER_RUN"});
-        let result = execute_tool(
-            ToolType::RunCommand,
-            &args,
-            tmp.path().to_str().unwrap(),
-            &AgentRole::Watcher,
-        );
-        assert!(!result.success, "denial must yield failure");
-        assert!(
-            result.output.starts_with("capability denied:"),
-            "expected canonical prefix, got: {}",
-            result.output
-        );
+        let result = phantom_agents::tools::ToolResult {
+            tool: ToolType::RunCommand,
+            success: false,
+            output: "capability denied: Act not in Watcher manifest".to_string(),
+            ..phantom_agents::tools::ToolResult::default()
+        };
 
         // Hand the result through the producer hook the pane uses inside
         // `execute_pending_tools`. The sink must end up with exactly one
@@ -1842,10 +1876,15 @@ mod tests {
     /// Both signals must agree: `outcome=denied`, the tool name and class
     /// match what the model attempted. We use a temp dir for the audit
     /// log file and verify the record lands.
+    ///
+    /// Like `dispatch_denial_pushes_event_to_sink`, we construct the denial
+    /// result directly rather than calling `execute_tool` — `execute_tool`
+    /// is capability-agnostic (see issue #104); the gate lives in
+    /// `dispatch_tool`.
     #[test]
     fn audit_denied_outcome_emitted_alongside_event() {
         use phantom_agents::audit;
-        use phantom_agents::tools::{execute_tool, ToolType};
+        use phantom_agents::tools::ToolType;
 
         // Initialize the audit subscriber against a tempdir so we can read
         // the JSONL file back. This is process-global; if another test in
@@ -1855,19 +1894,19 @@ mod tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let writer = audit::init(audit_dir.path()).expect("init audit");
 
-        let tmp = tempfile::TempDir::new().unwrap();
         let (mut pane, _tx) = agent_with_handle();
         pane.set_role_for_test(AgentRole::Watcher);
         let sink = new_denied_event_sink();
         pane.set_denied_event_sink_for_test(sink.clone());
 
+        // Construct a canonical denial result directly (see issue #104).
         let args = serde_json::json!({"command": "ls"});
-        let result = execute_tool(
-            ToolType::RunCommand,
-            &args,
-            tmp.path().to_str().unwrap(),
-            &AgentRole::Watcher,
-        );
+        let result = phantom_agents::tools::ToolResult {
+            tool: ToolType::RunCommand,
+            success: false,
+            output: "capability denied: Act not in Watcher manifest".to_string(),
+            ..phantom_agents::tools::ToolResult::default()
+        };
 
         pane.maybe_emit_capability_denied_event(ToolType::RunCommand, &args, &result);
 
