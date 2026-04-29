@@ -191,6 +191,12 @@ pub struct RouterConfig {
     /// so that no cloud call can slip through regardless of which code path
     /// triggers routing.
     pub privacy_mode: bool,
+    /// When `true`, only local backends (Ollama, heuristic) are used.
+    /// Cloud backends are filtered out at routing time.
+    ///
+    /// Set this to mirror the application-level `offline_mode` flag from
+    /// `PhantomConfig`. Can be auto-enabled after 3 consecutive cloud failures.
+    pub offline_mode: bool,
 }
 
 impl Default for RouterConfig {
@@ -204,6 +210,7 @@ impl Default for RouterConfig {
             cascade: true,
             confidence_threshold: 0.7,
             privacy_mode: false,
+            offline_mode: false,
         }
     }
 }
@@ -252,12 +259,18 @@ impl TaskClassifier {
 /// Routes tasks to the best available backend using a cost-aware cascade.
 pub struct BrainRouter {
     config: RouterConfig,
+    /// Counter for consecutive cloud backend failures.
+    /// Auto-enables offline mode after 3 failures.
+    cloud_failure_count: u32,
 }
 
 impl BrainRouter {
     /// Create a new router with the given configuration.
     pub fn new(config: RouterConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            cloud_failure_count: 0,
+        }
     }
 
     /// Select the best backend for a task.
@@ -267,7 +280,11 @@ impl BrainRouter {
             .config
             .backends
             .iter()
-            .filter(|b| b.available && b.capabilities.contains(&complexity))
+            .filter(|b| {
+                b.available && b.capabilities.contains(&complexity) &&
+                // If offline mode is on, reject cloud backends
+                !(self.config.offline_mode && b.is_cloud_provider())
+            })
             .collect();
 
         // Sort by cost, then latency.
@@ -286,6 +303,9 @@ impl BrainRouter {
     }
 
     /// Update a backend's availability and latency after a call.
+    ///
+    /// If a cloud backend fails, increments failure counter and auto-enables
+    /// offline mode after 3 consecutive cloud failures.
     pub fn record_result(&mut self, backend_name: &str, latency_ms: f32, success: bool) {
         if let Some(backend) = self
             .config
@@ -302,6 +322,23 @@ impl BrainRouter {
             if !success {
                 // Mark unavailable on failure, will be re-checked later.
                 backend.available = false;
+
+                // Track consecutive cloud failures.
+                if backend.is_cloud_provider() {
+                    self.cloud_failure_count += 1;
+                    if self.cloud_failure_count >= 3 {
+                        log::warn!(
+                            "Cloud backend '{}' failed 3+ times; enabling offline mode",
+                            backend_name
+                        );
+                        self.config.offline_mode = true;
+                    }
+                }
+            } else {
+                // On success, reset cloud failure counter.
+                if backend.is_cloud_provider() {
+                    self.cloud_failure_count = 0;
+                }
             }
         }
     }
@@ -356,6 +393,19 @@ impl BrainRouter {
     /// Returns `true` if privacy mode is currently active.
     pub fn privacy_mode(&self) -> bool {
         self.config.privacy_mode
+    }
+
+    /// Enable or disable offline mode on the router.
+    ///
+    /// When `true`, [`Self::route`] will filter to only local backends
+    /// (heuristic, Ollama), rejecting all cloud providers.
+    pub fn set_offline_mode(&mut self, enabled: bool) {
+        self.config.offline_mode = enabled;
+    }
+
+    /// Returns `true` if offline mode is currently active.
+    pub fn offline_mode(&self) -> bool {
+        self.config.offline_mode
     }
 
     /// Route a task with privacy enforcement.

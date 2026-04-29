@@ -694,6 +694,11 @@ impl App {
             AiAction::AgentQuarantined { agent_id, denial_count } => {
                 info!("[PHANTOM]: Agent {agent_id} quarantined ({denial_count} denials)");
             }
+            AiAction::SetOfflineMode { enabled } => {
+                info!("[PHANTOM]: Offline mode {}", if enabled { "ON" } else { "OFF" });
+                // Note: the actual router state is managed by the brain thread;
+                // this action is just for logging/UI updates.
+            }
             AiAction::DoNothing => {}
         }
     }

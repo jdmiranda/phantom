@@ -419,6 +419,30 @@ impl App {
                 self.console.history.clear();
                 self.console.scroll_offset = 0;
             }
+            cmd if cmd == "offline" || cmd.starts_with("offline ") => {
+                let subcommand = cmd.strip_prefix("offline").unwrap().trim();
+                match subcommand {
+                    "on" | "enable" => {
+                        self.console.system("Offline mode: ON (using local backends only)");
+                        if let Some(ref brain) = self.brain {
+                            let _ = brain.send_event(phantom_brain::events::AiEvent::SetOfflineMode {
+                                enabled: true,
+                            });
+                        }
+                    }
+                    "off" | "disable" => {
+                        self.console.system("Offline mode: OFF (cloud backends available)");
+                        if let Some(ref brain) = self.brain {
+                            let _ = brain.send_event(phantom_brain::events::AiEvent::SetOfflineMode {
+                                enabled: false,
+                            });
+                        }
+                    }
+                    _ => {
+                        self.console.error("Usage: offline on|off (or: offline enable|disable)");
+                    }
+                }
+            }
             "help" => {
                 self.console.system("Available commands:");
                 self.console.output("  set <key> <value>   Tune shader params (curvature, scanlines, bloom, aberration, vignette, noise)");

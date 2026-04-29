@@ -39,6 +39,13 @@ pub struct PhantomConfig {
     /// or toggled at runtime with `privacy on` / `privacy off`.
     /// Local backends (Ollama, heuristic) are unaffected.
     pub privacy_mode: bool,
+    /// Offline mode — when `true`, only local backends (Ollama, heuristic) are
+    /// used. Cloud backends are filtered out at routing time.
+    ///
+    /// Set via `offline_mode = true` in `~/.config/phantom/config.toml`
+    /// or toggled at runtime with `offline on` / `offline off`.
+    /// Can also be auto-enabled after 3 consecutive cloud backend failures.
+    pub offline_mode: bool,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -62,6 +69,7 @@ impl Default for PhantomConfig {
             demo_mode: false,
             nlp_llm_enabled: true,
             privacy_mode: false,
+            offline_mode: false,
         }
     }
 }
@@ -150,6 +158,9 @@ impl PhantomConfig {
                     }
                     "privacy_mode" => {
                         config.privacy_mode = matches!(value, "true" | "1" | "yes");
+                    }
+                    "offline_mode" => {
+                        config.offline_mode = matches!(value, "true" | "1" | "yes");
                     }
                     _ => {
                         warn!("Unknown config key: {key}");
@@ -262,6 +273,11 @@ font_size = 14.0
 # Local backends (Ollama, heuristic) continue to work normally.
 # Can also be toggled at runtime with `privacy on` / `privacy off`.
 # privacy_mode = false
+
+# Offline mode: use only local backends (Ollama, heuristic).
+# Cloud backends are filtered out at routing time.
+# Can also be toggled at runtime with `offline on` / `offline off`.
+# offline_mode = false
 "#;
 
 // ---------------------------------------------------------------------------
@@ -379,5 +395,32 @@ mod tests {
         assert!(!config.privacy_mode());
         config.privacy_mode = true;
         assert!(config.privacy_mode());
+    }
+
+    #[test]
+    fn offline_mode_defaults_to_false() {
+        let config = PhantomConfig::default();
+        assert!(
+            !config.offline_mode,
+            "offline_mode must default to false so cloud calls work by default"
+        );
+    }
+
+    #[test]
+    fn parse_offline_mode_true_enables_it() {
+        let config = PhantomConfig::parse("offline_mode = true").unwrap();
+        assert!(config.offline_mode);
+    }
+
+    #[test]
+    fn parse_offline_mode_one_enables_it() {
+        let config = PhantomConfig::parse("offline_mode = 1").unwrap();
+        assert!(config.offline_mode);
+    }
+
+    #[test]
+    fn parse_offline_mode_false_keeps_it_off() {
+        let config = PhantomConfig::parse("offline_mode = false").unwrap();
+        assert!(!config.offline_mode);
     }
 }

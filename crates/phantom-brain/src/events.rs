@@ -91,6 +91,9 @@ pub enum AiEvent {
         tool_name: String,
     },
 
+    /// Enable or disable offline mode (filter to local backends only).
+    SetOfflineMode { enabled: bool },
+
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -200,6 +203,12 @@ pub enum AiAction {
         /// Confidence in the suggestion, in the range `[0.0, 1.0]`.
         confidence: f32,
     },
+
+    /// Set offline mode (filter to local backends only).
+    ///
+    /// Used to toggle offline mode at runtime. When `true`, only local
+    /// backends (Ollama, heuristic) are used; cloud backends are filtered.
+    SetOfflineMode { enabled: bool },
 
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,

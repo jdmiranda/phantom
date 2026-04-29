@@ -130,13 +130,15 @@ pub trait Widget {
 /// - **Left**: current working directory, truncated with a leading `...` if
 ///   the path is too long for the available space.
 /// - **Center**: git branch name prefixed with a branch icon ( ).
-/// - **Right**: wall clock in `HH:MM` format.
+/// - **Right**: wall clock in `HH:MM` format, with optional offline and privacy indicators.
 #[derive(Clone, Debug)]
 pub struct StatusBar {
     cwd: String,
     branch: String,
     time: String,
     activity: Option<String>,
+    offline_mode: bool,
+    privacy_mode: bool,
 }
 
 impl StatusBar {
@@ -147,6 +149,8 @@ impl StatusBar {
             branch: String::from("main"),
             time: String::from("00:00"),
             activity: None,
+            offline_mode: false,
+            privacy_mode: false,
         }
     }
 
@@ -174,6 +178,16 @@ impl StatusBar {
     /// Take and clear the current activity message.
     pub fn take_activity(&mut self) -> Option<String> {
         self.activity.take()
+    }
+
+    /// Set offline mode indicator.
+    pub fn set_offline_mode(&mut self, enabled: bool) {
+        self.offline_mode = enabled;
+    }
+
+    /// Set privacy mode indicator.
+    pub fn set_privacy_mode(&mut self, enabled: bool) {
+        self.privacy_mode = enabled;
     }
 
     /// Truncate `text` so it fits within `max_chars`, prepending `...` if needed.
@@ -209,19 +223,29 @@ impl Widget for StatusBar {
     }
 
     fn render_text(&self, rect: &Rect) -> Vec<TextSegment> {
-        let mut segments = Vec::with_capacity(3);
+        let mut segments = Vec::with_capacity(5);
         // Padding scales with screen width so content survives CRT barrel
         // distortion at edges. ~1.5% of width handles curvature up to ~0.06.
         let padding = (rect.width * 0.015).max(8.0);
         let text_y = rect.y + (rect.height * 0.5) - 1.0;
 
-        // -- Right: time (anchored to right edge with CRT margin) --
-        let time_width = self.time.len() as f32 * CHAR_WIDTH;
-        let time_x = rect.x + rect.width - time_width - padding;
+        // -- Right: time + indicators (anchored to right edge with CRT margin) --
+        // Build indicator string: [OFFLINE] [P] or just time
+        let mut right_text = String::new();
+        if self.offline_mode {
+            right_text.push_str("[OFFLINE] ");
+        }
+        if self.privacy_mode {
+            right_text.push_str("[P] ");
+        }
+        right_text.push_str(&self.time);
+
+        let right_width = right_text.len() as f32 * CHAR_WIDTH;
+        let right_x = rect.x + rect.width - right_width - padding;
 
         segments.push(TextSegment {
-            text: self.time.clone(),
-            x: time_x,
+            text: right_text,
+            x: right_x,
             y: text_y,
             color: STATUS_BAR_FG,
         });
@@ -584,10 +608,10 @@ mod tests {
         // time + branch + cwd = 3
         assert_eq!(texts.len(), 3);
 
-        // Verify time segment content.
+        // Verify time segment content (should be the right-most segment).
         let time_seg = texts
             .iter()
-            .find(|s| s.text == "14:30")
+            .find(|s| s.text.contains("14:30"))
             .expect("should contain time");
         assert_eq!(time_seg.color, STATUS_BAR_FG);
 
@@ -614,7 +638,51 @@ mod tests {
         let bar = StatusBar::new();
         let texts = bar.render_text(&status_rect());
         assert!(texts.iter().any(|s| s.text.contains("main")));
-        assert!(texts.iter().any(|s| s.text == "00:00"));
+        assert!(texts.iter().any(|s| s.text.contains("00:00")));
+    }
+
+    #[test]
+    fn status_bar_shows_offline_indicator() {
+        let mut bar = StatusBar::new();
+        bar.set_offline_mode(true);
+        bar.set_time("14:30");
+
+        let texts = bar.render_text(&status_rect());
+        let right_seg = texts
+            .iter()
+            .find(|s| s.text.contains("14:30"))
+            .expect("should contain time");
+        assert!(right_seg.text.contains("[OFFLINE]"));
+    }
+
+    #[test]
+    fn status_bar_shows_privacy_indicator() {
+        let mut bar = StatusBar::new();
+        bar.set_privacy_mode(true);
+        bar.set_time("14:30");
+
+        let texts = bar.render_text(&status_rect());
+        let right_seg = texts
+            .iter()
+            .find(|s| s.text.contains("14:30"))
+            .expect("should contain time");
+        assert!(right_seg.text.contains("[P]"));
+    }
+
+    #[test]
+    fn status_bar_shows_both_indicators() {
+        let mut bar = StatusBar::new();
+        bar.set_offline_mode(true);
+        bar.set_privacy_mode(true);
+        bar.set_time("14:30");
+
+        let texts = bar.render_text(&status_rect());
+        let right_seg = texts
+            .iter()
+            .find(|s| s.text.contains("14:30"))
+            .expect("should contain time");
+        assert!(right_seg.text.contains("[OFFLINE]"));
+        assert!(right_seg.text.contains("[P]"));
     }
 
     #[test]
