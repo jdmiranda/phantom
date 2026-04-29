@@ -5555,6 +5555,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-stt"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "phantom-supervisor"
 version = "0.1.0"
 dependencies = [
