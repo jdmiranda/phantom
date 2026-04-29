@@ -100,6 +100,7 @@ pub struct KittyCommand {
 /// Format: `key=value,key=value;base64data`
 ///
 /// Returns `None` if the payload is malformed.
+#[must_use]
 pub fn parse_kitty_command(payload: &str) -> Option<KittyCommand> {
     // Split header from base64 data at the first semicolon.
     let (header, data) = match payload.find(';') {
