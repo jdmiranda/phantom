@@ -7,16 +7,16 @@
 use log::warn;
 use serde_json::json;
 
-use phantom_adapter::adapter::{
-    CursorData, CursorShape as AdapterCursorShape, GridData, Rect, RenderOutput,
-    ScrollState, SelectionRange, TerminalCell as AdapterCell,
-};
 #[cfg(test)]
 use phantom_adapter::adapter::QuadData;
+use phantom_adapter::adapter::{
+    CursorData, CursorShape as AdapterCursorShape, GridData, Rect, RenderOutput, ScrollState,
+    SelectionRange, TerminalCell as AdapterCell,
+};
+use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
-use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_terminal::output::{
     self, CursorShape as TermCursorShape, CursorState, TerminalThemeColors,
 };
@@ -168,9 +168,7 @@ impl AppCore for TerminalAdapter {
 
                 if self.output_buf.len() > OUTPUT_BUF_CAP {
                     let mut trim = self.output_buf.len() - OUTPUT_BUF_CAP;
-                    while trim < self.output_buf.len()
-                        && !self.output_buf.is_char_boundary(trim)
-                    {
+                    while trim < self.output_buf.len() && !self.output_buf.is_char_boundary(trim) {
                         trim += 1;
                     }
                     self.output_buf.drain(..trim);
@@ -202,10 +200,9 @@ impl AppCore for TerminalAdapter {
 
         if is_alt && !self.was_alt_screen {
             self.is_detached = true;
-            self.detached_label = phantom_terminal::process::foreground_process_name(
-                self.terminal.pty_fd(),
-            )
-            .unwrap_or_else(|| "interactive".to_string());
+            self.detached_label =
+                phantom_terminal::process::foreground_process_name(self.terminal.pty_fd())
+                    .unwrap_or_else(|| "interactive".to_string());
         }
 
         if !is_alt && self.was_alt_screen && self.is_detached {
@@ -277,14 +274,15 @@ impl Renderable for TerminalAdapter {
             visible_rows: self.terminal.size().rows as usize,
         });
 
-        let selection = self.terminal.selection_range().map(|(sc, sr, ec, er)| {
-            SelectionRange {
+        let selection = self
+            .terminal
+            .selection_range()
+            .map(|(sc, sr, ec, er)| SelectionRange {
                 start_col: sc,
                 start_row: sr,
                 end_col: ec,
                 end_row: er,
-            }
-        });
+            });
 
         RenderOutput {
             quads: vec![],
@@ -323,17 +321,12 @@ impl InputHandler for TerminalAdapter {
 }
 
 impl Commandable for TerminalAdapter {
-    fn accept_command(
-        &mut self,
-        cmd: &str,
-        args: &serde_json::Value,
-    ) -> anyhow::Result<String> {
+    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
             "write" => {
-                let text = args
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("write command requires a \"text\" string field"))?;
+                let text = args.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("write command requires a \"text\" string field")
+                })?;
                 self.terminal
                     .pty_write(text.as_bytes())
                     .map_err(|e| anyhow::anyhow!("pty_write failed: {e}"))?;
@@ -350,11 +343,13 @@ impl Commandable for TerminalAdapter {
                     "top" => self.terminal.scroll_to_top(),
                     "bottom" => self.terminal.scroll_to_bottom(),
                     "up" => {
-                        let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                        let lines =
+                            args.get("lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
                         self.terminal.scroll_up(lines);
                     }
                     "down" => {
-                        let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                        let lines =
+                            args.get("lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
                         self.terminal.scroll_down(lines);
                     }
                     other => return Err(anyhow::anyhow!("unknown scroll direction: {other}")),
@@ -362,10 +357,7 @@ impl Commandable for TerminalAdapter {
                 Ok("scrolled".into())
             }
             "scroll_to_offset" => {
-                let target = args
-                    .get("offset")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let target = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let current = self.terminal.display_offset();
                 if target > current {
                     self.terminal.scroll_up(target - current);
@@ -389,25 +381,22 @@ impl Commandable for TerminalAdapter {
                 Ok("written".into())
             }
             "resize" => {
-                let cols = args
-                    .get("cols")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("resize command requires a \"cols\" integer field"))?
-                    as u16;
-                let rows = args
-                    .get("rows")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("resize command requires a \"rows\" integer field"))?
-                    as u16;
+                let cols = args.get("cols").and_then(|v| v.as_u64()).ok_or_else(|| {
+                    anyhow::anyhow!("resize command requires a \"cols\" integer field")
+                })? as u16;
+                let rows = args.get("rows").and_then(|v| v.as_u64()).ok_or_else(|| {
+                    anyhow::anyhow!("resize command requires a \"rows\" integer field")
+                })? as u16;
                 self.terminal.resize(cols, rows);
                 Ok(format!("resized to {cols}x{rows}"))
             }
             "select_start" => {
                 let col = args.get("col").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                use phantom_terminal::selection::{Column, Line, Point, SelectionType, Side};
                 let point = Point::new(Line(row), Column(col));
-                self.terminal.start_selection(SelectionType::Simple, point, Side::Left);
+                self.terminal
+                    .start_selection(SelectionType::Simple, point, Side::Left);
                 Ok("selection started".into())
             }
             "select_update" => {
@@ -425,17 +414,19 @@ impl Commandable for TerminalAdapter {
             "select_word" => {
                 let col = args.get("col").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                use phantom_terminal::selection::{Column, Line, Point, SelectionType, Side};
                 let point = Point::new(Line(row), Column(col));
-                self.terminal.start_selection(SelectionType::Semantic, point, Side::Left);
+                self.terminal
+                    .start_selection(SelectionType::Semantic, point, Side::Left);
                 self.terminal.update_selection(point, Side::Right);
                 Ok("word selected".into())
             }
             "select_line" => {
                 let row = args.get("row").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                use phantom_terminal::selection::{Column, Line, Point, Side, SelectionType};
+                use phantom_terminal::selection::{Column, Line, Point, SelectionType, Side};
                 let point = Point::new(Line(row), Column(0));
-                self.terminal.start_selection(SelectionType::Lines, point, Side::Left);
+                self.terminal
+                    .start_selection(SelectionType::Lines, point, Side::Left);
                 self.terminal.update_selection(point, Side::Right);
                 Ok("line selected".into())
             }

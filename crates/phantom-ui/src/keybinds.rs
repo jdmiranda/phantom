@@ -133,27 +133,57 @@ pub struct KeyCombo {
 impl KeyCombo {
     /// Bare key, no modifiers.
     pub const fn bare(key: Key) -> Self {
-        Self { key, ctrl: false, alt: false, shift: false, logo: false }
+        Self {
+            key,
+            ctrl: false,
+            alt: false,
+            shift: false,
+            logo: false,
+        }
     }
 
     /// Cmd/Super + key.
     pub const fn cmd(key: Key) -> Self {
-        Self { key, ctrl: false, alt: false, shift: false, logo: true }
+        Self {
+            key,
+            ctrl: false,
+            alt: false,
+            shift: false,
+            logo: true,
+        }
     }
 
     /// Cmd/Super + Shift + key.
     pub const fn cmd_shift(key: Key) -> Self {
-        Self { key, ctrl: false, alt: false, shift: true, logo: true }
+        Self {
+            key,
+            ctrl: false,
+            alt: false,
+            shift: true,
+            logo: true,
+        }
     }
 
     /// Ctrl + key.
     pub const fn ctrl(key: Key) -> Self {
-        Self { key, ctrl: true, alt: false, shift: false, logo: false }
+        Self {
+            key,
+            ctrl: true,
+            alt: false,
+            shift: false,
+            logo: false,
+        }
     }
 
     /// Ctrl + Shift + key.
     pub const fn ctrl_shift(key: Key) -> Self {
-        Self { key, ctrl: true, alt: false, shift: true, logo: false }
+        Self {
+            key,
+            ctrl: true,
+            alt: false,
+            shift: true,
+            logo: false,
+        }
     }
 }
 
@@ -240,38 +270,73 @@ impl KeybindRegistry {
             // Clipboard
             (KeyCombo::cmd(Key::Char('c')), Action::Copy),
             (KeyCombo::cmd(Key::Char('v')), Action::Paste),
-
             // Tabs
             (KeyCombo::cmd(Key::Char('t')), Action::NewTab),
             (KeyCombo::cmd(Key::Char('w')), Action::CloseTab),
             (KeyCombo::cmd_shift(Key::Char(']')), Action::NextTab),
             (KeyCombo::cmd_shift(Key::Char('[')), Action::PrevTab),
-
             // Splits
             (KeyCombo::cmd(Key::Char('d')), Action::SplitHorizontal),
             (KeyCombo::cmd_shift(Key::Char('d')), Action::SplitVertical),
-
             // Focus navigation
             (KeyCombo::cmd(Key::Char(']')), Action::FocusNext),
             (KeyCombo::cmd(Key::Char('[')), Action::FocusPrev),
-
             // Zoom
-            (KeyCombo::cmd(Key::Char('=')), Action::ZoomIn),  // =/+ key
+            (KeyCombo::cmd(Key::Char('=')), Action::ZoomIn), // =/+ key
             (KeyCombo::cmd(Key::Char('-')), Action::ZoomOut),
             (KeyCombo::cmd(Key::Char('0')), Action::ZoomReset),
-
             // Scrollback
-            (KeyCombo { key: Key::PageUp, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollPageUp),
-            (KeyCombo { key: Key::PageDown, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollPageDown),
-            (KeyCombo { key: Key::Home, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollToTop),
-            (KeyCombo { key: Key::End, ctrl: false, alt: false, shift: true, logo: false }, Action::ScrollToBottom),
-
+            (
+                KeyCombo {
+                    key: Key::PageUp,
+                    ctrl: false,
+                    alt: false,
+                    shift: true,
+                    logo: false,
+                },
+                Action::ScrollPageUp,
+            ),
+            (
+                KeyCombo {
+                    key: Key::PageDown,
+                    ctrl: false,
+                    alt: false,
+                    shift: true,
+                    logo: false,
+                },
+                Action::ScrollPageDown,
+            ),
+            (
+                KeyCombo {
+                    key: Key::Home,
+                    ctrl: false,
+                    alt: false,
+                    shift: true,
+                    logo: false,
+                },
+                Action::ScrollToTop,
+            ),
+            (
+                KeyCombo {
+                    key: Key::End,
+                    ctrl: false,
+                    alt: false,
+                    shift: true,
+                    logo: false,
+                },
+                Action::ScrollToBottom,
+            ),
             // Fullscreen
-            (KeyCombo::ctrl_shift(Key::Char('f')), Action::ToggleFullscreen),
+            (
+                KeyCombo::ctrl_shift(Key::Char('f')),
+                Action::ToggleFullscreen,
+            ),
             (KeyCombo::bare(Key::F(11)), Action::ToggleFullscreen),
-
             // Window
-            (KeyCombo::cmd_shift(Key::Char('p')), Action::ShowCommandPalette),
+            (
+                KeyCombo::cmd_shift(Key::Char('p')),
+                Action::ShowCommandPalette,
+            ),
             (KeyCombo::cmd(Key::Char('q')), Action::Quit),
         ];
 
@@ -373,7 +438,13 @@ mod tests {
     #[test]
     fn key_combo_equality() {
         let a = KeyCombo::cmd(Key::Char('t'));
-        let b = KeyCombo { key: Key::Char('t'), ctrl: false, alt: false, shift: false, logo: true };
+        let b = KeyCombo {
+            key: Key::Char('t'),
+            ctrl: false,
+            alt: false,
+            shift: false,
+            logo: true,
+        };
         assert_eq!(a, b);
     }
 
@@ -399,16 +470,40 @@ mod tests {
     #[test]
     fn scroll_keybinds_registered() {
         let reg = KeybindRegistry::new();
-        let combo = KeyCombo { key: Key::PageUp, ctrl: false, alt: false, shift: true, logo: false };
+        let combo = KeyCombo {
+            key: Key::PageUp,
+            ctrl: false,
+            alt: false,
+            shift: true,
+            logo: false,
+        };
         assert_eq!(reg.lookup(&combo), Some(&Action::ScrollPageUp));
 
-        let combo = KeyCombo { key: Key::PageDown, ctrl: false, alt: false, shift: true, logo: false };
+        let combo = KeyCombo {
+            key: Key::PageDown,
+            ctrl: false,
+            alt: false,
+            shift: true,
+            logo: false,
+        };
         assert_eq!(reg.lookup(&combo), Some(&Action::ScrollPageDown));
 
-        let combo = KeyCombo { key: Key::Home, ctrl: false, alt: false, shift: true, logo: false };
+        let combo = KeyCombo {
+            key: Key::Home,
+            ctrl: false,
+            alt: false,
+            shift: true,
+            logo: false,
+        };
         assert_eq!(reg.lookup(&combo), Some(&Action::ScrollToTop));
 
-        let combo = KeyCombo { key: Key::End, ctrl: false, alt: false, shift: true, logo: false };
+        let combo = KeyCombo {
+            key: Key::End,
+            ctrl: false,
+            alt: false,
+            shift: true,
+            logo: false,
+        };
         assert_eq!(reg.lookup(&combo), Some(&Action::ScrollToBottom));
     }
 

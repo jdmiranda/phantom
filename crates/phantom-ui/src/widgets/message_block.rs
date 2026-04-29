@@ -299,7 +299,12 @@ mod tests {
     }
 
     fn make_rect(width: f32) -> Rect {
-        Rect { x: 0.0, y: 0.0, width, height: 200.0 }
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: 200.0,
+        }
     }
 
     // ----------------------------------------------------------------
@@ -396,7 +401,11 @@ mod tests {
         // Body column width = 800 - 16 - 8 = 776 px → 97 chars at cell_w=8
         let h = block.compute_height(800.0);
         let cell_h = fallback_ctx().cell_h();
-        assert_eq!(h, 2.0 * cell_h, "single-line body: expected 2 rows, got {h}");
+        assert_eq!(
+            h,
+            2.0 * cell_h,
+            "single-line body: expected 2 rows, got {h}"
+        );
     }
 
     /// Multiline body grows height proportionally.
@@ -414,7 +423,10 @@ mod tests {
         let actual_h = block.compute_height(800.0);
         assert_eq!(actual_h, expected_h);
         // Also verify the block is taller than the two-row single-line case.
-        assert!(actual_h > 2.0 * ctx.cell_h(), "multiline body should be taller than 2 rows");
+        assert!(
+            actual_h > 2.0 * ctx.cell_h(),
+            "multiline body should be taller than 2 rows"
+        );
     }
 
     /// Empty body → only the label row → height = 1 row.
@@ -423,7 +435,11 @@ mod tests {
         let mut block = MessageBlock::new(MessageRole::System, "", 0);
         block.set_render_ctx(fallback_ctx());
         let cell_h = fallback_ctx().cell_h();
-        assert_eq!(block.compute_height(800.0), cell_h, "empty body: expected 1 row");
+        assert_eq!(
+            block.compute_height(800.0),
+            cell_h,
+            "empty body: expected 1 row"
+        );
     }
 
     // ----------------------------------------------------------------
@@ -450,7 +466,11 @@ mod tests {
         let mut block = MessageBlock::new(MessageRole::User, body.clone(), 0);
         block.set_render_ctx(fallback_ctx());
         let lines = block.wrapped_lines(800.0);
-        assert_eq!(lines.len(), 1, "body of exactly `cols` chars should be one line");
+        assert_eq!(
+            lines.len(),
+            1,
+            "body of exactly `cols` chars should be one line"
+        );
         assert_eq!(lines[0], body);
     }
 
@@ -462,7 +482,11 @@ mod tests {
         let mut block = MessageBlock::new(MessageRole::User, body, 0);
         block.set_render_ctx(fallback_ctx());
         let lines = block.wrapped_lines(800.0);
-        assert_eq!(lines.len(), 2, "98 chars at 97-col width should produce 2 lines");
+        assert_eq!(
+            lines.len(),
+            2,
+            "98 chars at 97-col width should produce 2 lines"
+        );
     }
 
     /// Word-wrap: prefer breaking at a space rather than mid-word.
@@ -498,7 +522,10 @@ mod tests {
         block.set_render_ctx(fallback_ctx());
         // rect_width ≤ AVATAR_W + AVATAR_GAP → body_px = 0 → cols = 0
         let lines = block.wrapped_lines(AVATAR_W + AVATAR_GAP);
-        assert!(lines.is_empty(), "zero-width body column should produce no lines");
+        assert!(
+            lines.is_empty(),
+            "zero-width body column should produce no lines"
+        );
     }
 
     // ----------------------------------------------------------------
@@ -513,7 +540,10 @@ mod tests {
         let quads = block.render_quads(&rect);
         assert_eq!(quads.len(), 1, "should emit exactly one background quad");
         let t = Tokens::phosphor(fallback_ctx());
-        assert_eq!(quads[0].color, t.colors.surface_recessed, "background should use surface_recessed");
+        assert_eq!(
+            quads[0].color, t.colors.surface_recessed,
+            "background should use surface_recessed"
+        );
     }
 
     #[test]
@@ -537,7 +567,10 @@ mod tests {
         block.set_render_ctx(fallback_ctx());
         let rect = make_rect(800.0);
         let texts = block.render_text(&rect);
-        assert!(texts.len() >= 2, "should have at least avatar + label segments");
+        assert!(
+            texts.len() >= 2,
+            "should have at least avatar + label segments"
+        );
     }
 
     /// Avatar segment uses the role initial.
@@ -559,7 +592,10 @@ mod tests {
         let rect = make_rect(800.0);
         let texts = block.render_text(&rect);
         let label = &texts[1];
-        assert_eq!(label.text, "Tool Result", "ToolResult label should be 'Tool Result'");
+        assert_eq!(
+            label.text, "Tool Result",
+            "ToolResult label should be 'Tool Result'"
+        );
     }
 
     /// Avatar and label use the role color.
@@ -572,8 +608,14 @@ mod tests {
         let texts = block.render_text(&rect);
         let tokens = Tokens::phosphor(ctx);
         let expected = MessageRole::Agent.color(&tokens);
-        assert_eq!(texts[0].color, expected, "avatar color should match role color");
-        assert_eq!(texts[1].color, expected, "label color should match role color");
+        assert_eq!(
+            texts[0].color, expected,
+            "avatar color should match role color"
+        );
+        assert_eq!(
+            texts[1].color, expected,
+            "label color should match role color"
+        );
     }
 
     /// Body text segments use text_primary color.
@@ -588,8 +630,7 @@ mod tests {
         // Segments after [0]=avatar, [1]=label are body lines.
         for seg in texts.iter().skip(2) {
             assert_eq!(
-                seg.color,
-                tokens.colors.text_primary,
+                seg.color, tokens.colors.text_primary,
                 "body segment color should be text_primary, got {:?}",
                 seg.color
             );
@@ -648,7 +689,11 @@ mod tests {
         ];
         let initials: Vec<char> = roles.iter().map(|r| r.initial()).collect();
         let unique: std::collections::HashSet<char> = initials.iter().copied().collect();
-        assert_eq!(unique.len(), initials.len(), "all role initials must be distinct");
+        assert_eq!(
+            unique.len(),
+            initials.len(),
+            "all role initials must be distinct"
+        );
     }
 
     #[test]
@@ -660,7 +705,10 @@ mod tests {
             MessageRole::ToolUse,
             MessageRole::ToolResult,
         ] {
-            assert!(!role.label().is_empty(), "label for {role:?} must not be empty");
+            assert!(
+                !role.label().is_empty(),
+                "label for {role:?} must not be empty"
+            );
         }
     }
 
@@ -692,7 +740,11 @@ mod tests {
 
         // The space lives at char index 50 (≤ 97), so we expect a soft wrap
         // there, giving us exactly 2 lines.
-        assert_eq!(lines.len(), 2, "emoji body should wrap into 2 lines: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "emoji body should wrap into 2 lines: {lines:?}"
+        );
 
         // First line must be exactly the 50 crab emoji.
         assert_eq!(lines[0], left, "first line should be the 50-emoji prefix");
@@ -703,7 +755,10 @@ mod tests {
         // Sanity-check that the output round-trips back to the original body
         // (minus the joining space which is consumed).
         let reconstructed = lines.join(" ");
-        assert_eq!(reconstructed, body, "reconstructed body must match original");
+        assert_eq!(
+            reconstructed, body,
+            "reconstructed body must match original"
+        );
     }
 
     /// Accented / Latin-extended characters (2-byte UTF-8) wrap correctly.

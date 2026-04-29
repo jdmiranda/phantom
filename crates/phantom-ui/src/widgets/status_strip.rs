@@ -80,7 +80,11 @@ impl StatusStrip {
     ///
     /// Uses [`RenderCtx::fallback`] for metrics; call [`Self::set_render_ctx`]
     /// to provide live font metrics once available.
-    pub fn new(left: impl Into<String>, center: impl Into<String>, right: impl Into<String>) -> Self {
+    pub fn new(
+        left: impl Into<String>,
+        center: impl Into<String>,
+        right: impl Into<String>,
+    ) -> Self {
         Self {
             left: left.into(),
             center: center.into(),
@@ -233,11 +237,21 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     fn wide_rect() -> Rect {
-        Rect { x: 0.0, y: 980.0, width: 1200.0, height: STATUS_STRIP_HEIGHT }
+        Rect {
+            x: 0.0,
+            y: 980.0,
+            width: 1200.0,
+            height: STATUS_STRIP_HEIGHT,
+        }
     }
 
     fn narrow_rect(width: f32) -> Rect {
-        Rect { x: 0.0, y: 980.0, width, height: STATUS_STRIP_HEIGHT }
+        Rect {
+            x: 0.0,
+            y: 980.0,
+            width,
+            height: STATUS_STRIP_HEIGHT,
+        }
     }
 
     fn strip_with_ctx(left: &str, center: &str, right: &str, ctx: RenderCtx) -> StatusStrip {
@@ -296,7 +310,10 @@ mod tests {
 
         let s = StatusStrip::new("X", "Y", "Z");
         let quads = s.render_quads(&wide_rect());
-        assert_eq!(quads[0].color, expected, "background must use surface_recessed token");
+        assert_eq!(
+            quads[0].color, expected,
+            "background must use surface_recessed token"
+        );
     }
 
     /// Cross-check: `surface_recessed` must not equal `surface_base` (ensures
@@ -318,8 +335,14 @@ mod tests {
         let texts = s.render_text(&wide_rect());
         assert_eq!(texts.len(), 3);
         assert!(texts.iter().any(|t| t.text == "LEFT"), "left slot missing");
-        assert!(texts.iter().any(|t| t.text == "CENTER"), "center slot missing");
-        assert!(texts.iter().any(|t| t.text == "RIGHT"), "right slot missing");
+        assert!(
+            texts.iter().any(|t| t.text == "CENTER"),
+            "center slot missing"
+        );
+        assert!(
+            texts.iter().any(|t| t.text == "RIGHT"),
+            "right slot missing"
+        );
     }
 
     /// Token compliance: text color must equal `text_secondary`.
@@ -351,7 +374,10 @@ mod tests {
     fn all_empty_slots_produce_no_text() {
         let s = StatusStrip::default();
         let texts = s.render_text(&wide_rect());
-        assert!(texts.is_empty(), "all-empty strip should emit no text segments");
+        assert!(
+            texts.is_empty(),
+            "all-empty strip should emit no text segments"
+        );
     }
 
     // ── Truncation behavior ───────────────────────────────────────────────────
@@ -361,7 +387,10 @@ mod tests {
     #[test]
     fn truncate_long_text_ends_with_ellipsis() {
         let result = StatusStrip::truncate("abcdefghijklmnop", 8);
-        assert!(result.ends_with('…'), "truncated text should end with ellipsis");
+        assert!(
+            result.ends_with('…'),
+            "truncated text should end with ellipsis"
+        );
         assert!(
             result.chars().count() <= 8,
             "truncated result must fit within max_chars: got {}",
@@ -372,13 +401,19 @@ mod tests {
     #[test]
     fn truncate_short_text_unchanged() {
         let result = StatusStrip::truncate("hello", 20);
-        assert_eq!(result, "hello", "text shorter than budget must not be modified");
+        assert_eq!(
+            result, "hello",
+            "text shorter than budget must not be modified"
+        );
     }
 
     #[test]
     fn truncate_exact_fit_unchanged() {
         let result = StatusStrip::truncate("exact", 5);
-        assert_eq!(result, "exact", "text that exactly fits must not be truncated");
+        assert_eq!(
+            result, "exact",
+            "text that exactly fits must not be truncated"
+        );
     }
 
     #[test]
@@ -415,7 +450,12 @@ mod tests {
     fn zero_width_rect_produces_no_text_and_does_not_panic() {
         let ctx = RenderCtx::fallback();
         let s = strip_with_ctx("LEFT", "CENTER", "RIGHT", ctx);
-        let zero_rect = Rect { x: 0.0, y: 980.0, width: 0.0, height: STATUS_STRIP_HEIGHT };
+        let zero_rect = Rect {
+            x: 0.0,
+            y: 980.0,
+            width: 0.0,
+            height: STATUS_STRIP_HEIGHT,
+        };
         // Must not panic.
         let texts = s.render_text(&zero_rect);
         assert!(
@@ -445,7 +485,8 @@ mod tests {
             assert!(
                 n <= 10,
                 "segment '{}' has {} chars, expected ≤10",
-                seg.text, n
+                seg.text,
+                n
             );
             assert!(
                 seg.text.ends_with('…'),
@@ -478,7 +519,11 @@ mod tests {
         let s = strip_with_ctx("LEFT", "", "", ctx);
         let texts = s.render_text(&wide_rect());
         assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0].x, 0.0 + TOKEN_PAD, "left slot must start at rect.x + TOKEN_PAD");
+        assert_eq!(
+            texts[0].x,
+            0.0 + TOKEN_PAD,
+            "left slot must start at rect.x + TOKEN_PAD"
+        );
     }
 
     /// Right text must end at (rect.x + rect.width - TOKEN_PAD).

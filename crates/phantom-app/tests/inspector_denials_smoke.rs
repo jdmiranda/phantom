@@ -150,7 +150,10 @@ fn watcher_run_command_denial_appears_in_inspector_snapshot() {
         1,
         "expected one denial in snapshot; got {}: {:?}",
         denials.len(),
-        denials.iter().map(|d| &d.attempted_tool).collect::<Vec<_>>(),
+        denials
+            .iter()
+            .map(|d| &d.attempted_tool)
+            .collect::<Vec<_>>(),
     );
 
     let entry = &denials[0];

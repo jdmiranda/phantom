@@ -27,18 +27,24 @@ impl App {
     pub(crate) fn collect_metrics(&self) -> AppMetrics {
         let now = std::time::Instant::now();
         let frame_time_ms = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
-        let fps = if frame_time_ms > 0.0 { 1000.0 / frame_time_ms } else { 0.0 };
+        let fps = if frame_time_ms > 0.0 {
+            1000.0 / frame_time_ms
+        } else {
+            0.0
+        };
 
-        let agent_count = self.coordinator.registry().all_running().into_iter()
+        let agent_count = self
+            .coordinator
+            .registry()
+            .all_running()
+            .into_iter()
             .filter_map(|id| self.coordinator.registry().get(id))
             .filter(|e| e.app_type == "agent")
             .count();
 
         let pty_buf_bytes: usize = 0; // Legacy pane buffers removed; adapters manage their own
 
-        let memory_entries = self.memory.as_ref()
-            .map(|m| m.count())
-            .unwrap_or(0);
+        let memory_entries = self.memory.as_ref().map(|m| m.count()).unwrap_or(0);
 
         AppMetrics {
             fps,
@@ -67,11 +73,23 @@ pub(crate) fn build_appmon_lines(m: &AppMetrics) -> Vec<(String, [f32; 4])> {
 
     // FPS bar: 60fps = full, color by threshold.
     let fps_frac = (m.fps / 60.0).clamp(0.0, 1.0);
-    let fps_color = if m.fps >= 50.0 { green } else if m.fps >= 30.0 { yellow } else { red };
+    let fps_color = if m.fps >= 50.0 {
+        green
+    } else if m.fps >= 30.0 {
+        yellow
+    } else {
+        red
+    };
 
     // Frame time bar: 16ms = target, 33ms = yellow, 50ms+ = red.
     let ft_frac = (1.0 - (m.frame_time_ms / 50.0).clamp(0.0, 1.0)).max(0.0);
-    let ft_color = if m.frame_time_ms <= 17.0 { green } else if m.frame_time_ms <= 33.0 { yellow } else { red };
+    let ft_color = if m.frame_time_ms <= 17.0 {
+        green
+    } else if m.frame_time_ms <= 33.0 {
+        yellow
+    } else {
+        red
+    };
 
     // PTY buffer: 8192 max, show usage.
     let pty_max = 8192.0 * m.pane_count.max(1) as f32;
@@ -79,7 +97,13 @@ pub(crate) fn build_appmon_lines(m: &AppMetrics) -> Vec<(String, [f32; 4])> {
 
     // Bus queue: 256 max.
     let bus_frac = (m.bus_queue_depth as f32 / 256.0).clamp(0.0, 1.0);
-    let bus_color = if bus_frac < 0.5 { green } else if bus_frac < 0.8 { yellow } else { red };
+    let bus_color = if bus_frac < 0.5 {
+        green
+    } else if bus_frac < 0.8 {
+        yellow
+    } else {
+        red
+    };
 
     let bar = |frac: f32| -> String {
         let w = 20;
@@ -92,21 +116,58 @@ pub(crate) fn build_appmon_lines(m: &AppMetrics) -> Vec<(String, [f32; 4])> {
     let uptime = format_uptime(m.uptime_secs);
 
     vec![
-        (format!("▮ {:<12} {} {:.0} fps", "FRAMERATE", bar(fps_frac), m.fps), fps_color),
-        (format!("▮ {:<12} {} {:.1}ms", "FRAME TIME", bar(ft_frac), m.frame_time_ms), ft_color),
-        (format!("▮ {:<12} {} {}/{}", "PTY BUFFER", bar(pty_frac), m.pty_buf_bytes, pty_max as usize), dim),
-        (format!("▮ {:<12} {} {}/256", "EVENT BUS", bar(bus_frac), m.bus_queue_depth), bus_color),
-        (format!(
-            "▮ {:<12} panes:{} agents:{}/{} scene:{} mem:{} plugins:{}",
-            "SUBSYSTEMS",
-            m.pane_count,
-            m.agent_working,
-            m.agent_count,
-            m.scene_nodes,
-            m.memory_entries,
-            m.plugin_count,
-        ), cyan),
-        (format!("▮ {:<12} brain:{} uptime:{}", "STATUS", brain_status, uptime), green),
+        (
+            format!("▮ {:<12} {} {:.0} fps", "FRAMERATE", bar(fps_frac), m.fps),
+            fps_color,
+        ),
+        (
+            format!(
+                "▮ {:<12} {} {:.1}ms",
+                "FRAME TIME",
+                bar(ft_frac),
+                m.frame_time_ms
+            ),
+            ft_color,
+        ),
+        (
+            format!(
+                "▮ {:<12} {} {}/{}",
+                "PTY BUFFER",
+                bar(pty_frac),
+                m.pty_buf_bytes,
+                pty_max as usize
+            ),
+            dim,
+        ),
+        (
+            format!(
+                "▮ {:<12} {} {}/256",
+                "EVENT BUS",
+                bar(bus_frac),
+                m.bus_queue_depth
+            ),
+            bus_color,
+        ),
+        (
+            format!(
+                "▮ {:<12} panes:{} agents:{}/{} scene:{} mem:{} plugins:{}",
+                "SUBSYSTEMS",
+                m.pane_count,
+                m.agent_working,
+                m.agent_count,
+                m.scene_nodes,
+                m.memory_entries,
+                m.plugin_count,
+            ),
+            cyan,
+        ),
+        (
+            format!(
+                "▮ {:<12} brain:{} uptime:{}",
+                "STATUS", brain_status, uptime
+            ),
+            green,
+        ),
     ]
 }
 

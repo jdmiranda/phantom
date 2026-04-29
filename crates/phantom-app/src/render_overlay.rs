@@ -105,7 +105,9 @@ impl App {
         // -- Scrollback history --
         let history_top = y_offset + title_h + 4.0;
         let history_bottom = input_bar_y - 4.0;
-        let visible_lines = ((history_bottom - history_top) / line_height).floor().max(0.0) as usize;
+        let visible_lines = ((history_bottom - history_top) / line_height)
+            .floor()
+            .max(0.0) as usize;
 
         if visible_lines == 0 {
             return;
@@ -126,15 +128,9 @@ impl App {
                 crate::console::ConsoleLine::Command(cmd) => {
                     (format!("> {cmd}"), [0.2, 1.0, 0.5, 0.9])
                 }
-                crate::console::ConsoleLine::Output(msg) => {
-                    (msg.clone(), [0.6, 0.75, 0.7, 0.85])
-                }
-                crate::console::ConsoleLine::Error(msg) => {
-                    (msg.clone(), [1.0, 0.35, 0.25, 0.9])
-                }
-                crate::console::ConsoleLine::System(msg) => {
-                    (msg.clone(), [0.0, 0.8, 0.9, 0.8])
-                }
+                crate::console::ConsoleLine::Output(msg) => (msg.clone(), [0.6, 0.75, 0.7, 0.85]),
+                crate::console::ConsoleLine::Error(msg) => (msg.clone(), [1.0, 0.35, 0.25, 0.9]),
+                crate::console::ConsoleLine::System(msg) => (msg.clone(), [0.0, 0.8, 0.9, 0.8]),
             };
             // Truncate in-place if needed.
             let truncated = if text.chars().count() > max_chars {
@@ -252,7 +248,10 @@ impl App {
 
             if !opt_cells.is_empty() {
                 let cols = opt_cells.len();
-                let origin = (box_x + padding, box_y + padding + (i as f32 + 1.0) * line_height);
+                let origin = (
+                    box_x + padding,
+                    box_y + padding + (i as f32 + 1.0) * line_height,
+                );
                 let mut g = self.text_renderer.prepare_glyphs(
                     &mut self.atlas,
                     &self.gpu.queue,
@@ -394,9 +393,12 @@ impl App {
             let h = self.render_monitor_panel(
                 "SYSTEM RESOURCES",
                 &lines,
-                margin, panel_y, sys_width,
+                margin,
+                panel_y,
+                sys_width,
                 [0.15, 0.5, 0.3, 0.7],
-                quads, glyphs,
+                quads,
+                glyphs,
             );
             max_h = max_h.max(h);
         }
@@ -407,9 +409,12 @@ impl App {
             let h = self.render_monitor_panel(
                 "APP DIAGNOSTICS",
                 &lines,
-                app_x, panel_y, app_width,
+                app_x,
+                panel_y,
+                app_width,
                 [0.15, 0.3, 0.5, 0.7],
-                quads, glyphs,
+                quads,
+                glyphs,
             );
             max_h = max_h.max(h);
         }
@@ -453,16 +458,41 @@ impl App {
 
         // Border.
         let t = 1.0;
-        quads.push(QuadInstance { pos: [panel_x, panel_y], size: [panel_width, t], color: border_color, border_radius: 0.0 });
-        quads.push(QuadInstance { pos: [panel_x, panel_y + panel_height - t], size: [panel_width, t], color: border_color, border_radius: 0.0 });
-        quads.push(QuadInstance { pos: [panel_x, panel_y], size: [t, panel_height], color: border_color, border_radius: 0.0 });
-        quads.push(QuadInstance { pos: [panel_x + panel_width - t, panel_y], size: [t, panel_height], color: border_color, border_radius: 0.0 });
+        quads.push(QuadInstance {
+            pos: [panel_x, panel_y],
+            size: [panel_width, t],
+            color: border_color,
+            border_radius: 0.0,
+        });
+        quads.push(QuadInstance {
+            pos: [panel_x, panel_y + panel_height - t],
+            size: [panel_width, t],
+            color: border_color,
+            border_radius: 0.0,
+        });
+        quads.push(QuadInstance {
+            pos: [panel_x, panel_y],
+            size: [t, panel_height],
+            color: border_color,
+            border_radius: 0.0,
+        });
+        quads.push(QuadInstance {
+            pos: [panel_x + panel_width - t, panel_y],
+            size: [t, panel_height],
+            color: border_color,
+            border_radius: 0.0,
+        });
 
         // Title bar.
         quads.push(QuadInstance {
             pos: [panel_x, panel_y],
             size: [panel_width, title_h],
-            color: [bg[0] * 1.3 + 0.02, bg[1] * 1.5 + 0.03, bg[2] * 1.5 + 0.04, 1.0],
+            color: [
+                bg[0] * 1.3 + 0.02,
+                bg[1] * 1.5 + 0.03,
+                bg[2] * 1.5 + 0.04,
+                1.0,
+            ],
             border_radius: 6.0,
         });
 
@@ -558,13 +588,7 @@ impl App {
         let mut text_y = panel_y + padding;
 
         // Title.
-        self.render_overlay_text(
-            "SETTINGS",
-            text_x,
-            text_y,
-            [0.55, 1.0, 0.72, 1.0],
-            glyphs,
-        );
+        self.render_overlay_text("SETTINGS", text_x, text_y, [0.55, 1.0, 0.72, 1.0], glyphs);
         text_y += line_height;
 
         // Separator.
@@ -615,15 +639,9 @@ impl App {
                     let filled = ((frac * bar_chars as f32).round() as usize).min(bar_chars);
                     let empty = bar_chars - filled;
                     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
-                    format!(
-                        "{marker}  {:<14} {bar} {value_str}",
-                        item.label
-                    )
+                    format!("{marker}  {:<14} {bar} {value_str}", item.label)
                 } else {
-                    format!(
-                        "{marker}  {:<14} ◂ {value_str} ▸",
-                        item.label
-                    )
+                    format!("{marker}  {:<14} ◂ {value_str} ▸", item.label)
                 };
 
                 let color = if is_selected {
@@ -647,13 +665,7 @@ impl App {
         // Help line.
         text_y += line_height * 0.5;
         let help = "[Tab] section  [↑↓] select  [←→] adjust  [Esc] close";
-        self.render_overlay_text(
-            help,
-            text_x,
-            text_y,
-            [0.3, 0.5, 0.3, 0.55],
-            glyphs,
-        );
+        self.render_overlay_text(help, text_x, text_y, [0.3, 0.5, 0.3, 0.55], glyphs);
     }
 
     /// Build the context menu overlay (post-CRT, crisp).

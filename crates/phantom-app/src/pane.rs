@@ -47,7 +47,10 @@ pub(crate) fn key_name_to_bytes(key: &str) -> Vec<u8> {
 }
 
 /// Apply the outer margin to a layout rect, producing the container rect.
-pub(crate) fn container_rect(layout_rect: phantom_ui::layout::Rect, cell_size: (f32, f32)) -> phantom_ui::layout::Rect {
+pub(crate) fn container_rect(
+    layout_rect: phantom_ui::layout::Rect,
+    cell_size: (f32, f32),
+) -> phantom_ui::layout::Rect {
     let m = CONTAINER_MARGIN;
     phantom_ui::layout::Rect {
         x: layout_rect.x + m,
@@ -59,7 +62,10 @@ pub(crate) fn container_rect(layout_rect: phantom_ui::layout::Rect, cell_size: (
 
 /// Compute terminal cols/rows from a layout rect, accounting for container
 /// margin and inner chrome padding.
-pub(crate) fn pane_cols_rows(cell_size: (f32, f32), layout_rect: phantom_ui::layout::Rect) -> (u16, u16) {
+pub(crate) fn pane_cols_rows(
+    cell_size: (f32, f32),
+    layout_rect: phantom_ui::layout::Rect,
+) -> (u16, u16) {
     let inner = pane_inner_rect(cell_size, container_rect(layout_rect, cell_size));
     let cols = (inner.width / cell_size.0).floor().max(1.0) as u16;
     let rows = (inner.height / cell_size.1).floor().max(1.0) as u16;
@@ -67,7 +73,10 @@ pub(crate) fn pane_cols_rows(cell_size: (f32, f32), layout_rect: phantom_ui::lay
 }
 
 /// Compute the terminal-grid area inside a container rect.
-pub(crate) fn pane_inner_rect(cell_size: (f32, f32), outer: phantom_ui::layout::Rect) -> phantom_ui::layout::Rect {
+pub(crate) fn pane_inner_rect(
+    cell_size: (f32, f32),
+    outer: phantom_ui::layout::Rect,
+) -> phantom_ui::layout::Rect {
     let pad_x = cell_size.0 * CONTAINER_PAD_X_CELLS;
     let title_h = cell_size.1 * CONTAINER_TITLE_H_CELLS;
     let pad_b = cell_size.1 * CONTAINER_PAD_B_CELLS;
@@ -189,7 +198,8 @@ impl App {
         }
 
         // Update the existing adapter's PaneId mapping (split replaced the old PaneId).
-        self.coordinator.remap_pane(focused_app_id, current_pane_id, existing_child);
+        self.coordinator
+            .remap_pane(focused_app_id, current_pane_id, existing_child);
 
         // Resize the existing adapter's terminal to fit the new (smaller) pane.
         if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
@@ -205,7 +215,8 @@ impl App {
         let new_rect = self.layout.get_pane_rect(new_child).unwrap_or_else(|e| {
             warn!("Layout missing for new split pane {new_child:?}: {e}");
             phantom_ui::layout::Rect {
-                x: 0.0, y: 30.0,
+                x: 0.0,
+                y: 30.0,
                 width: width as f32 / 2.0,
                 height: height as f32 - 54.0,
             }
@@ -215,8 +226,8 @@ impl App {
         match PhantomTerminal::new(cols, rows) {
             Ok(terminal) => {
                 use crate::adapters::terminal::TerminalAdapter;
-                use phantom_terminal::output::TerminalThemeColors;
                 use phantom_scene::clock::Cadence;
+                use phantom_terminal::output::TerminalThemeColors;
 
                 let theme_colors = TerminalThemeColors {
                     foreground: self.theme.colors.foreground,
@@ -225,10 +236,9 @@ impl App {
                     ansi: Some(self.theme.colors.ansi),
                 };
 
-                let scene_node = self.scene.add_node(
-                    self.scene_content_node,
-                    phantom_scene::node::NodeKind::Pane,
-                );
+                let scene_node = self
+                    .scene
+                    .add_node(self.scene_content_node, phantom_scene::node::NodeKind::Pane);
 
                 let adapter = TerminalAdapter::with_theme(terminal, theme_colors);
                 let new_app_id = self.coordinator.register_adapter_at_pane(
@@ -236,6 +246,7 @@ impl App {
                     new_child,
                     scene_node,
                     Cadence::unlimited(),
+                    &mut self.layout,
                 );
                 self.coordinator.set_focus(new_app_id);
                 info!("Split: new adapter {new_app_id} ({cols}x{rows})");
@@ -261,7 +272,8 @@ impl App {
         }
 
         // Remove the adapter (handles layout, scene, focus shift).
-        self.coordinator.remove_adapter(focused_app_id, &mut self.layout, &mut self.scene);
+        self.coordinator
+            .remove_adapter(focused_app_id, &mut self.layout, &mut self.scene);
 
         let width = self.gpu.surface_config.width;
         let height = self.gpu.surface_config.height;
@@ -291,7 +303,12 @@ mod scrollbar_tests {
     use phantom_ui::layout::Rect;
 
     fn test_inner() -> Rect {
-        Rect { x: 100.0, y: 50.0, width: 400.0, height: 300.0 }
+        Rect {
+            x: 100.0,
+            y: 50.0,
+            width: 400.0,
+            height: 300.0,
+        }
     }
 
     #[test]
@@ -326,7 +343,12 @@ mod scrollbar_tests {
     // -- scrollbar_y_to_offset tests --
 
     fn make_track() -> Rect {
-        Rect { x: 100.0, y: 50.0, width: 6.0, height: 400.0 }
+        Rect {
+            x: 100.0,
+            y: 50.0,
+            width: 6.0,
+            height: 400.0,
+        }
     }
 
     #[test]
@@ -360,7 +382,12 @@ mod scrollbar_tests {
 
     #[test]
     fn y_to_offset_zero_height() {
-        let track = Rect { x: 0.0, y: 0.0, width: 6.0, height: 0.0 };
+        let track = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 6.0,
+            height: 0.0,
+        };
         let offset = scrollbar_y_to_offset(track, 50.0, 100);
         assert_eq!(offset, 0);
     }
@@ -383,20 +410,35 @@ mod scrollbar_tests {
 
     #[test]
     fn point_inside_rect() {
-        let rect = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        let rect = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
         assert!(point_in_rect(50.0, 40.0, rect));
     }
 
     #[test]
     fn point_on_edge() {
-        let rect = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        let rect = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
         assert!(point_in_rect(10.0, 20.0, rect)); // top-left corner
         assert!(point_in_rect(110.0, 70.0, rect)); // bottom-right corner
     }
 
     #[test]
     fn point_outside_rect() {
-        let rect = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        let rect = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
         assert!(!point_in_rect(5.0, 40.0, rect)); // left of rect
         assert!(!point_in_rect(50.0, 15.0, rect)); // above rect
         assert!(!point_in_rect(111.0, 40.0, rect)); // right of rect

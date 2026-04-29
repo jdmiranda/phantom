@@ -147,11 +147,7 @@ impl InputHandler for MonitorAdapter {
 }
 
 impl Commandable for MonitorAdapter {
-    fn accept_command(
-        &mut self,
-        cmd: &str,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<String> {
+    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
             "activate" => {
                 self.active = true;

@@ -5,13 +5,15 @@ use anyhow::Result;
 use wgpu::CommandEncoderDescriptor;
 
 use phantom_renderer::grid::{GridCell, GridRenderData};
-use phantom_ui::widgets::Widget;
 use phantom_renderer::postfx::PostFxParams;
 use phantom_renderer::quads::QuadInstance as QI;
+use phantom_ui::widgets::Widget;
 
 use crate::app::{App, AppState};
-use crate::pane::{pane_inner_rect, container_rect, scrollbar_track_rect, scrollbar_thumb_rect,
-    CONTAINER_PAD_X_CELLS, CONTAINER_TITLE_H_CELLS};
+use crate::pane::{
+    CONTAINER_PAD_X_CELLS, CONTAINER_TITLE_H_CELLS, container_rect, pane_inner_rect,
+    scrollbar_thumb_rect, scrollbar_track_rect,
+};
 
 impl App {
     // Render
@@ -54,11 +56,7 @@ impl App {
 
         match self.state {
             AppState::Boot => {
-                self.render_boot(
-                    screen_size,
-                    &mut all_quads,
-                    &mut all_glyphs,
-                );
+                self.render_boot(screen_size, &mut all_quads, &mut all_glyphs);
             }
             AppState::Terminal => {
                 self.render_terminal(
@@ -195,7 +193,6 @@ impl App {
                 self.build_context_menu_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
-
             if !chrome_quads.is_empty() || !chrome_glyphs.is_empty() {
                 // Upload + render overlay in its own pass on the surface.
                 self.quad_renderer.prepare(
@@ -227,7 +224,8 @@ impl App {
                 });
 
                 self.quad_renderer.render(&mut pass);
-                self.grid_renderer.render(&mut pass, self.atlas.bind_group());
+                self.grid_renderer
+                    .render(&mut pass, self.atlas.bind_group());
             }
         }
 
@@ -326,18 +324,31 @@ impl App {
         if let Some(fs_app_id) = self.fullscreen_pane {
             // Get render output from the fullscreen adapter.
             let coordinator_outputs = self.coordinator.render_all(&self.layout, self.cell_size);
-            if let Some((_id, _rect, ro)) = coordinator_outputs.iter().find(|(id, _, _)| *id == fs_app_id) {
+            if let Some((_id, _rect, ro)) = coordinator_outputs
+                .iter()
+                .find(|(id, _, _)| *id == fs_app_id)
+            {
                 if let Some(ref grid) = ro.grid {
                     let margin = 12.0;
                     let origin = (margin, margin);
 
                     self.pool_grid_cells.clear();
-                    self.pool_grid_cells.extend(grid.cells.iter().map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg }));
+                    self.pool_grid_cells
+                        .extend(grid.cells.iter().map(|tc| GridCell {
+                            ch: tc.ch,
+                            fg: tc.fg,
+                            bg: tc.bg,
+                        }));
 
                     let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
-                        &self.pool_grid_cells, grid.cols, grid.rows,
-                        &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
-                        origin, self.cell_size,
+                        &self.pool_grid_cells,
+                        grid.cols,
+                        grid.rows,
+                        &mut self.text_renderer,
+                        &mut self.atlas,
+                        &self.gpu.queue,
+                        origin,
+                        self.cell_size,
                     );
                     quads.append(&mut bg_quads);
                     glyphs.append(&mut glyph_instances);
@@ -349,7 +360,12 @@ impl App {
                             quads.push(QI {
                                 pos: [cx, cy],
                                 size: [self.cell_size.0, self.cell_size.1],
-                                color: [self.theme.colors.cursor[0], self.theme.colors.cursor[1], self.theme.colors.cursor[2], 0.7],
+                                color: [
+                                    self.theme.colors.cursor[0],
+                                    self.theme.colors.cursor[1],
+                                    self.theme.colors.cursor[2],
+                                    0.7,
+                                ],
                                 border_radius: 0.0,
                             });
                         }
@@ -360,7 +376,13 @@ impl App {
                         self.push_selection_quads(sel, margin, margin, grid.cols, quads);
                     }
                 }
-                self.render_overlay_text("ESC to exit fullscreen", screen_size[0] - 200.0, screen_size[1] - 30.0, [0.4, 0.6, 0.4, 0.5], chrome_glyphs);
+                self.render_overlay_text(
+                    "ESC to exit fullscreen",
+                    screen_size[0] - 200.0,
+                    screen_size[1] - 30.0,
+                    [0.4, 0.6, 0.4, 0.5],
+                    chrome_glyphs,
+                );
             }
             return;
         }
@@ -373,7 +395,12 @@ impl App {
         for (app_id, _rect, ro) in &coordinator_outputs {
             // Render quads (colored rectangles).
             for q in &ro.quads {
-                quads.push(QI { pos: [q.x, q.y], size: [q.w, q.h], color: q.color, border_radius: 0.0 });
+                quads.push(QI {
+                    pos: [q.x, q.y],
+                    size: [q.w, q.h],
+                    color: q.color,
+                    border_radius: 0.0,
+                });
             }
             // Render text segments.
             for seg in &ro.text_segments {
@@ -460,9 +487,19 @@ impl App {
                 // Title strip.
                 let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
                 let title_bg = if is_focused {
-                    [bg[0] * 1.6 + 0.04, bg[1] * 2.0 + 0.06, bg[2] * 1.6 + 0.04, 1.0]
+                    [
+                        bg[0] * 1.6 + 0.04,
+                        bg[1] * 2.0 + 0.06,
+                        bg[2] * 1.6 + 0.04,
+                        1.0,
+                    ]
                 } else {
-                    [bg[0] * 1.3 + 0.02, bg[1] * 1.5 + 0.03, bg[2] * 1.3 + 0.02, 1.0]
+                    [
+                        bg[0] * 1.3 + 0.02,
+                        bg[1] * 1.5 + 0.03,
+                        bg[2] * 1.3 + 0.02,
+                        1.0,
+                    ]
                 };
                 quads.push(QI {
                     pos: [pane_rect.x, pane_rect.y],
@@ -481,13 +518,33 @@ impl App {
                 };
                 let t = 1.0;
                 // top
-                chrome_quads.push(QI { pos: [pane_rect.x, pane_rect.y], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QI {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [pane_rect.width, t],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
                 // bottom
-                chrome_quads.push(QI { pos: [pane_rect.x, pane_rect.y + pane_rect.height - t], size: [pane_rect.width, t], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QI {
+                    pos: [pane_rect.x, pane_rect.y + pane_rect.height - t],
+                    size: [pane_rect.width, t],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
                 // left
-                chrome_quads.push(QI { pos: [pane_rect.x, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QI {
+                    pos: [pane_rect.x, pane_rect.y],
+                    size: [t, pane_rect.height],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
                 // right
-                chrome_quads.push(QI { pos: [pane_rect.x + pane_rect.width - t, pane_rect.y], size: [t, pane_rect.height], color: border_color, border_radius: 0.0 });
+                chrome_quads.push(QI {
+                    pos: [pane_rect.x + pane_rect.width - t, pane_rect.y],
+                    size: [t, pane_rect.height],
+                    color: border_color,
+                    border_radius: 0.0,
+                });
 
                 // Title text.
                 let dot_color = if is_focused {
@@ -497,10 +554,15 @@ impl App {
                 };
                 let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
                 let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
-                let app_type = self.coordinator.registry().get(*app_id)
+                let app_type = self
+                    .coordinator
+                    .registry()
+                    .get(*app_id)
                     .map(|e| e.app_type.as_str())
                     .unwrap_or("app");
-                let grid_dims = ro.grid.as_ref()
+                let grid_dims = ro
+                    .grid
+                    .as_ref()
                     .map(|g| format!("  {}x{}", g.cols, g.rows))
                     .unwrap_or_default();
                 let title_text = format!("\u{25cf} {}{}", app_type, grid_dims);
@@ -518,7 +580,12 @@ impl App {
                             border_radius: 3.0,
                         });
                         // Thumb.
-                        if let Some(thumb) = scrollbar_thumb_rect(track, scroll.display_offset, scroll.history_size, scroll.visible_rows) {
+                        if let Some(thumb) = scrollbar_thumb_rect(
+                            track,
+                            scroll.display_offset,
+                            scroll.history_size,
+                            scroll.visible_rows,
+                        ) {
                             let thumb_color = if is_focused {
                                 [0.2, 1.0, 0.5, 0.4]
                             } else {
@@ -538,13 +605,23 @@ impl App {
             // Render terminal grid data (the critical path for terminal adapters).
             if let Some(ref grid) = ro.grid {
                 self.pool_grid_cells.clear();
-                self.pool_grid_cells.extend(grid.cells.iter().map(|tc| GridCell { ch: tc.ch, fg: tc.fg, bg: tc.bg }));
+                self.pool_grid_cells
+                    .extend(grid.cells.iter().map(|tc| GridCell {
+                        ch: tc.ch,
+                        fg: tc.fg,
+                        bg: tc.bg,
+                    }));
 
                 let origin = (grid.origin.0, grid.origin.1);
                 let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
-                    &self.pool_grid_cells, grid.cols, grid.rows,
-                    &mut self.text_renderer, &mut self.atlas, &self.gpu.queue,
-                    origin, self.cell_size,
+                    &self.pool_grid_cells,
+                    grid.cols,
+                    grid.rows,
+                    &mut self.text_renderer,
+                    &mut self.atlas,
+                    &self.gpu.queue,
+                    origin,
+                    self.cell_size,
                 );
                 quads.append(&mut bg_quads);
                 glyphs.append(&mut glyph_instances);
@@ -606,11 +683,7 @@ impl App {
         // and emit it onto the chrome (overlay) buffers so the message is
         // crisp / unaffected by CRT post-FX. Hidden state is a no-op: the
         // widget's `render_quads` / `render_text` return empty `Vec`s.
-        self.build_notification_banner_overlay(
-            screen_size,
-            chrome_quads,
-            chrome_glyphs,
-        );
+        self.build_notification_banner_overlay(screen_size, chrome_quads, chrome_glyphs);
     }
 
     /// Build the top-of-screen notification banner onto the overlay buffers.
@@ -627,9 +700,7 @@ impl App {
         chrome_quads: &mut Vec<QI>,
         chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
-        use phantom_ui::widgets::{
-            BannerSeverity, NotificationBanner, NOTIFICATION_BANNER_HEIGHT,
-        };
+        use phantom_ui::widgets::{BannerSeverity, NOTIFICATION_BANNER_HEIGHT, NotificationBanner};
 
         let Some(banner_data) = self.notifications.current_banner() else {
             return;
@@ -676,7 +747,11 @@ impl App {
         quads: &mut Vec<QI>,
     ) {
         for row in sel.start_row..=sel.end_row {
-            let start_col = if row == sel.start_row { sel.start_col } else { 0 };
+            let start_col = if row == sel.start_row {
+                sel.start_col
+            } else {
+                0
+            };
             let end_col = if row == sel.end_row {
                 sel.end_col
             } else {
@@ -708,9 +783,11 @@ impl App {
     ) {
         for seg in segments {
             self.text_cell_buf.clear();
-            self.text_cell_buf.extend(seg.text.chars().map(|ch| {
-                phantom_renderer::text::TerminalCell { ch, fg: seg.color }
-            }));
+            self.text_cell_buf.extend(
+                seg.text
+                    .chars()
+                    .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: seg.color }),
+            );
 
             if self.text_cell_buf.is_empty() {
                 continue;
@@ -730,6 +807,4 @@ impl App {
             glyphs.append(&mut seg_glyphs);
         }
     }
-
-
 }

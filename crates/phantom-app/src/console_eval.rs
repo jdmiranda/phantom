@@ -23,9 +23,26 @@ pub enum EvalResult {
 
 /// Valid log channel names for `log.channel` validation.
 const VALID_CHANNELS: &[&str] = &[
-    "renderer", "shader", "terminal", "adapter", "coordinator", "scene",
-    "semantic", "nlp", "brain", "supervisor", "agents", "mcp", "plugins",
-    "memory", "context", "session", "boot", "input", "fx", "profiler",
+    "renderer",
+    "shader",
+    "terminal",
+    "adapter",
+    "coordinator",
+    "scene",
+    "semantic",
+    "nlp",
+    "brain",
+    "supervisor",
+    "agents",
+    "mcp",
+    "plugins",
+    "memory",
+    "context",
+    "session",
+    "boot",
+    "input",
+    "fx",
+    "profiler",
 ];
 
 fn is_valid_channel_name(name: &str) -> bool {
@@ -91,13 +108,11 @@ pub fn evaluate(input: &str) -> EvalResult {
                     if !is_valid_channel_name(&name) {
                         return EvalResult::Err(format!(
                             "Unknown channel '{}'. Valid: {}",
-                            parts[1], VALID_CHANNELS.join(", ")
+                            parts[1],
+                            VALID_CHANNELS.join(", ")
                         ));
                     }
-                    return EvalResult::Ok(Some(format!(
-                        "Channel '{}' {}.",
-                        parts[1], parts[2]
-                    )));
+                    return EvalResult::Ok(Some(format!("Channel '{}' {}.", parts[1], parts[2])));
                 }
                 return EvalResult::Err("Usage: log.channel <name> on|off".into());
             }

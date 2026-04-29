@@ -82,19 +82,13 @@ impl InspectorAdapter {
     pub(crate) fn with_view(view: InspectorView) -> Self {
         use phantom_ui::RenderCtx;
         let tokens = Tokens::phosphor(RenderCtx::fallback());
-        Self::new(
-            Arc::new(RwLock::new(view)),
-            Arc::new(RwLock::new(tokens)),
-        )
+        Self::new(Arc::new(RwLock::new(view)), Arc::new(RwLock::new(tokens)))
     }
 
     /// Test-only constructor that wraps an existing view with custom tokens.
     #[cfg(test)]
     pub(crate) fn with_view_and_tokens(view: InspectorView, tokens: Tokens) -> Self {
-        Self::new(
-            Arc::new(RwLock::new(view)),
-            Arc::new(RwLock::new(tokens)),
-        )
+        Self::new(Arc::new(RwLock::new(view)), Arc::new(RwLock::new(tokens)))
     }
 }
 
@@ -143,23 +137,23 @@ impl Renderable for InspectorAdapter {
         };
 
         // Derive role-specific colors from the live token palette.
-        let header_bg      = colors.surface_recessed;
-        let header_color   = colors.text_accent;
-        let section_color  = colors.text_primary;
-        let agent_color    = colors.text_primary;
-        let event_color    = colors.text_secondary;
-        let stamp_color    = colors.text_dim;
-        let pane_bg        = [0.0_f32, 0.0, 0.0, 0.0];
+        let header_bg = colors.surface_recessed;
+        let header_color = colors.text_accent;
+        let section_color = colors.text_primary;
+        let agent_color = colors.text_primary;
+        let event_color = colors.text_secondary;
+        let stamp_color = colors.text_dim;
+        let pane_bg = [0.0_f32, 0.0, 0.0, 0.0];
         // Denial colors are drawn from the `status_danger` token so that
         // theme changes (e.g. amber → blood) propagate to the security UI.
-        let denial_header  = colors.status_danger;
+        let denial_header = colors.status_danger;
         // Row body: same hue but slightly softened — reduce alpha slightly.
-        let denial_row     = {
+        let denial_row = {
             let [r, g, b, _] = colors.status_danger;
             [r * 0.95, g * 1.5_f32.min(1.0), b * 1.6_f32.min(1.0), 0.95]
         };
         // Chain sub-row: mix toward text_dim to push it into the background.
-        let denial_chain   = {
+        let denial_chain = {
             let [r, g, b, _] = colors.status_danger;
             let [dr, dg, db, _] = colors.text_dim;
             [(r + dr) * 0.5, (g + dg) * 0.5, (b + db) * 0.5, 0.80]
@@ -170,8 +164,16 @@ impl Renderable for InspectorAdapter {
         // `Rect::default()` carries `(0.0, 0.0)` as a "not provided" sentinel
         // so we fall back to legacy 8.0 / 16.0 for callers that don't pass
         // cell metrics through.
-        let cell_w = if rect.cell_size.0 > 0.0 { rect.cell_size.0 } else { 8.0 };
-        let cell_h = if rect.cell_size.1 > 0.0 { rect.cell_size.1 } else { 16.0 };
+        let cell_w = if rect.cell_size.0 > 0.0 {
+            rect.cell_size.0
+        } else {
+            8.0
+        };
+        let cell_h = if rect.cell_size.1 > 0.0 {
+            rect.cell_size.1
+        } else {
+            16.0
+        };
         let pad_x = cell_w; // 1 cell of left padding.
         let pad_y = cell_h * 0.4; // ~half a line of top padding.
 
@@ -287,7 +289,11 @@ impl Renderable for InspectorAdapter {
             // Truncate very long summaries to roughly the pane width.
             let max_chars = ((rect.width / cell_w).floor() as usize).saturating_sub(4);
             let summary = if ev.summary.chars().count() > max_chars {
-                let cut: String = ev.summary.chars().take(max_chars.saturating_sub(1)).collect();
+                let cut: String = ev
+                    .summary
+                    .chars()
+                    .take(max_chars.saturating_sub(1))
+                    .collect();
                 format!("{cut}…")
             } else {
                 ev.summary.clone()
@@ -417,11 +423,7 @@ impl InputHandler for InspectorAdapter {
 }
 
 impl Commandable for InspectorAdapter {
-    fn accept_command(
-        &mut self,
-        cmd: &str,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<String> {
+    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
         Err(anyhow::anyhow!(
             "inspector adapter does not accept commands: {cmd}"
         ))
@@ -550,10 +552,7 @@ mod tests {
 
         for i in 0..4 {
             let label = format!("agent-{i}");
-            let found = output
-                .text_segments
-                .iter()
-                .any(|t| t.text.contains(&label));
+            let found = output.text_segments.iter().any(|t| t.text.contains(&label));
             assert!(found, "expected text segment containing label {label}");
         }
     }
@@ -605,11 +604,18 @@ mod tests {
     fn inspector_adapter_handles_empty_view() {
         let adapter = InspectorAdapter::with_view(InspectorView::empty());
         let output = adapter.render(&make_rect(8.0));
-        assert!(output.text_segments.iter().any(|t| t.text.contains("no agents")));
-        assert!(output
-            .text_segments
-            .iter()
-            .any(|t| t.text.contains("no recent events")));
+        assert!(
+            output
+                .text_segments
+                .iter()
+                .any(|t| t.text.contains("no agents"))
+        );
+        assert!(
+            output
+                .text_segments
+                .iter()
+                .any(|t| t.text.contains("no recent events"))
+        );
     }
 
     /// Recent events must appear in the rendered text segments, formatted
@@ -627,7 +633,10 @@ mod tests {
             .build();
         let adapter = InspectorAdapter::with_view(view);
         let output = adapter.render(&make_rect(8.0));
-        let found = output.text_segments.iter().any(|t| t.text.contains("Spawned Watcher"));
+        let found = output
+            .text_segments
+            .iter()
+            .any(|t| t.text.contains("Spawned Watcher"));
         assert!(found, "expected event summary text in rendered output");
     }
 
@@ -778,10 +787,12 @@ mod tests {
             .build();
         let adapter = InspectorAdapter::with_view(view);
         let output = adapter.render(&make_rect(8.0));
-        assert!(output
-            .text_segments
-            .iter()
-            .any(|t| t.text == "chain: (empty)"));
+        assert!(
+            output
+                .text_segments
+                .iter()
+                .any(|t| t.text == "chain: (empty)")
+        );
     }
 
     // ---- Issue #31: live Tokens propagation --------------------------------
@@ -803,8 +814,8 @@ mod tests {
     /// differ — proving the live plumbing is in place.
     #[test]
     fn denials_header_color_changes_with_tokens() {
-        use phantom_ui::tokens::{ColorRoles, Tokens};
         use phantom_ui::RenderCtx;
+        use phantom_ui::tokens::{ColorRoles, Tokens};
 
         // Phosphor tokens: status_danger is red-dominant (r ≈ 1.0).
         let phosphor_tokens = Tokens::phosphor(RenderCtx::fallback());
@@ -862,8 +873,8 @@ mod tests {
     /// This is the core contract of the live-tokens feature.
     #[test]
     fn live_tokens_propagate_without_adapter_restart() {
-        use phantom_ui::tokens::{ColorRoles, Tokens};
         use phantom_ui::RenderCtx;
+        use phantom_ui::tokens::{ColorRoles, Tokens};
 
         let phosphor_tokens = Tokens::phosphor(RenderCtx::fallback());
         let tokens_arc = Arc::new(RwLock::new(phosphor_tokens));
@@ -917,8 +928,8 @@ mod tests {
     /// text color emitted by `render()`.
     #[test]
     fn header_text_color_changes_with_tokens() {
-        use phantom_ui::tokens::{ColorRoles, Tokens};
         use phantom_ui::RenderCtx;
+        use phantom_ui::tokens::{ColorRoles, Tokens};
 
         let phosphor_tokens = Tokens::phosphor(RenderCtx::fallback());
 
@@ -927,14 +938,9 @@ mod tests {
         alt_roles.text_accent = [0.0, 0.0, 1.0, 1.0];
         let alt_tokens = Tokens::new(alt_roles, RenderCtx::fallback());
 
-        let adapter_p = InspectorAdapter::with_view_and_tokens(
-            InspectorView::empty(),
-            phosphor_tokens,
-        );
-        let adapter_a = InspectorAdapter::with_view_and_tokens(
-            InspectorView::empty(),
-            alt_tokens,
-        );
+        let adapter_p =
+            InspectorAdapter::with_view_and_tokens(InspectorView::empty(), phosphor_tokens);
+        let adapter_a = InspectorAdapter::with_view_and_tokens(InspectorView::empty(), alt_tokens);
 
         let out_p = adapter_p.render(&make_rect(8.0));
         let out_a = adapter_a.render(&make_rect(8.0));

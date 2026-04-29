@@ -10,15 +10,15 @@
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use log::{debug, warn};
 
 use phantom_protocol::{
-    set_nonblocking, try_read_line, AppMessage, SupervisorCommand, HEARTBEAT_INTERVAL_MS,
+    AppMessage, HEARTBEAT_INTERVAL_MS, SupervisorCommand, set_nonblocking, try_read_line,
 };
 
 // ---------------------------------------------------------------------------

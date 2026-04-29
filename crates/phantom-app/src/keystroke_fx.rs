@@ -15,10 +15,9 @@ use phantom_renderer::grid::GridCell;
 
 /// Glitch characters — same block elements used in the boot sequence.
 const GLITCH_CHARS: &[char] = &[
-    '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}', '\u{2580}', '\u{2584}',
-    '\u{258C}', '\u{2590}', '\u{2502}', '\u{2524}', '\u{2561}', '\u{2562}',
-    '\u{2556}', '\u{2555}', '\u{2563}', '\u{2551}', '\u{2557}', '\u{255D}',
-    '\u{255C}', '\u{255B}', '\u{2510}', '\u{2514}', '\u{2534}', '\u{252C}',
+    '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}', '\u{2580}', '\u{2584}', '\u{258C}', '\u{2590}',
+    '\u{2502}', '\u{2524}', '\u{2561}', '\u{2562}', '\u{2556}', '\u{2555}', '\u{2563}', '\u{2551}',
+    '\u{2557}', '\u{255D}', '\u{255C}', '\u{255B}', '\u{2510}', '\u{2514}', '\u{2534}', '\u{252C}',
     '\u{251C}', '\u{2500}', '\u{253C}',
 ];
 
@@ -84,7 +83,9 @@ impl KeystrokeFx {
             }
 
             let idx = gc.row * cols + gc.col;
-            let Some(cell) = grid.get_mut(idx) else { continue };
+            let Some(cell) = grid.get_mut(idx) else {
+                continue;
+            };
 
             if cell.ch == ' ' {
                 continue;

@@ -83,30 +83,61 @@ impl Tokens {
     }
 
     pub fn phosphor(ctx: RenderCtx) -> Self {
-        Self { colors: ColorRoles::phosphor(), ctx }
+        Self {
+            colors: ColorRoles::phosphor(),
+            ctx,
+        }
     }
 
     // -- Spacing scale (4px-base, scales with the cell on dense fonts) --
-    pub fn space_0(&self) -> f32 { 0.0 }
-    pub fn space_1(&self) -> f32 { 4.0 }
-    pub fn space_2(&self) -> f32 { 8.0 }
-    pub fn space_3(&self) -> f32 { 12.0 }
-    pub fn space_4(&self) -> f32 { 16.0 }
-    pub fn space_5(&self) -> f32 { 24.0 }
-    pub fn space_6(&self) -> f32 { 32.0 }
+    pub fn space_0(&self) -> f32 {
+        0.0
+    }
+    pub fn space_1(&self) -> f32 {
+        4.0
+    }
+    pub fn space_2(&self) -> f32 {
+        8.0
+    }
+    pub fn space_3(&self) -> f32 {
+        12.0
+    }
+    pub fn space_4(&self) -> f32 {
+        16.0
+    }
+    pub fn space_5(&self) -> f32 {
+        24.0
+    }
+    pub fn space_6(&self) -> f32 {
+        32.0
+    }
 
     // -- Radii --
-    pub fn radius_sm(&self) -> f32 { 2.0 }
-    pub fn radius_md(&self) -> f32 { 4.0 }
-    pub fn radius_lg(&self) -> f32 { 6.0 }
+    pub fn radius_sm(&self) -> f32 {
+        2.0
+    }
+    pub fn radius_md(&self) -> f32 {
+        4.0
+    }
+    pub fn radius_lg(&self) -> f32 {
+        6.0
+    }
 
     // -- Line widths --
-    pub fn hair(&self) -> f32 { 1.0 }
-    pub fn frame(&self) -> f32 { 2.0 }
+    pub fn hair(&self) -> f32 {
+        1.0
+    }
+    pub fn frame(&self) -> f32 {
+        2.0
+    }
 
     // -- Convenience accessors that flow through the ctx --
-    pub fn cell_w(&self) -> f32 { self.ctx.cell_w() }
-    pub fn cell_h(&self) -> f32 { self.ctx.cell_h() }
+    pub fn cell_w(&self) -> f32 {
+        self.ctx.cell_w()
+    }
+    pub fn cell_h(&self) -> f32 {
+        self.ctx.cell_h()
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -120,8 +151,15 @@ mod tests {
     #[test]
     fn spacing_scale_is_monotonic_and_4_step() {
         let t = Tokens::phosphor(RenderCtx::fallback());
-        let scale = [t.space_0(), t.space_1(), t.space_2(), t.space_3(),
-                     t.space_4(), t.space_5(), t.space_6()];
+        let scale = [
+            t.space_0(),
+            t.space_1(),
+            t.space_2(),
+            t.space_3(),
+            t.space_4(),
+            t.space_5(),
+            t.space_6(),
+        ];
         // Strictly increasing.
         for w in scale.windows(2) {
             assert!(w[0] < w[1], "spacing scale not monotonic: {scale:?}");
@@ -162,7 +200,12 @@ mod tests {
         // Dim text is dimmer than primary.
         assert!(r.text_dim[1] < r.text_primary[1]);
         // All alphas are positive.
-        for &c in &[r.surface_base, r.surface_recessed, r.text_primary, r.chrome_frame] {
+        for &c in &[
+            r.surface_base,
+            r.surface_recessed,
+            r.text_primary,
+            r.chrome_frame,
+        ] {
             assert!(c[3] > 0.0, "alpha must be positive: {c:?}");
         }
     }
@@ -172,14 +215,22 @@ mod tests {
         let r = ColorRoles::phosphor();
         // Must exist and be semi-transparent (alpha in 0..1 exclusive).
         let a = r.selection_bg[3];
-        assert!(a > 0.0 && a < 1.0, "selection_bg alpha must be semi-transparent, got {a}");
+        assert!(
+            a > 0.0 && a < 1.0,
+            "selection_bg alpha must be semi-transparent, got {a}"
+        );
     }
 
     #[test]
     fn accent_focus_token_is_opaque_and_bright() {
         let r = ColorRoles::phosphor();
-        assert_eq!(r.accent_focus[3], 1.0, "accent_focus alpha must be 1.0 (opaque)");
-        assert!(r.accent_focus[2] > 0.5, "accent_focus should have elevated blue channel");
+        assert_eq!(
+            r.accent_focus[3], 1.0,
+            "accent_focus alpha must be 1.0 (opaque)"
+        );
+        assert!(
+            r.accent_focus[2] > 0.5,
+            "accent_focus should have elevated blue channel"
+        );
     }
 }
-

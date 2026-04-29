@@ -114,7 +114,11 @@ impl FocusRing {
             self.prev_focused = self.focused;
         }
 
-        let target = if self.focused.is_some() { 1.0_f32 } else { 0.0_f32 };
+        let target = if self.focused.is_some() {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
         let step = dt_ms / FADE_DURATION_MS;
 
         self.opacity = if target > self.opacity {
@@ -204,7 +208,12 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn ring_rect() -> Rect {
-        Rect { x: 10.0, y: 20.0, width: 400.0, height: 300.0 }
+        Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 400.0,
+            height: 300.0,
+        }
     }
 
     // ── Construction ──────────────────────────────────────────────────────────
@@ -248,7 +257,11 @@ mod tests {
         let mut ring = FocusRing::new();
         ring.set_focused(Some(1));
         ring.tick(50.0); // 50 ms → 50 % of 100 ms = 0.5
-        assert!((ring.opacity() - 0.5).abs() < 0.01, "expected ~0.5, got {}", ring.opacity());
+        assert!(
+            (ring.opacity() - 0.5).abs() < 0.01,
+            "expected ~0.5, got {}",
+            ring.opacity()
+        );
     }
 
     #[test]
@@ -274,7 +287,11 @@ mod tests {
         ring.tick(FADE_DURATION_MS); // fully visible
         ring.set_focused(None);
         ring.tick(50.0); // fade out 50 ms → 0.5
-        assert!((ring.opacity() - 0.5).abs() < 0.01, "expected ~0.5, got {}", ring.opacity());
+        assert!(
+            (ring.opacity() - 0.5).abs() < 0.01,
+            "expected ~0.5, got {}",
+            ring.opacity()
+        );
     }
 
     #[test]
@@ -294,7 +311,11 @@ mod tests {
         // Invisible ring still emits quads (constant pipeline).
         let ring = FocusRing::new();
         let quads = ring.render_quads(&ring_rect());
-        assert_eq!(quads.len(), 4, "focus ring must emit exactly 4 border quads");
+        assert_eq!(
+            quads.len(),
+            4,
+            "focus ring must emit exactly 4 border quads"
+        );
     }
 
     #[test]
@@ -340,11 +361,23 @@ mod tests {
         let rect = ring_rect();
         let quads = ring.render_quads(&rect);
         // Top and bottom quads: height == RING_THICKNESS.
-        assert!((quads[0].size[1] - RING_THICKNESS).abs() < 0.01, "top ring height");
-        assert!((quads[1].size[1] - RING_THICKNESS).abs() < 0.01, "bottom ring height");
+        assert!(
+            (quads[0].size[1] - RING_THICKNESS).abs() < 0.01,
+            "top ring height"
+        );
+        assert!(
+            (quads[1].size[1] - RING_THICKNESS).abs() < 0.01,
+            "bottom ring height"
+        );
         // Left and right quads: width == RING_THICKNESS.
-        assert!((quads[2].size[0] - RING_THICKNESS).abs() < 0.01, "left ring width");
-        assert!((quads[3].size[0] - RING_THICKNESS).abs() < 0.01, "right ring width");
+        assert!(
+            (quads[2].size[0] - RING_THICKNESS).abs() < 0.01,
+            "left ring width"
+        );
+        assert!(
+            (quads[3].size[0] - RING_THICKNESS).abs() < 0.01,
+            "right ring width"
+        );
     }
 
     #[test]

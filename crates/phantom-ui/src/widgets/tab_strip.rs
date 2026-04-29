@@ -72,7 +72,10 @@ pub struct Tab {
 impl Tab {
     /// Create a [`Tab`] with the given label and optional badge count.
     pub fn new(label: impl Into<String>, badge: Option<u32>) -> Self {
-        Self { label: label.into(), badge }
+        Self {
+            label: label.into(),
+            badge,
+        }
     }
 
     /// The display label of this tab.
@@ -130,7 +133,11 @@ impl TabStrip {
     /// `active` is clamped to `tabs.len().saturating_sub(1)` so passing an
     /// out-of-range index on an empty list is safe.
     pub fn new(tabs: Vec<Tab>, active: usize, on_select: impl FnMut(usize) + 'static) -> Self {
-        let clamped = if tabs.is_empty() { 0 } else { active.min(tabs.len() - 1) };
+        let clamped = if tabs.is_empty() {
+            0
+        } else {
+            active.min(tabs.len() - 1)
+        };
         Self {
             tabs,
             active: clamped,
@@ -341,13 +348,16 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn strip_rect() -> Rect {
-        Rect { x: 0.0, y: 0.0, width: 960.0, height: 30.0 }
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 960.0,
+            height: 30.0,
+        }
     }
 
     fn make_tabs(n: usize) -> Vec<Tab> {
-        (0..n)
-            .map(|i| Tab::new(format!("Tab{i}"), None))
-            .collect()
+        (0..n).map(|i| Tab::new(format!("Tab{i}"), None)).collect()
     }
 
     // ── Construction ──────────────────────────────────────────────────────────
@@ -524,11 +534,7 @@ mod tests {
     fn active_tab_text_uses_text_primary() {
         let ctx = RenderCtx::fallback();
         let t = Tokens::phosphor(ctx);
-        let strip = TabStrip::new(
-            vec![Tab::new("Alpha", None)],
-            0,
-            |_| {},
-        );
+        let strip = TabStrip::new(vec![Tab::new("Alpha", None)], 0, |_| {});
         let texts = strip.render_text(&strip_rect());
         assert!(!texts.is_empty());
         assert_eq!(texts[0].color, t.colors.text_primary);
@@ -538,14 +544,7 @@ mod tests {
     fn inactive_tab_text_uses_text_secondary() {
         let ctx = RenderCtx::fallback();
         let t = Tokens::phosphor(ctx);
-        let strip = TabStrip::new(
-            vec![
-                Tab::new("A", None),
-                Tab::new("B", None),
-            ],
-            0,
-            |_| {},
-        );
+        let strip = TabStrip::new(vec![Tab::new("A", None), Tab::new("B", None)], 0, |_| {});
         let texts = strip.render_text(&strip_rect());
         // Second tab (inactive) should use text_secondary.
         let b_seg = texts.iter().find(|s| s.text == "B").expect("B not found");
@@ -556,15 +555,14 @@ mod tests {
     fn badge_renders_as_additional_segment_in_status_warn() {
         let ctx = RenderCtx::fallback();
         let t = Tokens::phosphor(ctx);
-        let strip = TabStrip::new(
-            vec![Tab::new("Errors", Some(5))],
-            0,
-            |_| {},
-        );
+        let strip = TabStrip::new(vec![Tab::new("Errors", Some(5))], 0, |_| {});
         let texts = strip.render_text(&strip_rect());
         // Expect label segment + badge segment.
         assert_eq!(texts.len(), 2, "badge tab should emit 2 text segments");
-        let badge_seg = texts.iter().find(|s| s.text.contains("[5]")).expect("badge missing");
+        let badge_seg = texts
+            .iter()
+            .find(|s| s.text.contains("[5]"))
+            .expect("badge missing");
         assert_eq!(badge_seg.color, t.colors.status_warn);
     }
 

@@ -197,8 +197,10 @@ impl Renderable for AgentAdapter {
 
         // Output background.
         quads.push(QuadData {
-            x: rect.x, y: rect.y,
-            w: rect.width, h: output_height + pad,
+            x: rect.x,
+            y: rect.y,
+            w: rect.width,
+            h: output_height + pad,
             color: OUTPUT_BG,
         });
 
@@ -229,15 +231,19 @@ impl Renderable for AgentAdapter {
 
         // Separator line.
         quads.push(QuadData {
-            x: rect.x, y: input_y,
-            w: rect.width, h: 1.0,
+            x: rect.x,
+            y: input_y,
+            w: rect.width,
+            h: 1.0,
             color: INPUT_BAR_SEP,
         });
 
         // Input background.
         quads.push(QuadData {
-            x: rect.x, y: input_y + 1.0,
-            w: rect.width, h: INPUT_BAR_HEIGHT - 1.0,
+            x: rect.x,
+            y: input_y + 1.0,
+            w: rect.width,
+            h: INPUT_BAR_HEIGHT - 1.0,
             color: INPUT_BAR_BG,
         });
 
@@ -316,11 +322,7 @@ impl InputHandler for AgentAdapter {
 }
 
 impl Commandable for AgentAdapter {
-    fn accept_command(
-        &mut self,
-        cmd: &str,
-        args: &serde_json::Value,
-    ) -> anyhow::Result<String> {
+    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
             "dismiss" => {
                 self.pane.set_status(AgentPaneStatus::Done);
@@ -340,7 +342,8 @@ impl Commandable for AgentAdapter {
             "write_bytes" => {
                 // Raw bytes from route_bytes — decode as UTF-8 and feed to handle_input.
                 if let Some(bytes) = args.get("bytes").and_then(|v| v.as_array()) {
-                    let raw: Vec<u8> = bytes.iter()
+                    let raw: Vec<u8> = bytes
+                        .iter()
                         .filter_map(|b| b.as_u64().map(|n| n as u8))
                         .collect();
                     let text = String::from_utf8_lossy(&raw);
@@ -352,10 +355,9 @@ impl Commandable for AgentAdapter {
             }
             "scroll" => {
                 // Wheel scroll: {"direction": "up"|"down", "lines": N}
-                let lines = args.get("lines")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(3) as usize;
-                let direction = args.get("direction")
+                let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                let direction = args
+                    .get("direction")
                     .and_then(|v| v.as_str())
                     .unwrap_or("down");
                 let total_lines = self.pane.cached_lines().len();
@@ -483,7 +485,10 @@ mod tests {
         let result = adapter.accept_command("bogus", &serde_json::json!({}));
         assert!(result.is_err(), "unknown command must return Err");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unknown command"), "error must mention 'unknown command'");
+        assert!(
+            msg.contains("unknown command"),
+            "error must mention 'unknown command'"
+        );
         assert!(msg.contains("bogus"), "error must name the bad command");
     }
 
@@ -540,9 +545,7 @@ mod tests {
     /// includes it in `render_all` (tiled-split path, not overlay).
     #[test]
     fn agent_adapter_is_visual() {
-        let pane = crate::agent_pane::AgentPane::test_with_lines(vec![
-            "working...".into(),
-        ]);
+        let pane = crate::agent_pane::AgentPane::test_with_lines(vec!["working...".into()]);
         let adapter = AgentAdapter::new(pane);
         assert!(
             adapter.is_visual(),
@@ -576,9 +579,7 @@ mod tests {
     /// visual overlap with the terminal pane, the exact symptom of #13).
     #[test]
     fn agent_adapter_render_stays_within_rect() {
-        let lines: Vec<String> = (0..10)
-            .map(|i| format!("output line {i}"))
-            .collect();
+        let lines: Vec<String> = (0..10).map(|i| format!("output line {i}")).collect();
         let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
         let adapter = AgentAdapter::new(pane);
 
@@ -635,7 +636,10 @@ mod tests {
     fn agent_adapter_scroll_offset_starts_at_zero() {
         let pane = crate::agent_pane::AgentPane::test_with_lines(vec![]);
         let adapter = AgentAdapter::new(pane);
-        assert_eq!(adapter.scroll_offset, 0, "scroll must start at live view (bottom)");
+        assert_eq!(
+            adapter.scroll_offset, 0,
+            "scroll must start at live view (bottom)"
+        );
     }
 
     /// `scroll` command with direction "up" increments scroll_offset.
@@ -645,12 +649,18 @@ mod tests {
         let pane = crate::agent_pane::AgentPane::test_with_lines(lines);
         let mut adapter = AgentAdapter::new(pane);
 
-        let result = adapter.accept_command("scroll", &serde_json::json!({
-            "direction": "up",
-            "lines": 5,
-        }));
+        let result = adapter.accept_command(
+            "scroll",
+            &serde_json::json!({
+                "direction": "up",
+                "lines": 5,
+            }),
+        );
         assert!(result.is_ok());
-        assert!(adapter.scroll_offset > 0, "scroll_offset must increase on up scroll");
+        assert!(
+            adapter.scroll_offset > 0,
+            "scroll_offset must increase on up scroll"
+        );
     }
 
     /// `scroll` command with direction "down" decrements scroll_offset
@@ -661,10 +671,13 @@ mod tests {
         let mut adapter = AgentAdapter::new(pane);
         adapter.scroll_offset = 3;
 
-        let _ = adapter.accept_command("scroll", &serde_json::json!({
-            "direction": "down",
-            "lines": 10,
-        }));
+        let _ = adapter.accept_command(
+            "scroll",
+            &serde_json::json!({
+                "direction": "down",
+                "lines": 10,
+            }),
+        );
         assert_eq!(adapter.scroll_offset, 0, "scroll must not go below 0");
     }
 
@@ -710,18 +723,23 @@ mod tests {
         let adapter = AgentAdapter::new(pane);
 
         let rect = Rect {
-            x: 0.0, y: 0.0,
-            width: 400.0, height: 300.0,
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
             ..Default::default()
         };
         let render_out = adapter.render(&rect);
-        let scroll = render_out.scroll.expect("scroll state must be Some for 100 lines");
+        let scroll = render_out
+            .scroll
+            .expect("scroll state must be Some for 100 lines");
 
         let state = adapter.get_state();
-        let state_history = state["history_size"].as_u64().expect("history_size must be present");
+        let state_history = state["history_size"]
+            .as_u64()
+            .expect("history_size must be present");
         assert_eq!(
-            state_history,
-            scroll.history_size as u64,
+            state_history, scroll.history_size as u64,
             "get_state history_size ({}) must equal ScrollState.history_size ({}) \
              so mouse.rs click-jump math doesn't overshoot",
             state_history, scroll.history_size,
@@ -737,8 +755,10 @@ mod tests {
         let adapter = AgentAdapter::new(pane);
 
         let rect = Rect {
-            x: 0.0, y: 0.0,
-            width: 400.0, height: 300.0,
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
             ..Default::default()
         };
         let output = adapter.render(&rect);
@@ -756,8 +776,10 @@ mod tests {
         let adapter = AgentAdapter::new(pane);
 
         let rect = Rect {
-            x: 0.0, y: 0.0,
-            width: 400.0, height: 300.0,
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
             ..Default::default()
         };
         let output = adapter.render(&rect);
@@ -784,8 +806,10 @@ mod tests {
         let adapter = AgentAdapter::new(pane);
 
         let rect = Rect {
-            x: 0.0, y: 0.0,
-            width: 400.0, height: 300.0,
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
             ..Default::default()
         };
         // render() must be called first so cached_output_max_lines is populated.
@@ -823,34 +847,61 @@ mod tests {
     /// proves the pane-split registration path works without GPU resources.
     #[test]
     fn coordinator_registers_agent_adapter_alongside_terminal() {
-        use phantom_adapter::{AppCore, Commandable, BusParticipant, EventBus,
-                              InputHandler, Lifecycled, Permissioned, Renderable};
+        use crate::coordinator::AppCoordinator;
+        use phantom_adapter::{
+            AppCore, BusParticipant, Commandable, EventBus, InputHandler, Lifecycled, Permissioned,
+            Renderable,
+        };
+        use phantom_scene::clock::Cadence;
         use phantom_scene::node::{NodeId, NodeKind};
         use phantom_scene::tree::SceneTree;
-        use phantom_scene::clock::Cadence;
         use phantom_ui::layout::LayoutEngine;
-        use crate::coordinator::AppCoordinator;
 
         // Minimal mock terminal adapter.
         struct MockTerminal;
         impl AppCore for MockTerminal {
-            fn app_type(&self) -> &str { "terminal" }
-            fn is_alive(&self) -> bool { true }
+            fn app_type(&self) -> &str {
+                "terminal"
+            }
+            fn is_alive(&self) -> bool {
+                true
+            }
             fn update(&mut self, _dt: f32) {}
-            fn get_state(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn get_state(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
         }
         impl Renderable for MockTerminal {
-            fn render(&self, rect: &Rect) -> RenderOutput { RenderOutput {
-                quads: vec![QuadData { x: rect.x, y: rect.y, w: rect.width, h: rect.height, color: [1.0; 4] }],
-                text_segments: vec![], grid: None, scroll: None, selection: None,
-            }}
-            fn is_visual(&self) -> bool { true }
+            fn render(&self, rect: &Rect) -> RenderOutput {
+                RenderOutput {
+                    quads: vec![QuadData {
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.width,
+                        h: rect.height,
+                        color: [1.0; 4],
+                    }],
+                    text_segments: vec![],
+                    grid: None,
+                    scroll: None,
+                    selection: None,
+                }
+            }
+            fn is_visual(&self) -> bool {
+                true
+            }
         }
         impl InputHandler for MockTerminal {
-            fn handle_input(&mut self, _key: &str) -> bool { false }
+            fn handle_input(&mut self, _key: &str) -> bool {
+                false
+            }
         }
         impl Commandable for MockTerminal {
-            fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+            fn accept_command(
+                &mut self,
+                _cmd: &str,
+                _args: &serde_json::Value,
+            ) -> anyhow::Result<String> {
                 Ok("ok".into())
             }
         }
@@ -874,7 +925,8 @@ mod tests {
 
         // Split the layout to create a new pane for the agent.
         let term_pane_id = coord.pane_id_for(term_id).expect("terminal must have pane");
-        let (existing_child, new_child) = layout.split_vertical(term_pane_id)
+        let (existing_child, new_child) = layout
+            .split_vertical(term_pane_id)
             .expect("split must succeed");
         coord.remap_pane(term_id, term_pane_id, existing_child);
         layout.resize(800.0, 600.0).unwrap();
@@ -888,18 +940,25 @@ mod tests {
             new_child,
             agent_node,
             Cadence::unlimited(),
+            &mut layout,
         );
 
         // Both adapters must be running.
         let running = coord.all_app_ids();
-        assert!(running.contains(&term_id), "terminal adapter must be running");
+        assert!(
+            running.contains(&term_id),
+            "terminal adapter must be running"
+        );
         assert!(running.contains(&agent_id), "agent adapter must be running");
         assert_eq!(running.len(), 2, "exactly 2 adapters registered");
 
         // Both must have distinct pane IDs — they share no pane.
         let term_pane = coord.pane_id_for(term_id).expect("terminal has pane");
         let agent_pane_id = coord.pane_id_for(agent_id).expect("agent has pane");
-        assert_ne!(term_pane, agent_pane_id, "terminal and agent must occupy different panes");
+        assert_ne!(
+            term_pane, agent_pane_id,
+            "terminal and agent must occupy different panes"
+        );
 
         // render_all must return 2 outputs (both are visual).
         let outputs = coord.render_all(&layout, (8.0, 16.0));
@@ -910,12 +969,17 @@ mod tests {
         let term_rect = layout.get_pane_rect(term_pane).expect("terminal rect");
         let agent_rect = layout.get_pane_rect(agent_pane_id).expect("agent rect");
         assert!(
-            (term_rect.x - agent_rect.x).abs() > 1.0
-                || (term_rect.y - agent_rect.y).abs() > 1.0,
+            (term_rect.x - agent_rect.x).abs() > 1.0 || (term_rect.y - agent_rect.y).abs() > 1.0,
             "terminal and agent must occupy different spatial regions; \
              terminal rect ({:.0},{:.0} {:.0}x{:.0}) vs agent rect ({:.0},{:.0} {:.0}x{:.0})",
-            term_rect.x, term_rect.y, term_rect.width, term_rect.height,
-            agent_rect.x, agent_rect.y, agent_rect.width, agent_rect.height,
+            term_rect.x,
+            term_rect.y,
+            term_rect.width,
+            term_rect.height,
+            agent_rect.x,
+            agent_rect.y,
+            agent_rect.width,
+            agent_rect.height,
         );
     }
 
@@ -923,30 +987,48 @@ mod tests {
     /// both directions — proving Cmd+[/Cmd+] can visit both panes.
     #[test]
     fn focus_cycles_through_agent_and_terminal() {
-        use phantom_adapter::{AppCore, Commandable, BusParticipant, EventBus,
-                              InputHandler, Lifecycled, Permissioned, Renderable};
+        use crate::coordinator::AppCoordinator;
+        use phantom_adapter::{
+            AppCore, BusParticipant, Commandable, EventBus, InputHandler, Lifecycled, Permissioned,
+            Renderable,
+        };
+        use phantom_scene::clock::Cadence;
         use phantom_scene::node::{NodeId, NodeKind};
         use phantom_scene::tree::SceneTree;
-        use phantom_scene::clock::Cadence;
         use phantom_ui::layout::LayoutEngine;
-        use crate::coordinator::AppCoordinator;
 
         struct MockTerminal2;
         impl AppCore for MockTerminal2 {
-            fn app_type(&self) -> &str { "terminal" }
-            fn is_alive(&self) -> bool { true }
+            fn app_type(&self) -> &str {
+                "terminal"
+            }
+            fn is_alive(&self) -> bool {
+                true
+            }
             fn update(&mut self, _dt: f32) {}
-            fn get_state(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn get_state(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
         }
         impl Renderable for MockTerminal2 {
-            fn render(&self, _rect: &Rect) -> RenderOutput { RenderOutput::default() }
-            fn is_visual(&self) -> bool { true }
+            fn render(&self, _rect: &Rect) -> RenderOutput {
+                RenderOutput::default()
+            }
+            fn is_visual(&self) -> bool {
+                true
+            }
         }
         impl InputHandler for MockTerminal2 {
-            fn handle_input(&mut self, _key: &str) -> bool { false }
+            fn handle_input(&mut self, _key: &str) -> bool {
+                false
+            }
         }
         impl Commandable for MockTerminal2 {
-            fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+            fn accept_command(
+                &mut self,
+                _cmd: &str,
+                _args: &serde_json::Value,
+            ) -> anyhow::Result<String> {
                 Ok("ok".into())
             }
         }
@@ -961,7 +1043,9 @@ mod tests {
 
         let term_id = coord.register_adapter(
             Box::new(MockTerminal2),
-            &mut layout, &mut scene, content,
+            &mut layout,
+            &mut scene,
+            content,
             Cadence::unlimited(),
         );
 
@@ -978,6 +1062,7 @@ mod tests {
             new_child,
             agent_node,
             Cadence::unlimited(),
+            &mut layout,
         );
 
         // Focus on agent.

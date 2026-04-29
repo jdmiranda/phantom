@@ -133,11 +133,7 @@ impl InputHandler for VideoAdapter {
 }
 
 impl Commandable for VideoAdapter {
-    fn accept_command(
-        &mut self,
-        cmd: &str,
-        _args: &serde_json::Value,
-    ) -> anyhow::Result<String> {
+    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
             "stop" => {
                 self.playback.stop();

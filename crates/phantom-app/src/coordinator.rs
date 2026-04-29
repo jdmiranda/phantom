@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use phantom_adapter::{AppAdapter, AppId, AppRegistry, EventBus, Rect, RenderOutput};
 use phantom_adapter::spatial::SpatialPreference;
+use phantom_adapter::{AppAdapter, AppId, AppRegistry, EventBus, Rect, RenderOutput};
 use phantom_scene::clock::Cadence;
 use phantom_scene::dirty::DirtyFlags;
 use phantom_scene::node::{NodeId, NodeKind, RenderLayer};
@@ -79,18 +79,20 @@ impl AppCoordinator {
 
     /// Handle a window resize: update the arbiter's available area and
     /// re-negotiate spatial allocations.
-    pub fn on_window_resize(&mut self, available: (f32, f32)) {
+    pub fn on_window_resize(&mut self, available: (f32, f32), layout: &mut LayoutEngine) {
         self.arbiter.set_available(available);
-        self.run_arbiter_negotiation();
+        self.run_arbiter_negotiation(layout);
     }
 
-    /// Collect spatial preferences from all running adapters, run the
-    /// arbiter, and log the resulting plan.
+    /// Collect spatial preferences from all running adapters, run the arbiter,
+    /// and apply the resulting allocations as Taffy `min_size` / `max_size`
+    /// constraints on the matching pane nodes.
     ///
-    /// limitation: Applying the plan's allocations as Taffy min/max constraints
-    /// on the corresponding pane nodes is tracked in #154. For now we log the
-    /// plan so the arbiter logic can be iterated without layout regressions. // see #154
-    fn run_arbiter_negotiation(&self) {
+    /// The arbiter's pixel-space `Rect` for each `AppId` is looked up via
+    /// `app_pane_map` and forwarded to [`LayoutEngine::set_pane_size_constraints`].
+    /// Adapters that have no pane mapping (e.g. headless adapters registered
+    /// without a layout pane) are skipped silently.
+    fn run_arbiter_negotiation(&mut self, layout: &mut LayoutEngine) {
         let default_pref = SpatialPreference::simple(40, 10);
 
         let participants: Vec<(AppId, SpatialPreference)> = self
@@ -114,6 +116,8 @@ impl AppCoordinator {
             participants.len(),
             plan.allocations.len(),
         );
+
+        // Apply each allocation as Taffy min/max constraints.
         for (id, rect) in &plan.allocations {
             log::trace!(
                 "  AppId {id}: ({:.0}, {:.0}) {:.0}x{:.0}",
@@ -122,6 +126,16 @@ impl AppCoordinator {
                 rect.width,
                 rect.height,
             );
+
+            let Some(&pane_id) = self.app_pane_map.get(id) else {
+                continue;
+            };
+
+            let min = Some((rect.width, rect.height));
+            let max = Some((rect.width, rect.height));
+            if let Err(e) = layout.set_pane_size_constraints(pane_id, min, max) {
+                log::warn!("Failed to apply arbiter constraints for adapter {id}: {e}");
+            }
         }
     }
 
@@ -165,8 +179,15 @@ impl AppCoordinator {
         // Scene node.
         let node_id = scene.add_node(content_node, NodeKind::Pane);
         if let Some(node) = scene.get_mut(node_id) {
-            let app_type = self.registry.get(id).map(|e| e.app_type.as_str()).unwrap_or("unknown");
-            node.z_order = match app_type { "video" => 10, _ => 0 };
+            let app_type = self
+                .registry
+                .get(id)
+                .map(|e| e.app_type.as_str())
+                .unwrap_or("unknown");
+            node.z_order = match app_type {
+                "video" => 10,
+                _ => 0,
+            };
             node.render_layer = RenderLayer::Scene;
         }
         self.scene_map.insert(id, node_id);
@@ -178,7 +199,7 @@ impl AppCoordinator {
         }
 
         // Re-negotiate spatial allocations with the new participant.
-        self.run_arbiter_negotiation();
+        self.run_arbiter_negotiation(layout);
         self.dirty_adapters.insert(id);
 
         id
@@ -195,6 +216,7 @@ impl AppCoordinator {
         pane_id: PaneId,
         scene_node: NodeId,
         cadence: Cadence,
+        layout: &mut LayoutEngine,
     ) -> AppId {
         let is_first = self.registry.count() == 0;
 
@@ -223,7 +245,7 @@ impl AppCoordinator {
         }
 
         // Re-negotiate spatial allocations with the new participant.
-        self.run_arbiter_negotiation();
+        self.run_arbiter_negotiation(layout);
         self.dirty_adapters.insert(id);
 
         id
@@ -255,7 +277,7 @@ impl AppCoordinator {
         }
 
         // Re-negotiate so remaining adapters can claim freed space.
-        self.run_arbiter_negotiation();
+        self.run_arbiter_negotiation(layout);
         self.render_cache.remove(&app_id);
         self.dirty_adapters.remove(&app_id);
         self.floating.remove(&app_id);
@@ -417,7 +439,10 @@ impl AppCoordinator {
                     node.dirty |= DirtyFlags::TRANSFORM;
                     log::debug!(
                         "Scene sync: adapter {app_id} -> node {node_id} at ({:.0}, {:.0}, {:.0}x{:.0})",
-                        rect.x, rect.y, rect.width, rect.height,
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height,
                     );
                 }
             }
@@ -430,7 +455,16 @@ impl AppCoordinator {
         for id in self.registry.all_running() {
             if let Some(pane_id) = self.app_pane_map.get(&id) {
                 if let Ok(r) = layout.get_pane_rect(*pane_id) {
-                    allocations.insert(id, Rect { x: r.x, y: r.y, width: r.width, height: r.height, ..Default::default() });
+                    allocations.insert(
+                        id,
+                        Rect {
+                            x: r.x,
+                            y: r.y,
+                            width: r.width,
+                            height: r.height,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
         }
@@ -443,24 +477,46 @@ impl AppCoordinator {
     pub fn render_all_with_scene(&self, scene: &SceneTree) -> Vec<(AppId, Rect, RenderOutput)> {
         let mut outputs = Vec::new();
         for id in self.registry.all_running() {
-            let Some(entry) = self.registry.get(id) else { continue };
-            if !entry.visual { continue; }
-            let Some(&node_id) = self.scene_map.get(&id) else { continue };
-            let Some(node) = scene.get(node_id) else { continue };
+            let Some(entry) = self.registry.get(id) else {
+                continue;
+            };
+            if !entry.visual {
+                continue;
+            }
+            let Some(&node_id) = self.scene_map.get(&id) else {
+                continue;
+            };
+            let Some(node) = scene.get(node_id) else {
+                continue;
+            };
             let wt = node.world_transform;
-            let rect = Rect { x: wt.x, y: wt.y, width: wt.width, height: wt.height, ..Default::default() };
-            let Some(adapter) = self.registry.get_adapter(id) else { continue };
+            let rect = Rect {
+                x: wt.x,
+                y: wt.y,
+                width: wt.width,
+                height: wt.height,
+                ..Default::default()
+            };
+            let Some(adapter) = self.registry.get_adapter(id) else {
+                continue;
+            };
             let output = adapter.render(&rect);
             outputs.push((id, rect, output));
         }
 
         // Sort by z_order; focused adapter gets +1 bonus.
         outputs.sort_by_key(|(app_id, _, _)| {
-            let base = self.scene_map.get(app_id)
+            let base = self
+                .scene_map
+                .get(app_id)
                 .and_then(|&nid| scene.get(nid))
                 .map(|n| n.z_order)
                 .unwrap_or(0);
-            if self.focused == Some(*app_id) { base + 1 } else { base }
+            if self.focused == Some(*app_id) {
+                base + 1
+            } else {
+                base
+            }
         });
 
         outputs
@@ -468,7 +524,8 @@ impl AppCoordinator {
 
     /// Query which render layer an adapter's scene node belongs to.
     pub fn render_layer_for(&self, app_id: AppId, scene: &SceneTree) -> RenderLayer {
-        self.scene_map.get(&app_id)
+        self.scene_map
+            .get(&app_id)
             .and_then(|&nid| scene.get(nid))
             .map(|n| n.render_layer)
             .unwrap_or(RenderLayer::Scene)
@@ -483,7 +540,10 @@ impl AppCoordinator {
         cell_size: (f32, f32),
     ) -> LayeredRenderOutputs {
         let all = self.render_all(layout, cell_size);
-        let mut result = LayeredRenderOutputs { scene: Vec::new(), overlay: Vec::new() };
+        let mut result = LayeredRenderOutputs {
+            scene: Vec::new(),
+            overlay: Vec::new(),
+        };
         for item in all {
             let (app_id, _, _) = &item;
             match self.render_layer_for(*app_id, scene) {
@@ -495,11 +555,30 @@ impl AppCoordinator {
     }
 
     /// Detach a pane from the tiled grid into floating mode.
-    pub fn detach_to_float(&mut self, app_id: AppId, layout: &mut LayoutEngine, scene: &mut SceneTree) {
-        let rect = self.app_pane_map.get(&app_id)
+    pub fn detach_to_float(
+        &mut self,
+        app_id: AppId,
+        layout: &mut LayoutEngine,
+        scene: &mut SceneTree,
+    ) {
+        let rect = self
+            .app_pane_map
+            .get(&app_id)
             .and_then(|pid| layout.get_pane_rect(*pid).ok())
-            .map(|r| Rect { x: r.x, y: r.y, width: r.width, height: r.height, ..Default::default() })
-            .unwrap_or(Rect { x: 100.0, y: 100.0, width: 600.0, height: 400.0, ..Default::default() });
+            .map(|r| Rect {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+                ..Default::default()
+            })
+            .unwrap_or(Rect {
+                x: 100.0,
+                y: 100.0,
+                width: 600.0,
+                height: 400.0,
+                ..Default::default()
+            });
 
         if let Some(pane_id) = self.app_pane_map.remove(&app_id) {
             self.pane_map.remove(&pane_id);
@@ -521,8 +600,14 @@ impl AppCoordinator {
             }
         }
 
-        self.run_arbiter_negotiation();
-        log::info!("Detached adapter {app_id} to floating at ({:.0},{:.0} {:.0}x{:.0})", rect.x, rect.y, rect.width, rect.height);
+        self.run_arbiter_negotiation(layout);
+        log::info!(
+            "Detached adapter {app_id} to floating at ({:.0},{:.0} {:.0}x{:.0})",
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height
+        );
     }
 
     /// Get the scene node ID for an adapter, if it exists.
@@ -530,9 +615,15 @@ impl AppCoordinator {
         self.scene_map.get(&app_id).copied()
     }
 
-    pub fn is_floating(&self, app_id: AppId) -> bool { self.floating.contains(&app_id) }
-    pub fn float_rect(&self, app_id: AppId) -> Option<&Rect> { self.float_rects.get(&app_id) }
-    pub fn floating_ids(&self) -> impl Iterator<Item = AppId> + '_ { self.floating.iter().copied() }
+    pub fn is_floating(&self, app_id: AppId) -> bool {
+        self.floating.contains(&app_id)
+    }
+    pub fn float_rect(&self, app_id: AppId) -> Option<&Rect> {
+        self.float_rects.get(&app_id)
+    }
+    pub fn floating_ids(&self) -> impl Iterator<Item = AppId> + '_ {
+        self.floating.iter().copied()
+    }
 
     pub fn move_floating(&mut self, app_id: AppId, x: f32, y: f32) {
         if let Some(rect) = self.float_rects.get_mut(&app_id) {
@@ -549,8 +640,15 @@ impl AppCoordinator {
     }
 
     /// Dock a floating pane back into the tiled grid.
-    pub fn dock_to_grid(&mut self, app_id: AppId, layout: &mut LayoutEngine, scene: &mut SceneTree) {
-        if !self.floating.remove(&app_id) { return; }
+    pub fn dock_to_grid(
+        &mut self,
+        app_id: AppId,
+        layout: &mut LayoutEngine,
+        scene: &mut SceneTree,
+    ) {
+        if !self.floating.remove(&app_id) {
+            return;
+        }
         self.float_rects.remove(&app_id);
 
         match layout.add_pane() {
@@ -572,7 +670,7 @@ impl AppCoordinator {
             }
         }
 
-        self.run_arbiter_negotiation();
+        self.run_arbiter_negotiation(layout);
         log::info!("Docked adapter {app_id} back to grid");
     }
 
@@ -673,7 +771,10 @@ impl AppCoordinator {
         self.registry
             .get_adapter(app_id)
             .map(|a| a.get_state())
-            .and_then(|s| s.get("mouse_mode").and_then(|v| v.as_str().map(String::from)))
+            .and_then(|s| {
+                s.get("mouse_mode")
+                    .and_then(|v| v.as_str().map(String::from))
+            })
             .is_some_and(|m| m != "none")
     }
 
@@ -686,7 +787,9 @@ impl AppCoordinator {
         cmd: &str,
         args: &serde_json::Value,
     ) -> anyhow::Result<String> {
-        let id = self.focused.ok_or_else(|| anyhow::anyhow!("no focused adapter"))?;
+        let id = self
+            .focused
+            .ok_or_else(|| anyhow::anyhow!("no focused adapter"))?;
         self.send_command(id, cmd, args)
     }
 
@@ -816,11 +919,11 @@ impl AppCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phantom_adapter::{
-        AppState, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned,
-        QuadData, Renderable, TextData,
-    };
     use phantom_adapter::AppCore;
+    use phantom_adapter::{
+        AppState, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, QuadData,
+        Renderable, TextData,
+    };
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1002,7 +1105,10 @@ mod tests {
         coord.update_all(Duration::from_millis(16));
 
         let after = UPDATE_COUNTER.load(Ordering::Relaxed);
-        assert!(after > before, "update should have been called at least once");
+        assert!(
+            after > before,
+            "update should have been called at least once"
+        );
     }
 
     #[test]
@@ -1186,7 +1292,9 @@ mod tests {
     fn test_bus_accessors() {
         let mut coord = AppCoordinator::new_test(EventBus::new());
         assert_eq!(coord.bus().topic_count(), 0);
-        let _ = coord.bus_mut().create_topic(0, "test", phantom_adapter::DataType::Text);
+        let _ = coord
+            .bus_mut()
+            .create_topic(0, "test", phantom_adapter::DataType::Text);
         assert_eq!(coord.bus().topic_count(), 1);
     }
 
@@ -1202,27 +1310,47 @@ mod tests {
     struct PassiveAdapter;
 
     impl AppCore for PassiveAdapter {
-        fn app_type(&self) -> &str { "passive" }
-        fn is_alive(&self) -> bool { true }
+        fn app_type(&self) -> &str {
+            "passive"
+        }
+        fn is_alive(&self) -> bool {
+            true
+        }
         fn update(&mut self, _dt: f32) {}
-        fn get_state(&self) -> serde_json::Value { json!({"type": "passive"}) }
+        fn get_state(&self) -> serde_json::Value {
+            json!({"type": "passive"})
+        }
     }
 
     impl Renderable for PassiveAdapter {
-        fn render(&self, _rect: &Rect) -> RenderOutput { RenderOutput::default() }
-        fn is_visual(&self) -> bool { false }
+        fn render(&self, _rect: &Rect) -> RenderOutput {
+            RenderOutput::default()
+        }
+        fn is_visual(&self) -> bool {
+            false
+        }
     }
 
     impl InputHandler for PassiveAdapter {
-        fn handle_input(&mut self, _key: &str) -> bool { false }
-        fn accepts_input(&self) -> bool { false }
+        fn handle_input(&mut self, _key: &str) -> bool {
+            false
+        }
+        fn accepts_input(&self) -> bool {
+            false
+        }
     }
 
     impl Commandable for PassiveAdapter {
-        fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+        fn accept_command(
+            &mut self,
+            _cmd: &str,
+            _args: &serde_json::Value,
+        ) -> anyhow::Result<String> {
             Ok("unreachable".into())
         }
-        fn accepts_commands(&self) -> bool { false }
+        fn accepts_commands(&self) -> bool {
+            false
+        }
     }
 
     impl BusParticipant for PassiveAdapter {}
@@ -1238,7 +1366,9 @@ mod tests {
 
         let id = coord.register_adapter(
             Box::new(PassiveAdapter),
-            &mut layout, &mut scene, content,
+            &mut layout,
+            &mut scene,
+            content,
             Cadence::unlimited(),
         );
 
@@ -1258,13 +1388,20 @@ mod tests {
 
         let id = coord.register_adapter(
             Box::new(PassiveAdapter),
-            &mut layout, &mut scene, content,
+            &mut layout,
+            &mut scene,
+            content,
             Cadence::unlimited(),
         );
 
         let result = coord.send_command(id, "test", &json!({}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not accept commands"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("does not accept commands")
+        );
     }
 
     #[test]
@@ -1284,7 +1421,9 @@ mod tests {
         // Passive adapter: visual=false, input=false, commands=false.
         let id2 = coord.register_adapter(
             Box::new(PassiveAdapter),
-            &mut layout, &mut scene, content,
+            &mut layout,
+            &mut scene,
+            content,
             Cadence::unlimited(),
         );
         let entry2 = coord.registry().get(id2).unwrap();
@@ -1304,7 +1443,9 @@ mod tests {
         let _vis = register_mock(&mut coord, &mut layout, &mut scene, content, "vis");
         coord.register_adapter(
             Box::new(MockAdapter::headless("bg")),
-            &mut layout, &mut scene, content,
+            &mut layout,
+            &mut scene,
+            content,
             Cadence::unlimited(),
         );
 
@@ -1379,10 +1520,30 @@ mod tests {
         let layout_rect = layout.get_pane_rect(pane_id).unwrap();
         let expected = pane_inner_rect(cell_size, container_rect(layout_rect, cell_size));
 
-        assert!((rect_a.x - expected.x).abs() < 0.01, "x: got {} expected {}", rect_a.x, expected.x);
-        assert!((rect_a.y - expected.y).abs() < 0.01, "y: got {} expected {}", rect_a.y, expected.y);
-        assert!((rect_a.width - expected.width).abs() < 0.01, "w: got {} expected {}", rect_a.width, expected.width);
-        assert!((rect_a.height - expected.height).abs() < 0.01, "h: got {} expected {}", rect_a.height, expected.height);
+        assert!(
+            (rect_a.x - expected.x).abs() < 0.01,
+            "x: got {} expected {}",
+            rect_a.x,
+            expected.x
+        );
+        assert!(
+            (rect_a.y - expected.y).abs() < 0.01,
+            "y: got {} expected {}",
+            rect_a.y,
+            expected.y
+        );
+        assert!(
+            (rect_a.width - expected.width).abs() < 0.01,
+            "w: got {} expected {}",
+            rect_a.width,
+            expected.width
+        );
+        assert!(
+            (rect_a.height - expected.height).abs() < 0.01,
+            "h: got {} expected {}",
+            rect_a.height,
+            expected.height
+        );
 
         // And the quad the adapter emitted is at that same rect (sanity).
         assert!((q.x - expected.x).abs() < 0.01);
@@ -1395,9 +1556,7 @@ mod tests {
     /// `container_rect.y + title_h`.
     #[test]
     fn adapter_render_y_starts_below_title_strip() {
-        use crate::pane::{
-            CONTAINER_TITLE_H_CELLS, container_rect,
-        };
+        use crate::pane::{CONTAINER_TITLE_H_CELLS, container_rect};
 
         let cell_size = (8.0_f32, 16.0_f32);
         let mut coord = AppCoordinator::new_test(EventBus::new());
@@ -1436,9 +1595,7 @@ mod tests {
     /// paint outside the chrome's body region.
     #[test]
     fn adapter_render_height_excludes_title_strip() {
-        use crate::pane::{
-            CONTAINER_PAD_B_CELLS, CONTAINER_TITLE_H_CELLS, container_rect,
-        };
+        use crate::pane::{CONTAINER_PAD_B_CELLS, CONTAINER_TITLE_H_CELLS, container_rect};
 
         let cell_size = (8.0_f32, 16.0_f32);
         let mut coord = AppCoordinator::new_test(EventBus::new());
@@ -1542,7 +1699,10 @@ mod tests {
         // only checks direct children of the content node and returns 0 at
         // baseline, making the assertion trivially pass even if nodes leak.
         let baseline = layout.total_node_count();
-        assert!(baseline > 0, "total_node_count must see chrome nodes; got 0 — check test-utils feature");
+        assert!(
+            baseline > 0,
+            "total_node_count must see chrome nodes; got 0 — check test-utils feature"
+        );
 
         for cycle in 0..1_000 {
             // Register creates one new Taffy node.
@@ -1559,8 +1719,7 @@ mod tests {
 
             let after = layout.total_node_count();
             assert_eq!(
-                after,
-                baseline,
+                after, baseline,
                 "cycle {cycle}: Taffy node count leaked — expected {baseline}, got {after}",
             );
         }
@@ -1614,6 +1773,7 @@ mod tests {
             p_a_r,
             scene_node_c,
             Cadence::unlimited(),
+            &mut layout,
         );
 
         // Split P_A_L vertically: P_A_L becomes a container, P_A_T and P_A_B are leaves.
@@ -1629,6 +1789,7 @@ mod tests {
             p_a_b,
             scene_node_d,
             Cadence::unlimited(),
+            &mut layout,
         );
 
         layout.resize(800.0, 600.0).unwrap();
@@ -1642,12 +1803,10 @@ mod tests {
 
         let after = layout.total_node_count();
         assert_eq!(
-            after,
-            chrome_baseline,
+            after, chrome_baseline,
             "nested-split coordinator scenario leaked nodes: expected {chrome_baseline}, got {after}",
         );
     }
-
     // ── QA #159: Horizontal split — Cmd+D creates two functional panes ────────
 
     /// Splitting a single-pane layout horizontally must produce two child
@@ -1676,6 +1835,7 @@ mod tests {
             new_child,
             scene_node_b,
             Cadence::unlimited(),
+            &mut layout,
         );
         coord.set_focus(id_b);
 
@@ -1724,6 +1884,7 @@ mod tests {
             new_child_ab,
             scene_node_b,
             Cadence::unlimited(),
+            &mut layout,
         );
         coord.set_focus(id_b);
 
@@ -1740,6 +1901,7 @@ mod tests {
             new_child_bc,
             scene_node_c,
             Cadence::unlimited(),
+            &mut layout,
         );
         coord.set_focus(id_c);
 
@@ -1793,6 +1955,7 @@ mod tests {
             new_child,
             scene_node_b,
             Cadence::unlimited(),
+            &mut layout,
         );
         coord.set_focus(id_b);
 
@@ -1835,5 +1998,58 @@ mod tests {
 
         assert_eq!(coord.focused(), None, "focus must be None after closing the last pane");
         assert!(coord.all_app_ids().is_empty(), "no adapters must remain");
+    }
+
+    // ── Issue #154: arbiter allocations wired into Taffy min/max constraints ──
+
+    /// A single-adapter negotiation must apply the arbiter's allocation as
+    /// Taffy `min_size` / `max_size` constraints on the adapter's pane node.
+    ///
+    /// Arrange: register one visual adapter, set the arbiter to a known
+    ///          content area, and trigger negotiation (which happens
+    ///          automatically on `register_adapter`).
+    /// Act:     compute the Taffy layout.
+    /// Assert:  the pane's Taffy-computed rect is bounded by the arbiter's
+    ///          allocation (max constraint), proving the allocation was applied.
+    #[test]
+    fn arbiter_allocation_constrains_taffy_pane() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Configure the arbiter with a small fixed content area so the plan
+        // is deterministic: 640x480 px, 8x16 cell size.
+        let available = (640.0_f32, 480.0_f32);
+        let cell = (8.0_f32, 16.0_f32);
+        coord.set_arbiter_size(available, cell);
+
+        // Register one adapter — triggers `run_arbiter_negotiation` which
+        // must now call `set_pane_size_constraints` on the pane's node.
+        let id = register_mock(&mut coord, &mut layout, &mut scene, content, "solo");
+
+        // Recompute the layout at the same content dimensions.
+        layout.resize(available.0, available.1 + 58.0).unwrap(); // 58 ≈ tab_bar+status_bar
+
+        // The pane node must have received the constraint.
+        let pane_id = coord.pane_id_for(id).expect("pane must exist");
+        let rect = layout
+            .get_pane_rect(pane_id)
+            .expect("rect must be computable");
+
+        // The arbiter allocates full width and full available height to the
+        // single adapter. The max constraint caps the pane at 480px high.
+        assert!(
+            rect.height <= available.1 + 1.0,
+            "Taffy pane height {} must not exceed arbiter allocation {} (constraint applied)",
+            rect.height,
+            available.1,
+        );
+        assert!(
+            rect.width <= available.0 + 1.0,
+            "Taffy pane width {} must not exceed arbiter allocation {} (constraint applied)",
+            rect.width,
+            available.0,
+        );
     }
 }

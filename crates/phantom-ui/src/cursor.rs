@@ -198,8 +198,8 @@ impl Default for CursorBlink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokens::Tokens;
     use crate::RenderCtx;
+    use crate::tokens::Tokens;
 
     // -- Default construction --
 
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn tick_two_periods_returns_to_visible() {
         let mut b = CursorBlink::default();
-        b.tick(530);   // → hidden
+        b.tick(530); // → hidden
         let vis = b.tick(1060); // → visible again
         assert!(vis);
     }
@@ -259,8 +259,8 @@ mod tests {
     #[test]
     fn tick_three_periods_is_hidden() {
         let mut b = CursorBlink::default();
-        b.tick(530);   // period 1 → hidden
-        b.tick(1060);  // period 2 → visible
+        b.tick(530); // period 1 → hidden
+        b.tick(1060); // period 2 → visible
         let vis = b.tick(1590); // period 3 → hidden
         assert!(!vis);
     }
@@ -274,7 +274,10 @@ mod tests {
 
         // Jump another 8 periods (even). State should not change.
         let vis2 = b.tick(7 * 530 + 8 * 530);
-        assert!(!vis2, "even number of additional periods must leave state unchanged");
+        assert!(
+            !vis2,
+            "even number of additional periods must leave state unchanged"
+        );
     }
 
     // -- Sub-period carry-over --
@@ -296,10 +299,13 @@ mod tests {
     #[test]
     fn backward_time_does_not_toggle() {
         let mut b = CursorBlink::default();
-        b.tick(1000);   // somewhere past several periods
+        b.tick(1000); // somewhere past several periods
         let state_before = b.is_visible();
         let vis = b.tick(500); // earlier timestamp
-        assert_eq!(vis, state_before, "backward tick must not change visibility");
+        assert_eq!(
+            vis, state_before,
+            "backward tick must not change visibility"
+        );
     }
 
     #[test]

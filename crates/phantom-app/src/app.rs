@@ -19,8 +19,8 @@ use phantom_renderer::gpu::GpuContext;
 use phantom_renderer::grid::GridRenderer;
 use phantom_renderer::postfx::PostFxPipeline;
 use phantom_renderer::quads::{QuadInstance, QuadRenderer};
-use phantom_renderer::video::VideoRenderer;
 use phantom_renderer::text::TextRenderer;
+use phantom_renderer::video::VideoRenderer;
 
 use phantom_terminal::terminal::PhantomTerminal;
 
@@ -29,7 +29,7 @@ use phantom_ui::layout::LayoutEngine;
 use phantom_ui::themes::Theme;
 use phantom_ui::widgets::{StatusBar, TabBar};
 
-use phantom_adapter::{EventBus, TopicId, DataType};
+use phantom_adapter::{DataType, EventBus, TopicId};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::{OodaConfig, OodaLoop};
@@ -58,7 +58,6 @@ use crate::supervisor_client::SupervisorClient;
 /// Default font size in points for the terminal text renderer.
 const DEFAULT_FONT_SIZE: f32 = 18.0;
 
-
 // ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
@@ -83,10 +82,17 @@ pub(crate) enum ResizeEdge {
 /// State for dragging or resizing a floating pane.
 #[derive(Debug, Clone)]
 pub(crate) enum FloatInteraction {
-    Dragging { app_id: u32, offset_x: f32, offset_y: f32 },
-    Resizing { app_id: u32, edge: ResizeEdge, initial_rect: phantom_adapter::Rect },
+    Dragging {
+        app_id: u32,
+        offset_x: f32,
+        offset_y: f32,
+    },
+    Resizing {
+        app_id: u32,
+        edge: ResizeEdge,
+        initial_rect: phantom_adapter::Rect,
+    },
 }
-
 
 // ---------------------------------------------------------------------------
 // App
@@ -248,14 +254,16 @@ pub struct App {
     //    `None` when no inspector pane has ever been spawned; `Some(Arc<RwLock<…>>)`
     //    once the user runs `inspect` and stays present so the adapter and the
     //    App share the same lock for the rest of the session.
-    pub(crate) inspector_snapshot: Option<std::sync::Arc<std::sync::RwLock<phantom_agents::inspector::InspectorView>>>,
+    pub(crate) inspector_snapshot:
+        Option<std::sync::Arc<std::sync::RwLock<phantom_agents::inspector::InspectorView>>>,
 
     // -- Live design tokens shared with the InspectorAdapter (issue #31).
     //    `None` before the first inspector pane is spawned. After spawn the
     //    App and adapter share the same `Arc<RwLock<Tokens>>`; a theme switch
     //    can write a new `Tokens` value into the arc and the inspector picks
     //    it up at the next `render()` without an adapter restart.
-    pub(crate) inspector_tokens: Option<std::sync::Arc<std::sync::RwLock<phantom_ui::tokens::Tokens>>>,
+    pub(crate) inspector_tokens:
+        Option<std::sync::Arc<std::sync::RwLock<phantom_ui::tokens::Tokens>>>,
 
     // -- Lars fix-thread sink: shared queue of `EventKind::AgentBlocked`
     //    substrate events emitted by agent panes when their consecutive
@@ -459,7 +467,10 @@ impl App {
 
         // -- Font / text (scaled for HiDPI) --
         let scaled_font_size = config.font_size * scale_factor;
-        info!("Font: {:.0}pt logical × {:.1}x scale = {:.0}pt physical", config.font_size, scale_factor, scaled_font_size);
+        info!(
+            "Font: {:.0}pt logical × {:.1}x scale = {:.0}pt physical",
+            config.font_size, scale_factor, scaled_font_size
+        );
         let mut text_renderer = TextRenderer::new(scaled_font_size);
         let cell_size = text_renderer.measure_cell();
         info!(
@@ -472,8 +483,7 @@ impl App {
 
         // -- Renderers --
         let quad_renderer = QuadRenderer::new(&gpu.device, format);
-        let grid_renderer =
-            GridRenderer::new(&gpu.device, format, atlas.bind_group_layout());
+        let grid_renderer = GridRenderer::new(&gpu.device, format, atlas.bind_group_layout());
         let postfx = PostFxPipeline::new(&gpu.device, format, width, height);
         let video_renderer = VideoRenderer::new(&gpu.device, format);
 
@@ -627,9 +637,8 @@ impl App {
                 let dir = std::env::temp_dir().join("phantom-runtime");
                 let _ = std::fs::create_dir_all(&dir);
                 let cfg = crate::runtime::RuntimeConfig::under_dir(&dir);
-                crate::runtime::AgentRuntime::new(cfg, Vec::new()).expect(
-                    "substrate runtime: temp-dir fallback must open event log",
-                )
+                crate::runtime::AgentRuntime::new(cfg, Vec::new())
+                    .expect("substrate runtime: temp-dir fallback must open event log")
             }
         };
 
@@ -657,11 +666,17 @@ impl App {
         let first_pane_node = scene.add_node(content_node, NodeKind::Pane);
         // Overlay nodes (rendered after CRT post-fx).
         let cmd_bar_node = scene.add_node(root, NodeKind::CommandBar);
-        if let Some(n) = scene.get_mut(cmd_bar_node) { n.render_layer = RenderLayer::Overlay; }
+        if let Some(n) = scene.get_mut(cmd_bar_node) {
+            n.render_layer = RenderLayer::Overlay;
+        }
         let debug_hud_node = scene.add_node(root, NodeKind::DebugHud);
-        if let Some(n) = scene.get_mut(debug_hud_node) { n.render_layer = RenderLayer::Overlay; }
+        if let Some(n) = scene.get_mut(debug_hud_node) {
+            n.render_layer = RenderLayer::Overlay;
+        }
         let suggestion_node = scene.add_node(root, NodeKind::AgentSuggestion);
-        if let Some(n) = scene.get_mut(suggestion_node) { n.render_layer = RenderLayer::Overlay; }
+        if let Some(n) = scene.get_mut(suggestion_node) {
+            n.render_layer = RenderLayer::Overlay;
+        }
         let _ = (cmd_bar_node, debug_hud_node, suggestion_node); // suppress unused
         // Set initial transforms from layout.
         scene.set_transform(root, 0.0, 0.0, width as f32, height as f32);
@@ -776,7 +791,8 @@ impl App {
 
         // -- Event bus (single instance, will be handed to AppCoordinator) --
         let mut event_bus = EventBus::new();
-        let topic_terminal_output = event_bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
+        let topic_terminal_output =
+            event_bus.create_topic(0, "terminal.output", DataType::TerminalOutput);
         let topic_terminal_error = event_bus.create_topic(0, "terminal.error", DataType::Text);
         let topic_agent_event = event_bus.create_topic(0, "agent.event", DataType::Json);
 
@@ -785,14 +801,19 @@ impl App {
         event_bus.subscribe(BRAIN_OBSERVER_ID, topic_terminal_output);
         event_bus.subscribe(BRAIN_OBSERVER_ID, topic_terminal_error);
         event_bus.subscribe(BRAIN_OBSERVER_ID, topic_agent_event);
-        info!("Event bus initialized: {} topics, brain observer subscribed", event_bus.topic_count());
+        info!(
+            "Event bus initialized: {} topics, brain observer subscribed",
+            event_bus.topic_count()
+        );
 
         // -- Plugin registry --
         let plugin_registry = match PluginRegistry::new() {
             Ok(reg) => reg,
             Err(e) => {
                 warn!("Failed to create plugin registry: {e}");
-                match PluginRegistry::with_dir(std::env::temp_dir().join("phantom-plugins-fallback")) {
+                match PluginRegistry::with_dir(
+                    std::env::temp_dir().join("phantom-plugins-fallback"),
+                ) {
                     Ok(reg) => reg,
                     Err(e2) => {
                         warn!("Plugins disabled — all registry paths failed: {e2}");
@@ -813,8 +834,8 @@ impl App {
         // -- Register initial terminal as adapter (Phase 3 — coordinator-managed) --
         {
             use crate::adapters::terminal::TerminalAdapter;
-            use phantom_terminal::output::TerminalThemeColors;
             use phantom_scene::clock::Cadence;
+            use phantom_terminal::output::TerminalThemeColors;
 
             let theme_colors = TerminalThemeColors {
                 foreground: theme.colors.foreground,
@@ -828,6 +849,7 @@ impl App {
                 pane_id,
                 first_pane_node,
                 Cadence::unlimited(),
+                &mut layout,
             );
             info!("Initial terminal registered as adapter (AppId {_app_id})");
         }
@@ -876,7 +898,9 @@ impl App {
         let mcp_socket_path = std::env::var("PHANTOM_MCP_SOCK")
             .ok()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(format!("/tmp/phantom-mcp-{}.sock", std::process::id())));
+            .unwrap_or_else(|| {
+                PathBuf::from(format!("/tmp/phantom-mcp-{}.sock", std::process::id()))
+            });
         let (mcp_cmd_tx, mcp_cmd_rx) = mpsc::channel::<AppCommand>();
         let mcp_listener = match spawn_listener(mcp_socket_path.clone(), mcp_cmd_tx) {
             Ok(l) => {
@@ -884,7 +908,10 @@ impl App {
                 Some(l)
             }
             Err(e) => {
-                warn!("Failed to start MCP listener at {}: {e}", mcp_socket_path.display());
+                warn!(
+                    "Failed to start MCP listener at {}: {e}",
+                    mcp_socket_path.display()
+                );
                 None
             }
         };
@@ -1027,7 +1054,10 @@ impl App {
             self.watchdog_frame,
             state,
             self.coordinator.adapter_count(),
-            self.coordinator.registry().all_running().into_iter()
+            self.coordinator
+                .registry()
+                .all_running()
+                .into_iter()
                 .filter_map(|id| self.coordinator.registry().get(id))
                 .filter(|e| e.app_type == "agent")
                 .count(),
@@ -1110,14 +1140,15 @@ impl App {
         }
 
         // Dispatch shutdown hooks to plugins.
-        let wd = self.context.as_ref()
+        let wd = self
+            .context
+            .as_ref()
             .map(|c| c.root.clone())
             .unwrap_or_else(|| ".".into());
         let ctx = phantom_plugins::HookContext::shutdown(&wd);
-        let responses = self.plugin_registry.dispatch_hook(
-            &phantom_plugins::HookType::OnShutdown,
-            &ctx,
-        );
+        let responses = self
+            .plugin_registry
+            .dispatch_hook(&phantom_plugins::HookType::OnShutdown, &ctx);
         for resp in &responses {
             info!("[plugin shutdown]: {resp:?}");
         }
@@ -1138,27 +1169,36 @@ impl App {
     fn build_session_state(&self) -> SessionState {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let project_dir = self.context.as_ref()
+        let project_dir = self
+            .context
+            .as_ref()
             .map(|c| c.root.clone())
             .unwrap_or_else(|| ".".into());
-        let project_name = self.context.as_ref()
+        let project_name = self
+            .context
+            .as_ref()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "unknown".into());
-        let git_branch = self.context.as_ref()
+        let git_branch = self
+            .context
+            .as_ref()
             .and_then(|c| c.git.as_ref().map(|g| g.branch.clone()));
 
         // Build pane state from coordinator adapters.
         let focused_app = self.coordinator.focused();
-        let panes: Vec<PaneState> = self.coordinator.all_app_ids().iter().map(|&app_id| {
-            PaneState {
+        let panes: Vec<PaneState> = self
+            .coordinator
+            .all_app_ids()
+            .iter()
+            .map(|&app_id| PaneState {
                 working_dir: project_dir.clone(),
                 is_focused: focused_app == Some(app_id),
                 cols: 80,
                 rows: 24,
                 title: "shell".into(),
                 split: None,
-            }
-        }).collect();
+            })
+            .collect();
 
         let sp = &self.theme.shader_params;
         SessionState {
@@ -1268,15 +1308,20 @@ impl App {
 
         // Re-negotiate arbiter allocations with updated content area.
         // Chrome height = tab bar + status bar (same formula as constructor).
-        let chrome_h = self.layout.get_tab_bar_rect()
+        let chrome_h = self
+            .layout
+            .get_tab_bar_rect()
             .map(|r| r.height)
             .unwrap_or(0.0)
-            + self.layout.get_status_bar_rect()
+            + self
+                .layout
+                .get_status_bar_rect()
                 .map(|r| r.height)
                 .unwrap_or(0.0);
         let content_w = width as f32;
         let content_h = (height as f32 - chrome_h).max(0.0);
-        self.coordinator.on_window_resize((content_w, content_h));
+        self.coordinator
+            .on_window_resize((content_w, content_h), &mut self.layout);
 
         // Resize coordinator-managed adapters to match new layout dimensions.
         for app_id in self.coordinator.all_app_ids() {
@@ -1295,16 +1340,16 @@ impl App {
 
         // Update scene graph root transform.
         let root = self.scene.root();
-        self.scene.set_transform(root, 0.0, 0.0, width as f32, height as f32);
+        self.scene
+            .set_transform(root, 0.0, 0.0, width as f32, height as f32);
 
         // Sync adapter positions from Taffy layout into the scene graph.
         let plan = self.coordinator.build_layout_plan(&self.layout);
-        self.coordinator.sync_arbiter_to_scene(&plan, &mut self.scene);
+        self.coordinator
+            .sync_arbiter_to_scene(&plan, &mut self.scene);
 
         self.scene.update_world_transforms();
     }
-
-
 
     // -----------------------------------------------------------------------
     // Update
@@ -1377,10 +1422,18 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
 
     let root = std::env::var("HOME")
         .ok()
-        .map(|h| PathBuf::from(h).join(".config").join("phantom").join("bundles"))
+        .map(|h| {
+            PathBuf::from(h)
+                .join(".config")
+                .join("phantom")
+                .join("bundles")
+        })
         .unwrap_or_else(|| std::env::temp_dir().join("phantom-bundles"));
 
-    let cfg = StoreConfig { root: root.clone(), master_key };
+    let cfg = StoreConfig {
+        root: root.clone(),
+        master_key,
+    };
     match BundleStore::open(cfg) {
         Ok(s) => {
             info!("Bundle store opened at {}", root.display());

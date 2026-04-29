@@ -5,12 +5,12 @@
 
 use log::{debug, info, warn};
 
-use phantom_agents::{AgentSpawnOpts, AgentTask};
 use phantom_agents::cli::{AgentCommand, parse_agent_command};
-use phantom_protocol::{AppMessage, SupervisorCommand};
+use phantom_agents::{AgentSpawnOpts, AgentTask};
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
 use phantom_nlp::{translate, Intent};
+use phantom_protocol::{AppMessage, SupervisorCommand};
 use phantom_ui::themes;
 
 use crate::app::{App, AppState, NlpTranslateResult};
@@ -60,9 +60,13 @@ impl App {
                 // Only route to brain as Interrupt if no command matches.
                 debug!("{routing_msg}");
             }
-            EvalResult::Unknown { input: _, suggestions } => {
+            EvalResult::Unknown {
+                input: _,
+                suggestions,
+            } => {
                 if !suggestions.is_empty() {
-                    self.console.output(format!("Did you mean: {}?", suggestions.join(", ")));
+                    self.console
+                        .output(format!("Did you mean: {}?", suggestions.join(", ")));
                 }
                 // Fall through to legacy handling.
             }
@@ -141,31 +145,41 @@ impl App {
                 match parse_agent_command(input) {
                     None | Some(AgentCommand::Help) => {
                         // Bare `agent` with no flags → open interactive pane.
-                        let prompt = "You are an interactive AI assistant in the Phantom terminal. \
+                        let prompt =
+                            "You are an interactive AI assistant in the Phantom terminal. \
                              The user opened an agent pane to chat with you. Help them with \
                              whatever they need. You have tools to read files, edit code, \
-                             run commands, and search the project.".to_string();
+                             run commands, and search the project."
+                                .to_string();
                         if self.spawn_agent_pane(AgentTask::FreeForm { prompt }) {
                             self.console.system("Agent pane opened.");
                             self.console.open = false;
                         } else {
-                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
-                            self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
+                            self.console
+                                .error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                            self.console
+                                .error("Set it with: export ANTHROPIC_API_KEY=sk-...");
                         }
                     }
                     Some(AgentCommand::Spawn { prompt }) => {
-                        if self.spawn_agent_pane(AgentTask::FreeForm { prompt: prompt.clone() }) {
+                        if self.spawn_agent_pane(AgentTask::FreeForm {
+                            prompt: prompt.clone(),
+                        }) {
                             self.console.system("Agent pane opened.");
                             self.console.open = false;
                         } else {
-                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
-                            self.console.error("Set it with: export ANTHROPIC_API_KEY=sk-...");
+                            self.console
+                                .error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                            self.console
+                                .error("Set it with: export ANTHROPIC_API_KEY=sk-...");
                         }
                     }
                     Some(AgentCommand::SpawnWithFlags { prompt, flags }) => {
                         // Wire --model through AgentSpawnOpts so it reaches the
                         // ChatBackend selector (the core of issue #85).
-                        let task = AgentTask::FreeForm { prompt: prompt.clone() };
+                        let task = AgentTask::FreeForm {
+                            prompt: prompt.clone(),
+                        };
                         let mut opts = AgentSpawnOpts::new(task);
                         opts.chat_model = flags.model.clone();
                         // Surface warnings to the user.
@@ -173,14 +187,16 @@ impl App {
                             self.console.output(format!("  warning: {warn_msg}"));
                         }
                         if let Some(ref m) = flags.model {
-                            self.console.output(format!("  model: {}", m.backend_name()));
+                            self.console
+                                .output(format!("  model: {}", m.backend_name()));
                         }
                         if self.spawn_agent_pane_with_opts(opts) {
                             self.console.system("Agent pane opened.");
                             self.console.open = false;
                         } else {
                             self.console.error("Cannot spawn agent: API key not set");
-                            self.console.error("Set ANTHROPIC_API_KEY or OPENAI_API_KEY");
+                            self.console
+                                .error("Set ANTHROPIC_API_KEY or OPENAI_API_KEY");
                         }
                     }
                     Some(AgentCommand::SpawnFix { target }) => {
@@ -190,10 +206,12 @@ impl App {
                             context: "user-initiated fix".into(),
                         };
                         if self.spawn_agent_pane(task) {
-                            self.console.system(format!("Fix agent opened for {target}."));
+                            self.console
+                                .system(format!("Fix agent opened for {target}."));
                             self.console.open = false;
                         } else {
-                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                            self.console
+                                .error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
                         }
                     }
                     Some(AgentCommand::SpawnReview) => {
@@ -205,29 +223,37 @@ impl App {
                             self.console.system("Review agent opened.");
                             self.console.open = false;
                         } else {
-                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                            self.console
+                                .error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
                         }
                     }
                     Some(AgentCommand::SpawnWatch { description }) => {
-                        let task = AgentTask::WatchAndNotify { description: description.clone() };
+                        let task = AgentTask::WatchAndNotify {
+                            description: description.clone(),
+                        };
                         if self.spawn_agent_pane(task) {
-                            self.console.system(format!("Watch agent opened: {description}."));
+                            self.console
+                                .system(format!("Watch agent opened: {description}."));
                             self.console.open = false;
                         } else {
-                            self.console.error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
+                            self.console
+                                .error("Cannot spawn agent: ANTHROPIC_API_KEY not set");
                         }
                     }
                     Some(AgentCommand::List) => {
                         self.console.system("(agent list: use the agents panel)");
                     }
                     Some(AgentCommand::Show { id }) => {
-                        self.console.system(format!("(agent show #{id}: use the agents panel)"));
+                        self.console
+                            .system(format!("(agent show #{id}: use the agents panel)"));
                     }
                     Some(AgentCommand::Kill { id }) => {
-                        self.console.system(format!("(agent kill #{id}: use the agents panel)"));
+                        self.console
+                            .system(format!("(agent kill #{id}: use the agents panel)"));
                     }
                     Some(AgentCommand::KillAll) => {
-                        self.console.system("(agent kill-all: use the agents panel)");
+                        self.console
+                            .system("(agent kill-all: use the agents panel)");
                     }
                 }
             }
@@ -250,14 +276,20 @@ impl App {
                     for p in &list {
                         let status = if p.enabled { "on" } else { "off" };
                         self.console.output(format!(
-                            "{} v{} [{status}] — {}", p.name, p.version, p.description
+                            "{} v{} [{status}] — {}",
+                            p.name, p.version, p.description
                         ));
                     }
                 }
             }
             "video" => {
                 let path_str = if parts.len() >= 2 {
-                    input.trim().strip_prefix("video").unwrap().trim().to_string()
+                    input
+                        .trim()
+                        .strip_prefix("video")
+                        .unwrap()
+                        .trim()
+                        .to_string()
                 } else {
                     // No path given — open native macOS file picker.
                     self.console.system("Opening file picker...");
@@ -278,11 +310,14 @@ impl App {
                     self.console.system(format!(
                         "Playing: {} ({}x{} @ {}fps)",
                         path.file_name().unwrap_or_default().to_string_lossy(),
-                        playback.width, playback.height, playback.fps as u32,
+                        playback.width,
+                        playback.height,
+                        playback.fps as u32,
                     ));
                     self.video_playback = Some(playback);
                 } else {
-                    self.console.error("Failed to start video. Is ffmpeg installed?");
+                    self.console
+                        .error("Failed to start video. Is ffmpeg installed?");
                 }
             }
             cmd if cmd.starts_with("goal ") => {
@@ -300,17 +335,17 @@ impl App {
                     // Spawn an agent directly — the agent has tools, context,
                     // and the codebase map. Don't route through the brain's
                     // chat client.
-                    self.pending_brain_actions.push(
-                        phantom_brain::events::AiAction::SpawnAgent {
+                    self.pending_brain_actions
+                        .push(phantom_brain::events::AiAction::SpawnAgent {
                             task: phantom_agents::AgentTask::FreeForm { prompt: objective },
                             spawn_tag: None,
-                        }
-                    );
+                        });
                 }
             }
             "goals" => {
                 self.console.system("Queued goals for the brain:");
-                self.console.output("Paste these one at a time to set autonomous work:");
+                self.console
+                    .output("Paste these one at a time to set autonomous work:");
                 self.console.output("");
                 self.console.output("  goal wire proactive.rs into the brain OODA loop — replace the hardcoded quiet_threshold with ProactiveBrain.should_act()");
                 self.console.output("  goal wire curves.rs into scoring — replace hardcoded fix_score 0.9 and explain_score 0.7 with configurable ResponseCurve evaluations");
@@ -323,10 +358,16 @@ impl App {
                 if self.suggestion_history.is_empty() {
                     self.console.output("No suggestion history.");
                 } else {
-                    self.console.output(format!("{} recent suggestions:", self.suggestion_history.len()));
+                    self.console.output(format!(
+                        "{} recent suggestions:",
+                        self.suggestion_history.len()
+                    ));
                     for (i, s) in self.suggestion_history.iter().enumerate() {
-                        let age = std::time::Instant::now().duration_since(s.shown_at).as_secs();
-                        self.console.output(format!("  {}. [{}s ago] {}", i + 1, age, s.text));
+                        let age = std::time::Instant::now()
+                            .duration_since(s.shown_at)
+                            .as_secs();
+                        self.console
+                            .output(format!("  {}. [{}s ago] {}", i + 1, age, s.text));
                     }
                 }
             }
@@ -364,11 +405,13 @@ impl App {
                 }
             }
             "selftest" => {
-                self.console.system("SELFTEST: brain exercising its own features...");
+                self.console
+                    .system("SELFTEST: brain exercising its own features...");
                 self.selftest = Some(crate::selftest::SelfTestRunner::new(false));
             }
             "selfheal" => {
-                self.console.system("SELFHEAL: test → diagnose → fix → verify → commit → push");
+                self.console
+                    .system("SELFHEAL: test → diagnose → fix → verify → commit → push");
                 self.selftest = Some(crate::selftest::SelfTestRunner::new(true));
             }
             "clear" => {
@@ -380,8 +423,10 @@ impl App {
                 self.console.output("  set <key> <value>   Tune shader params (curvature, scanlines, bloom, aberration, vignette, noise)");
                 self.console.output("  theme <name>        Switch theme");
                 self.console.output("  agent <prompt>      Spawn AI agent");
-                self.console.output("  sysmon              Toggle system monitor");
-                self.console.output("  appmon              Toggle app diagnostics");
+                self.console
+                    .output("  sysmon              Toggle system monitor");
+                self.console
+                    .output("  appmon              Toggle app diagnostics");
                 self.console.output("  plugins             List plugins");
                 self.console.output("  plain               Disable all CRT effects");
                 self.console.output("  debug               Toggle shader debug HUD");
@@ -413,14 +458,15 @@ impl App {
                                 phantom_brain::events::AiAction::SpawnAgent {
                                     task: phantom_agents::AgentTask::FreeForm { prompt: desc },
                                     spawn_tag: None,
-                                }
+                                },
                             );
                         }
                         ResolvedAction::ShowInfo(info_text) => {
                             self.console.output(info_text);
                         }
                         ResolvedAction::Ambiguous { input: _, options } => {
-                            self.console.output(format!("Did you mean: {}", options.join(", ")));
+                            self.console
+                                .output(format!("Did you mean: {}", options.join(", ")));
                         }
                         ResolvedAction::PassThrough => {
                             // Heuristic couldn't classify — try the LLM backend.
@@ -482,14 +528,17 @@ impl App {
                 }
                 "font_size" => {
                     debug!("font_size change requires renderer recreation (not yet implemented)");
-                    self.console.error("font_size requires restart (not yet hot-swappable)");
+                    self.console
+                        .error("font_size requires restart (not yet hot-swappable)");
                 }
                 _ => {
                     self.console.error(format!("Unknown config key: {key}"));
                 }
             }
         } else {
-            self.console.error(format!("Invalid value for {key}: {value} (expected number)"));
+            self.console.error(format!(
+                "Invalid value for {key}: {value} (expected number)"
+            ));
         }
     }
 

@@ -81,16 +81,31 @@ impl App {
         // Handle active floating pane drag/resize.
         if let Some(ref interaction) = self.float_interaction {
             match interaction {
-                FloatInteraction::Dragging { app_id, offset_x, offset_y } => {
+                FloatInteraction::Dragging {
+                    app_id,
+                    offset_x,
+                    offset_y,
+                } => {
                     let new_x = (x as f32 - offset_x).max(0.0);
                     let new_y = (y as f32 - offset_y).max(0.0);
                     self.coordinator.move_floating(*app_id, new_x, new_y);
                 }
-                FloatInteraction::Resizing { app_id, edge, initial_rect } => {
+                FloatInteraction::Resizing {
+                    app_id,
+                    edge,
+                    initial_rect,
+                } => {
                     let (new_w, new_h) = match edge {
-                        ResizeEdge::Right => ((x as f32 - initial_rect.x).max(100.0), initial_rect.height),
-                        ResizeEdge::Bottom => (initial_rect.width, (y as f32 - initial_rect.y).max(80.0)),
-                        ResizeEdge::BottomRight => ((x as f32 - initial_rect.x).max(100.0), (y as f32 - initial_rect.y).max(80.0)),
+                        ResizeEdge::Right => {
+                            ((x as f32 - initial_rect.x).max(100.0), initial_rect.height)
+                        }
+                        ResizeEdge::Bottom => {
+                            (initial_rect.width, (y as f32 - initial_rect.y).max(80.0))
+                        }
+                        ResizeEdge::BottomRight => (
+                            (x as f32 - initial_rect.x).max(100.0),
+                            (y as f32 - initial_rect.y).max(80.0),
+                        ),
                     };
                     self.coordinator.resize_floating(*app_id, new_w, new_h);
                 }
@@ -115,8 +130,10 @@ impl App {
         let fy = y as f32;
         for fid in self.coordinator.floating_ids() {
             if let Some(rect) = self.coordinator.float_rect(fid) {
-                if fx >= rect.x && fx <= rect.x + rect.width
-                    && fy >= rect.y && fy <= rect.y + rect.height
+                if fx >= rect.x
+                    && fx <= rect.x + rect.width
+                    && fy >= rect.y
+                    && fy <= rect.y + rect.height
                 {
                     self.cursor_over_pane = Some(fid);
                     return;
@@ -222,9 +239,14 @@ impl App {
             0
         };
         Some(pixel_to_cell(
-            px, py, inner.x, inner.y,
-            self.cell_size.0, self.cell_size.1,
-            max_col.saturating_sub(1), max_row.saturating_sub(1),
+            px,
+            py,
+            inner.x,
+            inner.y,
+            self.cell_size.0,
+            self.cell_size.1,
+            max_col.saturating_sub(1),
+            max_row.saturating_sub(1),
         ))
     }
 
@@ -301,8 +323,10 @@ impl App {
             let mut float_focus = None;
             for fid in &float_ids {
                 if let Some(rect) = self.coordinator.float_rect(*fid) {
-                    if fmx >= rect.x && fmx <= rect.x + rect.width
-                        && fmy >= rect.y && fmy <= rect.y + rect.height
+                    if fmx >= rect.x
+                        && fmx <= rect.x + rect.width
+                        && fmy >= rect.y
+                        && fmy <= rect.y + rect.height
                     {
                         float_focus = Some(*fid);
                         break;
@@ -317,17 +341,31 @@ impl App {
                 if let Some(rect) = self.coordinator.float_rect(fid).cloned() {
                     if fmy < rect.y + 24.0 {
                         self.float_interaction = Some(FloatInteraction::Dragging {
-                            app_id: fid, offset_x: fmx - rect.x, offset_y: fmy - rect.y,
+                            app_id: fid,
+                            offset_x: fmx - rect.x,
+                            offset_y: fmy - rect.y,
                         });
                     } else {
                         let right = fmx > rect.x + rect.width - 8.0;
                         let bottom = fmy > rect.y + rect.height - 8.0;
                         if right && bottom {
-                            self.float_interaction = Some(FloatInteraction::Resizing { app_id: fid, edge: ResizeEdge::BottomRight, initial_rect: rect });
+                            self.float_interaction = Some(FloatInteraction::Resizing {
+                                app_id: fid,
+                                edge: ResizeEdge::BottomRight,
+                                initial_rect: rect,
+                            });
                         } else if right {
-                            self.float_interaction = Some(FloatInteraction::Resizing { app_id: fid, edge: ResizeEdge::Right, initial_rect: rect });
+                            self.float_interaction = Some(FloatInteraction::Resizing {
+                                app_id: fid,
+                                edge: ResizeEdge::Right,
+                                initial_rect: rect,
+                            });
                         } else if bottom {
-                            self.float_interaction = Some(FloatInteraction::Resizing { app_id: fid, edge: ResizeEdge::Bottom, initial_rect: rect });
+                            self.float_interaction = Some(FloatInteraction::Resizing {
+                                app_id: fid,
+                                edge: ResizeEdge::Bottom,
+                                initial_rect: rect,
+                            });
                         }
                     }
                 }
@@ -347,8 +385,9 @@ impl App {
                 (dx * dx + dy * dy).sqrt() < max_dist
             };
 
-            let rapid = self.last_click_time
-                .map_or(false, |t| now.duration_since(t) < Duration::from_millis(400));
+            let rapid = self.last_click_time.map_or(false, |t| {
+                now.duration_since(t) < Duration::from_millis(400)
+            });
 
             if rapid && near {
                 self.click_count = (self.click_count + 1).min(3);
@@ -394,7 +433,9 @@ impl App {
 
                 if point_in_rect(mx, my, track) {
                     // Query actual history size from adapter state for accurate jump.
-                    let history_size = self.coordinator.get_state(app_id)
+                    let history_size = self
+                        .coordinator
+                        .get_state(app_id)
                         .and_then(|s| s.get("history_size").and_then(|v| v.as_u64()))
                         .unwrap_or(0) as usize;
                     if history_size > 0 {
@@ -404,7 +445,9 @@ impl App {
                             "scroll_to_offset",
                             &serde_json::json!({"offset": target_offset}),
                         );
-                        debug!("Scrollbar click: adapter {app_id}, target_offset={target_offset}, history={history_size}");
+                        debug!(
+                            "Scrollbar click: adapter {app_id}, target_offset={target_offset}, history={history_size}"
+                        );
                     }
                     return;
                 }
@@ -510,12 +553,36 @@ impl App {
     }
     fn build_context_menu_items(&self) -> Vec<MenuItem> {
         vec![
-            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
-            MenuItem { label: "Paste".into(), action: MenuAction::Paste, enabled: true },
-            MenuItem { label: "Select All".into(), action: MenuAction::SelectAll, enabled: true },
-            MenuItem { label: "Split Horizontal".into(), action: MenuAction::SplitHorizontal, enabled: true },
-            MenuItem { label: "Split Vertical".into(), action: MenuAction::SplitVertical, enabled: true },
-            MenuItem { label: "Fullscreen".into(), action: MenuAction::Fullscreen, enabled: true },
+            MenuItem {
+                label: "Copy".into(),
+                action: MenuAction::Copy,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Paste".into(),
+                action: MenuAction::Paste,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Select All".into(),
+                action: MenuAction::SelectAll,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Split Horizontal".into(),
+                action: MenuAction::SplitHorizontal,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Split Vertical".into(),
+                action: MenuAction::SplitVertical,
+                enabled: true,
+            },
+            MenuItem {
+                label: "Fullscreen".into(),
+                action: MenuAction::Fullscreen,
+                enabled: true,
+            },
         ]
     }
 
@@ -523,7 +590,11 @@ impl App {
         match action {
             MenuAction::Copy => {
                 if let Some(focused) = self.coordinator.focused() {
-                    if let Ok(text) = self.coordinator.send_command(focused, "select_copy", &serde_json::json!({})) {
+                    if let Ok(text) = self.coordinator.send_command(
+                        focused,
+                        "select_copy",
+                        &serde_json::json!({}),
+                    ) {
                         if !text.is_empty() {
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let _ = clipboard.set_text(&text);
@@ -543,17 +614,27 @@ impl App {
             }
             MenuAction::SelectAll => {
                 if let Some(focused) = self.coordinator.focused() {
-                    let _ = self.coordinator.send_command(focused, "select_all", &serde_json::json!({}));
+                    let _ = self.coordinator.send_command(
+                        focused,
+                        "select_all",
+                        &serde_json::json!({}),
+                    );
                 }
             }
-            MenuAction::SplitHorizontal => { self.split_focused_pane(true); }
-            MenuAction::SplitVertical => { self.split_focused_pane(false); }
+            MenuAction::SplitHorizontal => {
+                self.split_focused_pane(true);
+            }
+            MenuAction::SplitVertical => {
+                self.split_focused_pane(false);
+            }
             MenuAction::Fullscreen => {
                 if let Some(focused) = self.coordinator.focused() {
                     self.fullscreen_pane = Some(focused);
                 }
             }
-            MenuAction::Close => { self.close_focused_pane(); }
+            MenuAction::Close => {
+                self.close_focused_pane();
+            }
         }
     }
 }
@@ -604,9 +685,18 @@ mod tests {
 
     #[test]
     fn winit_button_conversion() {
-        assert_eq!(winit_to_term_button(MouseButton::Left), Some(TermMouseButton::Left));
-        assert_eq!(winit_to_term_button(MouseButton::Right), Some(TermMouseButton::Right));
-        assert_eq!(winit_to_term_button(MouseButton::Middle), Some(TermMouseButton::Middle));
+        assert_eq!(
+            winit_to_term_button(MouseButton::Left),
+            Some(TermMouseButton::Left)
+        );
+        assert_eq!(
+            winit_to_term_button(MouseButton::Right),
+            Some(TermMouseButton::Right)
+        );
+        assert_eq!(
+            winit_to_term_button(MouseButton::Middle),
+            Some(TermMouseButton::Middle)
+        );
         assert_eq!(winit_to_term_button(MouseButton::Back), None);
         assert_eq!(winit_to_term_button(MouseButton::Forward), None);
     }

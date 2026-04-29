@@ -8,17 +8,15 @@ use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
 
-use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::agent::{Agent, AgentMessage};
+use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::audit::{AuditOutcome, emit_tool_call};
 use phantom_session::AgentSnapshot;
 use phantom_agents::chat::{ChatBackend, ChatModel, ChatRequest, build_backend};
 use phantom_agents::permissions::PermissionSet;
 use phantom_agents::role::{AgentRole, CapabilityClass};
 use phantom_agents::spawn_rules::{EventKind, EventSource, SubstrateEvent};
-use phantom_agents::tools::{
-    ToolCall, ToolDefinition, ToolResult, ToolType, available_tools,
-};
+use phantom_agents::tools::{ToolCall, ToolDefinition, ToolResult, ToolType, available_tools};
 use phantom_agents::{AgentSpawnOpts, AgentTask};
 use phantom_history::{AgentOutputCapture, ToolCall as HistoryToolCall};
 
@@ -332,7 +330,9 @@ impl AgentPane {
     #[cfg(test)]
     #[allow(dead_code)] // Used by adapter unit tests in sibling modules.
     pub(crate) fn test_with_lines(lines: Vec<String>) -> Self {
-        let task = AgentTask::FreeForm { prompt: "test".into() };
+        let task = AgentTask::FreeForm {
+            prompt: "test".into(),
+        };
         Self {
             task: "test".into(),
             status: AgentPaneStatus::Done,
@@ -500,12 +500,19 @@ impl AgentPane {
         // description as the initial user turn.
         let user_prompt = match &task {
             AgentTask::FreeForm { prompt } => prompt.clone(),
-            AgentTask::FixError { error_summary, context, .. } => {
+            AgentTask::FixError {
+                error_summary,
+                context,
+                ..
+            } => {
                 format!("Fix this error: {error_summary}\nContext: {context}")
             }
             AgentTask::RunCommand { command } => format!("Run: {command}"),
             AgentTask::ReviewCode { files, context } => {
-                format!("Review these files: {}\nContext: {context}", files.join(", "))
+                format!(
+                    "Review these files: {}\nContext: {context}",
+                    files.join(", ")
+                )
             }
             AgentTask::WatchAndNotify { description } => {
                 format!("Watch: {description}")
@@ -523,13 +530,7 @@ impl AgentPane {
             chat_backend.as_deref().map(|b| b.name()).unwrap_or("claude (default)"),
         );
 
-        let handle = Self::dispatch(
-            chat_backend.as_deref(),
-            claude_config,
-            &agent,
-            &tools,
-            &[],
-        );
+        let handle = Self::dispatch(chat_backend.as_deref(), claude_config, &agent, &tools, &[]);
 
         let working_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
@@ -667,9 +668,7 @@ impl AgentPane {
     /// connection (legacy / test fixtures) — callers fall back to the file
     /// /git-only path. Borrows `self.working_dir` as `&Path` so the
     /// returned context's lifetime is tied to `self`'s borrow scope.
-    fn build_dispatch_context(
-        &self,
-    ) -> Option<phantom_agents::dispatch::DispatchContext<'_>> {
+    fn build_dispatch_context(&self) -> Option<phantom_agents::dispatch::DispatchContext<'_>> {
         let registry = self.registry.clone()?;
         let pending_spawn = self.pending_spawn.clone()?;
         let self_ref = self.self_ref.clone()?;
@@ -728,9 +727,7 @@ impl AgentPane {
                     // Cap output to prevent unbounded memory growth.
                     if self.output.len() > 65536 {
                         let mut trim = self.output.len() - 65536;
-                        while trim < self.output.len()
-                            && !self.output.is_char_boundary(trim)
-                        {
+                        while trim < self.output.len() && !self.output.is_char_boundary(trim) {
                             trim += 1;
                         }
                         self.output.drain(..trim);
@@ -746,9 +743,14 @@ impl AgentPane {
                         }
                     }
                     if args_display.is_empty() {
-                        self.output.push_str(&format!("\n▶ {}\n", call.tool.api_name()));
+                        self.output
+                            .push_str(&format!("\n▶ {}\n", call.tool.api_name()));
                     } else {
-                        self.output.push_str(&format!("\n▶ {} {}\n", call.tool.api_name(), args_display));
+                        self.output.push_str(&format!(
+                            "\n▶ {} {}\n",
+                            call.tool.api_name(),
+                            args_display
+                        ));
                     }
                     // Record for the capture sidecar flush on Done/Error.
                     let args_json = serde_json::to_string(&call.args).unwrap_or_default();
@@ -874,25 +876,17 @@ impl AgentPane {
                     ..ToolResult::default()
                 }
                 .with_provenance(phantom_agents::tools::ToolProvenance::from_call(
-                    call.tool,
-                    &call.args,
-                    None,
+                    call.tool, &call.args, None,
                 ))
             } else if let Some(ctx) = dispatch_ctx.as_ref() {
                 // Substrate-aware fork: `dispatch_tool` routes by tool name
                 // through file/git → chat → composer surfaces, enforcing
                 // the role-class gate at a single check site. Provenance is
                 // re-tagged on the way out so the audit log stays consistent.
-                phantom_agents::dispatch::dispatch_tool(
-                    call.tool.api_name(),
-                    &call.args,
-                    ctx,
-                )
-                .with_provenance(phantom_agents::tools::ToolProvenance::from_call(
-                    call.tool,
-                    &call.args,
-                    None,
-                ))
+                phantom_agents::dispatch::dispatch_tool(call.tool.api_name(), &call.args, ctx)
+                    .with_provenance(phantom_agents::tools::ToolProvenance::from_call(
+                        call.tool, &call.args, None,
+                    ))
             } else {
                 // Legacy path (no substrate handles wired): the file/git
                 // surface only. The capability gate inside
@@ -922,11 +916,8 @@ impl AgentPane {
 
             // Display in pane.
             let status_char = if result.success { "✓" } else { "✗" };
-            self.output.push_str(&format!(
-                "  {} {:.0}ms\n",
-                status_char,
-                elapsed.as_millis(),
-            ));
+            self.output
+                .push_str(&format!("  {} {:.0}ms\n", status_char, elapsed.as_millis(),));
 
             // Show truncated output (max 200 chars for display).
             if result.output.len() > 200 {
@@ -965,8 +956,7 @@ impl AgentPane {
                 self.last_tool_error = None;
                 self.last_failing_capability = None;
             } else {
-                self.consecutive_tool_failures =
-                    self.consecutive_tool_failures.saturating_add(1);
+                self.consecutive_tool_failures = self.consecutive_tool_failures.saturating_add(1);
                 // Truncate the error excerpt so the eventual `reason` field
                 // doesn't drag a multi-KB tool error into the spawn payload.
                 let excerpt: String = result.output.chars().take(160).collect();
@@ -1246,8 +1236,7 @@ impl AgentPane {
             self.last_tool_error = None;
             self.last_failing_capability = None;
         } else {
-            self.consecutive_tool_failures =
-                self.consecutive_tool_failures.saturating_add(1);
+            self.consecutive_tool_failures = self.consecutive_tool_failures.saturating_add(1);
             self.last_tool_error = Some(error_excerpt.to_string());
             // Tests that only exercise the streak logic (not capability routing)
             // leave `last_failing_capability` unset — `maybe_emit_blocked_event`
@@ -1273,7 +1262,8 @@ impl AgentPane {
     /// the message gets appended to the conversation, and Claude responds.
     pub(crate) fn send_followup(&mut self, message: String) {
         // Display the user message.
-        self.output.push_str(&format!("\n\n> {message}\n\n● Thinking...\n"));
+        self.output
+            .push_str(&format!("\n\n> {message}\n\n● Thinking...\n"));
 
         // Append to conversation.
         self.agent.push_message(AgentMessage::User(message));
@@ -1294,8 +1284,11 @@ impl AgentPane {
 
     /// Revert file edits on failure (git checkout -- .).
     fn rollback_if_dirty(&mut self) {
-        if !self.has_file_edits { return; }
-        self.output.push_str("\n⚠ Agent failed with uncommitted edits. Reverting...\n");
+        if !self.has_file_edits {
+            return;
+        }
+        self.output
+            .push_str("\n⚠ Agent failed with uncommitted edits. Reverting...\n");
         let result = std::process::Command::new("git")
             .args(["checkout", "--", "."])
             .current_dir(&self.working_dir)
@@ -1306,7 +1299,8 @@ impl AgentPane {
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                self.output.push_str(&format!("  ← Revert failed: {stderr}\n"));
+                self.output
+                    .push_str(&format!("  ← Revert failed: {stderr}\n"));
             }
             Err(e) => {
                 self.output.push_str(&format!("  ← Revert failed: {e}\n"));
@@ -1346,14 +1340,26 @@ impl AgentPane {
             .map(|h| std::path::PathBuf::from(h).join(".config/phantom/agents"))
             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/phantom-agents"));
 
-        if std::fs::create_dir_all(&dir).is_err() { return; }
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs()).unwrap_or(0);
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
-        let sanitized: String = self.task.chars().take(30)
-            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        let sanitized: String = self
+            .task
+            .chars()
+            .take(30)
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
 
         let path = dir.join(format!("{timestamp}_{sanitized}.json"));
@@ -1363,7 +1369,6 @@ impl AgentPane {
             log::info!("Agent conversation saved: {}", path.display());
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1394,7 +1399,7 @@ fn build_codebase_context() -> String {
          - phantom-semantic (output parsing, error detection)\n\
          - phantom-context (project detection, git state)\n\
          - phantom-memory (persistent key-value store)\n\
-         - phantom-mcp (MCP protocol, Unix socket server/client)\n\n"
+         - phantom-mcp (MCP protocol, Unix socket server/client)\n\n",
     );
 
     // Try to read CLAUDE.md for project-specific instructions.
@@ -1418,20 +1423,30 @@ fn build_codebase_context() -> String {
 /// Format tool arguments as a compact, human-readable string.
 fn format_tool_args(tool: &ToolType, args: &serde_json::Value) -> String {
     match tool {
-        ToolType::ReadFile | ToolType::EditFile | ToolType::ListFiles => {
-            args.get("path").and_then(|v| v.as_str()).unwrap_or("?").to_string()
-        }
+        ToolType::ReadFile | ToolType::EditFile | ToolType::ListFiles => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string(),
         ToolType::WriteFile => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            let len = args.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+            let len = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len())
+                .unwrap_or(0);
             format!("{path} ({len} bytes)")
         }
-        ToolType::RunCommand => {
-            args.get("command").and_then(|v| v.as_str()).unwrap_or("?").to_string()
-        }
-        ToolType::SearchFiles => {
-            args.get("pattern").and_then(|v| v.as_str()).unwrap_or("?").to_string()
-        }
+        ToolType::RunCommand => args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string(),
+        ToolType::SearchFiles => args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string(),
         ToolType::GitStatus | ToolType::GitDiff => String::new(),
     }
 }
@@ -1528,7 +1543,8 @@ impl App {
         let _ = self.layout.resize(width as f32, height as f32);
 
         // Remap the existing terminal's PaneId.
-        self.coordinator.remap_pane(focused_app_id, current_pane_id, existing_child);
+        self.coordinator
+            .remap_pane(focused_app_id, current_pane_id, existing_child);
 
         // Resize the existing terminal to fit its new (smaller) pane.
         if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
@@ -1612,16 +1628,16 @@ impl App {
 
         let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
 
-        let scene_node = self.scene.add_node(
-            self.scene_content_node,
-            phantom_scene::node::NodeKind::Pane,
-        );
+        let scene_node = self
+            .scene
+            .add_node(self.scene_content_node, phantom_scene::node::NodeKind::Pane);
 
         let app_id = self.coordinator.register_adapter_at_pane(
             Box::new(adapter),
             new_child,
             scene_node,
             phantom_scene::clock::Cadence::unlimited(),
+            &mut self.layout,
         );
 
         // Focus the new agent pane.
@@ -1632,16 +1648,17 @@ impl App {
         // a `SpawnIfNotRunning(Watcher, "agent-pane-watch")` action and
         // appending the event to `events.jsonl`. Phase 2 will turn that
         // queued action into an actual supervised Watcher task.
-        self.runtime.push_event(phantom_agents::spawn_rules::SubstrateEvent {
-            kind: phantom_agents::spawn_rules::EventKind::PaneOpened {
-                app_type: "agent".to_string(),
-            },
-            payload: serde_json::json!({
-                "app_id": app_id,
-                "pane_id": format!("{:?}", new_child),
-            }),
-            source: phantom_agents::spawn_rules::EventSource::User,
-        });
+        self.runtime
+            .push_event(phantom_agents::spawn_rules::SubstrateEvent {
+                kind: phantom_agents::spawn_rules::EventKind::PaneOpened {
+                    app_type: "agent".to_string(),
+                },
+                payload: serde_json::json!({
+                    "app_id": app_id,
+                    "pane_id": format!("{:?}", new_child),
+                }),
+                source: phantom_agents::spawn_rules::EventSource::User,
+            });
 
         info!("Agent adapter registered (AppId {app_id}) in split pane");
         true
@@ -1671,7 +1688,6 @@ impl App {
             }
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1684,7 +1700,12 @@ mod tests {
     use std::sync::mpsc;
 
     fn test_agent() -> Agent {
-        Agent::new(0, AgentTask::FreeForm { prompt: "test task".into() })
+        Agent::new(
+            0,
+            AgentTask::FreeForm {
+                prompt: "test task".into(),
+            },
+        )
     }
 
     fn test_config() -> ClaudeConfig {
@@ -1760,7 +1781,10 @@ mod tests {
         pane.poll();
         assert_eq!(pane.status, AgentPaneStatus::Done);
         assert!(pane.output.contains("✓ Agent finished"));
-        assert!(pane.api_handle.is_none(), "handle should be dropped on Done");
+        assert!(
+            pane.api_handle.is_none(),
+            "handle should be dropped on Done"
+        );
     }
 
     #[test]
@@ -1845,7 +1869,8 @@ mod tests {
                 tool: phantom_agents::tools::ToolType::ReadFile,
                 args: serde_json::json!({"path": "/tmp/test"}),
             },
-        }).unwrap();
+        })
+        .unwrap();
 
         pane.poll();
         assert_eq!(pane.tool_use_ids, vec!["tool_123"]);
@@ -1885,14 +1910,16 @@ mod tests {
         // Set working_dir to temp dir so ListFiles works.
         pane.working_dir = std::env::temp_dir().to_string_lossy().into_owned();
 
-        tx.send(ApiEvent::TextDelta("Let me check.".into())).unwrap();
+        tx.send(ApiEvent::TextDelta("Let me check.".into()))
+            .unwrap();
         tx.send(ApiEvent::ToolUse {
             id: "toolu_1".into(),
             call: phantom_agents::tools::ToolCall {
                 tool: phantom_agents::tools::ToolType::ListFiles,
                 args: serde_json::json!({"path": "."}),
             },
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(ApiEvent::Done).unwrap();
 
         pane.poll();
@@ -1925,7 +1952,8 @@ mod tests {
                 tool: phantom_agents::tools::ToolType::GitStatus,
                 args: serde_json::json!({}),
             },
-        }).unwrap();
+        })
+        .unwrap();
         tx.send(ApiEvent::Done).unwrap();
 
         pane.poll();
@@ -1939,9 +1967,24 @@ mod tests {
     fn task_description_extraction() {
         // Verify the description logic works for each AgentTask variant.
         let cases: Vec<(AgentTask, &str)> = vec![
-            (AgentTask::FreeForm { prompt: "fix bug".into() }, "fix bug"),
-            (AgentTask::RunCommand { command: "cargo test".into() }, "Run: cargo test"),
-            (AgentTask::WatchAndNotify { description: "build".into() }, "Watch: build"),
+            (
+                AgentTask::FreeForm {
+                    prompt: "fix bug".into(),
+                },
+                "fix bug",
+            ),
+            (
+                AgentTask::RunCommand {
+                    command: "cargo test".into(),
+                },
+                "Run: cargo test",
+            ),
+            (
+                AgentTask::WatchAndNotify {
+                    description: "build".into(),
+                },
+                "Watch: build",
+            ),
         ];
 
         for (task, expected_prefix) in cases {
@@ -2126,8 +2169,14 @@ mod tests {
 
         // Payload shape.
         let payload = &ev.payload;
-        assert!(payload.get("agent_id").is_some(), "payload missing agent_id");
-        assert!(payload.get("agent_role").is_some(), "payload missing agent_role");
+        assert!(
+            payload.get("agent_id").is_some(),
+            "payload missing agent_id"
+        );
+        assert!(
+            payload.get("agent_role").is_some(),
+            "payload missing agent_role"
+        );
         assert!(payload.get("reason").is_some(), "payload missing reason");
         assert!(
             payload.get("blocked_at_unix_ms").is_some(),
@@ -2167,7 +2216,11 @@ mod tests {
         pane.record_tool_result_for_test(false, "second failure");
 
         let drained = sink.lock().unwrap();
-        assert_eq!(drained.len(), 1, "producer must have emitted exactly 1 event");
+        assert_eq!(
+            drained.len(),
+            1,
+            "producer must have emitted exactly 1 event"
+        );
 
         // Hand the producer's event to the substrate-level rule registry.
         // No actual agent spawns — we just verify the Fixer action would be

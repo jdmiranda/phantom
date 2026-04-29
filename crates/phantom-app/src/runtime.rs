@@ -350,14 +350,8 @@ impl AgentRuntime {
             reg.list().into_iter().cloned().collect()
         };
         for agent_ref in agent_refs {
-            let row = phantom_agents::inspector::AgentRow::new(
-                agent_ref,
-                "Idle",
-                None,
-                None,
-                0,
-                now_ms,
-            );
+            let row =
+                phantom_agents::inspector::AgentRow::new(agent_ref, "Idle", None, None, 0, now_ms);
             builder = builder.with_agent(row);
         }
 
@@ -533,7 +527,10 @@ mod tests {
         rt.push_event(pane_opened("video"));
         rt.tick();
 
-        assert!(rt.last_actions().is_empty(), "non-matching event must not queue actions");
+        assert!(
+            rt.last_actions().is_empty(),
+            "non-matching event must not queue actions"
+        );
         // But the event still hit the log.
         assert_eq!(rt.event_log().tail(1)[0].kind, "pane.opened.video");
     }
@@ -553,13 +550,16 @@ mod tests {
             // Drop here flushes via EventLog::Drop.
         }
 
-        assert!(path.exists(), "log file should exist on disk: {}", path.display());
+        assert!(
+            path.exists(),
+            "log file should exist on disk: {}",
+            path.display()
+        );
         let contents = std::fs::read_to_string(&path).expect("read log");
         let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
         assert!(!lines.is_empty(), "log should have at least one line");
         // The first non-empty line must be valid JSON.
-        let _: serde_json::Value =
-            serde_json::from_str(lines[0]).expect("valid JSON line");
+        let _: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON line");
     }
 
     /// Custom spawn rules supplied via `extra_rules` must be additive on
@@ -568,8 +568,9 @@ mod tests {
     fn extra_rules_compose_with_seed_rules() {
         let dir = tempdir().expect("tempdir");
         let cfg = RuntimeConfig::under_dir(dir.path());
-        let extra = vec![SpawnRule::on(EventKind::AudioStreamAvailable)
-            .spawn(AgentRole::Capturer, "audio-cap")];
+        let extra = vec![
+            SpawnRule::on(EventKind::AudioStreamAvailable).spawn(AgentRole::Capturer, "audio-cap"),
+        ];
         let mut rt = AgentRuntime::new(cfg, extra).expect("open");
 
         rt.push_event(SubstrateEvent {
@@ -606,7 +607,11 @@ mod tests {
         rt.tick();
 
         let view = rt.snapshot();
-        assert_eq!(view.recent_events.len(), 3, "snapshot should carry all 3 events");
+        assert_eq!(
+            view.recent_events.len(),
+            3,
+            "snapshot should carry all 3 events"
+        );
         // Kinds round-tripped through dotted name + summarize_event.
         let kinds: Vec<&str> = view.recent_events.iter().map(|e| e.kind.as_str()).collect();
         assert!(kinds.contains(&"pane.opened.agent"));
@@ -714,12 +719,8 @@ mod tests {
             .lines()
             .find(|l| l.contains(needle))
             .expect("find line");
-        let parsed: serde_json::Value =
-            serde_json::from_str(line).expect("valid JSON");
-        assert_eq!(
-            parsed.get("kind").and_then(|v| v.as_str()),
-            Some(needle),
-        );
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+        assert_eq!(parsed.get("kind").and_then(|v| v.as_str()), Some(needle),);
         // payload.attempted_tool must be the wire name the model called.
         let payload = parsed.get("payload").expect("payload field");
         assert_eq!(

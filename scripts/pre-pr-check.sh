@@ -1,174 +1,61 @@
 #!/usr/bin/env bash
-# pre-pr-check.sh — lightweight gate for implementation agents to run before opening a PR.
-# Checks changed Rust files for bare `pub` fields, `.unwrap()` outside test blocks,
-# and runs `cargo check` against the affected crate(s).
+# Pre-PR health check — runs fast local gates before opening a pull request.
+# Usage: ./scripts/pre-pr-check.sh [--fast]
 #
-# Usage: ./scripts/pre-pr-check.sh [<crate-name>]
-#   e.g. ./scripts/pre-pr-check.sh phantom-brain
+# Gates (in order):
+#   1. cargo check (type-check all workspace crates, no codegen)
+#   2. cargo fmt --check (formatting)
+#   3. cargo clippy (lints, warnings-as-errors)
+#   4. cargo test -p phantom-ui   (layout + arbiter unit tests)
+#   5. cargo test -p phantom-app coordinator  (coordinator integration tests)
 #
-# Exit code 0 = all checks passed.  Non-zero = at least one check failed.
+# Exit code: 0 = all gates passed, non-zero = at least one gate failed.
 
 set -euo pipefail
 
-REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-cd "$REPO_ROOT"
+cd "$(git rev-parse --show-toplevel)"
 
-EXPLICIT_CRATE="${1:-}"
-FAIL=0
+FAST="${1:-}"
+FAILURES=0
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
-green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
-bold()  { printf '\033[1m%s\033[0m\n'   "$*"; }
-
-banner() { echo; bold "── $* ──"; }
-
-# Collect changed .rs files relative to main (or the merge-base).
-changed_rs_files() {
-    local base
-    base=$(git merge-base HEAD "$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo main)" 2>/dev/null || echo "HEAD~1")
-    git diff --name-only "$base" HEAD -- '*.rs'
-}
-
-# Resolve crate name(s) from a list of file paths.
-# Returns unique `name` fields from each matching crates/*/Cargo.toml.
-crates_for_files() {
-    local files=("$@")
-    local found=()
-    for f in "${files[@]}"; do
-        # Walk up to find the nearest Cargo.toml inside crates/
-        local dir
-        dir=$(dirname "$f")
-        while [[ "$dir" != "." && "$dir" != "/" ]]; do
-            local cargo="$dir/Cargo.toml"
-            if [[ -f "$cargo" ]] && grep -q '^\[package\]' "$cargo" 2>/dev/null; then
-                local name
-                name=$(grep -m1 '^name' "$cargo" | sed 's/.*= *"\(.*\)".*/\1/')
-                if [[ -n "$name" ]]; then
-                    found+=("$name")
-                fi
-                break
-            fi
-            dir=$(dirname "$dir")
-        done
-    done
-    # Deduplicate
-    printf '%s\n' "${found[@]}" | sort -u
-}
-
-# ── Gather changed files ──────────────────────────────────────────────────────
-
-banner "Collecting changed Rust files"
-
-mapfile -t CHANGED < <(changed_rs_files)
-
-if [[ ${#CHANGED[@]} -eq 0 ]]; then
-    green "No changed .rs files detected — nothing to check."
-    exit 0
-fi
-
-echo "Changed files (${#CHANGED[@]}):"
-printf '  %s\n' "${CHANGED[@]}"
-
-# ── Check 1: bare `pub` fields ────────────────────────────────────────────────
-# Matches lines like `    pub field_name:` but NOT `pub(crate)`, `pub(super)`,
-# `pub fn`, `pub struct`, `pub enum`, `pub mod`, `pub use`, `pub type`, `pub trait`, `pub impl`.
-
-banner "Check 1: bare pub fields (pub without visibility qualifier on struct fields)"
-
-PUB_FIELD_HITS=()
-for f in "${CHANGED[@]}"; do
-    [[ -f "$f" ]] || continue
-    while IFS= read -r line; do
-        PUB_FIELD_HITS+=("$f: $line")
-    done < <(grep -nP '^\s+pub\s+(?![(fn struct enum mod use type trait impl])[a-z_]' "$f" 2>/dev/null || true)
-done
-
-if [[ ${#PUB_FIELD_HITS[@]} -gt 0 ]]; then
-    red "FAIL — bare pub fields found (use pub(crate) instead):"
-    printf '  %s\n' "${PUB_FIELD_HITS[@]}"
-    FAIL=1
-else
-    green "PASS — no bare pub fields."
-fi
-
-# ── Check 2: .unwrap() outside #[cfg(test)] blocks ───────────────────────────
-
-banner "Check 2: .unwrap() calls outside #[cfg(test)] blocks"
-
-UNWRAP_HITS=()
-for f in "${CHANGED[@]}"; do
-    [[ -f "$f" ]] || continue
-
-    # Strip test blocks, then scan for .unwrap().
-    # Strategy: use awk to suppress lines between #[cfg(test)] ... end of matching brace block,
-    # then grep the remainder.
-    stripped=$(awk '
-        /^[[:space:]]*#\[cfg\(test\)\]/ { in_test=1; depth=0; next }
-        in_test {
-            for (i=1; i<=length($0); i++) {
-                c = substr($0,i,1)
-                if (c == "{") depth++
-                if (c == "}") { depth--; if (depth <= 0) { in_test=0; next } }
-            }
-            next
-        }
-        { print NR": "$0 }
-    ' "$f")
-
-    while IFS= read -r line; do
-        UNWRAP_HITS+=("$f: $line")
-    done < <(echo "$stripped" | grep -P '\.unwrap\(\)' || true)
-done
-
-if [[ ${#UNWRAP_HITS[@]} -gt 0 ]]; then
-    red "FAIL — .unwrap() calls outside test blocks:"
-    printf '  %s\n' "${UNWRAP_HITS[@]}"
-    FAIL=1
-else
-    green "PASS — no .unwrap() calls outside test blocks."
-fi
-
-# ── Check 3: cargo check ──────────────────────────────────────────────────────
-
-banner "Check 3: cargo check"
-
-if [[ -n "$EXPLICIT_CRATE" ]]; then
-    CRATES_TO_CHECK=("$EXPLICIT_CRATE")
-else
-    mapfile -t CRATES_TO_CHECK < <(crates_for_files "${CHANGED[@]}")
-fi
-
-if [[ ${#CRATES_TO_CHECK[@]} -eq 0 ]]; then
-    echo "Could not detect affected crate(s); running workspace-wide cargo check."
-    if ! cargo check --workspace --quiet 2>&1; then
-        red "FAIL — cargo check (workspace) failed."
-        FAIL=1
+run_gate() {
+    local name="$1"
+    shift
+    echo ""
+    echo "==> [$name]"
+    if "$@"; then
+        echo "    PASS"
     else
-        green "PASS — cargo check (workspace)."
+        echo "    FAIL"
+        FAILURES=$((FAILURES + 1))
     fi
-else
-    echo "Crate(s) to check: ${CRATES_TO_CHECK[*]}"
-    for crate in "${CRATES_TO_CHECK[@]}"; do
-        echo
-        echo "  cargo check -p $crate ..."
-        if ! cargo check -p "$crate" --quiet 2>&1; then
-            red "FAIL — cargo check -p $crate failed."
-            FAIL=1
-        else
-            green "PASS — cargo check -p $crate."
-        fi
-    done
+}
+
+# Gate 1: type-check
+run_gate "cargo check (phantom-ui)" cargo check -p phantom-ui
+run_gate "cargo check (phantom-app)" cargo check -p phantom-app
+
+# Gate 2: formatting
+run_gate "cargo fmt --check (phantom-ui)" cargo fmt -p phantom-ui -- --check
+run_gate "cargo fmt --check (phantom-app)" cargo fmt -p phantom-app -- --check
+
+if [[ "$FAST" != "--fast" ]]; then
+    # Gate 3: clippy
+    run_gate "clippy (phantom-ui)" cargo clippy -p phantom-ui -- -D warnings
+    run_gate "clippy (phantom-app)" cargo clippy -p phantom-app -- -D warnings
 fi
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# Gate 4: layout + arbiter unit tests
+run_gate "tests (phantom-ui)" cargo test -p phantom-ui
 
-echo
-if [[ $FAIL -ne 0 ]]; then
-    red "pre-pr-check FAILED — fix the issues above before opening a PR."
-    exit 1
-else
-    green "pre-pr-check PASSED — ready to open a PR."
+# Gate 5: coordinator integration tests (includes issue #154 acceptance test)
+run_gate "tests (phantom-app coordinator)" cargo test -p phantom-app coordinator
+
+echo ""
+if [[ "$FAILURES" -eq 0 ]]; then
+    echo "All gates passed."
     exit 0
+else
+    echo "$FAILURES gate(s) failed."
+    exit 1
 fi

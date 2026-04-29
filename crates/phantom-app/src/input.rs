@@ -10,8 +10,8 @@ use log::{debug, info};
 use winit::keyboard::{Key, NamedKey};
 
 use phantom_terminal::input::{self, KeyEvent, PhantomKey, PhantomModifiers};
-use phantom_ui::keybinds::{Action, KeyCombo};
 use phantom_ui::keybinds::Key as UiKey;
+use phantom_ui::keybinds::{Action, KeyCombo};
 
 use crate::app::{App, AppState};
 
@@ -119,7 +119,10 @@ fn winit_key_to_terminal(event: &winit::event::KeyEvent) -> Option<KeyEvent> {
     };
 
     let mods = PhantomModifiers::NONE;
-    Some(KeyEvent { key: phantom_key, mods })
+    Some(KeyEvent {
+        key: phantom_key,
+        mods,
+    })
 }
 
 /// Get the current wall clock time as a `HH:MM` string.
@@ -218,16 +221,26 @@ impl App {
                 }
             }
             Action::ScrollPageUp => {
-                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "page_up"}));
+                let _ = self.coordinator.send_command_to_focused(
+                    "scroll",
+                    &serde_json::json!({"direction": "page_up"}),
+                );
             }
             Action::ScrollPageDown => {
-                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "page_down"}));
+                let _ = self.coordinator.send_command_to_focused(
+                    "scroll",
+                    &serde_json::json!({"direction": "page_down"}),
+                );
             }
             Action::ScrollToTop => {
-                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "top"}));
+                let _ = self
+                    .coordinator
+                    .send_command_to_focused("scroll", &serde_json::json!({"direction": "top"}));
             }
             Action::ScrollToBottom => {
-                let _ = self.coordinator.send_command_to_focused("scroll", &serde_json::json!({"direction": "bottom"}));
+                let _ = self
+                    .coordinator
+                    .send_command_to_focused("scroll", &serde_json::json!({"direction": "bottom"}));
             }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
@@ -425,9 +438,11 @@ impl App {
         {
             if let Some(focused) = self.coordinator.focused() {
                 if self.coordinator.is_floating(focused) {
-                    self.coordinator.dock_to_grid(focused, &mut self.layout, &mut self.scene);
+                    self.coordinator
+                        .dock_to_grid(focused, &mut self.layout, &mut self.scene);
                 } else {
-                    self.coordinator.detach_to_float(focused, &mut self.layout, &mut self.scene);
+                    self.coordinator
+                        .detach_to_float(focused, &mut self.layout, &mut self.scene);
                 }
             }
             return;
@@ -440,7 +455,8 @@ impl App {
         {
             if let Some(focused) = self.coordinator.focused() {
                 if self.coordinator.is_floating(focused) {
-                    self.coordinator.dock_to_grid(focused, &mut self.layout, &mut self.scene);
+                    self.coordinator
+                        .dock_to_grid(focused, &mut self.layout, &mut self.scene);
                 }
             }
             return;
@@ -483,14 +499,19 @@ impl App {
             if let Some(action) = self.keybinds.lookup(&combo) {
                 // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
                 // Let them fall through to the PTY so the program receives them.
-                let is_scroll = matches!(action,
-                    Action::ScrollPageUp | Action::ScrollPageDown |
-                    Action::ScrollToTop | Action::ScrollToBottom
+                let is_scroll = matches!(
+                    action,
+                    Action::ScrollPageUp
+                        | Action::ScrollPageDown
+                        | Action::ScrollToTop
+                        | Action::ScrollToBottom
                 );
                 if is_scroll {
                     // Check if focused adapter is in alt-screen mode (vim/htop/less).
                     // If so, let the keypress fall through to the PTY.
-                    let in_alt = self.coordinator.focused()
+                    let in_alt = self
+                        .coordinator
+                        .focused()
                         .and_then(|id| self.coordinator.get_state(id))
                         .and_then(|state| state.get("alt_screen").and_then(|v| v.as_bool()))
                         .unwrap_or(false);
@@ -522,10 +543,15 @@ impl App {
 
             // Copy selection to clipboard: Cmd+C (macOS) or Ctrl+Shift+C.
             if terminal_event.key == PhantomKey::Char('c')
-                && (terminal_event.mods.logo || (terminal_event.mods.ctrl && terminal_event.mods.shift))
+                && (terminal_event.mods.logo
+                    || (terminal_event.mods.ctrl && terminal_event.mods.shift))
             {
                 if let Some(focused) = self.coordinator.focused() {
-                    if let Ok(text) = self.coordinator.send_command(focused, "select_copy", &serde_json::json!({})) {
+                    if let Ok(text) = self.coordinator.send_command(
+                        focused,
+                        "select_copy",
+                        &serde_json::json!({}),
+                    ) {
                         if !text.is_empty() {
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let _ = clipboard.set_text(&text);
@@ -539,7 +565,9 @@ impl App {
 
             // Clear selection on any other keypress.
             if let Some(focused) = self.coordinator.focused() {
-                let _ = self.coordinator.send_command(focused, "select_clear", &serde_json::json!({}));
+                let _ =
+                    self.coordinator
+                        .send_command(focused, "select_clear", &serde_json::json!({}));
             }
 
             // Encode key event to raw PTY bytes.

@@ -58,17 +58,21 @@ impl App {
         self.drain_bus_to_brain();
 
         // Reap dead adapters (PTY exited).
-        let dead_adapters: Vec<_> = self.coordinator.all_app_ids()
+        let dead_adapters: Vec<_> = self
+            .coordinator
+            .all_app_ids()
             .into_iter()
             .filter(|id| {
-                self.coordinator.registry()
+                self.coordinator
+                    .registry()
                     .get_adapter(*id)
                     .map_or(false, |a| !a.is_alive())
             })
             .collect();
         for dead_id in dead_adapters {
             info!("Adapter {dead_id} exited, removing");
-            self.coordinator.remove_adapter(dead_id, &mut self.layout, &mut self.scene);
+            self.coordinator
+                .remove_adapter(dead_id, &mut self.layout, &mut self.scene);
         }
 
         if self.coordinator.adapter_count() == 0 {
@@ -136,16 +140,15 @@ impl App {
             // Derive error presence from the last command context stored on
             // the async brain scorer — we snapshot the same signals.
             let world = WorldState::new(
-                idle_secs,
-                false,   // has_errors: OODA uses BDS which will be fed via orient
-                0,       // error_count
-                false,   // has_active_process
-                false,   // new_pattern_detected
-                false,   // agent_just_completed
-                false,   // file_or_git_changed
-                false,   // in_repl
-                0.0,     // chattiness
-                0,       // suggestions_since_input
+                idle_secs, false, // has_errors: OODA uses BDS which will be fed via orient
+                0,     // error_count
+                false, // has_active_process
+                false, // new_pattern_detected
+                false, // agent_just_completed
+                false, // file_or_git_changed
+                false, // in_repl
+                0.0,   // chattiness
+                0,     // suggestions_since_input
             );
             let dt_ms = (dt * 1000.0) as u64;
             let ooda_actions = self.ooda_loop.tick(&world, dt_ms);
@@ -232,7 +235,11 @@ impl App {
         }
 
         // Expire stale suggestions (save to history before clearing).
-        if self.suggestion.as_ref().is_some_and(|s| now.duration_since(s.shown_at).as_secs() > 10) {
+        if self
+            .suggestion
+            .as_ref()
+            .is_some_and(|s| now.duration_since(s.shown_at).as_secs() > 10)
+        {
             if let Some(expired) = self.suggestion.take() {
                 self.suggestion_history.push_back(expired);
                 if self.suggestion_history.len() > 10 {
@@ -355,16 +362,14 @@ impl App {
         // Best-effort on the lock: a poisoned mutex logs a warning and the
         // events for that frame are dropped — observability never aborts the
         // update loop.
-        let denied: Vec<phantom_agents::spawn_rules::SubstrateEvent> = match self
-            .denied_event_sink
-            .lock()
-        {
-            Ok(mut q) => std::mem::take(&mut *q),
-            Err(_) => {
-                warn!("denied_event_sink mutex poisoned; dropping queued events");
-                Vec::new()
-            }
-        };
+        let denied: Vec<phantom_agents::spawn_rules::SubstrateEvent> =
+            match self.denied_event_sink.lock() {
+                Ok(mut q) => std::mem::take(&mut *q),
+                Err(_) => {
+                    warn!("denied_event_sink mutex poisoned; dropping queued events");
+                    Vec::new()
+                }
+            };
         if !denied.is_empty() {
             // Wall-clock millis — same domain `NotificationCenter` expects.
             // Compute once per frame and reuse for every drained event so the
@@ -465,7 +470,10 @@ impl App {
                 self.watchdog_frame,
                 uptime,
                 self.coordinator.adapter_count(),
-                self.coordinator.registry().all_running().into_iter()
+                self.coordinator
+                    .registry()
+                    .all_running()
+                    .into_iter()
                     .filter_map(|id| self.coordinator.registry().get(id))
                     .filter(|e| e.app_type == "agent")
                     .count(),
@@ -615,7 +623,11 @@ impl App {
         match action {
             AiAction::ShowSuggestion { text, options } => {
                 info!("[PHANTOM]: {text}");
-                *suggestion = Some(SuggestionOverlay { text, options, shown_at: now });
+                *suggestion = Some(SuggestionOverlay {
+                    text,
+                    options,
+                    shown_at: now,
+                });
             }
             AiAction::ShowNotification(msg) => {
                 info!("[PHANTOM]: {msg}");
@@ -632,7 +644,12 @@ impl App {
             }
             AiAction::UpdateMemory { key, value } => {
                 if let Some(mem) = memory {
-                    let _ = mem.set(&key, &value, phantom_memory::MemoryCategory::Context, phantom_memory::MemorySource::Auto);
+                    let _ = mem.set(
+                        &key,
+                        &value,
+                        phantom_memory::MemoryCategory::Context,
+                        phantom_memory::MemorySource::Auto,
+                    );
                 }
             }
             AiAction::SpawnAgent { task, spawn_tag } => {
@@ -647,8 +664,13 @@ impl App {
             }
             AiAction::RunCommand(cmd) => {
                 info!("[PHANTOM]: Running command: {cmd}");
-                let cmd_text = if cmd.ends_with('\n') { cmd } else { format!("{cmd}\n") };
-                let _ = coordinator.send_command_to_focused("write", &serde_json::json!({"text": cmd_text}));
+                let cmd_text = if cmd.ends_with('\n') {
+                    cmd
+                } else {
+                    format!("{cmd}\n")
+                };
+                let _ = coordinator
+                    .send_command_to_focused("write", &serde_json::json!({"text": cmd_text}));
             }
             AiAction::DismissAdapter { app_id } => {
                 info!("[PHANTOM]: Dismissing adapter {app_id}");
@@ -724,7 +746,7 @@ impl App {
     }
 
     fn mcp_capture_screenshot(&mut self, path: &Path) -> Result<ScreenshotReply, String> {
-        use phantom_renderer::screenshot::{capture_frame, ScreenshotMetadata, save_screenshot};
+        use phantom_renderer::screenshot::{ScreenshotMetadata, capture_frame, save_screenshot};
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let texture = self.postfx.scene_texture();
@@ -757,13 +779,21 @@ impl App {
             theme: self.theme.name.clone(),
             pane_count: self.coordinator.adapter_count(),
             project: self.context.as_ref().map(|c| c.name.clone()),
-            branch: self.context.as_ref().and_then(|c| c.git.as_ref().map(|g| g.branch.clone())),
+            branch: self
+                .context
+                .as_ref()
+                .and_then(|c| c.git.as_ref().map(|g| g.branch.clone())),
         };
 
         save_screenshot(&pixels_rgba, width, height, &metadata, path)
             .map_err(|e| format!("save failed: {e}"))?;
 
-        info!("Screenshot saved via MCP: {} ({}x{})", path.display(), width, height);
+        info!(
+            "Screenshot saved via MCP: {} ({}x{})",
+            path.display(),
+            width,
+            height
+        );
 
         Ok(ScreenshotReply {
             path: path.to_path_buf(),
@@ -785,10 +815,9 @@ impl App {
         }
 
         let bytes = key_name_to_bytes(key);
-        self.coordinator.send_command_to_focused(
-            "write_bytes",
-            &serde_json::json!({"bytes": bytes}),
-        ).map_err(|e| format!("write_bytes failed: {e}"))?;
+        self.coordinator
+            .send_command_to_focused("write_bytes", &serde_json::json!({"bytes": bytes}))
+            .map_err(|e| format!("write_bytes failed: {e}"))?;
         self.last_input_time = Instant::now();
         Ok(format!("wrote {} bytes to pty", bytes.len()))
     }
@@ -798,10 +827,9 @@ impl App {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        self.coordinator.send_command_to_focused(
-            "write",
-            &serde_json::json!({"text": text}),
-        ).map_err(|e| format!("write failed: {e}"))?;
+        self.coordinator
+            .send_command_to_focused("write", &serde_json::json!({"text": text}))
+            .map_err(|e| format!("write failed: {e}"))?;
         Ok(())
     }
 
@@ -814,7 +842,8 @@ impl App {
         };
         // The adapter's get_state() returns JSON with a "text" field
         // containing the rendered terminal grid as text.
-        state.get("text")
+        state
+            .get("text")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string()
