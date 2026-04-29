@@ -55,28 +55,73 @@ use crate::events::AiAction;
 /// Callers fill this in from their local data on every frame and pass it
 /// to [`OodaLoop::tick`]. The struct is `Copy`-cheap — all fields are
 /// primitives or small booleans.
+///
+/// Use [`WorldState::new`] to construct.
 #[derive(Debug, Clone, Default)]
 pub struct WorldState {
     /// Seconds since the user's last keyboard/mouse input.
-    pub idle_secs: f32,
+    idle_secs: f32,
     /// Whether the most-recently-parsed command output contained errors.
-    pub has_errors: bool,
+    has_errors: bool,
     /// Number of errors in the most recent parse (0 when `has_errors` is false).
-    pub error_count: u32,
+    error_count: u32,
     /// Whether a long-running child process (build, test, server) is active.
-    pub has_active_process: bool,
+    has_active_process: bool,
     /// Whether a novel memory pattern was detected this frame.
-    pub new_pattern_detected: bool,
+    new_pattern_detected: bool,
     /// Whether an agent completed its task this frame.
-    pub agent_just_completed: bool,
+    agent_just_completed: bool,
     /// Whether a file or git state change was detected this frame.
-    pub file_or_git_changed: bool,
+    file_or_git_changed: bool,
     /// Whether the user is inside an interactive REPL session.
-    pub in_repl: bool,
+    in_repl: bool,
     /// Accumulated chattiness of the brain (0.0 = silent, 1.0 = very chatty).
-    pub chattiness: f32,
+    chattiness: f32,
     /// Number of suggestions emitted since the last user input.
-    pub suggestions_since_input: u32,
+    suggestions_since_input: u32,
+}
+
+impl WorldState {
+    /// Construct a [`WorldState`] snapshot with all fields specified.
+    ///
+    /// # Arguments
+    ///
+    /// * `idle_secs` — seconds since the last keyboard/mouse input.
+    /// * `has_errors` — whether the most-recent parse contained errors.
+    /// * `error_count` — number of errors (0 when `has_errors` is false).
+    /// * `has_active_process` — whether a long-running child process is active.
+    /// * `new_pattern_detected` — novel memory pattern detected this frame.
+    /// * `agent_just_completed` — an agent completed its task this frame.
+    /// * `file_or_git_changed` — file or git state changed this frame.
+    /// * `in_repl` — user is inside an interactive REPL session.
+    /// * `chattiness` — accumulated brain chattiness (0.0–1.0).
+    /// * `suggestions_since_input` — suggestions emitted since last input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        idle_secs: f32,
+        has_errors: bool,
+        error_count: u32,
+        has_active_process: bool,
+        new_pattern_detected: bool,
+        agent_just_completed: bool,
+        file_or_git_changed: bool,
+        in_repl: bool,
+        chattiness: f32,
+        suggestions_since_input: u32,
+    ) -> Self {
+        Self {
+            idle_secs,
+            has_errors,
+            error_count,
+            has_active_process,
+            new_pattern_detected,
+            agent_just_completed,
+            file_or_git_changed,
+            in_repl,
+            chattiness,
+            suggestions_since_input,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -88,10 +133,30 @@ pub struct WorldState {
 pub struct OodaConfig {
     /// Maximum time (ms) allowed for Observe + Orient + Decide before the Act
     /// phase is skipped. Default: 2 ms.
-    pub budget_ms: f32,
+    budget_ms: f32,
     /// Minimum BDS score required to emit an action. Scores at or below this
     /// value produce `AiAction::DoNothing`. Default: 15.0 (Basic class ceiling).
-    pub action_threshold: f32,
+    action_threshold: f32,
+}
+
+impl OodaConfig {
+    /// Create a new [`OodaConfig`].
+    ///
+    /// * `budget_ms` — frame-budget cap in milliseconds.
+    /// * `action_threshold` — minimum BDS score required to emit an action.
+    pub fn new(budget_ms: f32, action_threshold: f32) -> Self {
+        Self { budget_ms, action_threshold }
+    }
+
+    /// Frame-budget cap in milliseconds.
+    pub fn budget_ms(&self) -> f32 {
+        self.budget_ms
+    }
+
+    /// Minimum BDS score required to emit an action.
+    pub fn action_threshold(&self) -> f32 {
+        self.action_threshold
+    }
 }
 
 impl Default for OodaConfig {
@@ -111,17 +176,49 @@ impl Default for OodaConfig {
 #[derive(Debug, Clone, Default)]
 pub struct TickMetrics {
     /// Total number of ticks executed.
-    pub ticks: u64,
+    ticks: u64,
     /// Number of ticks where the winning score was above `action_threshold`.
-    pub actions_emitted: u64,
+    actions_emitted: u64,
     /// Number of ticks skipped because the frame budget was exceeded.
-    pub budget_overruns: u64,
+    budget_overruns: u64,
     /// Duration (ms) of the most recent tick.
-    pub last_tick_ms: f32,
+    last_tick_ms: f32,
     /// The BDS winner ID from the most recent tick.
-    pub last_winner: String,
+    last_winner: String,
     /// The BDS winner score from the most recent tick.
-    pub last_winner_score: f32,
+    last_winner_score: f32,
+}
+
+impl TickMetrics {
+    /// Total number of ticks executed.
+    pub fn ticks(&self) -> u64 {
+        self.ticks
+    }
+
+    /// Number of ticks where the winning score exceeded `action_threshold`.
+    pub fn actions_emitted(&self) -> u64 {
+        self.actions_emitted
+    }
+
+    /// Number of ticks skipped because the frame budget was exceeded.
+    pub fn budget_overruns(&self) -> u64 {
+        self.budget_overruns
+    }
+
+    /// Duration (ms) of the most recent tick.
+    pub fn last_tick_ms(&self) -> f32 {
+        self.last_tick_ms
+    }
+
+    /// The BDS winner ID from the most recent tick.
+    pub fn last_winner(&self) -> &str {
+        &self.last_winner
+    }
+
+    /// The BDS winner score from the most recent tick.
+    pub fn last_winner_score(&self) -> f32 {
+        self.last_winner_score
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,21 +411,13 @@ mod tests {
     /// A world state that should reliably trigger the `fix_error` Reaction
     /// behavior (score ≥ 50) which beats the default threshold of 15.0.
     fn error_world() -> WorldState {
-        WorldState {
-            idle_secs: 5.0,
-            has_errors: true,
-            error_count: 3,
-            ..WorldState::default()
-        }
+        WorldState::new(5.0, true, 3, false, false, false, false, false, 0.0, 0)
     }
 
     /// A fully quiet world — no errors, no process, low idle — so the BDS
     /// winner should stay at the Basic "quiet" level (≤ 15).
     fn quiet_world() -> WorldState {
-        WorldState {
-            idle_secs: 0.5,
-            ..WorldState::default()
-        }
+        WorldState::new(0.5, false, 0, false, false, false, false, false, 0.0, 0)
     }
 
     // =======================================================================
@@ -404,9 +493,9 @@ mod tests {
         ooda.tick(&quiet_world(), 16);
         ooda.tick(&error_world(), 16);
 
-        assert_eq!(ooda.metrics().ticks, 3, "expected 3 ticks");
+        assert_eq!(ooda.metrics().ticks(), 3, "expected 3 ticks");
         assert!(
-            ooda.metrics().actions_emitted >= 1,
+            ooda.metrics().actions_emitted() >= 1,
             "expected at least 1 action emitted (error tick)"
         );
     }
@@ -418,10 +507,7 @@ mod tests {
     #[test]
     fn custom_high_threshold_suppresses_action() {
         // Set an impossibly high threshold so nothing ever fires.
-        let mut ooda = OodaLoop::new(OodaConfig {
-            budget_ms: 2.0,
-            action_threshold: 9999.0,
-        });
+        let mut ooda = OodaLoop::new(OodaConfig::new(2.0, 9999.0));
         let actions = ooda.tick(&error_world(), 16);
 
         assert!(
@@ -438,10 +524,7 @@ mod tests {
     #[test]
     fn agent_complete_triggers_notification() {
         let mut ooda = default_loop();
-        let world = WorldState {
-            agent_just_completed: true,
-            ..WorldState::default()
-        };
+        let world = WorldState::new(0.0, false, 0, false, false, true, false, false, 0.0, 0);
         let actions = ooda.tick(&world, 16);
 
         // notify_agent_complete is Reaction class (50+) — should beat threshold.
@@ -466,15 +549,7 @@ mod tests {
     #[test]
     fn orient_maps_world_to_context() {
         let ooda = default_loop();
-        let world = WorldState {
-            idle_secs: 12.5,
-            has_errors: true,
-            error_count: 7,
-            has_active_process: true,
-            chattiness: 0.3,
-            suggestions_since_input: 2,
-            ..WorldState::default()
-        };
+        let world = WorldState::new(12.5, true, 7, true, false, false, false, false, 0.3, 2);
         let ctx = ooda.orient(&world);
 
         assert!((ctx.idle_secs - 12.5).abs() < f32::EPSILON);
@@ -494,7 +569,7 @@ mod tests {
         let mut ooda = default_loop();
         ooda.tick(&error_world(), 16);
 
-        let winner = &ooda.metrics().last_winner;
+        let winner = ooda.metrics().last_winner();
         assert!(
             !winner.is_empty(),
             "expected last_winner to be set after tick"

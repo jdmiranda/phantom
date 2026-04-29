@@ -131,20 +131,20 @@ impl App {
         // into the same execute_brain_action pipeline as the async brain thread.
         {
             let idle_secs = now.duration_since(self.last_input_time).as_secs_f32();
-            let world = WorldState {
+            // Derive error presence from the last command context stored on
+            // the async brain scorer — we snapshot the same signals.
+            let world = WorldState::new(
                 idle_secs,
-                // Derive error presence from the last command context stored on
-                // the async brain scorer — we snapshot the same signals.
-                has_errors: false,   // OODA uses BDS which will be fed via orient
-                error_count: 0,
-                has_active_process: false,
-                new_pattern_detected: false,
-                agent_just_completed: false,
-                file_or_git_changed: false,
-                in_repl: false,
-                chattiness: 0.0,
-                suggestions_since_input: 0,
-            };
+                false,   // has_errors: OODA uses BDS which will be fed via orient
+                0,       // error_count
+                false,   // has_active_process
+                false,   // new_pattern_detected
+                false,   // agent_just_completed
+                false,   // file_or_git_changed
+                false,   // in_repl
+                0.0,     // chattiness
+                0,       // suggestions_since_input
+            );
             let dt_ms = (dt * 1000.0) as u64;
             let ooda_actions = self.ooda_loop.tick(&world, dt_ms);
             for action in ooda_actions {
