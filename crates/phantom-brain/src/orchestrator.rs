@@ -70,6 +70,13 @@ pub enum StepStatus {
     Failed,
     /// Skipped (e.g., became irrelevant after re-plan).
     Skipped,
+    /// Awaiting explicit human approval before execution may begin.
+    ///
+    /// Steps reach this state when [`PlanStep::requires_checkpoint`] is `true`
+    /// and the step would otherwise be the next eligible step. Execution is
+    /// paused until [`TaskLedger::approve_checkpoint`] transitions the step
+    /// back to [`StepStatus::Pending`], making it eligible for dispatch.
+    NeedsApproval,
 }
 
 /// A single step in the orchestrator's plan.
@@ -122,6 +129,13 @@ pub struct PlanStep {
     /// When `Some`, the dispatch layer resolves this ID in the
     /// `ProviderCatalog`. Unknown IDs fall back to `"claude-default"`.
     preferred_provider: Option<String>,
+    /// Whether this step requires explicit human approval before execution.
+    ///
+    /// When `true`, `set_plan` transitions the step's initial status to
+    /// [`StepStatus::NeedsApproval`] so it is excluded from
+    /// [`TaskLedger::eligible_next`] until the human calls
+    /// [`TaskLedger::approve_checkpoint`].
+    requires_checkpoint: bool,
 }
 
 impl PlanStep {
@@ -137,6 +151,7 @@ impl PlanStep {
             result_summary: None,
             depends_on: Vec::new(),
             preferred_provider: None,
+            requires_checkpoint: false,
         }
     }
 
@@ -156,6 +171,28 @@ impl PlanStep {
             depends_on,
             ..Self::new(description, task)
         }
+    }
+
+    /// Mark this step as requiring human approval before execution (builder-style).
+    ///
+    /// When a plan containing this step is loaded via [`TaskLedger::set_plan`],
+    /// the step's status is initialised to [`StepStatus::NeedsApproval`] so it
+    /// is excluded from [`TaskLedger::eligible_next`] until the operator calls
+    /// [`TaskLedger::approve_checkpoint`].
+    ///
+    /// # Example
+    /// ```ignore
+    /// let step = PlanStep::new("deploy to production", task)
+    ///     .with_checkpoint();
+    /// ```
+    pub fn with_checkpoint(mut self) -> Self {
+        self.requires_checkpoint = true;
+        self
+    }
+
+    /// Returns `true` if this step requires human approval before execution.
+    pub fn requires_checkpoint(&self) -> bool {
+        self.requires_checkpoint
     }
 
     /// Attach a preferred provider ID to this step (builder-style).
@@ -315,8 +352,7 @@ impl TaskLedger {
     /// Promote a guess to verified when an agent confirms it.
     pub fn verify_fact(&mut self, content_prefix: &str) {
         for fact in &mut self.facts {
-            if fact.confidence == FactConfidence::Guess
-                && fact.content.starts_with(content_prefix)
+            if fact.confidence == FactConfidence::Guess && fact.content.starts_with(content_prefix)
             {
                 fact.confidence = FactConfidence::Verified;
                 fact.updated_at = Instant::now();
@@ -336,6 +372,11 @@ impl TaskLedger {
 
     /// Set the initial plan (from the orchestrator's first pass).
     ///
+    /// Steps built with [`PlanStep::with_checkpoint`] are initialised to
+    /// [`StepStatus::NeedsApproval`] so they are excluded from
+    /// [`TaskLedger::eligible_next`] until the operator explicitly calls
+    /// [`TaskLedger::approve_checkpoint`].
+    ///
     /// If the dependency graph formed by `steps[i].depends_on` contains a
     /// cycle, **all steps are immediately marked `Failed`** and the ledger
     /// is left in a non-executable state so the reconciler can detect and
@@ -343,23 +384,35 @@ impl TaskLedger {
     pub fn set_plan(&mut self, steps: Vec<PlanStep>) {
         self.plan = steps;
         self.stall_counter = 0;
+
+        // Apply checkpoint gating before cycle detection so that a cyclic plan
+        // that also has checkpoints still ends up with everything marked Failed.
+        for step in &mut self.plan {
+            if step.requires_checkpoint && step.status == StepStatus::Pending {
+                step.status = StepStatus::NeedsApproval;
+            }
+        }
+
         if self.has_cycle() {
-            log::error!(
-                "TaskLedger::set_plan — dependency cycle detected; blocking all steps"
-            );
+            log::error!("TaskLedger::set_plan — dependency cycle detected; blocking all steps");
             for step in &mut self.plan {
                 step.status = StepStatus::Failed;
-                step.result_summary =
-                    Some("blocked: dependency cycle detected in plan".into());
+                step.result_summary = Some("blocked: dependency cycle detected in plan".into());
             }
         }
     }
 
     /// Returns all `Pending` steps whose dependency constraints are satisfied.
     ///
-    /// A step is *eligible* when every index in `step.depends_on` refers to
-    /// a step that has already reached `StepStatus::Done`. Steps with no
-    /// dependencies are always eligible (when `Pending`).
+    /// A step is *eligible* when:
+    /// - Its status is [`StepStatus::Pending`] (not `NeedsApproval` or any
+    ///   other status), **and**
+    /// - Every index in `step.depends_on` refers to a step that has already
+    ///   reached [`StepStatus::Done`].
+    ///
+    /// Steps with [`StepStatus::NeedsApproval`] are **never** returned —
+    /// they must be explicitly approved via [`TaskLedger::approve_checkpoint`]
+    /// before they can become eligible.
     ///
     /// The returned pairs are `(step_index, &PlanStep)` so the caller can
     /// simultaneously track position and content without a second lookup.
@@ -382,12 +435,58 @@ impl TaskLedger {
             .iter()
             .enumerate()
             .filter(|(_, s)| {
+                // NeedsApproval steps are explicitly excluded: they require a
+                // human to call approve_checkpoint before they become Pending.
                 s.status == StepStatus::Pending
                     && s.depends_on
                         .iter()
                         .all(|dep| *dep >= self.plan.len() || done.contains(dep))
             })
             .collect()
+    }
+
+    /// Transition a step from [`StepStatus::NeedsApproval`] to
+    /// [`StepStatus::Pending`], making it eligible for dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when:
+    /// - `step_idx` is out of bounds for the current plan, or
+    /// - the step at `step_idx` is not in [`StepStatus::NeedsApproval`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut ledger = TaskLedger::new("deploy");
+    /// let step = PlanStep::new("push to prod", task).with_checkpoint();
+    /// ledger.set_plan(vec![step]);
+    ///
+    /// // Step is gated — not eligible yet.
+    /// assert!(ledger.eligible_next().is_empty());
+    ///
+    /// // Human approves.
+    /// ledger.approve_checkpoint(0).expect("approval failed");
+    ///
+    /// // Now eligible.
+    /// assert_eq!(ledger.eligible_next().len(), 1);
+    /// ```
+    pub fn approve_checkpoint(&mut self, step_idx: usize) -> Result<(), String> {
+        match self.plan.get_mut(step_idx) {
+            None => Err(format!(
+                "approve_checkpoint: step index {step_idx} is out of bounds \
+                 (plan has {} steps)",
+                self.plan.len()
+            )),
+            Some(step) if step.status != StepStatus::NeedsApproval => Err(format!(
+                "approve_checkpoint: step {step_idx} is not awaiting approval \
+                 (current status: {:?})",
+                step.status
+            )),
+            Some(step) => {
+                step.status = StepStatus::Pending;
+                Ok(())
+            }
+        }
     }
 
     /// Returns `true` if the dependency graph contains a cycle.
@@ -433,7 +532,7 @@ impl TaskLedger {
                     }
 
                     match color[dep] {
-                        1 => return true,  // back-edge → cycle
+                        1 => return true, // back-edge → cycle
                         0 => {
                             // Tree-edge: push and colour grey.
                             color[dep] = 1;
@@ -495,12 +594,16 @@ impl TaskLedger {
                 StepStatus::Done => counts.done += 1,
                 StepStatus::Failed => counts.failed += 1,
                 StepStatus::Skipped => counts.skipped += 1,
+                StepStatus::NeedsApproval => counts.needs_approval += 1,
             }
         }
         counts
     }
 
     /// Whether the plan is fully resolved (all steps done/failed/skipped).
+    ///
+    /// Steps with [`StepStatus::NeedsApproval`] are **not** resolved —
+    /// they count as unfinished work until approved or explicitly failed.
     pub fn is_plan_resolved(&self) -> bool {
         self.plan.iter().all(|s| {
             matches!(
@@ -525,8 +628,7 @@ impl TaskLedger {
         let counts = self.step_counts();
 
         // Q1: Complete if all steps done and no pending work.
-        let is_complete =
-            counts.pending == 0 && counts.active == 0 && counts.done > 0;
+        let is_complete = counts.pending == 0 && counts.active == 0 && counts.done > 0;
 
         // Q2: Loop detection via output similarity.
         let is_looping = self.detect_loop();
@@ -547,12 +649,12 @@ impl TaskLedger {
         };
 
         // Q4 & Q5: Next step.
-        let (next_step_idx, next_instruction) =
-            if let Some((idx, step)) = self.next_pending_step() {
-                (Some(idx), Some(step.description.clone()))
-            } else {
-                (None, None)
-            };
+        let (next_step_idx, next_instruction) = if let Some((idx, step)) = self.next_pending_step()
+        {
+            (Some(idx), Some(step.description.clone()))
+        } else {
+            (None, None)
+        };
 
         // Update stall counter.
         if !has_progress && !is_complete {
@@ -587,10 +689,7 @@ impl TaskLedger {
         // Terminal: exhausted all re-plan attempts.
         if self.replan_count >= self.max_replans {
             return ReplanDecision::GiveUp {
-                reason: format!(
-                    "exhausted {} re-plan attempts",
-                    self.max_replans
-                ),
+                reason: format!("exhausted {} re-plan attempts", self.max_replans),
             };
         }
 
@@ -602,11 +701,7 @@ impl TaskLedger {
             }
             // Some steps failed -- re-plan with lessons learned.
             return ReplanDecision::Replan {
-                reason: format!(
-                    "{} of {} steps failed",
-                    counts.failed,
-                    self.plan.len()
-                ),
+                reason: format!("{} of {} steps failed", counts.failed, self.plan.len()),
                 failed_steps: self
                     .plan
                     .iter()
@@ -687,8 +782,7 @@ impl TaskLedger {
                 .iter()
                 .filter(|o| {
                     let prefix_len = last.len().min(o.len()).min(50);
-                    prefix_len > 0
-                        && last[..prefix_len] == o.as_str()[..prefix_len]
+                    prefix_len > 0 && last[..prefix_len] == o.as_str()[..prefix_len]
                 })
                 .count();
             if similar >= 3 {
@@ -742,6 +836,7 @@ impl TaskLedger {
                     StepStatus::Done => "OK",
                     StepStatus::Failed => "FAILED",
                     StepStatus::Skipped => "SKIPPED",
+                    StepStatus::NeedsApproval => "AWAITING_APPROVAL",
                     _ => "INCOMPLETE",
                 };
                 ctx.push_str(&format!("    [{}] {}", status_str, step.description));
@@ -762,6 +857,7 @@ impl TaskLedger {
                     StepStatus::Done => "DONE",
                     StepStatus::Failed => "FAILED",
                     StepStatus::Skipped => "SKIPPED",
+                    StepStatus::NeedsApproval => "AWAITING_APPROVAL",
                 };
                 ctx.push_str(&format!(
                     "  {}. [{}] {} (attempts: {})\n",
@@ -1047,6 +1143,9 @@ pub struct StepCounts {
     pub done: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// Steps currently awaiting human approval via
+    /// [`TaskLedger::approve_checkpoint`].
+    pub needs_approval: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1080,7 +1179,11 @@ mod tests {
         let mut ledger = TaskLedger::new("test");
         ledger.add_fact("error is in main.rs", FactConfidence::Verified, "agent-1");
         ledger.add_fact("might be a type mismatch", FactConfidence::Guess, "brain");
-        ledger.add_fact("need to check Cargo.toml", FactConfidence::ToLookUp, "brain");
+        ledger.add_fact(
+            "need to check Cargo.toml",
+            FactConfidence::ToLookUp,
+            "brain",
+        );
 
         assert_eq!(ledger.facts_at(FactConfidence::Verified).len(), 1);
         assert_eq!(ledger.facts_at(FactConfidence::Guess).len(), 1);
@@ -1515,7 +1618,9 @@ mod tests {
         let s2 = PlanStep::new("pending step", free_task("p"));
         orch.set_plan(vec![s1, s2]);
 
-        let step = orch.dispatch_next_step().expect("should return pending step");
+        let step = orch
+            .dispatch_next_step()
+            .expect("should return pending step");
         assert_eq!(step.description, "pending step");
     }
 
@@ -1714,8 +1819,10 @@ mod tests {
         // All three steps should be eligible: s0 and s1 have no deps,
         // s2 has only an OOB dep (treated as satisfied).
         assert_eq!(eligible.len(), 3, "OOB dep index must not block the step");
-        let descriptions: Vec<&str> =
-            eligible.iter().map(|(_, s)| s.description.as_str()).collect();
+        let descriptions: Vec<&str> = eligible
+            .iter()
+            .map(|(_, s)| s.description.as_str())
+            .collect();
         assert!(
             descriptions.contains(&"s2-oob"),
             "s2-oob must appear in eligible_next output"
@@ -1846,5 +1953,85 @@ mod tests {
         let step = PlanStep::new("plain step", free_task("x"));
         assert!(step.depends_on().is_empty());
         assert!(step.preferred_provider().is_none());
+    }
+
+    // -- Issue #44: Human checkpoint gate -------------------------------------
+
+    /// A checkpoint step is not eligible until explicitly approved.
+    #[test]
+    fn checkpoint_step_is_not_eligible_until_approved() {
+        let mut ledger = TaskLedger::new("deploy");
+        let step = PlanStep::new("push to production", free_task("deploy")).with_checkpoint();
+        ledger.set_plan(vec![step]);
+
+        // After set_plan, the checkpoint step must be in NeedsApproval.
+        assert_eq!(ledger.plan[0].status, StepStatus::NeedsApproval);
+
+        // eligible_next must exclude NeedsApproval steps.
+        let eligible = ledger.eligible_next();
+        assert!(
+            eligible.is_empty(),
+            "checkpoint step must not appear in eligible_next before approval"
+        );
+    }
+
+    /// Approving a checkpoint transitions it to Pending and makes it eligible.
+    #[test]
+    fn approve_checkpoint_makes_step_eligible() {
+        let mut ledger = TaskLedger::new("deploy");
+        let step = PlanStep::new("push to production", free_task("deploy")).with_checkpoint();
+        ledger.set_plan(vec![step]);
+
+        // Confirm gated.
+        assert!(ledger.eligible_next().is_empty());
+
+        // Human approves.
+        ledger
+            .approve_checkpoint(0)
+            .expect("approval should succeed");
+
+        // Now the step must be Pending and eligible.
+        assert_eq!(ledger.plan[0].status, StepStatus::Pending);
+        let eligible = ledger.eligible_next();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].1.description, "push to production");
+    }
+
+    /// Approving the wrong step index returns an Err.
+    #[test]
+    fn approve_checkpoint_wrong_step_returns_err() {
+        let mut ledger = TaskLedger::new("deploy");
+        let step = PlanStep::new("push to production", free_task("deploy")).with_checkpoint();
+        ledger.set_plan(vec![step]);
+
+        // Out-of-bounds index.
+        let result = ledger.approve_checkpoint(99);
+        assert!(result.is_err(), "out-of-bounds index must return Err");
+
+        // Approving a non-checkpoint step (index 0 is NeedsApproval, so we
+        // first approve it, then try again on the now-Pending step).
+        ledger.approve_checkpoint(0).expect("first approval ok");
+        // Step is now Pending — approving again must fail.
+        let result2 = ledger.approve_checkpoint(0);
+        assert!(
+            result2.is_err(),
+            "approving a non-NeedsApproval step must return Err"
+        );
+    }
+
+    /// A step without with_checkpoint() runs without any approval ceremony.
+    #[test]
+    fn non_checkpoint_step_runs_without_approval() {
+        let mut ledger = TaskLedger::new("build");
+        // Plain step — no checkpoint flag.
+        let step = PlanStep::new("compile sources", free_task("build"));
+        assert!(!step.requires_checkpoint());
+        ledger.set_plan(vec![step]);
+
+        // Must be Pending (not NeedsApproval) and immediately eligible.
+        assert_eq!(ledger.plan[0].status, StepStatus::Pending);
+        let eligible = ledger.eligible_next();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].1.description, "compile sources");
     }
 }
