@@ -106,11 +106,13 @@ pub trait TranscriptBackend: Send + Sync {
 /// In-memory backend that emits a fixed transcript regardless of audio
 /// content. Useful for tests and as the default placeholder until a real
 /// backend is wired up.
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct MockBackend {
     transcript: Vec<TranscriptEvent>,
 }
 
+#[cfg(test)]
 impl MockBackend {
     /// Build a backend that emits no events (drains audio and completes).
     #[must_use]
@@ -126,6 +128,7 @@ impl MockBackend {
     }
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl TranscriptBackend for MockBackend {
     fn name(&self) -> &'static str {
@@ -147,6 +150,7 @@ impl TranscriptBackend for MockBackend {
 
 // Tiny inline stream helper so we don't pull in `async-stream`. Drains the
 // audio channel, then emits each pre-canned event in order.
+#[cfg(test)]
 mod async_stream {
     use std::future::Future;
     use std::pin::Pin;
