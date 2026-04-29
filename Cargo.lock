@@ -5428,6 +5428,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "phantom-adapter",
  "phantom-agents",
  "phantom-context",
  "phantom-history",

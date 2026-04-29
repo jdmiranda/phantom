@@ -176,6 +176,7 @@ pub struct Agent {
     id: AgentId,
     /// The task this agent was spawned to perform.
     task: AgentTask,
+    #[allow(dead_code)] // Intent classification — read by tests; production use comes with Sec.8+ disposition routing.
     disposition: Disposition,
     /// Current lifecycle status.
     status: AgentStatus,
