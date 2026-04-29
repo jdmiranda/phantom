@@ -214,8 +214,13 @@ impl AgentRuntime {
 
     /// Lock the event log and return a guard. Used by callers (and tests)
     /// that want to drive `tail`, `path`, etc. directly.
+    ///
+    /// Recovers from a poisoned mutex (#222) — the inner value is still
+    /// usable after the thread that panicked released the guard.
     pub fn event_log(&self) -> std::sync::MutexGuard<'_, EventLog> {
-        self.event_log.lock().expect("event log mutex poisoned")
+        self.event_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Clone the event-log handle for sharing with a
@@ -230,8 +235,13 @@ impl AgentRuntime {
     /// Lock the registry and return a guard. Read-only consumers (e.g.
     /// `commands.rs::pair`) use this to look up agents by label without
     /// taking ownership.
+    ///
+    /// Recovers from a poisoned mutex (#222) — the inner value is still
+    /// usable after the thread that panicked released the guard.
     pub fn registry(&self) -> std::sync::MutexGuard<'_, AgentRegistry> {
-        self.registry.lock().expect("registry mutex poisoned")
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Clone the registry handle for sharing with dispatch contexts. Same
@@ -268,8 +278,13 @@ impl AgentRuntime {
 
     /// Force a flush of the underlying event log buffer. Useful before
     /// shutdown or in tests asserting on-disk state.
+    ///
+    /// Recovers from a poisoned mutex (#222).
     pub fn flush(&mut self) -> std::io::Result<()> {
-        let mut log = self.event_log.lock().expect("event log mutex poisoned");
+        let mut log = self
+            .event_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         log.flush()
     }
 
@@ -296,7 +311,10 @@ impl AgentRuntime {
         // gets newest-on-bottom; the inspector adapter is free to reverse if
         // it prefers newest-on-top.
         let envelopes = {
-            let log = self.event_log.lock().expect("event log mutex poisoned");
+            let log = self
+                .event_log
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             log.tail(phantom_agents::inspector::MAX_RECENT_EVENTS)
         };
         for env in &envelopes {
@@ -325,7 +343,10 @@ impl AgentRuntime {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let agent_refs: Vec<_> = {
-            let reg = self.registry.lock().expect("registry mutex poisoned");
+            let reg = self
+                .registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             reg.list().into_iter().cloned().collect()
         };
         for agent_ref in agent_refs {
@@ -709,5 +730,41 @@ mod tests {
             payload.get("attempted_class").and_then(|v| v.as_str()),
             Some("Act"),
         );
+    }
+
+    // -- Issue #222: poisoned mutex recovery -----------------------------------
+
+    /// Poison the `event_log` mutex by panicking inside a lock guard, then
+    /// assert that `AgentRuntime::event_log()` still returns a usable guard
+    /// rather than propagating the panic to the caller (#222).
+    #[test]
+    fn event_log_accessor_recovers_from_poisoned_mutex() {
+        let (rt, _dir) = make_runtime();
+
+        // Poison the event_log mutex: lock it in a thread that panics.
+        let handle = Arc::clone(&rt.event_log);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = handle.lock().unwrap();
+            panic!("intentional poison");
+        });
+
+        // The mutex is now poisoned. event_log() must not panic.
+        let _guard = rt.event_log();
+        // If we reach this line the recovery path worked.
+    }
+
+    /// Same as above but for the `registry` accessor.
+    #[test]
+    fn registry_accessor_recovers_from_poisoned_mutex() {
+        let (rt, _dir) = make_runtime();
+
+        let handle = Arc::clone(&rt.registry);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = handle.lock().unwrap();
+            panic!("intentional poison");
+        });
+
+        // Must not panic even though the mutex is poisoned.
+        let _guard = rt.registry();
     }
 }

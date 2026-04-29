@@ -56,7 +56,9 @@ pub struct ReconcilerState {
     active_dispatches: HashMap<usize, (AgentId, Instant)>,
     /// Monotonically increasing agent ID namespace for reconciler-dispatched
     /// agents. Starts high to avoid collision with AgentManager's IDs.
-    next_agent_id: AgentId,
+    /// Stored as `u64` to guarantee no silent wraparound on long-running
+    /// sessions (#221).
+    next_agent_id: u64,
     /// Configurable stall timeout (overrideable in tests).
     pub stall_timeout: Duration,
 }
@@ -225,18 +227,23 @@ impl ReconcilerState {
             .collect();
 
         for (idx, task, description) in eligible {
-            let agent_id = self.next_agent_id;
-            self.next_agent_id += 1;
+            let agent_id: u64 = self.next_agent_id;
+            self.next_agent_id = self
+                .next_agent_id
+                .checked_add(1)
+                .expect("reconciler next_agent_id overflowed u64 — unreachable in practice");
 
             // Advance step to Active before emitting SpawnAgent so that a
             // synchronous ledger inspection sees the correct state.
+            // `agent_id` fits in u32 for the ledger field; saturate rather
+            // than truncate so corrupt IDs are visible (#221).
             if let Some(s) = ledger.plan.get_mut(idx) {
                 s.status = StepStatus::Active;
-                s.agent_id = Some(agent_id as u32);
+                s.agent_id = Some(u32::try_from(agent_id).unwrap_or(u32::MAX));
                 s.attempts += 1;
             }
 
-            self.active_dispatches.insert(idx, (agent_id, Instant::now()));
+            self.active_dispatches.insert(idx, (agent_id as AgentId, Instant::now()));
 
             log::info!(
                 "Reconciler: dispatching step {idx} (agent_id={agent_id}) — {description}"
@@ -244,7 +251,7 @@ impl ReconcilerState {
 
             let _ = action_tx.send(AiAction::SpawnAgent {
                 task,
-                spawn_tag: Some(agent_id as u64),
+                spawn_tag: Some(agent_id),
             });
         }
     }
@@ -656,6 +663,38 @@ mod tests {
             state.active_dispatches.len(),
             1,
             "dispatch must still be registered"
+        );
+    }
+
+    // -- Issue #221: next_agent_id must not overflow silently -----------------
+
+    /// Drive `next_agent_id` forward 100 000 times and assert the counter
+    /// never wraps. Under the old `u32` scheme this would silently overflow
+    /// at 4 294 967 295; with `u64` the range is effectively unlimited for
+    /// any realistic session.
+    #[test]
+    fn next_agent_id_does_not_overflow_after_100k_increments() {
+        let mut state = ReconcilerState::new();
+        let start = state.next_agent_id;
+
+        for i in 0..100_000u64 {
+            // Each increment must not overflow (would panic via checked_add).
+            state.next_agent_id = state
+                .next_agent_id
+                .checked_add(1)
+                .expect("next_agent_id overflowed — u64 counter is broken");
+
+            // Verify monotonic increase (no wrap-around).
+            assert!(
+                state.next_agent_id > start,
+                "next_agent_id wrapped at iteration {i}",
+            );
+        }
+
+        assert_eq!(
+            state.next_agent_id,
+            start + 100_000,
+            "counter must advance by exactly 100 000"
         );
     }
 
