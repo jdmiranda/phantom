@@ -19,16 +19,13 @@
 //! data; the store tests use `tempfile::TempDir` for ephemeral SQLite files.
 
 use phantom_bundle_store::{
-    testing::{deterministic_master_key, open_at},
     BundleEmbeddings,
+    testing::{deterministic_master_key, open_at},
 };
-use phantom_bundles::{
-    assembler::BundleAssembler, AudioRef, FrameRef, TranscriptWord,
-};
+use phantom_bundles::{AudioRef, FrameRef, TranscriptWord, assembler::BundleAssembler};
 use phantom_embeddings::{
-    cosine_similarity,
+    Embedding, cosine_similarity,
     store::{EmbeddingStore, InMemoryStore},
-    Embedding,
 };
 use phantom_vision::{dhash, downsample_to_64x64_gray, fast_diff_gate, hamming_distance};
 use tempfile::TempDir;
@@ -48,7 +45,11 @@ fn solid_rgba(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
 /// Construct an [`Embedding`] from a plain `Vec<f32>`.
 fn embedding(vec: Vec<f32>) -> Embedding {
     let dim = vec.len();
-    Embedding { vec, dim, model: "test".into() }
+    Embedding {
+        vec,
+        dim,
+        model: "test".into(),
+    }
 }
 
 /// Open a fresh [`BundleStore`] in a temporary directory.
@@ -78,7 +79,10 @@ fn dedup_identical_frames_detected() {
     let hash_b = dhash(&frame_b, 128, 128).expect("dhash b");
 
     // Identical content must hash identically.
-    assert_eq!(hash_a, hash_b, "identical frames must produce the same dHash");
+    assert_eq!(
+        hash_a, hash_b,
+        "identical frames must produce the same dHash"
+    );
 
     // Hamming distance 0 → confirmed duplicate.
     let dist = hamming_distance(hash_a, hash_b);
@@ -86,10 +90,8 @@ fn dedup_identical_frames_detected() {
     assert!(dist <= 5, "threshold check: duplicate if dist <= 5");
 
     // --- fast SAD gate path ---
-    let reference = downsample_to_64x64_gray(&frame_a, 128, 128)
-        .expect("downsample reference");
-    let sad = fast_diff_gate(&frame_b, &reference, 128, 128)
-        .expect("fast_diff_gate");
+    let reference = downsample_to_64x64_gray(&frame_a, 128, 128).expect("downsample reference");
+    let sad = fast_diff_gate(&frame_b, &reference, 128, 128).expect("fast_diff_gate");
 
     assert_eq!(sad, 0, "SAD for identical frames must be 0");
 
@@ -98,8 +100,8 @@ fn dedup_identical_frames_detected() {
     // per pixel is ~161 over the 64×64 = 4096 cell grid → SAD ≈ 659_456.
     // Any significantly different solid color should produce SAD > 100_000.
     let frame_white = solid_rgba(128, 128, 255, 255, 255);
-    let sad_diff = fast_diff_gate(&frame_white, &reference, 128, 128)
-        .expect("fast_diff_gate different");
+    let sad_diff =
+        fast_diff_gate(&frame_white, &reference, 128, 128).expect("fast_diff_gate different");
     assert!(
         sad_diff > 100_000,
         "SAD for very different frames must be substantially above zero (got {sad_diff})"
@@ -154,7 +156,11 @@ fn bundle_assembler_round_trip() {
     });
 
     let original = asm
-        .finish(Some("ci-check".into()), vec!["rust".into(), "smoke".into()], 0.88)
+        .finish(
+            Some("ci-check".into()),
+            vec!["rust".into(), "smoke".into()],
+            0.88,
+        )
         .expect("assembler finish");
 
     // Basic invariants on the sealed bundle.
@@ -175,7 +181,10 @@ fn bundle_assembler_round_trip() {
     assert_eq!(restored.t_start_ns, original.t_start_ns, "t_start_ns");
     assert_eq!(restored.frames.len(), 2, "frame count");
     assert_eq!(restored.frames[0].sha, "cafebabe", "frame[0].sha");
-    assert_eq!(restored.frames[1].t_offset_ns, 33_000_000, "frame[1].t_offset_ns");
+    assert_eq!(
+        restored.frames[1].t_offset_ns, 33_000_000,
+        "frame[1].t_offset_ns"
+    );
     assert_eq!(restored.frames[1].dhash, 0xCAFE_BABE_u64, "frame[1].dhash");
     assert_eq!(restored.audio_chunks.len(), 1, "audio count");
     assert_eq!(restored.audio_chunks[0].sample_rate, 48_000, "sample_rate");
@@ -186,7 +195,11 @@ fn bundle_assembler_round_trip() {
     assert_eq!(restored.tags, vec!["rust", "smoke"], "tags");
     assert!((restored.importance - 0.88).abs() < 1e-5, "importance");
     assert!(restored.sealed, "sealed");
-    assert_eq!(restored.schema_version, phantom_bundles::SCHEMA_VERSION, "schema_version");
+    assert_eq!(
+        restored.schema_version,
+        phantom_bundles::SCHEMA_VERSION,
+        "schema_version"
+    );
 }
 
 // ── 3. Store + retrieve ───────────────────────────────────────────────────────
@@ -258,11 +271,17 @@ fn store_insert_and_retrieve_by_id() {
     assert_eq!(retrieved.id, original_id, "id");
     assert_eq!(retrieved.source_pane_id, 42, "source_pane_id");
     assert_eq!(retrieved.t_start_ns, 1_000_000, "t_start_ns");
-    assert_eq!(retrieved.t_wall_unix_ms, 1_700_000_000_000, "t_wall_unix_ms");
+    assert_eq!(
+        retrieved.t_wall_unix_ms, 1_700_000_000_000,
+        "t_wall_unix_ms"
+    );
 
     assert_eq!(retrieved.frames.len(), 2, "frame count");
     assert_eq!(retrieved.frames[0].sha, "sha-frame-0", "frame[0].sha");
-    assert_eq!(retrieved.frames[1].t_offset_ns, 16_666_666, "frame[1].t_offset_ns");
+    assert_eq!(
+        retrieved.frames[1].t_offset_ns, 16_666_666,
+        "frame[1].t_offset_ns"
+    );
     assert_eq!(retrieved.frames[0].width, 1280, "width");
     assert_eq!(retrieved.frames[0].height, 720, "height");
 
@@ -280,7 +299,11 @@ fn store_insert_and_retrieve_by_id() {
     );
 
     assert_eq!(retrieved.intent.as_deref(), Some("build-success"), "intent");
-    assert_eq!(retrieved.tags, vec!["green".to_string(), "ci".to_string()], "tags");
+    assert_eq!(
+        retrieved.tags,
+        vec!["green".to_string(), "ci".to_string()],
+        "tags"
+    );
     assert!((retrieved.importance - 0.75).abs() < 1e-5, "importance");
     assert!(retrieved.sealed, "sealed");
 }
@@ -337,7 +360,11 @@ fn end_to_end_capture_pipeline() {
 
     let hash_a = dhash(&frame_a, 64, 64).expect("dhash a");
     let hash_b = dhash(&frame_b, 64, 64).expect("dhash b");
-    assert_eq!(hamming_distance(hash_a, hash_b), 0, "dedup: b is a duplicate of a");
+    assert_eq!(
+        hamming_distance(hash_a, hash_b),
+        0,
+        "dedup: b is a duplicate of a"
+    );
 
     // --- Step 2: Bundle assembly ---
     let mut asm = BundleAssembler::new(7_u64);
@@ -362,7 +389,11 @@ fn end_to_end_capture_pipeline() {
         .finish(Some("e2e-smoke".into()), vec!["pipeline".into()], 0.5)
         .expect("assemble bundle");
 
-    assert_eq!(bundle.frames.len(), 1, "only the non-duplicate frame is stored");
+    assert_eq!(
+        bundle.frames.len(),
+        1,
+        "only the non-duplicate frame is stored"
+    );
     assert_eq!(bundle.frames[0].dhash, hash_a);
     assert!(bundle.sealed);
 
@@ -372,17 +403,23 @@ fn end_to_end_capture_pipeline() {
     let query_vec = vec![0.0_f32, 1.0, 0.0]; // "text" direction
 
     store
-        .write_bundle(&bundle, &[BundleEmbeddings {
-            modality: "text".into(),
-            embedding: embedding(query_vec.clone()),
-        }])
+        .write_bundle(
+            &bundle,
+            &[BundleEmbeddings {
+                modality: "text".into(),
+                embedding: embedding(query_vec.clone()),
+            }],
+        )
         .expect("write bundle to store");
 
     // --- Step 4: Retrieve by ID ---
     let retrieved = store.read_bundle(bundle_id).expect("read bundle");
     assert_eq!(retrieved.id, bundle_id, "retrieved id matches");
     assert_eq!(retrieved.frames.len(), 1, "retrieved frame count");
-    assert_eq!(retrieved.frames[0].dhash, hash_a, "dhash preserved in store");
+    assert_eq!(
+        retrieved.frames[0].dhash, hash_a,
+        "dhash preserved in store"
+    );
     assert_eq!(retrieved.transcript_words[0].text, "phantom smoke test");
 
     // --- Step 5: Vector search finds the bundle ---
@@ -394,7 +431,10 @@ fn end_to_end_capture_pipeline() {
         })
         .expect("vector search");
 
-    assert!(!hits.is_empty(), "vector search must return at least one hit");
+    assert!(
+        !hits.is_empty(),
+        "vector search must return at least one hit"
+    );
     assert_eq!(hits[0].bundle_id, bundle_id, "top hit must be our bundle");
     assert!(
         (hits[0].similarity - 1.0).abs() < 1e-5,

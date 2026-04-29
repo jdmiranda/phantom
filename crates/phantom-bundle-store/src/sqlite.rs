@@ -181,7 +181,9 @@ pub fn check_schema_version(conn: &Connection) -> Result<(), StoreError> {
         )
         .optional()?;
     let Some(s) = raw else {
-        return Err(StoreError::Invariant("meta.schema_version row missing".into()));
+        return Err(StoreError::Invariant(
+            "meta.schema_version row missing".into(),
+        ));
     };
     let found: u32 = s
         .parse()
@@ -229,7 +231,10 @@ pub fn insert_bundle(tx: &mut Transaction<'_>, bundle: &Bundle) -> Result<(), St
         insert_frame(conn, &id_str, seq as i64, frame)?;
     }
 
-    conn.execute("DELETE FROM audio_chunks WHERE bundle_id = ?1", params![id_str])?;
+    conn.execute(
+        "DELETE FROM audio_chunks WHERE bundle_id = ?1",
+        params![id_str],
+    )?;
     for (seq, audio) in bundle.audio_chunks.iter().enumerate() {
         insert_audio(conn, &id_str, seq as i64, audio)?;
     }
@@ -256,7 +261,12 @@ pub fn insert_bundle(tx: &mut Transaction<'_>, bundle: &Bundle) -> Result<(), St
     let tags_text = bundle.tags.join(" ");
     conn.execute(
         "INSERT INTO transcripts_fts (bundle_id, body, intent, tags) VALUES (?1, ?2, ?3, ?4)",
-        params![id_str, body, bundle.intent.as_deref().unwrap_or(""), tags_text],
+        params![
+            id_str,
+            body,
+            bundle.intent.as_deref().unwrap_or(""),
+            tags_text
+        ],
     )?;
 
     Ok(())
@@ -353,7 +363,17 @@ pub fn read_bundle(conn: &Connection, id: BundleId) -> Result<Bundle, StoreError
             },
         )
         .optional()?;
-    let Some((t_start_ns, t_wall_unix_ms, source_pane_id, intent, tags_json, importance, sealed, schema_version)) = row else {
+    let Some((
+        t_start_ns,
+        t_wall_unix_ms,
+        source_pane_id,
+        intent,
+        tags_json,
+        importance,
+        sealed,
+        schema_version,
+    )) = row
+    else {
         return Err(StoreError::NotFound(id));
     };
 

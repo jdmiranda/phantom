@@ -77,8 +77,8 @@ impl MasterKey {
             .map_err(|e| StoreError::Keyring(format!("entry: {e}")))?;
         match entry.get_password() {
             Ok(b64) => {
-                let bytes = decode_b64_32(&b64)
-                    .map_err(|e| StoreError::Keyring(format!("decode: {e}")))?;
+                let bytes =
+                    decode_b64_32(&b64).map_err(|e| StoreError::Keyring(format!("decode: {e}")))?;
                 Ok(Self::from_bytes(bytes))
             }
             Err(keyring::Error::NoEntry) => {
@@ -199,14 +199,14 @@ pub(crate) fn open_blob(dek: &DataEncryptionKey, env: &BlobEnvelope) -> Result<V
 // 32-byte master key through the keychain (which expects a string).
 // ---------------------------------------------------------------------------
 
-const B64_ALPHA: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn encode_b64_32(bytes: &[u8; 32]) -> String {
     let mut out = String::with_capacity(44);
     let mut i = 0;
     while i + 3 <= bytes.len() {
-        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
+        let n =
+            (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
         out.push(B64_ALPHA[((n >> 18) & 0x3F) as usize] as char);
         out.push(B64_ALPHA[((n >> 12) & 0x3F) as usize] as char);
         out.push(B64_ALPHA[((n >> 6) & 0x3F) as usize] as char);
@@ -268,9 +268,7 @@ fn decode_b64_32(s: &str) -> Result<[u8; 32], String> {
     if bytes[43] != b'=' || bytes[42] == b'=' {
         return Err("expected trailing 'XXX=' for 32-byte b64".into());
     }
-    let n = (lookup(bytes[40])? << 18)
-        | (lookup(bytes[41])? << 12)
-        | (lookup(bytes[42])? << 6);
+    let n = (lookup(bytes[40])? << 18) | (lookup(bytes[41])? << 12) | (lookup(bytes[42])? << 6);
     out[30] = ((n >> 16) & 0xFF) as u8;
     out[31] = ((n >> 8) & 0xFF) as u8;
     Ok(out)
@@ -303,7 +301,11 @@ mod tests {
 
         let other = Uuid::from_u128(0x1111_1111_1111_1111_1111_1111_1111_1111);
         let dek_c = mk.derive_bundle_dek(other).unwrap();
-        assert_ne!(dek_a.0.as_ref(), dek_c.0.as_ref(), "different bundles get different DEKs");
+        assert_ne!(
+            dek_a.0.as_ref(),
+            dek_c.0.as_ref(),
+            "different bundles get different DEKs"
+        );
     }
 
     #[test]

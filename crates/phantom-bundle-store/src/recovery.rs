@@ -23,9 +23,9 @@ use std::collections::HashSet;
 
 use phantom_bundles::BundleId;
 
-use crate::lance::{InMemoryVectorIndex, VectorIndex};
-use crate::sqlite::{Connection, all_bundle_ids};
 use crate::StoreError;
+use crate::lance::VectorIndex;
+use crate::sqlite::{Connection, all_bundle_ids};
 
 /// Sweep vector-index entries that no longer have a matching SQLite row,
 /// then clear the `leaked_rows` table.
@@ -33,7 +33,7 @@ use crate::StoreError;
 /// Returns the number of vector entries that were dropped.
 pub fn sweep_leaked_rows(
     sqlite: &Connection,
-    vectors: &InMemoryVectorIndex,
+    vectors: &dyn VectorIndex,
 ) -> Result<usize, StoreError> {
     let known: HashSet<BundleId> = all_bundle_ids(sqlite)?.into_iter().collect();
 
@@ -57,6 +57,7 @@ pub fn sweep_leaked_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lance::InMemoryVectorIndex;
     use crate::testing;
     use crate::{BundleEmbeddings, BundleStore, StoreConfig};
     use phantom_bundles::Bundle;
