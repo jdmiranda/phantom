@@ -227,13 +227,38 @@ impl App {
         }
 
         // Refresh git context periodically (off main thread, max once per 30s, one at a time).
+        //
+        // Timeout guard (#223): if the spawned thread has not finished within
+        // GIT_REFRESH_TIMEOUT we log a warning and drop the handle so the
+        // update loop is never blocked.  The underlying thread continues in the
+        // background (we cannot forcibly kill it) but it no longer occupies
+        // the `git_refresh_handle` slot — the next 30-second tick may spawn a
+        // fresh one once the slot is clear.
+        const GIT_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         if let Some(ref ctx) = self.context {
-            if now.duration_since(self.git_refresh_last).as_secs() >= 30 {
-                // Reap completed handle only when the timer fires (not every frame).
-                if self.git_refresh_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            // Check for timed-out or completed handles each frame so we don't
+            // wait until the 30-second timer fires to notice a hung thread.
+            if self.git_refresh_handle.is_some() {
+                let timed_out = self
+                    .git_refresh_spawned_at
+                    .is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
+                let finished = self
+                    .git_refresh_handle
+                    .as_ref()
+                    .is_some_and(|h| h.is_finished());
+                if timed_out {
+                    warn!(
+                        "git-refresh thread exceeded {}s timeout; abandoning handle",
+                        GIT_REFRESH_TIMEOUT.as_secs()
+                    );
                     self.git_refresh_handle = None;
+                    self.git_refresh_spawned_at = None;
+                } else if finished {
+                    self.git_refresh_handle = None;
+                    self.git_refresh_spawned_at = None;
                 }
             }
+
             if now.duration_since(self.git_refresh_last).as_secs() >= 30
                 && self.git_refresh_handle.is_none()
             {
@@ -250,6 +275,11 @@ impl App {
                         }
                     })
                     .ok();
+                self.git_refresh_spawned_at = if self.git_refresh_handle.is_some() {
+                    Some(now)
+                } else {
+                    None
+                };
             }
             if let Some(ref git) = ctx.git {
                 self.status_bar.set_branch(&git.branch);
@@ -932,5 +962,118 @@ mod tests {
                 other => panic!("expected SpawnIfNotRunning(Fixer), got {other:?}"),
             }
         }
+    }
+
+    // ---- #223: git-refresh timeout logic ----------------------------------
+
+    /// The timeout guard must abandon a handle whose spawned-at instant is
+    /// older than GIT_REFRESH_TIMEOUT (5 s) — even when the thread has not
+    /// finished — so the update loop is never blocked.
+    ///
+    /// We exercise the logic directly without spinning up a full `App` by
+    /// replicating the exact conditional that `App::update` runs each frame.
+    #[test]
+    fn git_refresh_timeout_abandons_hung_handle() {
+        use std::sync::{Arc, Barrier};
+        use std::time::{Duration, Instant};
+
+        const GIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
+        // Spawn a thread that blocks indefinitely (simulates a hung git process).
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_clone = Arc::clone(&barrier);
+        let handle = std::thread::Builder::new()
+            .name("test-hung-git".into())
+            .spawn(move || {
+                barrier_clone.wait(); // Released only when the test drops the barrier.
+                // Thread "hangs" here — in real life this would be a blocking git call.
+                std::thread::sleep(Duration::from_secs(60));
+            })
+            .expect("spawn hung thread");
+
+        // Simulate that the thread was spawned 6 seconds ago (over the 5 s timeout).
+        let spawned_at = Instant::now() - Duration::from_secs(6);
+        let now = Instant::now();
+
+        let mut git_refresh_handle: Option<std::thread::JoinHandle<()>> = Some(handle);
+        let mut git_refresh_spawned_at: Option<Instant> = Some(spawned_at);
+
+        // ---- replicate the timeout guard from App::update ----
+        if git_refresh_handle.is_some() {
+            let timed_out = git_refresh_spawned_at
+                .is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
+            let finished = git_refresh_handle
+                .as_ref()
+                .is_some_and(|h| h.is_finished());
+            if timed_out {
+                git_refresh_handle = None;
+                git_refresh_spawned_at = None;
+            } else if finished {
+                git_refresh_handle = None;
+                git_refresh_spawned_at = None;
+            }
+        }
+        // ---- end replicated guard ----
+
+        assert!(
+            git_refresh_handle.is_none(),
+            "timeout guard must clear the handle when spawned_at is older than GIT_REFRESH_TIMEOUT"
+        );
+        assert!(
+            git_refresh_spawned_at.is_none(),
+            "timeout guard must also clear spawned_at"
+        );
+
+        // Release the barrier so the hung thread can exit and the test
+        // process doesn't leak OS threads.
+        barrier.wait();
+    }
+
+    /// A finished thread must be reaped immediately (before the 30-second
+    /// refresh timer fires) so a subsequent spawn can start right away.
+    #[test]
+    fn git_refresh_reaps_finished_handle_every_frame() {
+        use std::time::{Duration, Instant};
+
+        const GIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
+        // Spawn a thread that finishes almost immediately.
+        let handle = std::thread::Builder::new()
+            .name("test-fast-git".into())
+            .spawn(|| { /* done immediately */ })
+            .expect("spawn fast thread");
+
+        // Give the thread time to finish.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let now = Instant::now();
+        let spawned_at = Some(now - Duration::from_millis(100));
+
+        let mut git_refresh_handle: Option<std::thread::JoinHandle<()>> = Some(handle);
+        let mut git_refresh_spawned_at: Option<Instant> = spawned_at;
+
+        if git_refresh_handle.is_some() {
+            let timed_out = git_refresh_spawned_at
+                .is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
+            let finished = git_refresh_handle
+                .as_ref()
+                .is_some_and(|h| h.is_finished());
+            if timed_out {
+                git_refresh_handle = None;
+                git_refresh_spawned_at = None;
+            } else if finished {
+                git_refresh_handle = None;
+                git_refresh_spawned_at = None;
+            }
+        }
+
+        assert!(
+            git_refresh_handle.is_none(),
+            "finished git-refresh handle must be reaped on every frame"
+        );
+        assert!(
+            git_refresh_spawned_at.is_none(),
+            "spawned_at must be cleared when the handle is reaped"
+        );
     }
 }
