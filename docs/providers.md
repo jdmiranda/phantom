@@ -80,7 +80,7 @@ impl ChatBackend for LocalBackend {
     fn name(&self) -> &'static str { "local" }
 
     fn complete(&self, request: ChatRequest<'_>) -> Result<ChatResponse, ChatError> {
-        // Reuse build_openai_request_body (already pub(crate)).
+        // Reuse build_openai_request_body (module-private — move to pub(crate) when LocalBackend lands).
         // POST to {base_url}/chat/completions with no auth header.
         // Parse with parse_openai_response — Ollama and llama.cpp both
         // speak the OpenAI wire format.
@@ -143,11 +143,11 @@ The existing trait is stable and correct.
 
 ## 6. Provider × Capability matrix (quick reference)
 
-Legend: ✅ implemented · 🟡 polyfillable/planned · ❌ unsupported · — not applicable
+Legend: ✅ implemented · 🟡 partial/polyfillable/planned · ❌ unsupported · — not applicable
 
 | Capability | Claude | OpenAI | LocalBackend (planned) |
 |---|:---:|:---:|:---:|
-| Streaming (event model) | ✅ | ✅ | 🟡 |
+| Streaming (event model) | 🟡 partial | 🟡 partial | 🟡 |
 | Tool use | ✅ | ✅ | 🟡 (model-dependent) |
 | System prompt | ✅ | ✅ | 🟡 |
 | max_tokens | ✅ | ✅ | 🟡 |
