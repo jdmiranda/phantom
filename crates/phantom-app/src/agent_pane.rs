@@ -540,6 +540,8 @@ impl AgentPane {
             event_log: self.event_log.clone(),
             pending_spawn,
             source_event_id: None,
+            quarantine: None,
+            correlation_id: None,
         })
     }
 

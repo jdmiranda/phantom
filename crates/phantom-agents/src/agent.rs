@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+use crate::correlation::CorrelationId;
 use crate::tools::{ToolCall, ToolResult};
 
 // ---------------------------------------------------------------------------
@@ -185,10 +186,28 @@ pub struct Agent {
     pub completed_at: Option<Instant>,
     /// Reason for entering Flatline state. Set by `flatline()`.
     pub flatline_reason: Option<String>,
+    /// Causality token linking this agent to the pipeline run that spawned it.
+    ///
+    /// All agents in the same pipeline share a single [`CorrelationId`] so that
+    /// every tool call, log entry, and event they produce can be queried as a
+    /// unit: `WHERE correlation_id = ?`.
+    ///
+    /// `None` for agents spawned outside a tracked pipeline (e.g. direct
+    /// user-initiated spawns that pre-date the tracing infrastructure).
+    pub correlation_id: Option<CorrelationId>,
+    /// The [`AgentId`] of the agent that directly spawned this one, if any.
+    ///
+    /// `None` for top-level agents spawned by the user or the substrate.
+    /// Set by the Composer when it calls `spawn_subagent` so the parent–child
+    /// relationship is recoverable at query time.
+    pub parent_id: Option<AgentId>,
 }
 
 impl Agent {
-    /// Create a new agent in `Queued` status.
+    /// Create a new agent in `Queued` status with no correlation context.
+    ///
+    /// Use [`Agent::with_correlation`] when spawning inside a tracked pipeline
+    /// run to propagate the causality token.
     pub fn new(id: AgentId, task: AgentTask) -> Self {
         Self {
             id,
@@ -199,7 +218,41 @@ impl Agent {
             created_at: Instant::now(),
             completed_at: None,
             flatline_reason: None,
+            correlation_id: None,
+            parent_id: None,
         }
+    }
+
+    /// Create a new agent in `Queued` status and stamp it with the given
+    /// correlation context.
+    ///
+    /// All agents in the same pipeline run should share the same
+    /// `correlation_id`. `parent_id` should be the id of the Composer (or
+    /// other spawner) that issued the `spawn_subagent` call.
+    #[must_use]
+    pub fn with_correlation(
+        id: AgentId,
+        task: AgentTask,
+        correlation_id: CorrelationId,
+        parent_id: Option<AgentId>,
+    ) -> Self {
+        Self {
+            correlation_id: Some(correlation_id),
+            parent_id,
+            ..Self::new(id, task)
+        }
+    }
+
+    /// Return the correlation id for this agent, if set.
+    #[must_use]
+    pub fn correlation_id(&self) -> Option<CorrelationId> {
+        self.correlation_id
+    }
+
+    /// Return the parent agent id, if this agent was spawned by another agent.
+    #[must_use]
+    pub fn parent_id(&self) -> Option<AgentId> {
+        self.parent_id
     }
 
     /// Append a message to the conversation history.
@@ -1184,6 +1237,87 @@ mod tests {
         assert!(
             line.contains("PENDING APPROVAL"),
             "status line must show PENDING APPROVAL tag"
+        );
+    }
+
+    // ---- Correlation ID -------------------------------------------------------
+
+    #[test]
+    fn new_agent_has_no_correlation_id() {
+        let agent = Agent::new(1, AgentTask::FreeForm { prompt: "test".into() });
+        assert!(
+            agent.correlation_id().is_none(),
+            "Agent::new must leave correlation_id as None",
+        );
+        assert!(
+            agent.parent_id().is_none(),
+            "Agent::new must leave parent_id as None",
+        );
+    }
+
+    #[test]
+    fn with_correlation_stamps_id_and_parent() {
+        let cid = CorrelationId::new();
+        let agent = Agent::with_correlation(
+            42,
+            AgentTask::FreeForm { prompt: "child".into() },
+            cid,
+            Some(7),
+        );
+
+        assert_eq!(
+            agent.correlation_id(),
+            Some(cid),
+            "with_correlation must stamp the given CorrelationId",
+        );
+        assert_eq!(
+            agent.parent_id(),
+            Some(7),
+            "with_correlation must stamp the given parent_id",
+        );
+    }
+
+    #[test]
+    fn with_correlation_no_parent() {
+        let cid = CorrelationId::new();
+        let agent = Agent::with_correlation(
+            10,
+            AgentTask::FreeForm { prompt: "root-child".into() },
+            cid,
+            None,
+        );
+
+        assert_eq!(agent.correlation_id(), Some(cid));
+        assert!(agent.parent_id().is_none(), "parent_id must be None when not supplied");
+    }
+
+    #[test]
+    fn with_correlation_inherits_queued_status() {
+        let cid = CorrelationId::new();
+        let agent = Agent::with_correlation(
+            5,
+            AgentTask::FreeForm { prompt: "test".into() },
+            cid,
+            None,
+        );
+        assert_eq!(
+            agent.status,
+            AgentStatus::Queued,
+            "with_correlation must start in Queued status",
+        );
+    }
+
+    #[test]
+    fn pipeline_agents_share_correlation_id() {
+        // All agents in a pipeline run should carry the same CorrelationId.
+        let cid = CorrelationId::new();
+        let parent = Agent::with_correlation(1, AgentTask::FreeForm { prompt: "orchestrator".into() }, cid, None);
+        let child = Agent::with_correlation(2, AgentTask::FreeForm { prompt: "worker".into() }, cid, Some(1));
+
+        assert_eq!(
+            parent.correlation_id(),
+            child.correlation_id(),
+            "pipeline agents must share the same correlation id",
         );
     }
 }
