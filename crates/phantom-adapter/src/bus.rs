@@ -78,12 +78,7 @@ impl EventBus {
     }
 
     /// Register a new topic. Returns the assigned `TopicId`.
-    pub fn create_topic(
-        &mut self,
-        publisher: AppId,
-        name: &str,
-        data_type: DataType,
-    ) -> TopicId {
+    pub fn create_topic(&mut self, publisher: AppId, name: &str, data_type: DataType) -> TopicId {
         let id = self.next_topic_id;
         self.next_topic_id += 1;
         self.topics.push(Topic {
@@ -258,14 +253,23 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: t_output,
             sender: 0,
-            event: Event::TerminalOutput { app_id: 0, bytes: 2 },
+            event: Event::TerminalOutput {
+                app_id: 0,
+                bytes: 2,
+            },
             frame: 0,
             timestamp: 42,
         });
 
         let msgs = bus.drain_for(brain_id);
         assert_eq!(msgs.len(), 1);
-        assert!(matches!(msgs[0].event, Event::TerminalOutput { app_id: 0, bytes: 2 }));
+        assert!(matches!(
+            msgs[0].event,
+            Event::TerminalOutput {
+                app_id: 0,
+                bytes: 2
+            }
+        ));
         assert_eq!(msgs[0].timestamp, 42);
     }
 
@@ -283,7 +287,10 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: t_error,
             sender: 0,
-            event: Event::Custom { kind: "error".into(), data: "has_errors".into() },
+            event: Event::Custom {
+                kind: "error".into(),
+                data: "has_errors".into(),
+            },
             frame: 0,
             timestamp: 1,
         });
@@ -339,7 +346,10 @@ mod tests {
             bus.emit(BusMessage {
                 topic_id: t_output,
                 sender: 0,
-                event: Event::TerminalOutput { app_id: 0, bytes: ts },
+                event: Event::TerminalOutput {
+                    app_id: 0,
+                    bytes: ts,
+                },
                 frame: ts,
                 timestamp: ts,
             });
@@ -361,7 +371,10 @@ mod tests {
             bus.emit(BusMessage {
                 topic_id: tid,
                 sender: 0,
-                event: Event::Custom { kind: "spam".into(), data: i.to_string() },
+                event: Event::Custom {
+                    kind: "spam".into(),
+                    data: i.to_string(),
+                },
                 frame: i,
                 timestamp: i,
             });
@@ -387,7 +400,10 @@ mod tests {
         bus.emit(BusMessage {
             topic_id: tid,
             sender: 0,
-            event: Event::Custom { kind: "test".into(), data: "first".into() },
+            event: Event::Custom {
+                kind: "test".into(),
+                data: "first".into(),
+            },
             frame: 0,
             timestamp: 1,
         });

@@ -218,9 +218,7 @@ impl AgentRuntime {
     /// Recovers from a poisoned mutex (#222) — the inner value is still
     /// usable after the thread that panicked released the guard.
     pub fn event_log(&self) -> std::sync::MutexGuard<'_, EventLog> {
-        self.event_log
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.event_log.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Clone the event-log handle for sharing with a
@@ -239,9 +237,7 @@ impl AgentRuntime {
     /// Recovers from a poisoned mutex (#222) — the inner value is still
     /// usable after the thread that panicked released the guard.
     pub fn registry(&self) -> std::sync::MutexGuard<'_, AgentRegistry> {
-        self.registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.registry.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Clone the registry handle for sharing with dispatch contexts. Same
@@ -281,10 +277,7 @@ impl AgentRuntime {
     ///
     /// Recovers from a poisoned mutex (#222).
     pub fn flush(&mut self) -> std::io::Result<()> {
-        let mut log = self
-            .event_log
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut log = self.event_log.lock().unwrap_or_else(|e| e.into_inner());
         log.flush()
     }
 
@@ -311,10 +304,7 @@ impl AgentRuntime {
         // gets newest-on-bottom; the inspector adapter is free to reverse if
         // it prefers newest-on-top.
         let envelopes = {
-            let log = self
-                .event_log
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let log = self.event_log.lock().unwrap_or_else(|e| e.into_inner());
             log.tail(phantom_agents::inspector::MAX_RECENT_EVENTS)
         };
         for env in &envelopes {
@@ -343,10 +333,7 @@ impl AgentRuntime {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let agent_refs: Vec<_> = {
-            let reg = self
-                .registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
             reg.list().into_iter().cloned().collect()
         };
         for agent_ref in agent_refs {

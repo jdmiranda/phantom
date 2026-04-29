@@ -65,6 +65,11 @@ pub trait ActionHandler {
 
     /// Notification that an agent has been placed in quarantine.
     fn agent_quarantined(&mut self, agent_id: AgentId, denial_count: usize);
+
+    /// A human-checkpoint gate was reached in the active plan.
+    fn checkpoint_reached(&mut self, step_idx: usize, description: String) {
+        let _ = (step_idx, description);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +117,9 @@ impl AiAction {
             }
             AiAction::AgentQuarantined { agent_id, denial_count } => {
                 handler.agent_quarantined(agent_id, denial_count);
+            }
+            AiAction::CheckpointReached { step_idx, description } => {
+                handler.checkpoint_reached(step_idx, description);
             }
             AiAction::DoNothing => {}
         }

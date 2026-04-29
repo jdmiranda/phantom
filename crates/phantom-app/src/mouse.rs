@@ -11,7 +11,7 @@ use log::debug;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
 use phantom_terminal::input::{
-    encode_mouse_motion_sgr, encode_mouse_sgr, MouseButton as TermMouseButton,
+    MouseButton as TermMouseButton, encode_mouse_motion_sgr, encode_mouse_sgr,
 };
 
 use crate::app::{App, FloatInteraction, ResizeEdge};
@@ -416,8 +416,12 @@ impl App {
             //   • multi-pane   → track anchored to the chrome-inset inner_rect
             let tiled_count = self.coordinator.all_app_ids().len();
             for app_id in self.coordinator.all_app_ids() {
-                let Some(pane_id) = self.coordinator.pane_id_for(app_id) else { continue };
-                let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) else { continue };
+                let Some(pane_id) = self.coordinator.pane_id_for(app_id) else {
+                    continue;
+                };
+                let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) else {
+                    continue;
+                };
                 let track = if tiled_count <= 1 {
                     scrollbar_track_rect(phantom_ui::layout::Rect {
                         x: layout_rect.x,
@@ -731,7 +735,7 @@ mod tests {
     /// chrome-inset correction in single-pane mode.
     #[test]
     fn scrollbar_track_rect_single_pane_anchoring() {
-        use crate::pane::{scrollbar_track_rect, SCROLLBAR_WIDTH};
+        use crate::pane::{SCROLLBAR_WIDTH, scrollbar_track_rect};
 
         // Simulate a full-screen layout rect (no chrome insets applied).
         let layout_rect = phantom_ui::layout::Rect {
@@ -746,17 +750,29 @@ mod tests {
 
         // Track x must be at the right edge minus scrollbar width and margin.
         let expected_x = layout_rect.x + layout_rect.width - SCROLLBAR_WIDTH - margin;
-        assert!((track.x - expected_x).abs() < 0.01,
-            "track.x={} expected {}", track.x, expected_x);
+        assert!(
+            (track.x - expected_x).abs() < 0.01,
+            "track.x={} expected {}",
+            track.x,
+            expected_x
+        );
 
         // Track y starts at layout_rect.y + margin.
-        assert!((track.y - (layout_rect.y + margin)).abs() < 0.01,
-            "track.y={} expected {}", track.y, layout_rect.y + margin);
+        assert!(
+            (track.y - (layout_rect.y + margin)).abs() < 0.01,
+            "track.y={} expected {}",
+            track.y,
+            layout_rect.y + margin
+        );
 
         // Track height is inset by margin on both ends.
         let expected_h = layout_rect.height - margin * 2.0;
-        assert!((track.height - expected_h).abs() < 0.01,
-            "track.height={} expected {}", track.height, expected_h);
+        assert!(
+            (track.height - expected_h).abs() < 0.01,
+            "track.height={} expected {}",
+            track.height,
+            expected_h
+        );
 
         assert_eq!(track.width, SCROLLBAR_WIDTH);
     }
@@ -766,7 +782,12 @@ mod tests {
     fn scrollbar_thumb_absent_without_history() {
         use crate::pane::{scrollbar_thumb_rect, scrollbar_track_rect};
 
-        let rect = phantom_ui::layout::Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let rect = phantom_ui::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
         let track = scrollbar_track_rect(rect);
         assert!(scrollbar_thumb_rect(track, 0, 0, 24).is_none());
     }
@@ -776,7 +797,12 @@ mod tests {
     fn scrollbar_thumb_present_with_history() {
         use crate::pane::{scrollbar_thumb_rect, scrollbar_track_rect};
 
-        let rect = phantom_ui::layout::Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let rect = phantom_ui::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
         let track = scrollbar_track_rect(rect);
         let thumb = scrollbar_thumb_rect(track, 0, 500, 24);
         assert!(thumb.is_some(), "thumb should exist when history_size > 0");
@@ -800,7 +826,7 @@ mod tests {
 
     #[test]
     fn cursor_to_cell_single_pane_no_chrome_offset() {
-        use crate::pane::{container_rect, pane_inner_rect, CONTAINER_TITLE_H_CELLS};
+        use crate::pane::{CONTAINER_TITLE_H_CELLS, container_rect, pane_inner_rect};
         use phantom_ui::layout::Rect;
 
         let cell_w = 8.0_f32;
@@ -808,7 +834,12 @@ mod tests {
         let cell_size = (cell_w, cell_h);
 
         // Full-screen layout rect (single-pane: no margin/chrome applied).
-        let layout_rect = Rect { x: 0.0, y: 0.0, width: 1280.0, height: 800.0 };
+        let layout_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 800.0,
+        };
 
         // -- Single-pane path (the fix) -------------------------------------
         // inner == layout_rect, so cursor (0,0) -> cell (0,0).
@@ -816,13 +847,18 @@ mod tests {
         let max_col = (inner_single.width / cell_w).floor() as usize;
         let max_row = (inner_single.height / cell_h).floor() as usize;
         let (col, row) = pixel_to_cell(
-            0.0, 0.0,
-            inner_single.x, inner_single.y,
-            cell_w, cell_h,
-            max_col.saturating_sub(1), max_row.saturating_sub(1),
+            0.0,
+            0.0,
+            inner_single.x,
+            inner_single.y,
+            cell_w,
+            cell_h,
+            max_col.saturating_sub(1),
+            max_row.saturating_sub(1),
         );
         assert_eq!(
-            (col, row), (0, 0),
+            (col, row),
+            (0, 0),
             "single-pane: cursor at (0,0) must map to cell (0,0); got ({col},{row})",
         );
 
@@ -834,7 +870,9 @@ mod tests {
         assert!(
             inner_multi.x > 0.0 || inner_multi.y > 0.0,
             "multi-pane inner rect must have a non-zero origin due to chrome insets; \
-             got ({}, {})", inner_multi.x, inner_multi.y,
+             got ({}, {})",
+            inner_multi.x,
+            inner_multi.y,
         );
 
         // inner.y must be at least one title-strip height from the window top,
@@ -843,7 +881,8 @@ mod tests {
         assert!(
             inner_multi.y >= title_h - 0.5,
             "multi-pane inner.y must be at least one title-strip height ({title_h}px) \
-             from the window top; got {}", inner_multi.y,
+             from the window top; got {}",
+            inner_multi.y,
         );
     }
 }

@@ -112,8 +112,7 @@ impl AppRegistry {
 
     /// Borrow the adapter for `id`.
     pub fn get_adapter(&self, id: AppId) -> Option<&dyn AppAdapter> {
-        self.index_of(id)
-            .and_then(|i| self.adapters[i].as_deref())
+        self.index_of(id).and_then(|i| self.adapters[i].as_deref())
     }
 
     /// Mutably borrow the adapter for `id`.
