@@ -31,9 +31,9 @@ use phantom_renderer::quads::QuadInstance;
 // -----------------------------------------------------------------------
 
 /// Width of the avatar glyph column in pixels.
-pub(crate) const AVATAR_W: f32 = 16.0;
+pub const AVATAR_W: f32 = 16.0;
 /// Horizontal gap between the avatar column and the body text column.
-pub(crate) const AVATAR_GAP: f32 = 8.0;
+pub const AVATAR_GAP: f32 = 8.0;
 
 // -----------------------------------------------------------------------
 // MessageRole
