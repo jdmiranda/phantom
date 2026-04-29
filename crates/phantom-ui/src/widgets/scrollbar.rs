@@ -66,17 +66,32 @@ const THUMB_HOVER_ALPHA: f32 = 0.70;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollState {
     /// Lines of history above the visible viewport (0 = scrolled to bottom).
-    pub display_offset: usize,
+    display_offset: usize,
     /// Total scrollback lines available above the viewport.
-    pub history_size: usize,
+    history_size: usize,
     /// Number of lines currently visible in the pane.
-    pub visible_rows: usize,
+    visible_rows: usize,
 }
 
 impl ScrollState {
     /// Create a scroll state.
     pub fn new(display_offset: usize, history_size: usize, visible_rows: usize) -> Self {
         Self { display_offset, history_size, visible_rows }
+    }
+
+    /// Lines of history above the visible viewport (0 = scrolled to bottom).
+    pub fn display_offset(&self) -> usize {
+        self.display_offset
+    }
+
+    /// Total scrollback lines available above the viewport.
+    pub fn history_size(&self) -> usize {
+        self.history_size
+    }
+
+    /// Number of lines currently visible in the pane.
+    pub fn visible_rows(&self) -> usize {
+        self.visible_rows
     }
 
     /// Whether the scrollbar has anything to show.
