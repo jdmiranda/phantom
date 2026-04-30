@@ -4,17 +4,15 @@
 //! the `PhantomConfig::nlp_llm_enabled` flag without constructing a live `App`
 //! (which requires a GPU context).
 
-use phantom_nlp::{Intent, MockLlmBackend, translate};
 use phantom_context::ProjectContext;
+use phantom_nlp::{Intent, MockLlmBackend, translate};
 
 // ---------------------------------------------------------------------------
 // Helper: detect real project context for tests.
 // ---------------------------------------------------------------------------
 
 fn rust_ctx() -> ProjectContext {
-    ProjectContext::detect(std::path::Path::new(
-        env!("CARGO_MANIFEST_DIR"),
-    ))
+    ProjectContext::detect(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
 // ---------------------------------------------------------------------------
@@ -40,9 +38,8 @@ fn translate_spawn_agent_with_mock() {
 #[test]
 fn translate_search_history_with_mock() {
     let ctx = rust_ctx();
-    let backend = MockLlmBackend::new(
-        r#"{"intent":"SearchHistory","query":"recent git commits today"}"#,
-    );
+    let backend =
+        MockLlmBackend::new(r#"{"intent":"SearchHistory","query":"recent git commits today"}"#);
     let intent = translate("what changed today", &ctx, &backend).unwrap();
     assert!(matches!(intent, Intent::SearchHistory { .. }));
     assert_eq!(intent.query(), Some("recent git commits today"));
@@ -51,9 +48,8 @@ fn translate_search_history_with_mock() {
 #[test]
 fn translate_clarify_for_ambiguous_input() {
     let ctx = rust_ctx();
-    let backend = MockLlmBackend::new(
-        r#"{"intent":"Clarify","question":"What exactly do you want to do?"}"#,
-    );
+    let backend =
+        MockLlmBackend::new(r#"{"intent":"Clarify","question":"What exactly do you want to do?"}"#);
     let intent = translate("xyzzy frobnicate", &ctx, &backend).unwrap();
     assert!(matches!(intent, Intent::Clarify { .. }));
     assert_eq!(intent.question(), Some("What exactly do you want to do?"));

@@ -747,6 +747,89 @@ impl App {
         }
     }
 
+    /// Build the bezier tether overlay for issue #2 alt-screen split panes.
+    ///
+    /// Draws a horizontal line of thin quad segments connecting the right edge
+    /// of the primary pane to the left edge of the secondary (alt-screen) pane.
+    /// Color is the theme foreground at low opacity so it adapts to all themes.
+    ///
+    /// The segments approximate a cubic bezier curve from the anchor point on
+    /// the primary to the anchor point on the secondary.  We use 8 segments for
+    /// a smooth-looking result without excessive quad count.
+    pub(crate) fn build_alt_screen_tether(&self, quads: &mut Vec<QuadInstance>) {
+        if self.alt_screen_secondaries.is_empty() {
+            return;
+        }
+
+        // Tether color: theme foreground at ~35% opacity.
+        let accent = self.theme.colors.foreground;
+        let color = [accent[0], accent[1], accent[2], 0.35];
+        let segment_thickness = 2.0;
+        const SEGMENTS: usize = 8;
+
+        for (&primary_id, &secondary_id) in &self.alt_screen_secondaries {
+            // Get layout rects for both panes.
+            let primary_pane = self.coordinator.pane_id_for(primary_id);
+            let secondary_pane = self.coordinator.pane_id_for(secondary_id);
+
+            let (Some(ppane), Some(spane)) = (primary_pane, secondary_pane) else {
+                continue;
+            };
+
+            let (Ok(primary_rect), Ok(secondary_rect)) = (
+                self.layout.get_pane_rect(ppane),
+                self.layout.get_pane_rect(spane),
+            ) else {
+                continue;
+            };
+
+            // Anchor: mid-right of primary, mid-left of secondary.
+            let p0x = primary_rect.x + primary_rect.width;
+            let p0y = primary_rect.y + primary_rect.height * 0.5;
+            let p3x = secondary_rect.x;
+            let p3y = secondary_rect.y + secondary_rect.height * 0.5;
+
+            // Control points: pull horizontally by 40% of the gap.
+            let gap = (p3x - p0x).abs();
+            let ctrl = gap * 0.4;
+            let p1x = p0x + ctrl;
+            let p1y = p0y;
+            let p2x = p3x - ctrl;
+            let p2y = p3y;
+
+            // Evaluate cubic bezier at SEGMENTS + 1 points and draw segments.
+            let mut prev_x = p0x;
+            let mut prev_y = p0y;
+            for i in 1..=SEGMENTS {
+                let t = i as f32 / SEGMENTS as f32;
+                let u = 1.0 - t;
+                let cx = u * u * u * p0x
+                    + 3.0 * u * u * t * p1x
+                    + 3.0 * u * t * t * p2x
+                    + t * t * t * p3x;
+                let cy = u * u * u * p0y
+                    + 3.0 * u * u * t * p1y
+                    + 3.0 * u * t * t * p2y
+                    + t * t * t * p3y;
+
+                // Draw a thin quad covering the segment line.
+                let dx = cx - prev_x;
+                let dy = cy - prev_y;
+                let len = (dx * dx + dy * dy).sqrt().max(0.5);
+
+                quads.push(QuadInstance {
+                    pos: [prev_x, prev_y - segment_thickness * 0.5],
+                    size: [len, segment_thickness],
+                    color,
+                    border_radius: 0.0,
+                });
+
+                prev_x = cx;
+                prev_y = cy;
+            }
+        }
+    }
+
     /// Helper: render a text string directly into the overlay glyph buffer.
     pub(crate) fn render_overlay_text(
         &mut self,

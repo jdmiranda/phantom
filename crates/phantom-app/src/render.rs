@@ -193,6 +193,11 @@ impl App {
                 self.build_context_menu_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
+            // -- Alt-screen bezier tether (issue #2 process detach v1) --
+            if !self.alt_screen_secondaries.is_empty() {
+                self.build_alt_screen_tether(&mut chrome_quads);
+            }
+
             if !chrome_quads.is_empty() || !chrome_glyphs.is_empty() {
                 // Upload + render overlay in its own pass on the surface.
                 self.quad_renderer.prepare(

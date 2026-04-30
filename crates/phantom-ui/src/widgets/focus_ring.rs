@@ -528,9 +528,13 @@ mod pane_focus_state_tests {
         assert_eq!(ring.opacity(), 1.0);
 
         ring.set_focused(Some(PANE_B)); // different pane
-        ring.tick(0.0);                 // one zero-dt tick
+        ring.tick(0.0); // one zero-dt tick
         // Should not drop opacity since something is still focused.
-        assert_eq!(ring.opacity(), 1.0, "opacity must not fade when focus merely moves");
+        assert_eq!(
+            ring.opacity(),
+            1.0,
+            "opacity must not fade when focus merely moves"
+        );
     }
 
     // When focus is cleared, ticking must gradually reduce opacity toward 0.
@@ -542,10 +546,17 @@ mod pane_focus_state_tests {
 
         ring.set_focused(None);
         ring.tick(FADE_DURATION_MS / 2.0); // half fade-out
-        assert!(ring.opacity() < 1.0, "opacity must decrease after focus cleared");
+        assert!(
+            ring.opacity() < 1.0,
+            "opacity must decrease after focus cleared"
+        );
         assert!(ring.opacity() >= 0.0, "opacity must be non-negative");
 
         ring.tick(FADE_DURATION_MS * 2.0); // complete fade-out
-        assert_eq!(ring.opacity(), 0.0, "opacity must reach zero after full fade-out");
+        assert_eq!(
+            ring.opacity(),
+            0.0,
+            "opacity must reach zero after full fade-out"
+        );
     }
 }

@@ -11,7 +11,6 @@ use log::{info, warn};
 use phantom_agents::agent::{Agent, AgentMessage};
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::audit::{AuditOutcome, emit_tool_call};
-use phantom_session::AgentSnapshot;
 use phantom_agents::chat::{ChatBackend, ChatModel, ChatRequest, build_backend};
 use phantom_agents::permissions::PermissionSet;
 use phantom_agents::role::{AgentRole, CapabilityClass};
@@ -19,6 +18,7 @@ use phantom_agents::spawn_rules::{EventKind, EventSource, SubstrateEvent};
 use phantom_agents::tools::{ToolCall, ToolDefinition, ToolResult, ToolType, available_tools};
 use phantom_agents::{AgentSpawnOpts, AgentTask};
 use phantom_history::{AgentOutputCapture, ToolCall as HistoryToolCall};
+use phantom_session::AgentSnapshot;
 
 use crate::app::App;
 
@@ -311,7 +311,8 @@ pub(crate) struct AgentPane {
     ///
     /// `None` for legacy / test callers that do not wire a quarantine registry;
     /// the gate skips the check (fail-open) so old paths are unaffected.
-    quarantine: Option<std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>>,
+    quarantine:
+        Option<std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -525,9 +526,20 @@ impl AgentPane {
         info!(
             "Agent pane spawning: {} messages (system={}, user={}, backend={})",
             agent.messages().len(),
-            agent.messages().iter().filter(|m| matches!(m, AgentMessage::System(_))).count(),
-            agent.messages().iter().filter(|m| matches!(m, AgentMessage::User(_))).count(),
-            chat_backend.as_deref().map(|b| b.name()).unwrap_or("claude (default)"),
+            agent
+                .messages()
+                .iter()
+                .filter(|m| matches!(m, AgentMessage::System(_)))
+                .count(),
+            agent
+                .messages()
+                .iter()
+                .filter(|m| matches!(m, AgentMessage::User(_)))
+                .count(),
+            chat_backend
+                .as_deref()
+                .map(|b| b.name())
+                .unwrap_or("claude (default)"),
         );
 
         let handle = Self::dispatch(chat_backend.as_deref(), claude_config, &agent, &tools, &[]);
@@ -600,7 +612,9 @@ impl AgentPane {
         pending_spawn: phantom_agents::composer_tools::SpawnSubagentQueue,
         self_ref: phantom_agents::role::AgentRef,
         role: phantom_agents::role::AgentRole,
-        quarantine: std::sync::Arc<std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>>,
+        quarantine: std::sync::Arc<
+            std::sync::Mutex<phantom_agents::quarantine::QuarantineRegistry>,
+        >,
     ) {
         self.registry = Some(registry);
         self.event_log = Some(event_log);
@@ -654,12 +668,14 @@ impl AgentPane {
     /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
     /// When `None` is held (legacy / test path), tool calls and output are
     /// not recorded.
-    pub(crate) fn set_agent_capture(&mut self, capture: AgentOutputCapture, session_uuid: uuid::Uuid) {
+    pub(crate) fn set_agent_capture(
+        &mut self,
+        capture: AgentOutputCapture,
+        session_uuid: uuid::Uuid,
+    ) {
         self.agent_capture = Some(capture);
         self.capture_session_uuid = session_uuid;
     }
-
-
 
     /// Build a [`phantom_agents::dispatch::DispatchContext`] from the
     /// pane's current substrate handles, if all required pieces are wired.
@@ -738,7 +754,11 @@ impl AgentPane {
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
                     if let Some(ref mut j) = self.journal {
-                        if let Err(e) = j.record_tool_call(self.agent.id() as u64, call.tool.api_name(), &args_display) {
+                        if let Err(e) = j.record_tool_call(
+                            self.agent.id() as u64,
+                            call.tool.api_name(),
+                            &args_display,
+                        ) {
                             warn!("AgentJournal::record_tool_call failed: {e}");
                         }
                     }
@@ -776,7 +796,9 @@ impl AgentPane {
                                 "~{}in/~{}out tokens, {} tool calls",
                                 self.input_tokens, self.output_tokens, self.tool_call_count
                             );
-                            if let Err(e) = j.record_completion(self.agent.id() as u64, true, summary) {
+                            if let Err(e) =
+                                j.record_completion(self.agent.id() as u64, true, summary)
+                            {
                                 warn!("AgentJournal::record_completion failed: {e}");
                             }
                         }
@@ -1504,7 +1526,9 @@ pub(crate) fn resolve_api_config(model: &ChatModel) -> Option<ClaudeConfig> {
             config
         }
         ChatModel::OpenAi(_) => {
-            let key = std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty());
+            let key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty());
             if key.is_none() {
                 warn!("Cannot spawn agent: OPENAI_API_KEY not set");
             }
@@ -1532,10 +1556,7 @@ impl App {
     /// Splits the focused pane vertically, creates the agent (using the
     /// requested [`ChatModel`] if any), wraps it in an `AgentAdapter`, and
     /// registers it in the new split pane.
-    pub(crate) fn spawn_agent_pane_with_opts(
-        &mut self,
-        opts: AgentSpawnOpts,
-    ) -> bool {
+    pub(crate) fn spawn_agent_pane_with_opts(&mut self, opts: AgentSpawnOpts) -> bool {
         // Extract metadata before opts is moved into spawn_with_opts.
         let spawn_tag = opts.spawn_tag;
         // role/label carry Composer spawn_subagent metadata (#224).
@@ -1543,7 +1564,10 @@ impl App {
         let spawn_label = opts.label().unwrap_or("agent-pane").to_string();
         let resolved_model = opts.resolve_model();
         let Some(claude_config) = resolve_api_config(&resolved_model) else {
-            warn!("Cannot spawn agent: no API key configured for model {:?}", resolved_model);
+            warn!(
+                "Cannot spawn agent: no API key configured for model {:?}",
+                resolved_model
+            );
             return false;
         };
 
@@ -1783,6 +1807,9 @@ mod tests {
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             quarantine: None,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         };
         (pane, tx)
     }
@@ -1881,6 +1908,9 @@ mod tests {
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             journal: None,
             quarantine: None,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         };
         assert!(!pane.poll());
     }
@@ -1934,7 +1964,12 @@ mod tests {
         assert!(pane.api_handle.is_none());
         // Assistant text should have been flushed to agent messages.
         assert!(pane.current_assistant_text.is_empty());
-        assert!(pane.agent.messages().iter().any(|m| matches!(m, AgentMessage::Assistant(t) if t == "result")));
+        assert!(
+            pane.agent
+                .messages()
+                .iter()
+                .any(|m| matches!(m, AgentMessage::Assistant(t) if t == "result"))
+        );
     }
 
     #[test]
@@ -1964,8 +1999,16 @@ mod tests {
         // turn_count should have incremented.
         assert_eq!(pane.turn_count, 1);
         // Agent messages should include ToolCall and ToolResult.
-        let has_tool_call = pane.agent.messages().iter().any(|m| matches!(m, AgentMessage::ToolCall(_)));
-        let has_tool_result = pane.agent.messages().iter().any(|m| matches!(m, AgentMessage::ToolResult(_)));
+        let has_tool_call = pane
+            .agent
+            .messages()
+            .iter()
+            .any(|m| matches!(m, AgentMessage::ToolCall(_)));
+        let has_tool_result = pane
+            .agent
+            .messages()
+            .iter()
+            .any(|m| matches!(m, AgentMessage::ToolResult(_)));
         assert!(has_tool_call, "agent should have a ToolCall message");
         assert!(has_tool_result, "agent should have a ToolResult message");
         // Output should show the continuation.
@@ -2453,9 +2496,7 @@ mod tests {
         // Build a Dispatcher-role pane with all substrate handles wired.
         let (mut pane, _tx) = agent_with_handle();
 
-        let registry = Arc::new(Mutex::new(
-            phantom_agents::inbox::AgentRegistry::new(),
-        ));
+        let registry = Arc::new(Mutex::new(phantom_agents::inbox::AgentRegistry::new()));
         let event_log = Arc::new(Mutex::new(
             EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
         ));
@@ -2468,7 +2509,9 @@ mod tests {
             pending_spawn,
             self_ref,
             AgentRole::Dispatcher,
-            Arc::new(Mutex::new(phantom_agents::quarantine::QuarantineRegistry::default())),
+            Arc::new(Mutex::new(
+                phantom_agents::quarantine::QuarantineRegistry::default(),
+            )),
         );
 
         // Wire the dispatcher (mock repo — no real gh calls in tests).
@@ -2476,7 +2519,8 @@ mod tests {
         pane.set_ticket_dispatcher(Arc::clone(&dispatcher));
 
         // Build a dispatch context; the ticket_dispatcher field must be Some.
-        let ctx = pane.build_dispatch_context()
+        let ctx = pane
+            .build_dispatch_context()
             .expect("build_dispatch_context must return Some for a fully-wired Dispatcher pane");
 
         assert!(
@@ -2501,9 +2545,7 @@ mod tests {
 
         let (mut pane, _tx) = agent_with_handle();
 
-        let registry = Arc::new(Mutex::new(
-            phantom_agents::inbox::AgentRegistry::new(),
-        ));
+        let registry = Arc::new(Mutex::new(phantom_agents::inbox::AgentRegistry::new()));
         let event_log = Arc::new(Mutex::new(
             EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
         ));
@@ -2516,7 +2558,9 @@ mod tests {
             pending_spawn,
             self_ref,
             AgentRole::Watcher,
-            Arc::new(Mutex::new(phantom_agents::quarantine::QuarantineRegistry::default())),
+            Arc::new(Mutex::new(
+                phantom_agents::quarantine::QuarantineRegistry::default(),
+            )),
         );
 
         // Wire a dispatcher into a non-Dispatcher pane — should still be None
@@ -2524,7 +2568,8 @@ mod tests {
         let dispatcher = GhTicketDispatcher::new("test/repo").shared();
         pane.set_ticket_dispatcher(Arc::clone(&dispatcher));
 
-        let ctx = pane.build_dispatch_context()
+        let ctx = pane
+            .build_dispatch_context()
             .expect("build_dispatch_context must return Some for a wired pane");
 
         assert!(
@@ -2568,10 +2613,12 @@ mod tests {
         let quarantine = Arc::new(Mutex::new(QuarantineRegistry::new_with_policy(
             AutoQuarantinePolicy { threshold: 1 },
         )));
-        quarantine
-            .lock()
-            .unwrap()
-            .check_and_escalate(agent_id, TaintLevel::Tainted, 0, "test-offense");
+        quarantine.lock().unwrap().check_and_escalate(
+            agent_id,
+            TaintLevel::Tainted,
+            0,
+            "test-offense",
+        );
         assert!(
             quarantine.lock().unwrap().agent_is_quarantined(agent_id),
             "agent must be quarantined before the dispatch test"
@@ -2582,14 +2629,17 @@ mod tests {
         let (mut pane, _tx) = agent_with_handle();
         let registry = Arc::new(Mutex::new(AgentRegistry::new()));
         let event_log = {
-            let log = phantom_memory::event_log::EventLog::open(
-                &tmp.path().join("events.jsonl"),
-            )
-            .unwrap();
+            let log = phantom_memory::event_log::EventLog::open(&tmp.path().join("events.jsonl"))
+                .unwrap();
             Arc::new(Mutex::new(log))
         };
         let pending_spawn = new_spawn_subagent_queue();
-        let self_ref = AgentRef::new(agent_id, AgentRole::Conversational, "offender", SpawnSource::User);
+        let self_ref = AgentRef::new(
+            agent_id,
+            AgentRole::Conversational,
+            "offender",
+            SpawnSource::User,
+        );
 
         pane.working_dir = tmp.path().to_string_lossy().into_owned();
         pane.set_substrate_handles(
@@ -2725,7 +2775,12 @@ mod tests {
             tool_use_ids: Vec::new(),
             cached_lines: Vec::new(),
             cached_len: 0,
-            agent: Agent::new(0, AgentTask::FreeForm { prompt: "fix the failing tests".into() }),
+            agent: Agent::new(
+                0,
+                AgentTask::FreeForm {
+                    prompt: "fix the failing tests".into(),
+                },
+            ),
             pending_tools: Vec::new(),
             working_dir: ".".into(),
             claude_config: test_config(),
@@ -2752,6 +2807,9 @@ mod tests {
             quarantine: None,
             snapshot_sink: None,
             last_failing_capability: None,
+            agent_capture: None,
+            capture_session_uuid: uuid::Uuid::nil(),
+            capture_tool_calls: Vec::new(),
         };
         let _ = tx; // keep sender alive so handle stays live
         assert_eq!(pane.task, "fix the failing tests");
@@ -2765,12 +2823,16 @@ mod tests {
     /// get different ids when constructed through the manager.
     #[test]
     fn spawn_two_panes_have_unique_agent_ids() {
-        use phantom_agents::manager::AgentManager;
         use phantom_agents::agent::AgentTask;
+        use phantom_agents::manager::AgentManager;
 
         let mut mgr = AgentManager::new(4);
-        let id1 = mgr.spawn(AgentTask::FreeForm { prompt: "task A".into() });
-        let id2 = mgr.spawn(AgentTask::FreeForm { prompt: "task B".into() });
+        let id1 = mgr.spawn(AgentTask::FreeForm {
+            prompt: "task A".into(),
+        });
+        let id2 = mgr.spawn(AgentTask::FreeForm {
+            prompt: "task B".into(),
+        });
 
         assert_ne!(id1, id2, "each spawned agent must receive a unique ID");
         assert_eq!(id1, 1);
@@ -2779,23 +2841,25 @@ mod tests {
         // Verify both are independently retrievable.
         assert!(mgr.get(id1).is_some());
         assert!(mgr.get(id2).is_some());
-        assert_eq!(mgr.get(id1).unwrap().id, id1);
-        assert_eq!(mgr.get(id2).unwrap().id, id2);
+        assert_eq!(mgr.get(id1).unwrap().id(), id1);
+        assert_eq!(mgr.get(id2).unwrap().id(), id2);
     }
 
     /// Backtick spawn via the manager starts the agent in `Working` status when
     /// there is available concurrency capacity.
     #[test]
     fn manager_spawn_starts_agent_in_working_status() {
-        use phantom_agents::manager::AgentManager;
         use phantom_agents::agent::{AgentStatus, AgentTask};
+        use phantom_agents::manager::AgentManager;
 
         let mut mgr = AgentManager::new(4);
-        let id = mgr.spawn(AgentTask::FreeForm { prompt: "do something".into() });
+        let id = mgr.spawn(AgentTask::FreeForm {
+            prompt: "do something".into(),
+        });
 
         let agent = mgr.get(id).expect("spawned agent must be retrievable");
         assert_eq!(
-            agent.status,
+            agent.status(),
             AgentStatus::Working,
             "spawned agent must start in Working status when capacity is available"
         );
@@ -2809,18 +2873,20 @@ mod tests {
     /// `Failed` and logs the kill event in its output log.
     #[test]
     fn kill_working_agent_transitions_to_failed() {
-        use phantom_agents::manager::AgentManager;
         use phantom_agents::agent::{AgentStatus, AgentTask};
+        use phantom_agents::manager::AgentManager;
 
         let mut mgr = AgentManager::new(4);
-        let id = mgr.spawn(AgentTask::FreeForm { prompt: "long running task".into() });
+        let id = mgr.spawn(AgentTask::FreeForm {
+            prompt: "long running task".into(),
+        });
 
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Working);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Working);
 
         let killed = mgr.kill(id);
         assert!(killed, "kill() must return true for a Working agent");
         assert_eq!(
-            mgr.get(id).unwrap().status,
+            mgr.get(id).unwrap().status(),
             AgentStatus::Failed,
             "killed agent must be in Failed state"
         );
@@ -2830,18 +2896,20 @@ mod tests {
     /// so the GUI can show the user that the agent was terminated deliberately.
     #[test]
     fn kill_agent_appends_kill_log_entry() {
-        use phantom_agents::manager::AgentManager;
         use phantom_agents::agent::AgentTask;
+        use phantom_agents::manager::AgentManager;
 
         let mut mgr = AgentManager::new(4);
-        let id = mgr.spawn(AgentTask::FreeForm { prompt: "task".into() });
+        let id = mgr.spawn(AgentTask::FreeForm {
+            prompt: "task".into(),
+        });
         mgr.kill(id);
 
         let agent = mgr.get(id).unwrap();
         assert!(
-            agent.output_log.iter().any(|l| l.contains("killed")),
+            agent.output_log().iter().any(|l| l.contains("killed")),
             "killed agent output_log must contain a kill annotation; got: {:?}",
-            agent.output_log,
+            agent.output_log(),
         );
     }
 
@@ -2849,18 +2917,20 @@ mod tests {
     /// `kill()` returns `false` because there is nothing to terminate.
     #[test]
     fn kill_terminal_agent_is_noop() {
-        use phantom_agents::manager::AgentManager;
         use phantom_agents::agent::{AgentStatus, AgentTask};
+        use phantom_agents::manager::AgentManager;
 
         let mut mgr = AgentManager::new(4);
-        let id = mgr.spawn(AgentTask::FreeForm { prompt: "already done".into() });
+        let id = mgr.spawn(AgentTask::FreeForm {
+            prompt: "already done".into(),
+        });
         mgr.get_mut(id).unwrap().complete(true);
-        assert_eq!(mgr.get(id).unwrap().status, AgentStatus::Done);
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Done);
 
         let killed = mgr.kill(id);
         assert!(!killed, "kill() on a Done agent must return false");
         assert_eq!(
-            mgr.get(id).unwrap().status,
+            mgr.get(id).unwrap().status(),
             AgentStatus::Done,
             "status must not change for a terminal agent"
         );
@@ -2876,7 +2946,8 @@ mod tests {
         assert!(pane.api_handle.is_some());
 
         // Simulate an external kill by injecting an Error event.
-        tx.send(ApiEvent::Error("killed by user".into())).expect("send must succeed");
+        tx.send(ApiEvent::Error("killed by user".into()))
+            .expect("send must succeed");
         pane.poll();
 
         assert_eq!(
@@ -2899,8 +2970,8 @@ mod tests {
     /// be left untouched.
     #[test]
     fn kill_all_terminates_all_active_agents_and_skips_terminal() {
-        use phantom_agents::manager::AgentManager;
         use phantom_agents::agent::{AgentStatus, AgentTask};
+        use phantom_agents::manager::AgentManager;
 
         let mut mgr = AgentManager::new(4);
         let id1 = mgr.spawn(AgentTask::FreeForm { prompt: "a".into() });
@@ -2909,14 +2980,14 @@ mod tests {
 
         // Mark one as already done.
         mgr.get_mut(id3).unwrap().complete(true);
-        assert_eq!(mgr.get(id3).unwrap().status, AgentStatus::Done);
+        assert_eq!(mgr.get(id3).unwrap().status(), AgentStatus::Done);
 
         let count = mgr.kill_all();
         assert_eq!(count, 2, "kill_all must kill exactly the two active agents");
-        assert_eq!(mgr.get(id1).unwrap().status, AgentStatus::Failed);
-        assert_eq!(mgr.get(id2).unwrap().status, AgentStatus::Failed);
+        assert_eq!(mgr.get(id1).unwrap().status(), AgentStatus::Failed);
+        assert_eq!(mgr.get(id2).unwrap().status(), AgentStatus::Failed);
         assert_eq!(
-            mgr.get(id3).unwrap().status,
+            mgr.get(id3).unwrap().status(),
             AgentStatus::Done,
             "terminal agent must not be affected by kill_all"
         );
@@ -2955,7 +3026,10 @@ mod tests {
         with_env_locked("ANTHROPIC_API_KEY", Some("sk-ant-test-key"), || {
             let model = ChatModel::Claude("claude-3-5-sonnet-20241022".into());
             let result = resolve_api_config(&model);
-            assert!(result.is_some(), "Claude model + ANTHROPIC_API_KEY set → should return Some");
+            assert!(
+                result.is_some(),
+                "Claude model + ANTHROPIC_API_KEY set → should return Some"
+            );
         });
     }
 
@@ -2965,7 +3039,10 @@ mod tests {
         with_env_locked("ANTHROPIC_API_KEY", None, || {
             let model = ChatModel::Claude("claude-3-5-sonnet-20241022".into());
             let result = resolve_api_config(&model);
-            assert!(result.is_none(), "Claude model + no ANTHROPIC_API_KEY → should return None");
+            assert!(
+                result.is_none(),
+                "Claude model + no ANTHROPIC_API_KEY → should return None"
+            );
         });
     }
 
@@ -2975,7 +3052,10 @@ mod tests {
         with_env_locked("OPENAI_API_KEY", Some("sk-openai-test-key"), || {
             let model = ChatModel::OpenAi("gpt-4o".into());
             let result = resolve_api_config(&model);
-            assert!(result.is_some(), "OpenAI model + OPENAI_API_KEY set → should return Some");
+            assert!(
+                result.is_some(),
+                "OpenAI model + OPENAI_API_KEY set → should return Some"
+            );
         });
     }
 
@@ -2985,7 +3065,10 @@ mod tests {
         with_env_locked("OPENAI_API_KEY", None, || {
             let model = ChatModel::OpenAi("gpt-4o".into());
             let result = resolve_api_config(&model);
-            assert!(result.is_none(), "OpenAI model + no OPENAI_API_KEY → should return None");
+            assert!(
+                result.is_none(),
+                "OpenAI model + no OPENAI_API_KEY → should return None"
+            );
         });
     }
 

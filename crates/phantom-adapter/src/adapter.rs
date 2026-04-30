@@ -67,6 +67,24 @@ pub trait AppCore: Send {
     fn output_buf_snapshot(&self) -> Option<String> {
         None
     }
+
+    /// Wire a shared render-snapshot Arc into this adapter.
+    ///
+    /// Called by `App::split_for_alt_screen` when the layout is split so that
+    /// the alt-screen view sibling can receive rendered grid data each frame.
+    /// Terminal adapters store the Arc and write into it during `update()`.
+    ///
+    /// The default no-op means all non-terminal adapters compile unchanged.
+    fn attach_alt_screen_snapshot(
+        &mut self,
+        _snapshot: std::sync::Arc<std::sync::Mutex<Option<RenderOutput>>>,
+    ) {
+    }
+
+    /// Remove the shared render-snapshot Arc previously set by
+    /// `attach_alt_screen_snapshot`.  Called when the secondary pane is
+    /// collapsed.  The default is a no-op.
+    fn detach_alt_screen_snapshot(&mut self) {}
 }
 
 /// Visual adapters that render into a rect.

@@ -614,7 +614,11 @@ mod tab_nav_data_model_tests {
     fn click_second_tab_sets_active_index_to_one() {
         let mut strip = three_tab_strip();
         strip.on_click(350.0, STRIP_WIDTH);
-        assert_eq!(strip.active(), 1, "clicking second tab must set active to 1");
+        assert_eq!(
+            strip.active(),
+            1,
+            "clicking second tab must set active to 1"
+        );
     }
 
     // Clicking at x=50 (first slot) → active = 0.
@@ -650,7 +654,11 @@ mod tab_nav_data_model_tests {
         assert_eq!(strip.active(), 1);
         // Badges are accessed via rendered text rather than direct field access;
         // verify tab_count and active index haven't corrupted neighbouring tabs.
-        assert_eq!(strip.tab_count(), 3, "tab count must not change after click");
+        assert_eq!(
+            strip.tab_count(),
+            3,
+            "tab count must not change after click"
+        );
     }
 
     // A tab created with a badge count must report that count.
@@ -683,10 +691,15 @@ mod tab_nav_data_model_tests {
             |_| {},
         );
         // Collect badge values from rendered text segments and check the counts.
-        let texts = strip.render_text(&crate::layout::Rect { x: 0.0, y: 0.0, width: STRIP_WIDTH, height: 30.0 });
+        let texts = strip.render_text(&crate::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: STRIP_WIDTH,
+            height: 30.0,
+        });
         let badge_10 = texts.iter().any(|s| s.text.contains("[10]"));
-        let badge_1  = texts.iter().any(|s| s.text.contains("[1]"));
-        assert!(badge_1,  "badge [1] must be rendered for tab A");
+        let badge_1 = texts.iter().any(|s| s.text.contains("[1]"));
+        assert!(badge_1, "badge [1] must be rendered for tab A");
         assert!(badge_10, "badge [10] must be rendered for tab B");
     }
 
