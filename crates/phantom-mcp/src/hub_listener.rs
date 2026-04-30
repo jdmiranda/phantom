@@ -12,6 +12,7 @@
 //!   └─ hub_loop  (OS thread with its own tokio runtime, or spawned on
 //!                 the caller's tokio runtime when one is already active)
 //!        ├─ Identity::load_or_generate (keychain lookup per attempt)
+//!        ├─ DeviceCredentials::load    (JWT from keychain — empty string if absent)
 //!        ├─ RelayClient::connect  (HELLO/HELLO_ACK handshake)
 //!        ├─ send_registration     (phantom_id, device_token, host, version)
 //!        └─ recv loop
@@ -25,9 +26,18 @@
 //! If `hub_url` is empty, [`spawn_hub`] returns `Ok(None)` and nothing is
 //! spawned.  The caller does not need to guard against a missing hub URL.
 //!
-//! # Auth placeholder
-//! `device_token` is an opaque `String` forwarded unchanged in the registration
-//! frame under the key `"device_token"`.  Real JWT issuance lands in #398.
+//! # Auth (issue #398)
+//! The `device_token` is a JWT loaded from the OS keyring via
+//! [`phantom_net::DeviceCredentials::load`].  Run `phantom auth register
+//! --hub <url>` first to populate the keyring entry.  If no credentials are
+//! found the registration frame sends an empty token; the hub will reject the
+//! connection with code 4401.
+//!
+//! # #487 coordination
+//! `spawn_hub` no longer accepts an `Identity` parameter.  The identity is
+//! always reloaded from the OS keychain on each connection attempt — the
+//! keychain is the source of truth.  The call site in `phantom-app` has been
+//! updated accordingly.
 //!
 //! # Relation to Unix-socket listener
 //! The Unix-socket listener (`listener.rs`) is sync and thread-per-connection.
@@ -45,6 +55,7 @@ use serde_json::json;
 use tokio::runtime::Handle;
 
 use phantom_net::RelayClient;
+use phantom_net::credentials::DeviceCredentials;
 use phantom_net::identity::{Identity, PeerId};
 
 use crate::listener::{AppCommand, dispatch_public};
@@ -100,28 +111,18 @@ impl HubListener {
 /// Returns `Ok(None)` immediately and without spawning anything when `hub_url`
 /// is empty.
 ///
+/// The identity and JWT are loaded from the OS keychain on each connection
+/// attempt.  The keychain is the source of truth — run `phantom auth register
+/// --hub <url>` before starting Phantom to populate the JWT entry.
+///
 /// `identity_namespace` controls which keychain slot is used for the Ed25519
 /// keypair.  Pass `None` to use the default `"phantom"` namespace, or supply
 /// `PHANTOM_IDENTITY_NAMESPACE` to isolate QA / dev instances.
-///
-/// `device_token` is forwarded as-is in the registration frame.  Issue #398
-/// provides real JWT issuance; for Phase 1 callers pass an empty string.
-/// Connect to `hub_url` and register this Phantom instance.
-///
-/// The `identity` parameter is used for the first connection attempt; on
-/// subsequent reconnects the identity is reloaded from the OS keychain (same
-/// keypair — the keychain is the source of truth).
 pub fn spawn_hub(
     hub_url: &str,
-    identity: Identity,
-    device_token: String,
     cmd_tx: Sender<AppCommand>,
 ) -> Result<Option<HubListener>> {
-    // Derive the namespace from the identity's peer_id so reconnects reload
-    // the same key.  The keychain service name is "phantom-net/phantom" by
-    // convention (see Identity::load_or_generate in phantom-net).
-    let _ = identity; // consumed; reconnects use load_or_generate
-    spawn_hub_ns(hub_url, None, device_token, cmd_tx)
+    spawn_hub_ns(hub_url, None, cmd_tx)
 }
 
 /// Like [`spawn_hub`] but accepts an explicit `identity_namespace` override.
@@ -130,7 +131,6 @@ pub fn spawn_hub(
 pub fn spawn_hub_ns(
     hub_url: &str,
     identity_namespace: Option<String>,
-    device_token: String,
     cmd_tx: Sender<AppCommand>,
 ) -> Result<Option<HubListener>> {
     if hub_url.is_empty() {
@@ -146,7 +146,7 @@ pub fn spawn_hub_ns(
 
     match Handle::try_current() {
         Ok(handle) => {
-            handle.spawn(hub_loop(hub_url_owned, ns, device_token, cmd_tx));
+            handle.spawn(hub_loop(hub_url_owned, ns, cmd_tx));
         }
         Err(_) => {
             std::thread::Builder::new()
@@ -156,7 +156,7 @@ pub fn spawn_hub_ns(
                         .enable_all()
                         .build()
                         .expect("failed to build hub tokio runtime");
-                    rt.block_on(hub_loop(hub_url_owned, ns, device_token, cmd_tx));
+                    rt.block_on(hub_loop(hub_url_owned, ns, cmd_tx));
                 })?;
         }
     }
@@ -172,12 +172,7 @@ pub fn spawn_hub_ns(
 // ---------------------------------------------------------------------------
 
 /// Top-level async task.  Reconnects indefinitely with exponential back-off.
-async fn hub_loop(
-    hub_url: String,
-    identity_ns: String,
-    device_token: String,
-    cmd_tx: Sender<AppCommand>,
-) {
+async fn hub_loop(hub_url: String, identity_ns: String, cmd_tx: Sender<AppCommand>) {
     let mut delay = BACKOFF_MIN;
     let mut attempt: u32 = 0;
 
@@ -185,8 +180,7 @@ async fn hub_loop(
         attempt += 1;
         debug!("hub_listener: connect attempt {attempt} to {hub_url}");
 
-        // Load (or generate) the identity fresh on each attempt.  The keychain
-        // lookup is idempotent — the same keypair is returned every time.
+        // Load (or generate) the identity fresh on each attempt.
         let identity = match Identity::load_or_generate(&identity_ns) {
             Ok(id) => id,
             Err(e) => {
@@ -194,6 +188,22 @@ async fn hub_loop(
                 tokio::time::sleep(delay).await;
                 delay = backoff_advance(delay);
                 continue;
+            }
+        };
+
+        // Load the JWT from the OS keychain (populated by `phantom auth register`).
+        // If no credentials are stored, send an empty token; the hub will respond
+        // with code 4401.  This lets Phantom start gracefully even before
+        // registration has run.
+        let device_token = match DeviceCredentials::load(&identity_ns) {
+            Ok(Some(creds)) => creds.jwt,
+            Ok(None) => {
+                warn!("hub_listener: no device credentials in keychain — hub will reject connection; run `phantom auth register --hub <url>`");
+                String::new()
+            }
+            Err(e) => {
+                warn!("hub_listener: failed to load device credentials: {e:#} — proceeding with empty token");
+                String::new()
             }
         };
 
@@ -234,15 +244,12 @@ async fn connect_and_run(
 ) -> Result<()> {
     let peer_id_str = identity.peer_id.as_str().to_owned();
 
-    // RelayClient::connect takes Identity by value — no Clone required.
     let mut client = RelayClient::connect(hub_url, identity).await?;
     info!("hub_listener: connected — phantom_id={peer_id_str}");
 
-    // Send the registration frame.  peer_id_str is a plain String by this point.
     send_registration(&mut client, &peer_id_str, device_token).await?;
     info!("hub_listener: registered — phantom_id={peer_id_str}");
 
-    // Inbound dispatch loop.
     let hub_peer = PeerId::from(HUB_PEER_ID.to_owned());
 
     loop {
@@ -264,13 +271,9 @@ async fn connect_and_run(
             request.method, request.id
         );
 
-        // `dispatch_public` blocks on `reply_rx.recv_timeout` (a std sync call).
-        // Running it on a blocking thread prevents stalling the tokio executor.
         let cmd_tx_clone = cmd_tx.clone();
         let request_clone = request.clone();
         let response = tokio::task::spawn_blocking(move || {
-            // Create a fresh server per request — it is stateless (no live app
-            // state; all live state flows through cmd_tx).
             let srv = PhantomMcpServer::new();
             dispatch_public(&srv, &request_clone, &cmd_tx_clone)
         })
@@ -298,11 +301,14 @@ async fn connect_and_run(
 /// {
 ///   "type":         "register",
 ///   "phantom_id":   "<base58 peer-id>",
-///   "device_token": "<opaque — #398 fills real JWT>",
+///   "device_token": "<JWT — empty if credentials not yet stored>",
 ///   "host":         "<hostname>",
 ///   "version":      "<cargo package version>"
 /// }
 /// ```
+///
+/// The `device_token` is a signed JWT (HS256) issued by the hub at registration
+/// time.  The hub verifies the signature on the incoming frame.
 async fn send_registration(
     client: &mut RelayClient,
     peer_id: &str,
@@ -359,7 +365,6 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // In-process mock hub
-    // (mirrors the pattern in phantom-net/src/tests.rs)
     // -----------------------------------------------------------------------
 
     type HubSender = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
@@ -419,7 +424,6 @@ mod tests {
             return;
         }
 
-        // Register peer.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         peers.lock().await.insert(peer_id.clone(), tx);
 
@@ -437,7 +441,6 @@ mod tests {
                 Err(_) => continue,
             };
 
-            // PING → PONG
             if env.payload == b"PING" {
                 let pong = Envelope::new(
                     &relay_identity,
@@ -453,16 +456,12 @@ mod tests {
                 continue;
             }
 
-            // Route the frame to the addressed peer (peer-to-peer),
-            // or echo it back to the sender if addressed to "hub".
             let guard = peers.lock().await;
             if env.to == HUB_PEER_ID {
-                // Echo hub-addressed frames back to the sender (test helper).
                 if let Some(peer_tx) = guard.get(&env.from) {
                     let _ = peer_tx.send(bytes);
                 }
             } else if let Some(peer_tx) = guard.get(&env.to) {
-                // Forward to the addressed peer (peer-to-peer routing).
                 let _ = peer_tx.send(bytes);
             }
         }
@@ -470,10 +469,6 @@ mod tests {
         peers.lock().await.remove(&peer_id);
     }
 
-    // -----------------------------------------------------------------------
-    // Helper: generate a unique test identity via the OS keychain.
-    // Each call uses a unique service name so tests don't share state.
-    // -----------------------------------------------------------------------
     fn test_identity(tag: &str) -> NetIdentity {
         use std::time::{SystemTime, UNIX_EPOCH};
         let ns_nanos = SystemTime::now()
@@ -491,9 +486,8 @@ mod tests {
 
     #[test]
     fn spawn_hub_noop_when_url_empty() {
-        let identity = test_identity("noop");
         let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
-        let result = spawn_hub("", identity, String::new(), cmd_tx);
+        let result = spawn_hub("", cmd_tx);
         assert!(result.is_ok(), "spawn_hub must not error on empty URL");
         assert!(
             result.unwrap().is_none(),
@@ -505,26 +499,16 @@ mod tests {
     // Test: listener connects, registers, and dispatches phantom.run_command
     // -----------------------------------------------------------------------
 
-    /// Verifies that a tools/call frame arriving from the hub is parsed and
-    /// forwarded to the App command channel as `AppCommand::RunCommand`.
-    ///
-    /// Note: the response routing (listener → hub → Claude) is completed by
-    /// the hub-side registry in issue #396.  This test verifies only the
-    /// Phantom-side dispatch: that the inbound frame is correctly deserialised
-    /// and forwarded to `cmd_tx`.
     #[tokio::test]
     async fn hub_listener_registers_and_dispatches_run_command() {
         let addr = spawn_mock_hub().await.unwrap();
         let hub_url = format!("ws://{addr}");
 
-        // Track the AppCommand that arrives on cmd_tx.
         let received_cmd: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let received_clone = Arc::clone(&received_cmd);
 
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AppCommand>();
 
-        // Serve the command channel in a background OS thread and signal
-        // completion via a tokio oneshot so the async test can await it.
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         std::thread::spawn(move || {
             let mut done_tx = Some(done_tx);
@@ -539,36 +523,24 @@ mod tests {
             }
         });
 
-        // Use a unique test identity namespace so the keychain slot is isolated.
-        let identity = test_identity("dispatch");
         let ns = format!("phantom-test-hub-{}", std::process::id());
 
-        spawn_hub_ns(&hub_url, Some(ns.clone()), "placeholder-token".to_owned(), cmd_tx)
+        spawn_hub_ns(&hub_url, Some(ns.clone()), cmd_tx)
             .unwrap()
             .expect("hub listener must return Some for non-empty URL");
 
-        // Allow the listener to connect, complete the handshake, and register.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Connect a second client acting as "the hub agent" that forwards
-        // a JSON-RPC request to the listener.
         let agent_id = test_identity("agent");
         let mut hub_agent = RelayClient::connect(&hub_url, agent_id).await.unwrap();
-        // Brief wait to let the agent's handshake complete before sending.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Recover the listener's peer_id from the keychain namespace.
         let listener_id = match NetIdentity::load_or_generate(&ns) {
             Ok(id) => id,
-            Err(_) => {
-                // Keychain unavailable in CI; skip routing test.
-                drop(identity);
-                return;
-            }
+            Err(_) => return, // Keychain unavailable in CI; skip routing test.
         };
         let listener_peer = NetPeerId::from(listener_id.peer_id.as_str().to_owned());
 
-        // Send a tools/call request addressed directly to the listener.
         let request = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -581,7 +553,6 @@ mod tests {
         let payload = serde_json::to_vec(&request).unwrap();
         hub_agent.send(&listener_peer, payload).await.unwrap();
 
-        // Wait for the AppCommand to arrive at the mock app thread (max 5 s).
         tokio::time::timeout(Duration::from_secs(5), done_rx)
             .await
             .expect("AppCommand::RunCommand must be dispatched within 5 s")
@@ -592,8 +563,6 @@ mod tests {
             Some("echo hello"),
             "AppCommand::RunCommand must carry the correct command string"
         );
-
-        drop(identity);
     }
 
     // -----------------------------------------------------------------------
@@ -602,8 +571,6 @@ mod tests {
 
     #[tokio::test]
     async fn hub_listener_reconnects_after_disconnect() {
-        // Bind a server that counts successful HELLO/ACK handshakes, then
-        // immediately closes the WS after each one so the listener retries.
         let connect_count = Arc::new(tokio::sync::Mutex::new(0u32));
         let count_srv = Arc::clone(&connect_count);
 
@@ -650,11 +617,10 @@ mod tests {
         let ns = format!("phantom-test-reconnect-{}", std::process::id());
         let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel::<AppCommand>();
 
-        spawn_hub_ns(&hub_url, Some(ns), String::new(), cmd_tx)
+        spawn_hub_ns(&hub_url, Some(ns), cmd_tx)
             .unwrap()
             .expect("must return Some");
 
-        // BACKOFF_MIN is 1s; wait 4s to give at least 2–3 reconnect cycles.
         tokio::time::sleep(Duration::from_secs(4)).await;
 
         let count = *connect_count.lock().await;
@@ -669,11 +635,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn registration_frame_fields_are_present() {
+    fn registration_frame_has_device_token_field() {
         let frame = json!({
             "type":         "register",
             "phantom_id":   "some-peer-id",
-            "device_token": "tok-placeholder",
+            "device_token": "eyJ.test.jwt",
             "host":         "test-host",
             "version":      env!("CARGO_PKG_VERSION"),
         });
@@ -685,19 +651,21 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: auth placeholder passes through unchanged
+    // Test: empty device_token is sent when credentials not stored
     // -----------------------------------------------------------------------
 
     #[test]
-    fn auth_placeholder_passes_through_unchanged() {
-        let token = "placeholder-device-token-xyz";
+    fn registration_frame_allows_empty_device_token() {
+        // This documents the graceful degradation path: if `phantom auth register`
+        // has not been run, the listener still sends the frame with an empty JWT.
+        // The hub will reject with 4401, triggering a reconnect loop.
         let frame = json!({
             "type":         "register",
             "phantom_id":   "some-peer-id",
-            "device_token": token,
+            "device_token": "",
             "host":         "test-host",
             "version":      "0.1.0",
         });
-        assert_eq!(frame["device_token"].as_str(), Some(token));
+        assert_eq!(frame["device_token"].as_str(), Some(""));
     }
 }

@@ -28,6 +28,23 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# JWT issuance and verification (HS256, issue #398).
+# Chosen: `jsonwebtoken` — most widely used Rust JWT crate, actively maintained,
+# supports HS256/RS256, has first-class claims validation (exp, iat, iss).
+# Phase 3 will swap to RS256; the algorithm is a single-field change.
+jsonwebtoken = "9"
+
+# SHA-256 for API key hashing (issue #398).
+sha2 = "0.10"
+
+# Constant-time comparison to prevent timing attacks on API key comparison.
+subtle = "2"
+
+# Ed25519 for verifying Phantom registration signatures.
+# Must stay in sync with phantom-net's version.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+
 [dev-dependencies]
 axum-test = "15"
 tokio = { version = "1", features = ["full", "test-util"] }

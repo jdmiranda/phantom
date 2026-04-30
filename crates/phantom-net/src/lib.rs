@@ -25,12 +25,14 @@
 //! - [`heartbeat`] — ping/pong state machine with exponential back-off
 
 pub mod client;
+pub mod credentials;
 pub mod envelope;
 pub mod heartbeat;
 pub mod identity;
 pub mod transport;
 
 pub use client::RelayClient;
+pub use credentials::DeviceCredentials;
 pub use envelope::Envelope;
 pub use identity::{Identity, PeerId};
 

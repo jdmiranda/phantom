@@ -1054,34 +1054,28 @@ impl App {
             }
         };
 
-        // -- Hub registration listener (issue #395) --
+        // -- Hub registration listener (issues #395, #398) --
         // When PHANTOM_HUB_URL is set, dial out to phantom-hub and register
         // this Phantom instance so Claude can reach it remotely.  If the env
-        // var is absent this is a graceful no-op.  The device_token is an
-        // opaque placeholder until issue #398 provides real JWT issuance.
+        // var is absent this is a graceful no-op.
+        //
+        // The identity and JWT are loaded from the OS keychain inside
+        // spawn_hub on each connection attempt (issue #398).  Run
+        // `phantom auth register --hub <url>` before launching to populate
+        // the JWT entry; without it the hub will reject the connection.
         let hub_listener = {
             let hub_url = std::env::var("PHANTOM_HUB_URL").unwrap_or_default();
-            let device_token = std::env::var("PHANTOM_HUB_DEVICE_TOKEN")
-                .unwrap_or_default();
-            match phantom_net::Identity::load_or_generate("phantom") {
-                Ok(identity) => {
-                    match phantom_mcp::spawn_hub(&hub_url, identity, device_token, hub_cmd_tx) {
-                        Ok(Some(hl)) => {
-                            info!("Hub listener started: {}", hl.hub_url());
-                            Some(hl)
-                        }
-                        Ok(None) => {
-                            debug!("Hub URL not configured — hub registration skipped");
-                            None
-                        }
-                        Err(e) => {
-                            warn!("Failed to start hub listener: {e}");
-                            None
-                        }
-                    }
+            match phantom_mcp::spawn_hub(&hub_url, hub_cmd_tx) {
+                Ok(Some(hl)) => {
+                    info!("Hub listener started: {}", hl.hub_url());
+                    Some(hl)
+                }
+                Ok(None) => {
+                    debug!("Hub URL not configured — hub registration skipped");
+                    None
                 }
                 Err(e) => {
-                    warn!("Failed to load identity for hub registration: {e}");
+                    warn!("Failed to start hub listener: {e}");
                     None
                 }
             }
