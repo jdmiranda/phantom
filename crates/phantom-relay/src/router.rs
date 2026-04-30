@@ -9,6 +9,7 @@ use anyhow::{bail, Result};
 use log::{debug, warn};
 
 use crate::envelope::{ClientMessage, Envelope, PeerId, RelayMessage};
+use crate::grant::{CapabilityClass, Grant, PeerGrantRegistry};
 use crate::rate_limit::TokenBucket;
 use crate::session::SessionHandle;
 
@@ -18,6 +19,8 @@ pub struct Router {
     sessions: HashMap<PeerId, SessionHandle>,
     /// Per-peer token buckets.
     rate_buckets: HashMap<PeerId, TokenBucket>,
+    /// Per-peer capability grant registry (default-deny).
+    grants: PeerGrantRegistry,
     /// Default rate limit (messages / second).
     rate_limit: u32,
     /// Maximum simultaneously connected peers.
@@ -31,9 +34,31 @@ impl Router {
         Self {
             sessions: HashMap::new(),
             rate_buckets: HashMap::new(),
+            grants: PeerGrantRegistry::new(),
             rate_limit,
             max_peers,
         }
+    }
+
+    /// Grant a capability to `peer_id`.
+    pub fn grant(&mut self, peer_id: &PeerId, grant: Grant) {
+        self.grants.grant(peer_id, grant);
+    }
+
+    /// Revoke a specific capability for `peer_id`.
+    pub fn revoke(&mut self, peer_id: &PeerId, class: CapabilityClass) {
+        self.grants.revoke(peer_id, class);
+    }
+
+    /// Revoke all capability grants for `peer_id` (e.g. on disconnect).
+    pub fn revoke_all(&mut self, peer_id: &PeerId) {
+        self.grants.revoke_all(peer_id);
+    }
+
+    /// Access the underlying [`PeerGrantRegistry`] for inspection.
+    #[must_use]
+    pub fn grants(&self) -> &PeerGrantRegistry {
+        &self.grants
     }
 
     /// Register a peer's session handle.
@@ -84,6 +109,24 @@ impl Router {
     }
 
     fn forward(&mut self, sender: &PeerId, envelope: Envelope) -> RelayMessage {
+        // --- capability grant check (issue #415) ---
+        //
+        // Every peer must hold a `Relay` grant before any envelope is
+        // forwarded. server.rs issues this grant on handshake success and
+        // revokes it on disconnect. Unknown / unganted peers are denied here
+        // with a `CapabilityDenied` reply, preventing unauthenticated message
+        // injection without a rate-limit token burn.
+        if let Err(reason) = self.grants.check(sender, CapabilityClass::Relay) {
+            warn!(
+                "router: capability denied for peer {} (Relay): {}",
+                sender, reason
+            );
+            return RelayMessage::CapabilityDenied {
+                peer_id: sender.clone(),
+                reason: reason.to_string(),
+            };
+        }
+
         // --- rate limit check ---
         let bucket = self
             .rate_buckets
@@ -144,7 +187,10 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
+    use crate::grant::Grant;
     use crate::session::Session;
     use uuid::Uuid;
 
@@ -152,6 +198,11 @@ mod tests {
         let session = Session::new(PeerId(id.into()));
         let handle = session.handle();
         (session, handle)
+    }
+
+    /// Grant a permanent `Relay` capability to `peer_id` on `router`.
+    fn grant_relay(router: &mut Router, peer_id: &str) {
+        router.grant(&PeerId(peer_id.into()), Grant::permanent(CapabilityClass::Relay));
     }
 
     #[test]
@@ -191,6 +242,10 @@ mod tests {
         let (_, handle_alice) = make_session("alice");
         router.register(handle_alice).unwrap();
         router.register(handle_bob).unwrap();
+        // Both peers must hold a Relay grant (issued by server.rs on handshake
+        // in production; issued manually here in tests).
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
 
         let envelope = Envelope {
             from: PeerId("alice".into()),
@@ -214,6 +269,7 @@ mod tests {
         let mut router = Router::new(100, 10);
         let (_, handle_alice) = make_session("alice");
         router.register(handle_alice).unwrap();
+        grant_relay(&mut router, "alice");
 
         let envelope = Envelope {
             from: PeerId("alice".into()),
@@ -233,6 +289,8 @@ mod tests {
         let (_bob_session, hb) = make_session("bob"); // keep rx alive so channel stays open
         router.register(ha).unwrap();
         router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
 
         let make_env = || Envelope {
             from: PeerId("alice".into()),
@@ -254,5 +312,120 @@ mod tests {
             "expected RateLimitExceeded, got {:?}",
             reply
         );
+    }
+
+    // ── Grant-check tests (issue #415) ────────────────────────────────────────
+
+    /// A peer with no Relay grant must receive `CapabilityDenied`.
+    #[test]
+    fn unganted_peer_is_denied() {
+        let mut router = Router::new(100, 10);
+        let (_, ha) = make_session("alice");
+        let (_, hb) = make_session("bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        // No grant issued for alice.
+
+        let envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!(null),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::CapabilityDenied { .. }),
+            "expected CapabilityDenied, got {reply:?}"
+        );
+    }
+
+    /// After `revoke`, subsequent forwards are denied.
+    #[test]
+    fn revoke_denies_subsequent_forward() {
+        let mut router = Router::new(100, 10);
+        let (_, ha) = make_session("alice");
+        let (_, hb) = make_session("bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+
+        router.revoke(&PeerId("alice".into()), CapabilityClass::Relay);
+
+        let envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!(null),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::CapabilityDenied { .. }),
+            "expected CapabilityDenied after revoke, got {reply:?}"
+        );
+    }
+
+    /// An expired grant (expiry set in the past) must be denied.
+    #[test]
+    fn expired_grant_is_denied() {
+        let mut router = Router::new(100, 10);
+        let (_, ha) = make_session("alice");
+        let (_, hb) = make_session("bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+
+        let past = Instant::now() - Duration::from_secs(1);
+        router.grant(
+            &PeerId("alice".into()),
+            Grant::with_expiry(CapabilityClass::Relay, past),
+        );
+
+        let envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!(null),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::CapabilityDenied { .. }),
+            "expected CapabilityDenied for expired grant, got {reply:?}"
+        );
+    }
+
+    /// A grant expiring in the future should be accepted.
+    #[tokio::test]
+    async fn future_expiry_grant_delivers() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("bob");
+        let (_, ha) = make_session("alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+
+        let future = Instant::now() + Duration::from_secs(60);
+        router.grant(
+            &PeerId("alice".into()),
+            Grant::with_expiry(CapabilityClass::Relay, future),
+        );
+
+        let envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!("future-grant"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "expected Delivered with future expiry grant, got {reply:?}"
+        );
+
+        let raw = bob_session.rx.try_recv().expect("message not delivered");
+        assert!(raw.contains("future-grant"));
     }
 }

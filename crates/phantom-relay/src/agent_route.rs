@@ -246,6 +246,7 @@ pub fn decode_agent_envelope(envelope: &Envelope) -> Result<AgentEnvelope, serde
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grant::{CapabilityClass as GC, Grant};
     use crate::session::Session;
 
     fn make_session(id: &str) -> (Session, crate::session::SessionHandle) {
@@ -332,6 +333,8 @@ mod tests {
         let (_, alice_handle) = make_session("alice");
         router.register(alice_handle).unwrap();
         router.register(bob_handle).unwrap();
+        // Alice needs a Relay grant so router.route() lets the envelope through.
+        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -341,7 +344,7 @@ mod tests {
             payload: serde_json::json!({"agent_id": 5, "content": {"UserSpeak": "hi"}}),
         };
 
-        // No grant check — trusted internal path.
+        // No agent-level grant check — trusted internal path.
         let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None);
         assert!(result.is_ok(), "routing should succeed: {result:?}");
 
@@ -358,6 +361,9 @@ mod tests {
         let mut router = Router::new(100, 10);
         let (_, alice_handle) = make_session("alice");
         router.register(alice_handle).unwrap();
+        // Alice holds a Relay grant so she passes the router grant check; the
+        // failure must come from "ghost" not being registered.
+        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -415,6 +421,8 @@ mod tests {
         let (_bob_session, bob_handle) = make_session("bob"); // keep alive so channel stays open
         router.register(alice_handle).unwrap();
         router.register(bob_handle).unwrap();
+        // Alice needs a router-level Relay grant so router.route() passes.
+        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
