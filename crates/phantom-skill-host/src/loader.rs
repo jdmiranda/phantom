@@ -73,13 +73,19 @@ pub fn load_from_path(path: &std::path::Path) -> anyhow::Result<Arc<dyn Semantic
     // Validate that all function pointers are non-null.
     // SAFETY: we just checked vtable_ptr is non-null; it points into the
     // dylib's read-only data which outlives the `Arc<Library>` below.
+    // Return Err rather than panicking — a malformed dylib must not crash the process.
     unsafe {
         let vt = &*vtable_ptr;
-        // Transmute to usize to check non-null without calling.
         // The cast via `as usize` on a fn pointer is defined behaviour.
-        assert_ne!(vt.classify_command as usize, 0, "classify_command fn ptr is null");
-        assert_ne!(vt.parse as usize, 0, "parse fn ptr is null");
-        assert_ne!(vt.free_buf as usize, 0, "free_buf fn ptr is null");
+        if vt.classify_command as usize == 0 {
+            bail!("classify_command fn ptr is null in {:?}", path);
+        }
+        if vt.parse as usize == 0 {
+            bail!("parse fn ptr is null in {:?}", path);
+        }
+        if vt.free_buf as usize == 0 {
+            bail!("free_buf fn ptr is null in {:?}", path);
+        }
     }
 
     let lib_arc = Arc::new(lib);
