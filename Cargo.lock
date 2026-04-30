@@ -5668,6 +5668,7 @@ dependencies = [
  "phantom-scene",
  "phantom-semantic",
  "phantom-session",
+ "phantom-skill-host",
  "phantom-stt",
  "phantom-terminal",
  "phantom-ui",
@@ -5990,7 +5991,6 @@ name = "phantom-skill-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "libloading",
  "log",
  "notify",
