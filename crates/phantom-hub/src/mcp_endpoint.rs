@@ -11,12 +11,24 @@
 //! - `phantom.read_output` — routes a `phantom.read_output` JSON-RPC frame with an optional
 //!   `since` cursor to the target Phantom; returns the text + next cursor.
 //!
+//! # Phase 2 (issue #399)
+//!
+//! - `phantom.spawn_agent` — routes a `phantom.spawn_agent` JSON-RPC frame to the target
+//!   Phantom; Phantom calls [`phantom_agents::AgentManager::spawn`] and returns an
+//!   `{ agent_id, started_at }` payload. The hub forwards the structured reply unchanged.
+//!
 //! # Auth
 //!
 //! Both endpoints require `Authorization: Bearer <api-key>` where the key is
 //! a `phk_<base64url>` value loaded from `HUB_API_KEYS` at startup.  The hub
 //! stores SHA-256 hashes; comparison is constant-time via [`crate::auth::ApiKeyStore::validate`].
 //! An absent or invalid key returns 401 immediately, before any registry access.
+//!
+//! For `phantom.spawn_agent` the hub also verifies that the target `phantom_id` is
+//! online in the registry before forwarding (404-equivalent JSON-RPC error if not).
+//! Per-key capability scoping (allowlist for spawn per API key) is deferred to issue
+//! #409 (ticket 09); v1 grants spawn to any valid API key. The comment
+//! `// SECURITY: ticket-09 will add per-key capability scoping here` marks the call site.
 //!
 //! # Transport
 //!
@@ -29,8 +41,8 @@
 //!
 //! # `tools/list`
 //!
-//! The hub has its own `tools/list` — Phase 1 does NOT proxy `tools/list` to any Phantom.
-//! The three tools defined here are the entire surface area for Phase 1.
+//! The hub has its own `tools/list` — it does NOT proxy `tools/list` to any Phantom.
+//! Phase 2 surface area: four tools (three from Phase 1 plus `phantom.spawn_agent`).
 //!
 //! # Output buffering for `read_output`
 //!
@@ -39,8 +51,8 @@
 //! The hub relays those fields back to Claude unchanged.  Cap and eviction are
 //! Phantom-side concerns; the hub is a pure pass-through for `read_output` payloads.
 //!
-//! For Phase 1, the hub's default timeout (30 s, `HUB_FORWARD_TIMEOUT_SECS`) applies
-//! to both `run_command` and `read_output`.  Long-running commands should use
+//! For Phase 1+2, the hub's default timeout (30 s, `HUB_FORWARD_TIMEOUT_SECS`) applies
+//! to `run_command`, `read_output`, and `spawn_agent`.  Long-running commands should use
 //! `read_output` polling with the cursor rather than waiting on `run_command`.
 
 use axum::body::Body;
@@ -140,6 +152,38 @@ fn fleet_tools() -> Vec<McpTool> {
                     }
                 },
                 "required": ["phantom_id"]
+            }),
+        },
+        // Phase 2 (issue #399): remote agent spawn returning a stable AgentId.
+        McpTool {
+            name: "phantom.spawn_agent".into(),
+            description: "Spawn an AI agent on a specific Phantom instance. \
+                Returns a stable agent_id (decimal string) and started_at timestamp \
+                immediately — the agent runs asynchronously. \
+                Use phantom.get_agent_status (issue #400) to poll for progress. \
+                NOTE: any valid API key can spawn agents in v1; per-key capability \
+                scoping is deferred to issue #409."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "phantom_id": {
+                        "type": "string",
+                        "description": "The stable peer ID of the target Phantom, \
+                            as returned by phantom.list_phantoms."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Free-form task description for the agent."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["default", "defender", "inspector"],
+                        "description": "Agent role. Defaults to 'default'.",
+                        "default": "default"
+                    }
+                },
+                "required": ["phantom_id", "prompt"]
             }),
         },
     ]
@@ -317,6 +361,8 @@ async fn dispatch_tools_call(
         "phantom.list_phantoms" => dispatch_list_phantoms(state, id).await,
         "phantom.run_command" => dispatch_run_command(state, id, &args).await,
         "phantom.read_output" => dispatch_read_output(state, id, &args).await,
+        // Phase 2 (issue #399)
+        "phantom.spawn_agent" => dispatch_spawn_agent(state, id, &args).await,
         other => {
             warn!("mcp: tools/call for unknown tool '{other}'");
             json_rpc_error(id, -32601, format!("Unknown tool: {other}"))
@@ -458,6 +504,87 @@ async fn dispatch_read_output(
         method: "tools/call".into(),
         params: json!({
             "name": "phantom.read_output",
+            "arguments": forward_args
+        }),
+    };
+
+    let pid = PhantomId::new(&phantom_id);
+
+    match router::forward(&state.registry, &pid, phantom_req, None, &()).await {
+        Ok(resp) => phantom_response_to_mcp(id, resp),
+        Err(e) => route_error_to_mcp(id, &phantom_id, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// phantom.spawn_agent (issue #399)
+// ---------------------------------------------------------------------------
+
+/// Route a `phantom.spawn_agent` JSON-RPC frame to the named Phantom.
+///
+/// The hub is a pure pass-through for this tool — it does NOT call
+/// `AgentManager` itself. Instead it forwards the frame to the Phantom's
+/// MCP listener, which dispatches `AppCommand::SpawnAgent` on the App thread,
+/// calls `AgentManager::spawn`, and returns `{ agent_id, started_at }`.
+///
+/// # Auth / capability gate
+///
+/// Auth: API key validated by the shared `require_api_key` guard (returns 401
+/// to the HTTP layer before this function is reached).
+///
+/// Capability gate v1: any valid API key can spawn agents.  Per-key capability
+/// scoping (limiting spawn to explicitly-whitelisted keys) is deferred to
+/// issue #409.
+/// SECURITY: ticket-09 will add per-key capability scoping here.
+///
+/// The `phantom_id` existence check is enforced by `router::forward` which
+/// returns `RouteError::NotFound` when the peer is absent from the registry.
+async fn dispatch_spawn_agent(
+    state: &AppState,
+    id: serde_json::Value,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_owned(),
+        _ => {
+            return json_rpc_error(id, -32602, "missing or empty 'phantom_id' argument");
+        }
+    };
+
+    let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_owned(),
+        _ => {
+            return json_rpc_error(id, -32602, "missing or empty 'prompt' argument");
+        }
+    };
+
+    // Validate role against the allowlist; forward the raw value — Phantom
+    // coerces unknown roles to "default" on its side.
+    let role = args.get("role").and_then(|v| v.as_str()).unwrap_or("default");
+    let role = match role {
+        "defender" | "inspector" | "default" => role.to_owned(),
+        other => {
+            warn!("mcp: spawn_agent role '{other}' not in allowlist, coercing to 'default'");
+            "default".to_owned()
+        }
+    };
+
+    info!("mcp: spawn_agent phantom={phantom_id} prompt={prompt:?} role={role}");
+
+    // SECURITY: ticket-09 will add per-key capability scoping here.
+    // v1: any valid API key may spawn agents.
+
+    let forward_args = json!({
+        "prompt": prompt,
+        "role": role
+    });
+
+    let phantom_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(id.clone()),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "phantom.spawn_agent",
             "arguments": forward_args
         }),
     };
@@ -713,11 +840,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // tools/list → three tools
+    // tools/list → four tools (Phase 2 adds phantom.spawn_agent)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn mcp_tools_list_returns_three_tools() {
+    async fn mcp_tools_list_returns_four_tools() {
         let app = crate::build_router(test_state_with_key(TEST_API_KEY));
         let resp = app
             .oneshot(
@@ -747,7 +874,8 @@ mod tests {
         assert!(names.contains(&"phantom.list_phantoms"), "names: {names:?}");
         assert!(names.contains(&"phantom.run_command"), "names: {names:?}");
         assert!(names.contains(&"phantom.read_output"), "names: {names:?}");
-        assert_eq!(names.len(), 3, "expected exactly 3 tools, got: {names:?}");
+        assert!(names.contains(&"phantom.spawn_agent"), "names: {names:?}");
+        assert_eq!(names.len(), 4, "expected exactly 4 tools, got: {names:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -1112,6 +1240,171 @@ mod tests {
                         json!({
                             "name": "phantom.run_command",
                             "arguments": { "command": "ls" }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let code = val["error"]["code"].as_i64().unwrap_or(0);
+        assert_eq!(code, -32602, "expected INVALID_PARAMS -32602, got {code}");
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.spawn_agent: valid auth + connected peer → agent_id returned
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_agent_valid_auth_and_connected_peer_returns_agent_id() {
+        let state = test_state_with_key(TEST_API_KEY);
+        let mut rx = register_fake_phantom(&state, "spawn-phantom", "localhost", "0.1.0").await;
+
+        // Fake Phantom: receives spawn_agent, returns agent_id + started_at.
+        let reg_clone = Arc::clone(&state.registry);
+        tokio::spawn(async move {
+            let req = rx.recv().await.expect("fake phantom should receive request");
+            let hub_id = req.id.clone().unwrap().as_u64().unwrap();
+            deliver_response(
+                &reg_clone,
+                &PhantomId::new("spawn-phantom"),
+                crate::router::JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: Some(serde_json::Value::Number(hub_id.into())),
+                    result: Some(json!({
+                        "content": [{"type": "text", "text": "agent spawned: id=7 started_at=2026-04-30T00:00:00Z"}],
+                        "agent_id": "7",
+                        "started_at": "2026-04-30T00:00:00Z"
+                    })),
+                    error: None,
+                },
+            )
+            .await;
+        });
+
+        let app = crate::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.spawn_agent",
+                            "arguments": {
+                                "phantom_id": "spawn-phantom",
+                                "prompt": "list the modified files in this repo"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_none(), "unexpected error: {val}");
+        let agent_id = val["result"]["agent_id"].as_str().unwrap_or("");
+        assert_eq!(agent_id, "7", "expected agent_id '7', got: {val}");
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.spawn_agent: unknown peer → JSON-RPC NotFound error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_agent_unknown_peer_returns_rpc_error() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.spawn_agent",
+                            "arguments": {
+                                "phantom_id": "ghost-phantom",
+                                "prompt": "do something"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_some(), "expected error, got: {val}");
+        let code = val["error"]["code"].as_i64().unwrap();
+        assert_eq!(code, -32001, "expected NotFound -32001, got {code}");
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.spawn_agent: no API key → 401
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_agent_no_api_key_returns_401() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.spawn_agent",
+                            "arguments": {
+                                "phantom_id": "any-phantom",
+                                "prompt": "do something"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.spawn_agent: missing prompt → INVALID_PARAMS error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_agent_missing_prompt_returns_invalid_params() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.spawn_agent",
+                            "arguments": { "phantom_id": "some-phantom" }
                         }),
                     )))
                     .unwrap(),
