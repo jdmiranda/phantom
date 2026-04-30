@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::envelope::{ClientMessage, PeerId, RelayMessage};
+use crate::grant::{CapabilityClass, Grant};
 use crate::router::Router;
 use crate::session::Session;
 
@@ -131,6 +132,10 @@ async fn handle_connection(
                 .await?;
             return Ok(());
         }
+        // Issue a permanent `Relay` grant on successful authentication.
+        // The peer proved its identity via `IdentityProof`; it is now allowed
+        // to forward envelopes through the relay until it disconnects.
+        guard.grant(&peer_id, Grant::permanent(CapabilityClass::Relay));
     }
 
     let ack = HandshakeAck {
@@ -213,5 +218,9 @@ async fn handle_connection(
     info!("peer {} disconnected", peer_id);
     let mut guard = router.lock().await;
     guard.unregister(&peer_id);
+    // Revoke all capability grants so a reconnecting peer with the same id
+    // cannot inherit a stale grant. Grants are re-issued on the next
+    // successful handshake (see step 1 above).
+    guard.revoke_all(&peer_id);
     Ok(())
 }

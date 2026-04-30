@@ -50,6 +50,8 @@ pub enum RelayMessage {
     Error { code: String, message: String },
     /// Server-initiated keepalive.
     Ping,
+    /// The sender peer lacks the required capability grant for this operation.
+    CapabilityDenied { peer_id: PeerId, reason: String },
 }
 
 /// Messages a client sends to the relay after the handshake.

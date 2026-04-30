@@ -285,8 +285,12 @@ impl BrainRouter {
     ///
     /// When privacy mode is active, cloud backends are excluded from the
     /// candidate set — only local backends (heuristic, Ollama) are returned.
-    #[must_use] 
+    #[must_use]
     pub fn route(&self, complexity: TaskComplexity) -> Vec<&ModelBackend> {
+        // No `PeerGrantRegistry` check here: `BrainRouter` dispatches only within
+        // this process. Cloud backends (Claude, OpenAI-compat) are called by the
+        // brain thread; they do not traverse the relay. Cross-peer LLM calls are
+        // gated at the relay by `CapabilityClass::Llm`.
         let mut candidates: Vec<&ModelBackend> = self
             .config
             .backends

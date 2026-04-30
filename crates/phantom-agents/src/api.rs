@@ -376,13 +376,17 @@ fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
 /// Returns an [`ApiHandle`] that the main thread polls each frame via
 /// [`ApiHandle::try_recv`]. The background thread uses `reqwest::blocking`
 /// so no async runtime is needed.
-#[must_use] 
+#[must_use]
 pub fn send_message(
     config: &ClaudeConfig,
     agent: &Agent,
     tools: &[ToolDefinition],
     tool_use_ids: &[String],
 ) -> ApiHandle {
+    // No `PeerGrantRegistry` check here: phantom-agents' Claude API calls
+    // originate from within this process (the `agent_pane` dispatch loop) and
+    // never cross the relay boundary. The relay enforces `CapabilityClass::Llm`
+    // for cross-peer LLM dispatch before any message arrives at a remote agent.
     let (tx, rx) = mpsc::channel();
 
     let request_body = build_request_body(config, agent, tools, tool_use_ids);

@@ -11,6 +11,7 @@
 
 pub mod agent_route;
 pub mod envelope;
+pub mod grant;
 pub mod rate_limit;
 pub mod router;
 pub mod server;
