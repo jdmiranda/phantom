@@ -449,6 +449,23 @@ pub struct App {
     //    - The brain router skips cloud backends (Claude, OpenAI).
     //    - The status strip shows a lock indicator.
     pub(crate) privacy_mode: bool,
+
+    // -- OODA signal cache (#358) -------------------------------------------
+    //
+    // Lightweight cache updated from bus events so `build_world_state()` can
+    // assemble a fully populated `WorldState` in O(1) without scanning the PTY
+    // buffer on every frame.
+    //
+    // `ooda_last_parsed` — most recent `ParsedOutput` from a `CommandComplete`
+    //   event; `None` before the first command finishes.
+    pub(crate) ooda_last_parsed: Option<phantom_semantic::ParsedOutput>,
+    // `ooda_agent_just_completed` — set to `true` when an `AgentComplete`
+    //   event arrives; cleared to `false` at the end of `build_world_state()`
+    //   so it fires for exactly one OODA tick.
+    pub(crate) ooda_agent_just_completed: bool,
+    // `ooda_git_changed` — set to `true` when `GitStateChanged` is received;
+    //   cleared after one OODA tick (same single-frame pulse pattern).
+    pub(crate) ooda_git_changed: bool,
 }
 
 /// An active suggestion from the AI brain.
@@ -1112,6 +1129,10 @@ impl App {
             alt_screen_fade: std::collections::HashMap::new(),
             alt_screen_pending_collapses: Vec::new(),
             privacy_mode: config.privacy_mode,
+            // OODA signal cache — all start zeroed; populated by drain_bus_to_brain.
+            ooda_last_parsed: None,
+            ooda_agent_just_completed: false,
+            ooda_git_changed: false,
         })
     }
 

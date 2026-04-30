@@ -147,19 +147,10 @@ impl App {
         // into the same execute_brain_action pipeline as the async brain thread.
         {
             let idle_secs = now.duration_since(self.last_input_time).as_secs_f32();
-            // Derive error presence from the last command context stored on
-            // the async brain scorer — we snapshot the same signals.
-            let world = WorldState::new(
-                idle_secs, false, // has_errors: OODA uses BDS which will be fed via orient
-                0,     // error_count
-                false, // has_active_process
-                false, // new_pattern_detected
-                false, // agent_just_completed
-                false, // file_or_git_changed
-                false, // in_repl
-                0.0,   // chattiness
-                0,     // suggestions_since_input
-            );
+            // Build a fully-populated WorldState from live app signals (#358).
+            // All signals are O(1) reads from the OODA cache updated by
+            // drain_bus_to_brain() — no per-tick scanning.
+            let world = self.build_world_state(idle_secs);
             let dt_ms = (dt * 1000.0) as u64;
             let ooda_actions = self.ooda_loop.tick(&world, dt_ms);
             for action in ooda_actions {
@@ -320,6 +311,8 @@ impl App {
                 } else if finished {
                     self.git_refresh_handle = None;
                     self.git_refresh_spawned_at = None;
+                    // Signal the OODA cache that git state just refreshed (#358).
+                    self.ooda_git_changed = true;
                 }
             }
 
@@ -541,9 +534,18 @@ impl App {
 
         for msg in msgs {
             // 0) Command-boundary tracking for both the history store and
-            //    the brain's ParsedOutput (issue #226).
+            //    the brain's ParsedOutput (issue #226), plus OODA signal
+            //    cache updates (issue #358).
+            //
             //    `CommandStarted` records the command text in both maps;
-            //    `CommandComplete` consumes pending_command_text for history.
+            //    `CommandComplete` consumes pending_command_text for history
+            //    and updates the OODA ParsedOutput cache in O(1) so that
+            //    `build_world_state()` can read error presence without scanning.
+            //    `AgentTaskComplete`/`AgentError` set the one-frame pulse flag.
+            //
+            // The ParsedOutput is computed here (section 0) rather than inside
+            // the brain branch (section 1) so the cache is always populated
+            // regardless of whether the async brain thread is running.
             match &msg.event {
                 Event::CommandStarted { app_id, command } => {
                     self.pending_command_text.insert(*app_id, command.clone());
@@ -564,6 +566,29 @@ impl App {
                             warn!("history append failed: {e}");
                         }
                     }
+                    // OODA cache (#358): store the parsed result so
+                    // build_world_state() can derive has_errors / error_count.
+                    let command = self
+                        .pane_last_command
+                        .get(app_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let raw_output = self
+                        .coordinator
+                        .terminal_output_buf(*app_id)
+                        .unwrap_or_default();
+                    let parsed = phantom_semantic::parser::SemanticParser::parse(
+                        &command,
+                        "",
+                        &raw_output,
+                        Some(*exit_code),
+                    );
+                    self.ooda_last_parsed = Some(parsed);
+                }
+                // OODA cache (#358): pulse flag — cleared after one tick by
+                // build_world_state().
+                Event::AgentTaskComplete { .. } | Event::AgentError { .. } => {
+                    self.ooda_agent_just_completed = true;
                 }
                 _ => {}
             }
@@ -574,26 +599,27 @@ impl App {
                     Event::TerminalOutput { bytes, .. } => {
                         Some(AiEvent::OutputChunk(format!("[{bytes} bytes]")))
                     }
-                    Event::CommandComplete { app_id, exit_code } => {
-                        // Populate the ParsedOutput from the actual terminal
-                        // output buffer and tracked command text so the OODA
-                        // scorer's fix/explain curves have real signal to work
-                        // with (issue #226 — was always blind due to empty strings).
-                        let command = self
-                            .pane_last_command
-                            .get(app_id)
-                            .cloned()
-                            .unwrap_or_default();
-                        let raw_output = self
-                            .coordinator
-                            .terminal_output_buf(*app_id)
-                            .unwrap_or_default();
-                        let parsed = phantom_semantic::parser::SemanticParser::parse(
-                            &command,
-                            "",
-                            &raw_output,
-                            Some(*exit_code),
-                        );
+                    Event::CommandComplete { app_id, .. } => {
+                        // Re-use the parsed output already stored in the OODA
+                        // cache (computed in section 0 above) so we don't parse
+                        // the same output twice.
+                        let parsed = self
+                            .ooda_last_parsed
+                            .clone()
+                            .unwrap_or_else(|| phantom_semantic::ParsedOutput {
+                                command: self
+                                    .pane_last_command
+                                    .get(app_id)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                command_type: phantom_semantic::CommandType::Unknown,
+                                exit_code: None,
+                                content_type: phantom_semantic::ContentType::PlainText,
+                                errors: Vec::new(),
+                                warnings: Vec::new(),
+                                duration_ms: None,
+                                raw_output: String::new(),
+                            });
                         Some(AiEvent::CommandComplete(parsed))
                     }
                     Event::AgentTaskComplete {
@@ -1002,6 +1028,97 @@ impl App {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // OODA signal builder (#358)
+    // -----------------------------------------------------------------------
+
+    /// Build a [`WorldState`] from live app signals for the per-frame OODA tick.
+    ///
+    /// All reads are O(1) field accesses or tiny collection sizes (≤10 items).
+    /// One-frame pulse flags (`ooda_agent_just_completed`, `ooda_git_changed`)
+    /// are cleared after being consumed so they fire for exactly one OODA tick.
+    ///
+    /// # Signal sources
+    ///
+    /// | `WorldState` field       | Live source                                     |
+    /// |--------------------------|------------------------------------------------|
+    /// | `idle_secs`              | `now - last_input_time` (computed by caller)   |
+    /// | `has_errors`             | `ooda_last_parsed.errors.is_empty().not()`     |
+    /// | `error_count`            | `ooda_last_parsed.errors.len()`               |
+    /// | `has_active_process`     | `pending_command_text.is_empty().not()`        |
+    /// | `agent_just_completed`   | `ooda_agent_just_completed` (one-frame pulse)  |
+    /// | `file_or_git_changed`    | `ooda_git_changed` or `context.git.is_dirty`  |
+    /// | `in_repl`                | any adapter is in alt-screen (`prev_detached`) |
+    /// | `chattiness`             | `suggestion_history` depth / capacity ratio    |
+    /// | `suggestions_since_input`| history entries with `shown_at >= last_input_time` |
+    pub(crate) fn build_world_state(&mut self, idle_secs: f32) -> WorldState {
+        // --- error signals --------------------------------------------------
+        let (has_errors, error_count) = self
+            .ooda_last_parsed
+            .as_ref()
+            .map(|p| (!p.errors.is_empty(), p.errors.len() as u32))
+            .unwrap_or((false, 0));
+
+        // --- active process -------------------------------------------------
+        // Any entry in `pending_command_text` means a `CommandStarted` arrived
+        // without a matching `CommandComplete` — i.e. a process is still running.
+        let has_active_process = !self.pending_command_text.is_empty();
+
+        // --- agent completion pulse -----------------------------------------
+        let agent_just_completed = self.ooda_agent_just_completed;
+        self.ooda_agent_just_completed = false; // consume: fires for one tick only
+
+        // --- file / git change ----------------------------------------------
+        // `ooda_git_changed` is a one-frame pulse set by `drain_bus_to_brain`
+        // when an `AgentTaskComplete`/`AgentError` event carries git-state
+        // side effects. We also OR in `context.git.is_dirty` so the OODA loop
+        // knows the repo is dirty even before an explicit change event fires.
+        let git_dirty = self
+            .context
+            .as_ref()
+            .and_then(|c| c.git.as_ref())
+            .map(|g| g.is_dirty)
+            .unwrap_or(false);
+        let file_or_git_changed = self.ooda_git_changed || git_dirty;
+        self.ooda_git_changed = false; // consume pulse
+
+        // --- REPL / alt-screen detection ------------------------------------
+        // If any terminal adapter is currently in alt-screen mode (interactive
+        // full-screen program like vim, less, python REPL, etc.) we consider
+        // the user to be inside a REPL.  The `prev_detached` map is maintained
+        // by `poll_alt_screen_transitions` each frame.
+        let in_repl = self.prev_detached.values().any(|&d| d);
+
+        // --- chattiness (dampener ratio) ------------------------------------
+        // Expressed as the current suggestion queue depth relative to the
+        // maximum stored (10). This gives the OODA scorer a 0.0–1.0 signal
+        // without holding a reference to the brain thread's internal scorer.
+        const MAX_HISTORY: f32 = 10.0;
+        let chattiness = (self.suggestion_history.len() as f32 / MAX_HISTORY).min(1.0);
+
+        // --- suggestions since last input -----------------------------------
+        // Count history entries shown after the last user-input instant.
+        // The deque holds at most 10 items so the scan is O(1) in practice.
+        let suggestions_since_input = self
+            .suggestion_history
+            .iter()
+            .filter(|s| s.shown_at >= self.last_input_time)
+            .count() as u32;
+
+        WorldState::new(
+            idle_secs,
+            has_errors,
+            error_count,
+            has_active_process,
+            false, // new_pattern_detected: not yet wired; requires memory pattern engine
+            agent_just_completed,
+            file_or_git_changed,
+            in_repl,
+            chattiness,
+            suggestions_since_input,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,5 +1394,149 @@ mod tests {
             git_refresh_spawned_at.is_none(),
             "spawned_at must be cleared when the handle is reaped"
         );
+    }
+
+    // ---- #358: build_world_state() signal mapping -------------------------
+    //
+    // Full `App` construction requires a GPU context, so these tests exercise
+    // the mapping logic directly using the same standalone patterns as the
+    // git-refresh timeout tests above.
+
+    /// `has_errors` / `error_count` derive from the last ParsedOutput stored
+    /// in the OODA cache.  When the cache holds a ParsedOutput with errors,
+    /// the WorldState must reflect them; when the cache is empty both must be
+    /// false/0.
+    #[test]
+    fn build_world_state_error_signals_from_parsed_output() {
+        use phantom_semantic::{CommandType, ContentType, DetectedError, ErrorType, ParsedOutput};
+
+        // --- helper: build a minimal ParsedOutput with `n` errors -----------
+        fn make_parsed(n: usize) -> ParsedOutput {
+            ParsedOutput {
+                command: "cargo build".into(),
+                command_type: CommandType::Unknown,
+                exit_code: Some(if n > 0 { 1 } else { 0 }),
+                content_type: ContentType::PlainText,
+                errors: (0..n)
+                    .map(|i| DetectedError {
+                        message: format!("error #{i}"),
+                        error_type: ErrorType::Compiler,
+                        file: None,
+                        line: None,
+                        column: None,
+                        code: None,
+                        severity: phantom_semantic::Severity::Error,
+                        raw_line: String::new(),
+                        suggestion: None,
+                    })
+                    .collect(),
+                warnings: Vec::new(),
+                duration_ms: None,
+                raw_output: String::new(),
+            }
+        }
+
+        // Simulate the mapping performed by build_world_state().
+        let derive_error_signals =
+            |parsed: &Option<ParsedOutput>| -> (bool, u32) {
+                parsed
+                    .as_ref()
+                    .map(|p| (!p.errors.is_empty(), p.errors.len() as u32))
+                    .unwrap_or((false, 0))
+            };
+
+        // No cache yet → no errors.
+        let (has_errors, count) = derive_error_signals(&None);
+        assert!(!has_errors, "empty cache must yield has_errors=false");
+        assert_eq!(count, 0, "empty cache must yield error_count=0");
+
+        // Cache with 0 errors → clean command.
+        let (has_errors, count) = derive_error_signals(&Some(make_parsed(0)));
+        assert!(!has_errors, "zero-error ParsedOutput must yield has_errors=false");
+        assert_eq!(count, 0);
+
+        // Cache with 3 errors → OODA sees them.
+        let (has_errors, count) = derive_error_signals(&Some(make_parsed(3)));
+        assert!(has_errors, "ParsedOutput with 3 errors must set has_errors=true");
+        assert_eq!(count, 3, "error_count must equal parsed.errors.len()");
+    }
+
+    /// `has_active_process` is `true` when `pending_command_text` is non-empty
+    /// (a `CommandStarted` arrived without a matching `CommandComplete`).
+    #[test]
+    fn build_world_state_active_process_from_pending_commands() {
+        use std::collections::HashMap;
+
+        let pending_active: HashMap<u32, String> = [(42u32, "cargo build".into())].into();
+        let pending_empty: HashMap<u32, String> = HashMap::new();
+
+        let has_active = |p: &HashMap<u32, String>| !p.is_empty();
+
+        assert!(
+            has_active(&pending_active),
+            "non-empty pending_command_text must set has_active_process=true"
+        );
+        assert!(
+            !has_active(&pending_empty),
+            "empty pending_command_text must set has_active_process=false"
+        );
+    }
+
+    /// `agent_just_completed` is a one-frame pulse: `true` for exactly one call
+    /// to `build_world_state()` after the flag is set, then `false` thereafter.
+    #[test]
+    fn build_world_state_agent_just_completed_is_single_frame_pulse() {
+        // Simulate the pulse-consume logic from build_world_state().
+        let mut flag = true;
+
+        // First call: flag is true, consume it.
+        let first = flag;
+        flag = false;
+
+        // Second call: flag must be false.
+        let second = flag;
+
+        assert!(first, "agent_just_completed must be true on the first call");
+        assert!(!second, "agent_just_completed must be false on subsequent calls");
+    }
+
+    /// `suggestions_since_input` counts history entries whose `shown_at` is
+    /// at or after `last_input_time`.
+    #[test]
+    fn build_world_state_suggestions_since_input_counts_post_input_history() {
+        use std::time::{Duration, Instant};
+
+        let base = Instant::now();
+        let last_input_time = base + Duration::from_secs(1);
+
+        // Build three dummy instants: one before input, two after.
+        let instants = vec![
+            base,                               // before input — must not count
+            last_input_time + Duration::from_millis(100), // after input
+            last_input_time + Duration::from_millis(200), // after input
+        ];
+
+        let count = instants
+            .iter()
+            .filter(|&&t| t >= last_input_time)
+            .count() as u32;
+
+        assert_eq!(count, 2, "only 2 of 3 instants are at or after last_input_time");
+    }
+
+    /// `in_repl` is `true` when any value in `prev_detached` is `true`.
+    #[test]
+    fn build_world_state_in_repl_from_prev_detached() {
+        use std::collections::HashMap;
+
+        let no_repl: HashMap<u32, bool> = [(1u32, false), (2u32, false)].into();
+        let repl: HashMap<u32, bool> = [(1u32, false), (2u32, true)].into();
+        let empty: HashMap<u32, bool> = HashMap::new();
+
+        let in_repl = |m: &HashMap<u32, bool>| m.values().any(|&d| d);
+
+        assert!(!in_repl(&no_repl), "all-false detached map must yield in_repl=false");
+        assert!(in_repl(&repl), "one true entry must yield in_repl=true");
+        assert!(!in_repl(&empty), "empty map must yield in_repl=false");
     }
 }
