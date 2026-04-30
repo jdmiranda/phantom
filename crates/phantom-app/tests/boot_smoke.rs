@@ -138,6 +138,7 @@ fn brain_spawns_and_channel_is_open() {
         router: None,
         catalog: None,
         privacy_mode: false,
+        relay_inbound_rx: None,
     });
 
     // The channel must be open immediately after spawn.
@@ -199,6 +200,7 @@ fn boot_smoke_full_invariants() {
         router: None,
         catalog: None,
         privacy_mode: false,
+        relay_inbound_rx: None,
     });
 
     assert!(
