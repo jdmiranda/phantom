@@ -1,4 +1,5 @@
 //! Integration tests for the JSON-RPC frame router.
+#![allow(clippy::let_unit_value)]
 //!
 //! These tests exercise `router::forward` and `router::deliver_response` end-to-end.
 //! They do not involve an HTTP server — the WebSocket layer is replaced by a

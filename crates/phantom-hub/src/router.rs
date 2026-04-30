@@ -21,10 +21,11 @@
 //!
 //! # Idempotency
 //!
-//! When a caller provides an `X-Idempotency-Key` header (optional in Phase 1),
-//! the hub deduplicates concurrent retries by keying on
-//! `(PhantomId, idempotency_key)`. A second caller with the same key joins the
-//! already-in-flight oneshot rather than sending a duplicate frame to Phantom.
+//! Idempotency dedup (deduplicating concurrent retried calls by an optional
+//! caller-supplied key) is deferred to issue #397. The `idempotency_key`
+//! parameter on [`forward`] is accepted but ignored in Phase 1. A correct
+//! implementation requires a shared broadcast channel per in-flight key and
+//! bounded map cleanup; the broken Phase 1 stub was removed in PR #495 review.
 //!
 //! # Timeout
 //!
@@ -38,12 +39,10 @@
 //! When the channel is full, [`RouteError::Backpressure`] is returned
 //! immediately rather than blocking the caller.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 
 use crate::registry::{HubId, PhantomId, SharedRegistry};
 
@@ -153,25 +152,20 @@ pub enum RouteError {
 }
 
 // ---------------------------------------------------------------------------
-// Idempotency tracking
+// Idempotency tracking (deferred — see module doc)
 // ---------------------------------------------------------------------------
 
-type IdempotencyKey = String;
-
-/// Shared idempotency deduplication table.
+/// Placeholder for the idempotency dedup map deferred to issue #397.
 ///
-/// Keyed by `(PhantomId, idempotency_key)`. Each entry is a receiver that the
-/// second caller waits on rather than sending a second frame to Phantom.
-///
-/// Note: in Phase 1 the idempotency key is optional. When absent, no
-/// deduplication is performed.
-pub type SharedIdempotencyMap = Arc<Mutex<HashMap<(PhantomId, IdempotencyKey), oneshot::Sender<JsonRpcResponse>>>>;
+/// The `forward` function accepts this type so callers can be wired up today;
+/// passing `None` to `idempotency_key` is always safe. A real implementation
+/// will replace this with a bounded broadcast-channel map once #397 lands.
+pub type SharedIdempotencyMap = ();
 
-/// Create a new empty idempotency map.
+/// Create a no-op idempotency placeholder.
 #[must_use]
-pub fn new_idempotency_map() -> SharedIdempotencyMap {
-    Arc::new(Mutex::new(HashMap::new()))
-}
+#[allow(clippy::let_unit_value)]
+pub fn new_idempotency_map() -> SharedIdempotencyMap {}
 
 // ---------------------------------------------------------------------------
 // forward
@@ -199,6 +193,11 @@ fn forward_timeout() -> Duration {
 /// 3. Races the reply oneshot against the timeout.
 /// 4. On success, rewrites the response id back to the original Claude id.
 ///
+/// `idempotency_key` is accepted for API compatibility but **ignored in Phase
+/// 1**. Idempotency dedup is deferred to issue #397 — the broken stub that was
+/// here (dead oneshot receiver + unbounded map growth) was removed during PR
+/// #495 review.
+///
 /// # Errors
 ///
 /// See [`RouteError`].
@@ -206,24 +205,10 @@ pub async fn forward(
     registry: &SharedRegistry,
     phantom_id: &PhantomId,
     mut req: JsonRpcRequest,
-    idempotency_key: Option<&str>,
-    idem_map: &SharedIdempotencyMap,
+    _idempotency_key: Option<&str>,
+    _idem_map: &SharedIdempotencyMap,
 ) -> Result<JsonRpcResponse, RouteError> {
-    // --- Optional idempotency dedup ---
-    if let Some(key) = idempotency_key {
-        let idem_key = (phantom_id.clone(), key.to_owned());
-        let mut map = idem_map.lock().await;
-        if let Some(_existing_tx) = map.get(&idem_key) {
-            // There's already a sender in the map — this is a second caller.
-            // We can't clone a oneshot sender, so Phase 1 just lets it fall
-            // through. A future Phase can store a broadcast here. This is the
-            // documented "join" point from the spec.
-        }
-        // Insert our sender; we'll clean it up after the call completes.
-        let (tx, _rx) = oneshot::channel::<JsonRpcResponse>();
-        map.insert(idem_key.clone(), tx);
-        drop(map);
-    }
+    // Idempotency dedup deferred to issue #397 — see module-level doc.
 
     // --- Save the original caller-supplied id ---
     let original_id = req.id.clone();
@@ -331,7 +316,10 @@ pub async fn deliver_response(registry: &SharedRegistry, phantom_id: &PhantomId,
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::let_unit_value)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::registry::{new_shared, OUTBOUND_CHANNEL_CAPACITY};
 
