@@ -459,6 +459,13 @@ fn brain_loop(
             continue; // CapabilityDenied is handled here; skip OODA for it.
         }
 
+        // Handle offline mode toggle.
+        if let AiEvent::SetOfflineMode { enabled } = event {
+            router.set_offline_mode(enabled);
+            log::info!("Brain: offline mode {}", if enabled { "ON" } else { "OFF" });
+            continue; // SetOfflineMode is handled here; skip OODA for it.
+        }
+
         // ACCUMULATE: OutputChunk events are batched — don't process each one
         // individually. Accumulate and let the timeout tick flush them.
         if let AiEvent::OutputChunk(ref text) = event {
@@ -510,12 +517,17 @@ fn brain_loop(
         // CLASSIFY: determine task complexity and select backend cascade.
         let complexity = TaskClassifier::classify(&event);
         // Clone the first Ollama backend info so we can release the router borrow.
-        let ollama_backend: Option<ModelBackend> = router
-            .route(complexity)
-            .iter()
-            .find(|b| matches!(b.kind, BackendKind::Ollama { .. }))
-            .cloned()
-            .cloned();
+        let ollama_backend: Option<ModelBackend> = match router.route_checked(complexity) {
+            Ok(backends) => backends
+                .iter()
+                .find(|b| matches!(b.kind, BackendKind::Ollama { .. }))
+                .cloned()
+                .cloned(),
+            Err(e) => {
+                log::warn!("Brain: privacy mode blocked Ollama selection: {e}");
+                None
+            }
+        };
 
         // DECIDE: score all actions via heuristics, pick the best.
         let best = scorer.evaluate(&event, &context, &memory);
@@ -545,12 +557,17 @@ fn brain_loop(
 
         // ESCALATE: for Complex tasks, if Ollama didn't enhance (still heuristic)
         // and Claude is available, escalate to the frontier model.
-        let claude_backend: Option<ModelBackend> = router
-            .route(complexity)
-            .iter()
-            .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
-            .cloned()
-            .cloned();
+        let claude_backend: Option<ModelBackend> = match router.route_checked(complexity) {
+            Ok(backends) => backends
+                .iter()
+                .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
+                .cloned()
+                .cloned(),
+            Err(e) => {
+                log::warn!("Brain: privacy mode blocked Claude selection: {e}");
+                None
+            }
+        };
         let action = enhance_with_claude(
             action,
             &event,
@@ -1032,6 +1049,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::PauseAgent { .. } => "pause_agent",
         AiAction::ResumeAgent { .. } => "resume_agent",
         AiAction::UpdateConnectionState { .. } => "update_connection_state",
+        AiAction::SetOfflineMode { .. } => "set_offline_mode",
         AiAction::DoNothing => "quiet",
     }
 }

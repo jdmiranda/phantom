@@ -32,6 +32,20 @@ pub struct PhantomConfig {
     /// `nlp_llm = false` / `nlp_llm = 0` in the config file) to disable the
     /// network call and fall back directly to spawning an agent.
     pub(crate) nlp_llm_enabled: bool,
+    /// Privacy mode — when `true`, all cloud API calls (Claude, OpenAI-compat)
+    /// are blocked at the application level.
+    ///
+    /// Set via `privacy_mode = true` in `~/.config/phantom/config.toml`
+    /// or toggled at runtime with `privacy on` / `privacy off`.
+    /// Local backends (Ollama, heuristic) are unaffected.
+    pub privacy_mode: bool,
+    /// Offline mode — when `true`, only local backends (Ollama, heuristic) are
+    /// used. Cloud backends are filtered out at routing time.
+    ///
+    /// Set via `offline_mode = true` in `~/.config/phantom/config.toml`
+    /// or toggled at runtime with `offline on` / `offline off`.
+    /// Can also be auto-enabled after 3 consecutive cloud backend failures.
+    pub offline_mode: bool,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -54,6 +68,8 @@ impl Default for PhantomConfig {
             skip_boot: false,
             demo_mode: false,
             nlp_llm_enabled: true,
+            privacy_mode: false,
+            offline_mode: false,
         }
     }
 }
@@ -140,6 +156,12 @@ impl PhantomConfig {
                         // LLM translate call; anything else leaves it enabled.
                         config.nlp_llm_enabled = !matches!(value, "false" | "0" | "no");
                     }
+                    "privacy_mode" => {
+                        config.privacy_mode = matches!(value, "true" | "1" | "yes");
+                    }
+                    "offline_mode" => {
+                        config.offline_mode = matches!(value, "true" | "1" | "yes");
+                    }
                     _ => {
                         warn!("Unknown config key: {key}");
                     }
@@ -192,6 +214,16 @@ impl PhantomConfig {
         self.nlp_llm_enabled
     }
 
+    /// Returns whether privacy mode is enabled.
+    pub fn privacy_mode(&self) -> bool {
+        self.privacy_mode
+    }
+
+    /// Returns whether offline mode is enabled.
+    pub fn offline_mode(&self) -> bool {
+        self.offline_mode
+    }
+
     /// Write a default config file to the standard path.
     pub fn write_default() -> Result<PathBuf> {
         let path = config_path();
@@ -237,6 +269,16 @@ font_size = 14.0
 
 # Boot animation (also auto-skipped on session restore)
 # skip_boot = false
+
+# Privacy mode: block all cloud API calls (Claude, OpenAI-compat).
+# Local backends (Ollama, heuristic) continue to work normally.
+# Can also be toggled at runtime with `privacy on` / `privacy off`.
+# privacy_mode = false
+
+# Offline mode: use only local backends (Ollama, heuristic).
+# Cloud backends are filtered out at routing time.
+# Can also be toggled at runtime with `offline on` / `offline off`.
+# offline_mode = false
 "#;
 
 // ---------------------------------------------------------------------------
@@ -319,5 +361,67 @@ mod tests {
     fn parse_nlp_llm_true_stays_enabled() {
         let config = PhantomConfig::parse("nlp_llm = true").unwrap();
         assert!(config.nlp_llm_enabled);
+    }
+
+    #[test]
+    fn privacy_mode_defaults_to_false() {
+        let config = PhantomConfig::default();
+        assert!(
+            !config.privacy_mode,
+            "privacy_mode must default to false so cloud calls work by default"
+        );
+    }
+
+    #[test]
+    fn parse_privacy_mode_true_enables_it() {
+        let config = PhantomConfig::parse("privacy_mode = true").unwrap();
+        assert!(config.privacy_mode);
+    }
+
+    #[test]
+    fn parse_privacy_mode_one_enables_it() {
+        let config = PhantomConfig::parse("privacy_mode = 1").unwrap();
+        assert!(config.privacy_mode);
+    }
+
+    #[test]
+    fn parse_privacy_mode_false_keeps_it_off() {
+        let config = PhantomConfig::parse("privacy_mode = false").unwrap();
+        assert!(!config.privacy_mode);
+    }
+
+    #[test]
+    fn privacy_mode_accessor_matches_field() {
+        let mut config = PhantomConfig::default();
+        assert!(!config.privacy_mode());
+        config.privacy_mode = true;
+        assert!(config.privacy_mode());
+    }
+
+    #[test]
+    fn offline_mode_defaults_to_false() {
+        let config = PhantomConfig::default();
+        assert!(
+            !config.offline_mode,
+            "offline_mode must default to false so cloud calls work by default"
+        );
+    }
+
+    #[test]
+    fn parse_offline_mode_true_enables_it() {
+        let config = PhantomConfig::parse("offline_mode = true").unwrap();
+        assert!(config.offline_mode);
+    }
+
+    #[test]
+    fn parse_offline_mode_one_enables_it() {
+        let config = PhantomConfig::parse("offline_mode = 1").unwrap();
+        assert!(config.offline_mode);
+    }
+
+    #[test]
+    fn parse_offline_mode_false_keeps_it_off() {
+        let config = PhantomConfig::parse("offline_mode = false").unwrap();
+        assert!(!config.offline_mode);
     }
 }

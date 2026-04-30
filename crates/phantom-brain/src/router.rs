@@ -113,7 +113,52 @@ impl ModelBackend {
             cost_per_1k: 0.003,
         }
     }
+
+    /// Returns `true` if this backend makes outbound cloud API calls.
+    ///
+    /// Local backends (heuristic, Ollama) return `false`.
+    /// Cloud backends (Claude, OpenAI-compat) return `true`.
+    pub fn is_cloud_provider(&self) -> bool {
+        matches!(
+            self.kind,
+            BackendKind::Claude { .. } | BackendKind::OpenAICompat { .. }
+        )
+    }
+
+    /// Returns a human-readable provider name for logging and error messages.
+    pub fn provider_name(&self) -> &'static str {
+        match &self.kind {
+            BackendKind::Heuristic => "heuristic",
+            BackendKind::Ollama { .. } => "ollama",
+            BackendKind::Claude { .. } => "claude",
+            BackendKind::OpenAICompat { .. } => "openai-compat",
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// PrivacyModeViolation
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`BrainRouter::route_checked`] when privacy mode is
+/// active and a cloud provider would otherwise be selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacyModeViolation {
+    /// Name of the cloud provider that triggered the violation.
+    pub provider: String,
+}
+
+impl std::fmt::Display for PrivacyModeViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "privacy mode active: cloud provider '{}' blocked",
+            self.provider
+        )
+    }
+}
+
+impl std::error::Error for PrivacyModeViolation {}
 
 // ---------------------------------------------------------------------------
 // RouterConfig
@@ -127,6 +172,19 @@ pub struct RouterConfig {
     pub cascade: bool,
     /// Confidence threshold below which to escalate to next tier.
     pub confidence_threshold: f32,
+    /// When `true`, cloud backends are rejected before dispatch.
+    ///
+    /// Set this to mirror the application-level `privacy_mode` flag from
+    /// `PhantomConfig`. The router enforces the policy at the routing layer
+    /// so that no cloud call can slip through regardless of which code path
+    /// triggers routing.
+    pub privacy_mode: bool,
+    /// When `true`, only local backends (Ollama, heuristic) are used.
+    /// Cloud backends are filtered out at routing time.
+    ///
+    /// Set this to mirror the application-level `offline_mode` flag from
+    /// `PhantomConfig`. Can be auto-enabled after 3 consecutive cloud failures.
+    pub offline_mode: bool,
 }
 
 impl Default for RouterConfig {
@@ -139,6 +197,8 @@ impl Default for RouterConfig {
             ],
             cascade: true,
             confidence_threshold: 0.7,
+            privacy_mode: false,
+            offline_mode: false,
         }
     }
 }
@@ -187,12 +247,18 @@ impl TaskClassifier {
 /// Routes tasks to the best available backend using a cost-aware cascade.
 pub struct BrainRouter {
     config: RouterConfig,
+    /// Counter for consecutive cloud backend failures.
+    /// Auto-enables offline mode after 3 failures.
+    cloud_failure_count: u32,
 }
 
 impl BrainRouter {
     /// Create a new router with the given configuration.
     pub fn new(config: RouterConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            cloud_failure_count: 0,
+        }
     }
 
     /// Select the best backend for a task.
@@ -202,7 +268,11 @@ impl BrainRouter {
             .config
             .backends
             .iter()
-            .filter(|b| b.available && b.capabilities.contains(&complexity))
+            .filter(|b| {
+                b.available && b.capabilities.contains(&complexity) &&
+                // If offline mode is on, reject cloud backends
+                !(self.config.offline_mode && b.is_cloud_provider())
+            })
             .collect();
 
         // Sort by cost, then latency.
@@ -221,6 +291,9 @@ impl BrainRouter {
     }
 
     /// Update a backend's availability and latency after a call.
+    ///
+    /// If a cloud backend fails, increments failure counter and auto-enables
+    /// offline mode after 3 consecutive cloud failures.
     pub fn record_result(&mut self, backend_name: &str, latency_ms: f32, success: bool) {
         if let Some(backend) = self
             .config
@@ -237,6 +310,23 @@ impl BrainRouter {
             if !success {
                 // Mark unavailable on failure, will be re-checked later.
                 backend.available = false;
+
+                // Track consecutive cloud failures.
+                if backend.is_cloud_provider() {
+                    self.cloud_failure_count += 1;
+                    if self.cloud_failure_count >= 3 {
+                        log::warn!(
+                            "Cloud backend '{}' failed 3+ times; enabling offline mode",
+                            backend_name
+                        );
+                        self.config.offline_mode = true;
+                    }
+                }
+            } else {
+                // On success, reset cloud failure counter.
+                if backend.is_cloud_provider() {
+                    self.cloud_failure_count = 0;
+                }
             }
         }
     }
@@ -278,6 +368,63 @@ impl BrainRouter {
     /// Whether cascade mode is enabled.
     pub fn cascade_enabled(&self) -> bool {
         self.config.cascade
+    }
+
+    /// Enable or disable privacy mode on the router.
+    ///
+    /// When `true`, [`Self::route_checked`] will reject any cloud-provider
+    /// backend (Claude, OpenAI-compat) with a [`PrivacyModeViolation`] error.
+    pub fn set_privacy_mode(&mut self, enabled: bool) {
+        self.config.privacy_mode = enabled;
+    }
+
+    /// Returns `true` if privacy mode is currently active.
+    pub fn privacy_mode(&self) -> bool {
+        self.config.privacy_mode
+    }
+
+    /// Enable or disable offline mode on the router.
+    ///
+    /// When `true`, [`Self::route`] will filter to only local backends
+    /// (heuristic, Ollama), rejecting all cloud providers.
+    pub fn set_offline_mode(&mut self, enabled: bool) {
+        self.config.offline_mode = enabled;
+    }
+
+    /// Returns `true` if offline mode is currently active.
+    pub fn offline_mode(&self) -> bool {
+        self.config.offline_mode
+    }
+
+    /// Route a task with privacy enforcement.
+    ///
+    /// Behaves identically to [`Self::route`] except that when privacy mode is
+    /// active any cloud-provider backend in the candidate list causes a
+    /// [`PrivacyModeViolation`] error to be returned. Non-cloud backends
+    /// (heuristic, Ollama) are returned normally.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`PrivacyModeViolation`] encountered among the
+    /// selected candidates when privacy mode is on and at least one cloud
+    /// backend would otherwise be selected.
+    pub fn route_checked(
+        &self,
+        complexity: TaskComplexity,
+    ) -> Result<Vec<&ModelBackend>, PrivacyModeViolation> {
+        let candidates = self.route(complexity);
+
+        if self.config.privacy_mode {
+            for backend in &candidates {
+                if backend.is_cloud_provider() {
+                    return Err(PrivacyModeViolation {
+                        provider: backend.provider_name().to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(candidates)
     }
 }
 
@@ -498,6 +645,8 @@ mod tests {
             backends: vec![ModelBackend::heuristic()],
             cascade: true,
             confidence_threshold: 0.7,
+            privacy_mode: false,
+            offline_mode: false,
         };
         let router = BrainRouter::new(config);
         // Heuristic only handles Trivial, not Complex.
@@ -511,6 +660,8 @@ mod tests {
             backends: vec![ModelBackend::heuristic()],
             cascade: false,
             confidence_threshold: 0.7,
+            privacy_mode: false,
+            offline_mode: false,
         };
         let router = BrainRouter::new(config);
         let backends = router.route(TaskComplexity::Trivial);
