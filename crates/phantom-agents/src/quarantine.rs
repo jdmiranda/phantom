@@ -842,6 +842,7 @@ mod tests {
             correlation_id: None,
             ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
         };
 
         // A normal read that would otherwise succeed must be blocked.
@@ -903,6 +904,7 @@ mod tests {
             correlation_id: None,
             ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
         };
 
         let res = dispatch_tool("read_file", &serde_json::json!({"path": "probe.txt"}), &ctx);

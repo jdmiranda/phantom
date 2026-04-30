@@ -13,6 +13,7 @@ pub mod api;
 pub mod audit;
 pub mod lifecycle;
 pub mod correlation;
+pub mod dag_explorer;
 pub mod policy;
 pub mod handoff;
 pub mod chat;

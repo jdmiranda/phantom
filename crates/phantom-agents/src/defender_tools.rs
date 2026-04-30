@@ -434,6 +434,7 @@ mod tests {
             correlation_id: None,
             ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
         };
 
         let result = dispatch_tool(

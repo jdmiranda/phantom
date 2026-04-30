@@ -89,6 +89,11 @@ use crate::chat_tools::{ChatTool, ChatToolContext, broadcast_to_role, read_from_
 use crate::composer_tools::{
     ComposerTool, event_log_query, request_critique, spawn_subagent, wait_for_agent,
 };
+use crate::dag_explorer::{
+    CartographerTool, dag_annotate, dag_clear_annotations, dag_add_child,
+    dag_critical_path, dag_find_blocking, dag_get_node, dag_list_edges, dag_list_nodes,
+    dag_mark_complete, dag_mark_failed, dag_mark_skipped,
+};
 use crate::defender_tools::{DefenderTool, DefenderToolContext, challenge_agent};
 use crate::dispatcher::{
     DispatcherTool, DispatcherToolContext, mark_ticket_done, mark_ticket_in_progress,
@@ -363,6 +368,38 @@ pub fn dispatch_tool(
                                 Err(e) => result(PLACEHOLDER_TOOL, false, e),
                             }
                         }
+                    }
+                }
+            }
+        }
+    } else if let Some(carto_tool) = CartographerTool::from_api_name(name) {
+        // ---- Cartographer tools (issue #67) --------------------------------
+        if let Err(msg) = check_capability(ctx.role, carto_tool.class()) {
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            match ctx.dag_explorer.as_ref() {
+                None => result(
+                    PLACEHOLDER_TOOL,
+                    false,
+                    "DAG explorer not configured".into(),
+                ),
+                Some(dag_ctx) => {
+                    let r = match carto_tool {
+                        CartographerTool::DagListNodes => dag_list_nodes(dag_ctx),
+                        CartographerTool::DagGetNode => dag_get_node(args, dag_ctx),
+                        CartographerTool::DagListEdges => dag_list_edges(dag_ctx),
+                        CartographerTool::DagFindBlocking => dag_find_blocking(args, dag_ctx),
+                        CartographerTool::DagCriticalPath => dag_critical_path(args, dag_ctx),
+                        CartographerTool::DagMarkComplete => dag_mark_complete(args, dag_ctx),
+                        CartographerTool::DagMarkFailed => dag_mark_failed(args, dag_ctx),
+                        CartographerTool::DagMarkSkipped => dag_mark_skipped(args, dag_ctx),
+                        CartographerTool::DagAddChild => dag_add_child(args, dag_ctx),
+                        CartographerTool::DagAnnotate => dag_annotate(args, dag_ctx),
+                        CartographerTool::DagClearAnnotations => dag_clear_annotations(dag_ctx),
+                    };
+                    match r {
+                        Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
                     }
                 }
             }

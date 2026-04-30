@@ -65,6 +65,7 @@ fn build_dispatch_ctx<'a>(
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     }
 }
 

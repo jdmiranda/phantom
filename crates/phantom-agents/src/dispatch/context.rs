@@ -95,4 +95,15 @@ pub struct DispatchContext<'a> {
     /// Legacy and test paths that do not set this field explicitly should use
     /// `RuntimeMode::Normal`.
     pub runtime_mode: RuntimeMode,
+    /// Issue #67: DAG explorer context for the Cartographer role.
+    ///
+    /// When `Some`, the Cartographer role's DAG tools (`dag_list_nodes`,
+    /// `dag_get_node`, `dag_list_edges`, `dag_find_blocking`,
+    /// `dag_critical_path`, `dag_mark_complete`, `dag_mark_failed`,
+    /// `dag_mark_skipped`, `dag_add_child`, `dag_annotate`,
+    /// `dag_clear_annotations`) are routed to [`crate::dag_explorer::DagExplorerContext`].
+    ///
+    /// `None` returns an `"unknown tool"` style error for those names —
+    /// correct behaviour for non-Cartographer agents and legacy test paths.
+    pub dag_explorer: Option<crate::dag_explorer::DagExplorerContext>,
 }

@@ -104,6 +104,12 @@ impl AgentPane {
             correlation_id: None,
             ticket_dispatcher,
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
+            // Issue #67: DAG explorer context for the Cartographer role.
+            // `None` for all non-Cartographer panes and for Cartographer panes
+            // whose parent App has not yet wired a DagExplorerContext (Phase 2
+            // wiring; the Cartographer pane will populate this when the DAG
+            // viewer surface is available).
+            dag_explorer: None,
         })
     }
 }
