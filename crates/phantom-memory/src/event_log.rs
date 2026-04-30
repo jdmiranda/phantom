@@ -721,7 +721,7 @@ mod tests {
     ///
     /// The mock-writer test operates on the `EventLog` internals by re-creating
     /// an equivalent control flow through the public API.
-
+    ///
     /// Verify that `append` returns `ErrorKind::StorageFull` and that the
     /// writer is marked poisoned afterward.
     ///

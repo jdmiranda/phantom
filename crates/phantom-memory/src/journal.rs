@@ -146,31 +146,37 @@ impl JournalEntry {
     }
 
     /// The agent that produced this entry.
+    #[must_use]
     pub fn agent_id(&self) -> AgentId {
         self.agent_id
     }
 
     /// Monotonically increasing global sequence number.
+    #[must_use]
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
 
     /// Wall-clock timestamp in milliseconds since the Unix epoch.
+    #[must_use]
     pub fn ts_unix_ms(&self) -> i64 {
         self.ts_unix_ms
     }
 
     /// State-machine phase at the time of the event.
+    #[must_use]
     pub fn phase(&self) -> Phase {
         self.phase
     }
 
     /// Severity level.
+    #[must_use]
     pub fn level(&self) -> Level {
         self.level
     }
 
     /// Human-readable description of the event.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -370,6 +376,7 @@ impl AgentJournal {
     /// Most-recent `n` journal entries, in chronological order (oldest first).
     ///
     /// Reads from the in-memory tail; performs no file I/O.
+    #[must_use]
     pub fn tail(&self, n: usize) -> Vec<JournalEntry> {
         self.log
             .tail(n)
@@ -379,6 +386,7 @@ impl AgentJournal {
     }
 
     /// All in-memory entries for a specific `phase`.
+    #[must_use]
     pub fn filter_by_phase(&self, phase: Phase) -> Vec<JournalEntry> {
         self.log
             .tail(usize::MAX)
@@ -389,6 +397,7 @@ impl AgentJournal {
     }
 
     /// All in-memory entries produced by `agent_id`.
+    #[must_use]
     pub fn filter_by_agent(&self, agent_id: AgentId) -> Vec<JournalEntry> {
         self.log
             .tail(usize::MAX)
@@ -399,6 +408,7 @@ impl AgentJournal {
     }
 
     /// All in-memory entries produced by `agent_id` in the given `phase`.
+    #[must_use]
     pub fn filter_by_agent_and_phase(&self, agent_id: AgentId, phase: Phase) -> Vec<JournalEntry> {
         self.log
             .tail(usize::MAX)
@@ -409,6 +419,7 @@ impl AgentJournal {
     }
 
     /// All in-memory entries with `level == level`.
+    #[must_use]
     pub fn filter_by_level(&self, level: Level) -> Vec<JournalEntry> {
         self.log
             .tail(usize::MAX)
@@ -420,6 +431,7 @@ impl AgentJournal {
 
     /// All in-memory entries whose timestamp falls within `[from_ms, to_ms]`
     /// (inclusive, milliseconds since Unix epoch).
+    #[must_use]
     pub fn query_range(&self, from_ms: i64, to_ms: i64) -> Vec<JournalEntry> {
         self.log
             .tail(usize::MAX)
@@ -433,6 +445,7 @@ impl AgentJournal {
     ///
     /// Only entries appended *after* the subscription point are delivered.  The
     /// channel is bounded and lossy — the file is the durable record.
+    #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
         self.log.subscribe()
     }
@@ -443,6 +456,7 @@ impl AgentJournal {
     }
 
     /// Path of the backing JSONL file.
+    #[must_use]
     pub fn path(&self) -> &Path {
         self.log.path()
     }

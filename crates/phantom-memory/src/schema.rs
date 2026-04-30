@@ -85,6 +85,7 @@ pub enum KnownKind {
 
 impl KnownKind {
     /// The canonical dotted-path string for this kind.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             KnownKind::AgentSpawn => "agent.spawn",
@@ -107,7 +108,8 @@ impl KnownKind {
     ///
     /// Returns `None` if the string is not a recognized kind (and not an
     /// `unknown.*` prefix — callers must check that separately).
-    pub fn from_str(s: &str) -> Option<Self> {
+    #[must_use]
+    pub fn parse_kind(s: &str) -> Option<Self> {
         match s {
             "agent.spawn" => Some(KnownKind::AgentSpawn),
             "agent.complete" => Some(KnownKind::AgentComplete),
@@ -127,6 +129,7 @@ impl KnownKind {
     }
 
     /// All known kinds, in declaration order.  Useful for exhaustive tests.
+    #[must_use]
     pub fn all() -> &'static [KnownKind] {
         &[
             KnownKind::AgentSpawn,
@@ -246,26 +249,31 @@ impl EventLogEntry {
     }
 
     /// Monotonically increasing log id.
+    #[must_use]
     pub fn id(&self) -> u64 {
         self.id
     }
 
     /// Creation time in milliseconds since the Unix epoch.
+    #[must_use]
     pub fn timestamp_ms(&self) -> u64 {
         self.timestamp_ms
     }
 
     /// Dotted-path event kind string.
+    #[must_use]
     pub fn kind(&self) -> &str {
         &self.kind
     }
 
     /// Structured payload.
+    #[must_use]
     pub fn payload(&self) -> &serde_json::Value {
         &self.payload
     }
 
     /// Ordered list of causal ancestor event ids.
+    #[must_use]
     pub fn source_chain(&self) -> &[u64] {
         &self.source_chain
     }
@@ -274,6 +282,7 @@ impl EventLogEntry {
     ///
     /// Returns the string form of the UUID (hyphenated, 36 chars) or `None`
     /// for entries that were not produced in a tracked pipeline run.
+    #[must_use]
     pub fn correlation_id(&self) -> Option<&str> {
         self.correlation_id.as_deref()
     }
@@ -308,7 +317,7 @@ impl EventLogEntry {
 
 /// Validate a kind string: must be a known kind OR start with `unknown.`.
 fn validate_kind(kind: &str) -> Result<(), SchemaError> {
-    if KnownKind::from_str(kind).is_some() || kind.starts_with("unknown.") {
+    if KnownKind::parse_kind(kind).is_some() || kind.starts_with("unknown.") {
         Ok(())
     } else {
         Err(SchemaError::InvalidKind {
@@ -363,7 +372,7 @@ mod tests {
         for &kind in KnownKind::all() {
             let s = kind.as_str();
             let back =
-                KnownKind::from_str(s).unwrap_or_else(|| panic!("from_str({s:?}) returned None"));
+                KnownKind::parse_kind(s).unwrap_or_else(|| panic!("from_str({s:?}) returned None"));
             assert_eq!(back, kind, "round-trip failed for {s:?}");
         }
     }
@@ -377,9 +386,9 @@ mod tests {
 
     #[test]
     fn unknown_kind_from_str_returns_none() {
-        assert!(KnownKind::from_str("not.a.real.kind").is_none());
-        assert!(KnownKind::from_str("unknown.future_field").is_none());
-        assert!(KnownKind::from_str("").is_none());
+        assert!(KnownKind::parse_kind("not.a.real.kind").is_none());
+        assert!(KnownKind::parse_kind("unknown.future_field").is_none());
+        assert!(KnownKind::parse_kind("").is_none());
     }
 
     #[test]
