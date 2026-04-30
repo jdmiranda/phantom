@@ -68,6 +68,7 @@ fn agent_with_handle() -> (AgentPane, mpsc::Sender<ApiEvent>) {
         agent_capture: None,
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
+        dag_explorer: None,
     };
     (pane, tx)
 }
@@ -169,6 +170,7 @@ fn poll_returns_false_when_no_handle() {
         agent_capture: None,
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
+        dag_explorer: None,
     };
     assert!(!pane.poll());
 }
@@ -1043,6 +1045,7 @@ fn spawn_agent_pane_task_matches_prompt() {
         agent_capture: None,
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
+        dag_explorer: None,
     };
     let _ = tx; // keep sender alive so handle stays live
     assert_eq!(pane.task, "fix the failing tests");
@@ -1343,5 +1346,242 @@ fn resolve_api_config_claude_rejects_wrong_key() {
     assert!(
         result.is_none(),
         "Claude model + only OPENAI_API_KEY set → must return None"
+    );
+}
+
+// =========================================================================
+// Issue #437: Cartographer DAG tool dispatch end-to-end tests
+// =========================================================================
+
+/// A Cartographer-role pane with a wired DagExplorerContext must produce a
+/// DispatchContext whose `dag_explorer` field is `Some`.  This is the
+/// acceptance test for the production call site (dispatch_ctx.rs line that
+/// previously always returned `None`).
+#[test]
+fn cartographer_pane_with_dag_context_has_some_in_dispatch_ctx() {
+    use phantom_agents::dag_explorer::DagExplorerContext;
+    use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+    use phantom_memory::event_log::EventLog;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+
+    let (mut pane, _tx) = agent_with_handle();
+
+    let registry = Arc::new(Mutex::new(phantom_agents::inbox::AgentRegistry::new()));
+    let event_log = Arc::new(Mutex::new(
+        EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+    ));
+    let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+    let self_ref =
+        AgentRef::new(10, AgentRole::Cartographer, "cartographer-1", SpawnSource::User);
+
+    pane.set_substrate_handles(
+        registry,
+        event_log,
+        pending_spawn,
+        self_ref,
+        AgentRole::Cartographer,
+        Arc::new(Mutex::new(
+            phantom_agents::quarantine::QuarantineRegistry::default(),
+        )),
+    );
+
+    // Wire the DAG explorer context — this is the new path under test.
+    pane.set_dag_explorer_context(DagExplorerContext::empty());
+
+    let ctx = pane
+        .build_dispatch_context()
+        .expect("build_dispatch_context must return Some for a wired pane");
+
+    assert!(
+        ctx.dag_explorer.is_some(),
+        "DispatchContext for a Cartographer pane with a wired DagExplorerContext \
+         must have dag_explorer = Some; previously this was always None (issue #437)"
+    );
+}
+
+/// A Cartographer pane dispatching `dag_list_nodes` against a real DagStore
+/// must receive a successful `Ok` result containing valid JSON, not the
+/// graceful error string.  This is the end-to-end DAG tool call test.
+#[test]
+fn cartographer_dag_list_nodes_reaches_dag_store() {
+    use phantom_agents::dag_explorer::{DagExplorerContext, DagStore};
+    use phantom_agents::dispatch::dispatch_tool;
+    use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+    use phantom_memory::event_log::EventLog;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+
+    let (mut pane, _tx) = agent_with_handle();
+
+    let registry = Arc::new(Mutex::new(phantom_agents::inbox::AgentRegistry::new()));
+    let event_log = Arc::new(Mutex::new(
+        EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+    ));
+    let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+    let self_ref =
+        AgentRef::new(11, AgentRole::Cartographer, "cartographer-2", SpawnSource::User);
+
+    pane.set_substrate_handles(
+        registry,
+        event_log,
+        pending_spawn,
+        self_ref,
+        AgentRole::Cartographer,
+        Arc::new(Mutex::new(
+            phantom_agents::quarantine::QuarantineRegistry::default(),
+        )),
+    );
+
+    // Pre-populate the store with one node so the response is non-empty.
+    let store = Arc::new(Mutex::new(DagStore::new()));
+    store
+        .lock()
+        .unwrap()
+        .add_node("bootstrap the workspace", vec![]);
+
+    let ctx_handle = DagExplorerContext::new(Arc::clone(&store));
+    pane.set_dag_explorer_context(ctx_handle);
+
+    let ctx = pane
+        .build_dispatch_context()
+        .expect("build_dispatch_context must return Some");
+
+    // Issue a dag_list_nodes call through the canonical dispatch_tool gate.
+    let result = dispatch_tool("dag_list_nodes", &serde_json::json!({}), &ctx);
+
+    assert!(
+        result.success,
+        "dag_list_nodes must succeed when DagExplorerContext is wired; output: {}",
+        result.output,
+    );
+
+    // The output must be valid JSON containing the node we pre-seeded.
+    let parsed: serde_json::Value = serde_json::from_str(&result.output)
+        .expect("dag_list_nodes output must be valid JSON");
+    let nodes = parsed.as_array().expect("dag_list_nodes must return a JSON array");
+    assert_eq!(
+        nodes.len(),
+        1,
+        "expected 1 node in the response, got {}",
+        nodes.len()
+    );
+    assert_eq!(
+        nodes[0]["description"].as_str(),
+        Some("bootstrap the workspace"),
+        "node description must match what was inserted"
+    );
+}
+
+/// Revocation path: a Cartographer pane WITHOUT a wired DagExplorerContext
+/// (simulating headless mode or a boot failure) must return the graceful
+/// error string rather than panicking.
+#[test]
+fn cartographer_dag_tool_without_context_returns_graceful_error() {
+    use phantom_agents::dispatch::dispatch_tool;
+    use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+    use phantom_memory::event_log::EventLog;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+
+    let (mut pane, _tx) = agent_with_handle();
+
+    let registry = Arc::new(Mutex::new(phantom_agents::inbox::AgentRegistry::new()));
+    let event_log = Arc::new(Mutex::new(
+        EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+    ));
+    let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+    let self_ref =
+        AgentRef::new(12, AgentRole::Cartographer, "cartographer-3", SpawnSource::User);
+
+    // Wire all substrate handles but do NOT wire a dag_explorer context.
+    pane.set_substrate_handles(
+        registry,
+        event_log,
+        pending_spawn,
+        self_ref,
+        AgentRole::Cartographer,
+        Arc::new(Mutex::new(
+            phantom_agents::quarantine::QuarantineRegistry::default(),
+        )),
+    );
+    // dag_explorer deliberately not set — simulates headless / boot failure.
+
+    let ctx = pane
+        .build_dispatch_context()
+        .expect("build_dispatch_context must return Some even without dag_explorer");
+
+    assert!(
+        ctx.dag_explorer.is_none(),
+        "DispatchContext for a Cartographer with no wired context must have dag_explorer = None"
+    );
+
+    // The call must not panic and must return success=false with a
+    // human-readable error rather than an empty string or a panic.
+    let result = dispatch_tool("dag_list_nodes", &serde_json::json!({}), &ctx);
+
+    assert!(
+        !result.success,
+        "dag_list_nodes without a DagExplorerContext must return success=false; \
+         output: {}",
+        result.output,
+    );
+    assert!(
+        !result.output.is_empty(),
+        "graceful error output must not be empty"
+    );
+}
+
+/// Non-Cartographer pane must never get a dag_explorer in its dispatch
+/// context, even if one was somehow set on the pane (defence-in-depth).
+#[test]
+fn non_cartographer_pane_always_has_none_dag_explorer_in_ctx() {
+    use phantom_agents::dag_explorer::DagExplorerContext;
+    use phantom_agents::role::{AgentRef, AgentRole, SpawnSource};
+    use phantom_memory::event_log::EventLog;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+
+    let (mut pane, _tx) = agent_with_handle();
+
+    let registry = Arc::new(Mutex::new(phantom_agents::inbox::AgentRegistry::new()));
+    let event_log = Arc::new(Mutex::new(
+        EventLog::open(&tmp.path().join("events.jsonl")).unwrap(),
+    ));
+    let pending_spawn = phantom_agents::composer_tools::new_spawn_subagent_queue();
+    let self_ref =
+        AgentRef::new(13, AgentRole::Conversational, "conversational-1", SpawnSource::User);
+
+    pane.set_substrate_handles(
+        registry,
+        event_log,
+        pending_spawn,
+        self_ref,
+        AgentRole::Conversational,
+        Arc::new(Mutex::new(
+            phantom_agents::quarantine::QuarantineRegistry::default(),
+        )),
+    );
+
+    // Force a dag_explorer onto a non-Cartographer pane — must be stripped
+    // in build_dispatch_context (capability gate defence-in-depth).
+    pane.set_dag_explorer_context(DagExplorerContext::empty());
+
+    let ctx = pane
+        .build_dispatch_context()
+        .expect("build_dispatch_context must return Some");
+
+    assert!(
+        ctx.dag_explorer.is_none(),
+        "DispatchContext for a non-Cartographer pane must have dag_explorer = None \
+         even when one is set on the pane (defence-in-depth)"
     );
 }
