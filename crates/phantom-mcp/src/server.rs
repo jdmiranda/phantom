@@ -306,6 +306,30 @@ fn builtin_tools() -> Vec<McpTool> {
                 "required": ["command"],
             }),
         },
+        // Phase 2 (issue #399): direct agent-spawn returning a stable AgentId.
+        McpTool {
+            name: "phantom.spawn_agent".to_owned(),
+            description: "Spawn an AI agent on this Phantom instance and return a stable AgentId. \
+                The agent runs asynchronously; use phantom.get_agent_status (issue #400) to poll \
+                for progress. Unlike phantom.command 'agent …', this tool returns the AgentId \
+                immediately so downstream status queries are possible.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Free-form task description for the agent."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["default", "defender", "inspector"],
+                        "description": "Agent role. Defaults to 'default'. Unknown values are coerced to 'default'.",
+                        "default": "default"
+                    }
+                },
+                "required": ["prompt"],
+            }),
+        },
     ]
 }
 
@@ -362,11 +386,12 @@ mod tests {
         let req = create_request(2, "tools/list", json!({}));
         let resp = s.handle_request(&req);
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
         let names: Vec<String> = tools.iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
         assert!(names.contains(&"phantom.run_command".to_owned()));
         assert!(names.contains(&"phantom.screenshot".to_owned()));
         assert!(names.contains(&"phantom.set_memory".to_owned()));
+        assert!(names.contains(&"phantom.spawn_agent".to_owned()));
     }
 
     #[test]
@@ -445,9 +470,9 @@ mod tests {
     }
 
     #[test]
-    fn server_has_nine_tools_and_three_resources() {
+    fn server_has_ten_tools_and_three_resources() {
         let s = server();
-        assert_eq!(s.tools().len(), 9);
+        assert_eq!(s.tools().len(), 10);
         assert_eq!(s.resources().len(), 3);
     }
 
@@ -458,11 +483,12 @@ mod tests {
             "phantom.run_command", "phantom.read_output", "phantom.screenshot",
             "phantom.split_pane", "phantom.get_context", "phantom.get_memory",
             "phantom.set_memory", "phantom.send_key", "phantom.command",
+            "phantom.spawn_agent",
         ];
         for name in tool_names {
             let req = create_request(100, "tools/call", json!({
                 "name": name,
-                "arguments": {"command": "test", "key": "k", "value": "v", "direction": "h"}
+                "arguments": {"command": "test", "key": "k", "value": "v", "direction": "h", "prompt": "test prompt"}
             }));
             let resp = s.handle_request(&req);
             let result = resp.result.unwrap();

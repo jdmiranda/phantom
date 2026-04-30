@@ -21,7 +21,7 @@ impl App {
     /// Existing callers passing a bare [`AgentTask`] keep working byte-for-byte
     /// (no chat model override → default Claude path).
     pub(crate) fn spawn_agent_pane(&mut self, task: AgentTask) -> bool {
-        self.spawn_agent_pane_with_opts(AgentSpawnOpts::new(task))
+        self.spawn_agent_pane_with_opts(AgentSpawnOpts::new(task)).is_some()
     }
 
     /// Spawn a new agent pane with explicit spawn options.
@@ -29,10 +29,16 @@ impl App {
     /// Splits the focused pane vertically, creates the agent (using the
     /// requested [`ChatModel`] if any), wraps it in an `AgentAdapter`, and
     /// registers it in the new split pane.
+    ///
+    /// Returns `Some(agent_id)` on success, `None` when the spawn cannot
+    /// proceed (no focused pane, layout error, or missing API key).
+    /// The `agent_id` is the stable [`phantom_agents::AgentId`] (`u64`)
+    /// assigned by the agent's internal id counter — callers can use this
+    /// to correlate subsequent `phantom.get_agent_status` polls (issue #400).
     pub(crate) fn spawn_agent_pane_with_opts(
         &mut self,
         opts: AgentSpawnOpts,
-    ) -> bool {
+    ) -> Option<u64> {
         // Extract metadata before opts is moved into spawn_with_opts.
         let spawn_tag = opts.spawn_tag;
         // role/label carry Composer spawn_subagent metadata (#224).
@@ -41,17 +47,17 @@ impl App {
         let resolved_model = opts.resolve_model();
         let Some(claude_config) = resolve_api_config(&resolved_model) else {
             warn!("Cannot spawn agent: no API key configured for model {:?}", resolved_model);
-            return false;
+            return None;
         };
 
         // Split the focused pane to make room for the agent.
         let Some(focused_app_id) = self.coordinator.focused() else {
             warn!("Cannot spawn agent: no focused adapter");
-            return false;
+            return None;
         };
         let Some(current_pane_id) = self.coordinator.pane_id_for(focused_app_id) else {
             warn!("Cannot spawn agent: focused adapter has no layout pane");
-            return false;
+            return None;
         };
 
         let split_result = self.layout.split_vertical(current_pane_id);
@@ -59,7 +65,7 @@ impl App {
             Ok(ids) => ids,
             Err(e) => {
                 warn!("Agent split failed: {e}");
-                return false;
+                return None;
             }
         };
 
@@ -168,6 +174,10 @@ impl App {
             agent_pane.set_agent_capture(capture.clone(), self.session_uuid);
         }
 
+        // Capture the stable AgentId BEFORE the pane is moved into the adapter.
+        // This is the value returned to MCP callers (issue #399).
+        let agent_id = agent_pane.agent_id();
+
         let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
 
         let scene_node = self
@@ -202,8 +212,8 @@ impl App {
                 source: phantom_agents::spawn_rules::EventSource::User,
             });
 
-        info!("Agent adapter registered (AppId {app_id}) in split pane");
-        true
+        info!("Agent adapter registered (AppId {app_id}) in split pane (agent_id={agent_id})");
+        Some(agent_id)
     }
 
     /// Drain the App's `BlockedEventSink` and return the queued

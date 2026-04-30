@@ -12,7 +12,7 @@ use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::WorldState;
 use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
-use phantom_mcp::{AppCommand, ScreenshotReply};
+use phantom_mcp::{AppCommand, ScreenshotReply, SpawnAgentReply};
 use phantom_protocol::Event;
 use crate::app::{App, AppState};
 use crate::input::chrono_time_string;
@@ -706,6 +706,53 @@ impl App {
             AppCommand::SetMemory { key, value, reply } => {
                 let result = self.mcp_set_memory(&key, &value);
                 let _ = reply.send(result);
+            }
+            AppCommand::SpawnAgent { prompt, role: _, reply } => {
+                // role mapping is deferred to v2; all roles use the FreeForm path.
+                let task = phantom_agents::agent::AgentTask::FreeForm { prompt };
+                // Build a minimal ISO-8601 UTC timestamp without a chrono dep.
+                let started_at = {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let s = secs % 60;
+                    let m = (secs / 60) % 60;
+                    let h = (secs / 3600) % 24;
+                    let days = secs / 86400; // days since 1970-01-01
+                    // Simple Gregorian calendar computation.
+                    let (year, month, day) = {
+                        let mut y = 1970u32;
+                        let mut d = days;
+                        loop {
+                            let leap = (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400);
+                            let yd = if leap { 366u64 } else { 365 };
+                            if d < yd { break; }
+                            d -= yd;
+                            y += 1;
+                        }
+                        let leap = (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400);
+                        let mdays = [31u64,if leap{29}else{28},31,30,31,30,31,31,30,31,30,31];
+                        let mut mo = 1u32;
+                        for &md in &mdays {
+                            if d < md { break; }
+                            d -= md;
+                            mo += 1;
+                        }
+                        (y, mo, d + 1)
+                    };
+                    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+                };
+                match self.spawn_agent_pane_with_opts(phantom_agents::AgentSpawnOpts::new(task)) {
+                    Some(agent_id) => {
+                        let _ = reply.send(Ok(SpawnAgentReply { agent_id, started_at }));
+                    }
+                    None => {
+                        let _ = reply.send(Err(
+                            "spawn_agent failed: no focused pane or API key not configured".into(),
+                        ));
+                    }
+                }
             }
         }
     }
