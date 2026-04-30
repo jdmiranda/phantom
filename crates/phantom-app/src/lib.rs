@@ -9,6 +9,7 @@ pub mod boot_order;
 mod capture;
 mod commands;
 pub mod config;
+pub(crate) mod peer_grants;
 mod console;
 pub mod console_eval;
 pub mod context_menu;
