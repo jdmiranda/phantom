@@ -279,6 +279,14 @@ mod tests {
     }
 
     #[test]
+    fn manifest_validation_allows_empty_entry_point_when_scaffold() {
+        let mut m = sample_manifest();
+        m.scaffold = true;
+        m.entry_point = String::new();
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
     fn has_permission_positive() {
         let m = sample_manifest();
         assert!(m.has_permission(&Permission::ReadFiles));
