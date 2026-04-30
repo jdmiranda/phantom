@@ -41,9 +41,7 @@
 
 use std::time::Instant;
 
-use crate::curves::{
-    BehaviorDecisionSystem, ScoringContext, build_default_behaviors,
-};
+use crate::curves::{BehaviorDecisionSystem, ScoringContext, build_default_behaviors};
 use crate::events::AiAction;
 
 // ---------------------------------------------------------------------------
@@ -145,7 +143,10 @@ impl OodaConfig {
     /// * `budget_ms` — frame-budget cap in milliseconds.
     /// * `action_threshold` — minimum BDS score required to emit an action.
     pub fn new(budget_ms: f32, action_threshold: f32) -> Self {
-        Self { budget_ms, action_threshold }
+        Self {
+            budget_ms,
+            action_threshold,
+        }
     }
 
     /// Frame-budget cap in milliseconds.
@@ -380,12 +381,8 @@ impl OodaLoop {
                 key: "ooda_pattern".into(),
                 value: "new pattern detected".into(),
             },
-            "notify_agent_complete" => {
-                AiAction::ShowNotification("Agent completed.".into())
-            }
-            "notify_change" => {
-                AiAction::ShowNotification("Files or git state changed.".into())
-            }
+            "notify_agent_complete" => AiAction::ShowNotification("Agent completed.".into()),
+            "notify_change" => AiAction::ShowNotification("Files or git state changed.".into()),
             // quiet / watch_build / unknown → DoNothing
             _ => AiAction::DoNothing,
         }
@@ -535,11 +532,7 @@ mod tests {
         let has_notify = actions
             .iter()
             .any(|a| matches!(a, AiAction::ShowNotification(_)));
-        assert!(
-            has_notify,
-            "expected ShowNotification, got {:?}",
-            actions
-        );
+        assert!(has_notify, "expected ShowNotification, got {:?}", actions);
     }
 
     // =======================================================================

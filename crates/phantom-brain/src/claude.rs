@@ -42,13 +42,9 @@ pub fn is_available() -> bool {
 /// Generate a response from Claude.
 ///
 /// Returns `(response_text, latency_ms)` on success.
-pub fn generate(
-    model: &str,
-    prompt: &str,
-    max_tokens: u32,
-) -> Result<(String, f32), String> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY not set".to_string())?;
+pub fn generate(model: &str, prompt: &str, max_tokens: u32) -> Result<(String, f32), String> {
+    let api_key =
+        std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set".to_string())?;
 
     let start = std::time::Instant::now();
 
@@ -141,20 +137,17 @@ pub fn build_error_analysis_prompt(
 ///
 /// Blocks until done — the brain thread is dedicated and doesn't share
 /// work with the render loop.
-pub fn investigate(
-    prompt: &str,
-    working_dir: &str,
-    max_rounds: u32,
-) -> Result<String, String> {
-    use phantom_agents::api::{ApiEvent, ClaudeConfig, send_message};
+pub fn investigate(prompt: &str, working_dir: &str, max_rounds: u32) -> Result<String, String> {
     use phantom_agents::agent::{Agent, AgentMessage, AgentTask};
+    use phantom_agents::api::{ApiEvent, ClaudeConfig, send_message};
     use phantom_agents::role::AgentRole;
     use phantom_agents::tools::{available_tools, execute_tool};
 
-    let config = ClaudeConfig::from_env()
-        .ok_or("ANTHROPIC_API_KEY not set")?;
+    let config = ClaudeConfig::from_env().ok_or("ANTHROPIC_API_KEY not set")?;
 
-    let task = AgentTask::FreeForm { prompt: prompt.to_string() };
+    let task = AgentTask::FreeForm {
+        prompt: prompt.to_string(),
+    };
     let mut agent = Agent::new(0, task);
     let sys = agent.system_prompt();
     agent.push_message(AgentMessage::System(sys));

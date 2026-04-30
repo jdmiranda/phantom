@@ -139,13 +139,14 @@ impl ProviderCatalog {
         }
     }
 
-    /// Create a catalog pre-loaded with the three built-in profiles.
+    /// Create a catalog pre-loaded with the built-in profiles.
     ///
     /// Built-in profiles:
     ///
     /// - `"claude-default"` — `claude-sonnet-4-20250514` via the `claude` CLI
     /// - `"claude-fast"`    — `claude-haiku-4-5` via the `claude` CLI
-    /// - `"ollama-phi3.5"` — `phi3.5:latest` via Ollama
+    /// - `"ollama-phi3.5"` — `phi3.5:latest` via Ollama (local)
+    /// - `"ollama-llama3"`  — `llama3:latest` via Ollama (local)
     pub fn with_builtins() -> Self {
         let mut catalog = Self::empty();
 
@@ -172,6 +173,13 @@ impl ProviderCatalog {
             "ollama run phi3.5",
             "phi3.5:latest",
             vec!["phi3.5:latest".into(), "phi3.5:3.8b".into()],
+        ));
+
+        catalog.insert(ProviderProfile::new(
+            "ollama-llama3",
+            "ollama run llama3",
+            "llama3:latest",
+            vec!["llama3:latest".into(), "llama3:8b".into()],
         ));
 
         catalog
@@ -241,6 +249,35 @@ impl ProviderCatalog {
         self.resolve(id).cloned()
     }
 
+    /// Build an [`crate::ollama::OllamaBackend`] from an `ollama-*` profile.
+    ///
+    /// Returns `None` when `id` does not resolve to a profile whose
+    /// `runtime_command` starts with `"ollama"`. The backend uses the profile's
+    /// `default_model` and the standard local Ollama URL (`http://localhost:11434`).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use phantom_brain::provider_catalog::ProviderCatalog;
+    /// use phantom_brain::goal::ChatBackend;
+    ///
+    /// let catalog = ProviderCatalog::with_builtins();
+    /// if let Some(backend) = catalog.build_ollama_backend("ollama-phi3.5") {
+    ///     // backend implements ChatBackend
+    ///     let _ = backend.chat("Hello");
+    /// }
+    /// ```
+    pub fn build_ollama_backend(&self, id: &str) -> Option<crate::ollama::OllamaBackend> {
+        let profile = self.profiles.get(id)?;
+        if !profile.runtime_command.starts_with("ollama") {
+            return None;
+        }
+        Some(crate::ollama::OllamaBackend::new(
+            profile.default_model.clone(),
+            "http://localhost:11434",
+        ))
+    }
+
     /// Returns `true` if the catalog contains a profile with `id`.
     pub fn contains(&self, id: &str) -> bool {
         self.profiles.contains_key(id)
@@ -295,12 +332,7 @@ mod tests {
     #[test]
     fn profile_auto_appends_default_model_if_missing() {
         // default_model not listed in available_models — must be appended.
-        let p = ProviderProfile::new(
-            "p",
-            "cmd",
-            "missing-model",
-            vec!["other-model".into()],
-        );
+        let p = ProviderProfile::new("p", "cmd", "missing-model", vec!["other-model".into()]);
         assert!(
             p.available_models().contains(&"missing-model".to_string()),
             "default_model must appear in available_models"
@@ -354,9 +386,9 @@ mod tests {
     // -- ProviderCatalog::with_builtins -------------------------------------
 
     #[test]
-    fn with_builtins_has_three_profiles() {
+    fn with_builtins_has_four_profiles() {
         let cat = ProviderCatalog::with_builtins();
-        assert_eq!(cat.len(), 3);
+        assert_eq!(cat.len(), 4);
     }
 
     #[test]
@@ -420,7 +452,12 @@ mod tests {
     #[test]
     fn insert_adds_new_profile() {
         let mut cat = ProviderCatalog::empty();
-        cat.insert(ProviderProfile::new("custom", "my-llm", "v1", vec!["v1".into()]));
+        cat.insert(ProviderProfile::new(
+            "custom",
+            "my-llm",
+            "v1",
+            vec!["v1".into()],
+        ));
         assert!(cat.contains("custom"));
         assert_eq!(cat.len(), 1);
     }
@@ -436,7 +473,7 @@ mod tests {
             vec!["new-model".into()],
         ));
         // Length must not grow when replacing.
-        assert_eq!(cat.len(), old_len);
+        assert_eq!(cat.len(), old_len, "length must not grow when replacing");
         let p = cat.resolve("claude-fast").expect("must exist");
         assert_eq!(p.runtime_command(), "new-command");
     }
@@ -465,6 +502,7 @@ mod tests {
         assert!(ids.contains(&"claude-default"));
         assert!(ids.contains(&"claude-fast"));
         assert!(ids.contains(&"ollama-phi3.5"));
+        assert!(ids.contains(&"ollama-llama3"));
     }
 
     // -- Default ------------------------------------------------------------
@@ -475,6 +513,7 @@ mod tests {
         assert!(cat.contains("claude-default"));
         assert!(cat.contains("claude-fast"));
         assert!(cat.contains("ollama-phi3.5"));
+        assert!(cat.contains("ollama-llama3"));
     }
 
     // -- Required named tests (Issue #61) -----------------------------------
@@ -512,7 +551,7 @@ mod tests {
         );
         assert_eq!(p.default_model(), "custom-fast-model");
         // Catalog length must not grow when replacing.
-        assert_eq!(cat.len(), 3, "length must not grow when overriding");
+        assert_eq!(cat.len(), 4, "length must not grow when overriding");
     }
 
     /// Requesting a non-existent profile via `get` returns `None`.
@@ -533,6 +572,65 @@ mod tests {
             p.default_model().contains("sonnet"),
             "default profile must use sonnet, got {}",
             p.default_model()
+        );
+    }
+
+    /// The built-in `ollama-llama3` profile must exist and use llama3.
+    #[test]
+    fn with_builtins_contains_ollama_llama3() {
+        let cat = ProviderCatalog::with_builtins();
+        assert!(
+            cat.contains("ollama-llama3"),
+            "ollama-llama3 must be present"
+        );
+        let p = cat.resolve("ollama-llama3").expect("must resolve");
+        assert_eq!(p.default_model(), "llama3:latest");
+        assert!(p.runtime_command().starts_with("ollama"));
+    }
+
+    /// `build_ollama_backend` returns an `OllamaBackend` for `ollama-*` profiles.
+    #[test]
+    fn build_ollama_backend_returns_backend_for_ollama_profile() {
+        let cat = ProviderCatalog::with_builtins();
+        let backend = cat.build_ollama_backend("ollama-phi3.5");
+        assert!(
+            backend.is_some(),
+            "build_ollama_backend must return Some for ollama-phi3.5"
+        );
+        let backend = backend.unwrap();
+        assert_eq!(backend.model(), "phi3.5:latest");
+        assert_eq!(backend.base_url(), "http://localhost:11434");
+    }
+
+    /// `build_ollama_backend` returns an `OllamaBackend` for `ollama-llama3`.
+    #[test]
+    fn build_ollama_backend_returns_backend_for_llama3_profile() {
+        let cat = ProviderCatalog::with_builtins();
+        let backend = cat
+            .build_ollama_backend("ollama-llama3")
+            .expect("ollama-llama3 must produce a backend");
+        assert_eq!(backend.model(), "llama3:latest");
+    }
+
+    /// `build_ollama_backend` returns `None` for non-Ollama profiles.
+    #[test]
+    fn build_ollama_backend_returns_none_for_claude_profile() {
+        let cat = ProviderCatalog::with_builtins();
+        let backend = cat.build_ollama_backend("claude-default");
+        assert!(
+            backend.is_none(),
+            "build_ollama_backend must return None for claude profiles"
+        );
+    }
+
+    /// `build_ollama_backend` returns `None` for missing profiles.
+    #[test]
+    fn build_ollama_backend_returns_none_for_missing_profile() {
+        let cat = ProviderCatalog::with_builtins();
+        let backend = cat.build_ollama_backend("nonexistent-profile");
+        assert!(
+            backend.is_none(),
+            "build_ollama_backend must return None for missing profiles"
         );
     }
 }

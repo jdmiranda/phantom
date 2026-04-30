@@ -37,7 +37,7 @@ use phantom_context::ProjectContext;
 use phantom_history::{AgentOutputCapture, HistoryStore};
 use phantom_mcp::{AppCommand, McpListener, spawn_listener};
 use phantom_memory::MemoryStore;
-use phantom_nlp::{ClaudeLlmBackend, LlmBackend};
+use phantom_nlp::{ClaudeLlmBackend, LlmBackend, OllamaLlmBackend};
 use phantom_plugins::PluginRegistry;
 use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
@@ -630,6 +630,7 @@ impl App {
             std::sync::mpsc::sync_channel::<NlpTranslateResult>(8);
 
         // Build the LLM backend only when the feature is enabled and the key is present.
+        // Priority: ClaudeLlmBackend (cloud) → OllamaLlmBackend (local, if daemon reachable).
         let nlp_backend: Option<std::sync::Arc<dyn LlmBackend + Send + Sync>> =
             if config.nlp_llm_enabled {
                 match ClaudeLlmBackend::from_env() {
@@ -638,8 +639,15 @@ impl App {
                         Some(std::sync::Arc::new(backend))
                     }
                     Err(e) => {
-                        debug!("NLP LLM backend: disabled ({e})");
-                        None
+                        debug!("NLP LLM backend: Claude unavailable ({e}), probing Ollama");
+                        let ollama = OllamaLlmBackend::from_env();
+                        if ollama.is_available() {
+                            info!("NLP LLM backend: OllamaLlmBackend ({})", ollama.model());
+                            Some(std::sync::Arc::new(ollama))
+                        } else {
+                            debug!("NLP LLM backend: disabled (Ollama daemon not reachable)");
+                            None
+                        }
                     }
                 }
             } else {

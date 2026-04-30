@@ -19,8 +19,8 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
-use phantom_agents::dispatch::Disposition;
 use phantom_agents::AgentTask;
+use phantom_agents::dispatch::Disposition;
 
 // ---------------------------------------------------------------------------
 // Fact classification (task ledger knowledge categories)
