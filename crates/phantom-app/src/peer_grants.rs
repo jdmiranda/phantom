@@ -107,15 +107,13 @@ fn load_from_path(path: &std::path::Path) -> PeerGrantRegistry {
     let mut registry = PeerGrantRegistry::new();
     for record in records {
         // Drop expired entries.
-        if let Some(exp) = record.expires_at_secs {
-            if exp <= now_secs {
-                debug!(
-                    "peer_grants: skipping expired grant for {} (expired {}s ago)",
-                    record.peer_id,
-                    now_secs.saturating_sub(exp)
-                );
-                continue;
-            }
+        if let Some(exp) = record.expires_at_secs && exp <= now_secs {
+            debug!(
+                "peer_grants: skipping expired grant for {} (expired {}s ago)",
+                record.peer_id,
+                now_secs.saturating_sub(exp)
+            );
+            continue;
         }
 
         let classes: HashSet<CapabilityClass> = record
@@ -152,11 +150,9 @@ pub fn save_peer_grant_registry(registry: &PeerGrantRegistry) {
 }
 
 fn save_to_path(registry: &PeerGrantRegistry, path: &std::path::Path) {
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            warn!("peer_grants: cannot create config dir: {e}");
-            return;
-        }
+    if let Some(parent) = path.parent() && let Err(e) = std::fs::create_dir_all(parent) {
+        warn!("peer_grants: cannot create config dir: {e}");
+        return;
     }
 
     let now_secs = SystemTime::now()
