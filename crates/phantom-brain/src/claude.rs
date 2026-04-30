@@ -35,6 +35,7 @@ struct ContentBlock {
 }
 
 /// Check if the Claude API is reachable (API key is set).
+#[must_use] 
 pub fn is_available() -> bool {
     std::env::var("ANTHROPIC_API_KEY").is_ok()
 }
@@ -99,6 +100,7 @@ pub fn generate(model: &str, prompt: &str, max_tokens: u32) -> Result<(String, f
 }
 
 /// Build a prompt for Claude error analysis (deeper than Ollama's triage).
+#[must_use] 
 pub fn build_error_analysis_prompt(
     command: &str,
     errors: &[phantom_semantic::DetectedError],

@@ -273,7 +273,6 @@ fn read_load_average() -> f32 {
     let text = shell_with_timeout("sysctl -n vm.loadavg");
     text.trim()
         .trim_start_matches('{')
-        .trim()
         .split_whitespace()
         .next()
         .and_then(|s| s.parse::<f32>().ok())
@@ -375,7 +374,7 @@ struct DiskIoCounters {
 impl DiskIoCounters {
     fn read() -> Self {
         let text = shell_with_timeout("iostat -I -d | tail -1");
-        let parts: Vec<&str> = text.trim().split_whitespace().collect();
+        let parts: Vec<&str> = text.split_whitespace().collect();
         if parts.len() >= 3 {
             let mb: f64 = parts[2].parse().unwrap_or(0.0);
             let kb = (mb * 1024.0) as u64;
@@ -410,7 +409,7 @@ struct NetCounters {
 impl NetCounters {
     fn read() -> Self {
         let text = shell_with_timeout("netstat -ib | grep -E '^en[0-9]' | head -1");
-        let parts: Vec<&str> = text.trim().split_whitespace().collect();
+        let parts: Vec<&str> = text.split_whitespace().collect();
         if parts.len() >= 10 {
             let rx: u64 = parts[6].parse().unwrap_or(0);
             let tx: u64 = parts[9].parse().unwrap_or(0);
@@ -499,14 +498,13 @@ fn read_powermetrics() -> (Option<f32>, Option<f32>, Option<f32>) {
         if line.contains("GPU die temperature") {
             gpu_temp = extract_temp(line);
         }
-        if line.contains("GPU") && (line.contains("Active") || line.contains("active residency")) {
-            if let Some(pct_str) = line.split(':').nth(1) {
+        if line.contains("GPU") && (line.contains("Active") || line.contains("active residency"))
+            && let Some(pct_str) = line.split(':').nth(1) {
                 let cleaned = pct_str.trim().trim_end_matches('%').trim();
                 if let Ok(v) = cleaned.parse::<f32>() {
                     gpu_usage = Some(v / 100.0);
                 }
             }
-        }
     }
     (cpu_temp, gpu_temp, gpu_usage)
 }
@@ -514,7 +512,7 @@ fn read_powermetrics() -> (Option<f32>, Option<f32>, Option<f32>) {
 fn extract_temp(line: &str) -> Option<f32> {
     line.split(':')
         .nth(1)
-        .and_then(|s| s.trim().split_whitespace().next())
+        .and_then(|s| s.split_whitespace().next())
         .and_then(|s| s.parse::<f32>().ok())
 }
 

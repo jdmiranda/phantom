@@ -71,7 +71,7 @@ impl App {
                 self.coordinator
                     .registry()
                     .get_adapter(*id)
-                    .map_or(false, |a| !a.is_alive())
+                    .is_some_and(|a| !a.is_alive())
             })
             .collect();
         for dead_id in dead_adapters {
@@ -257,14 +257,12 @@ impl App {
             .suggestion
             .as_ref()
             .is_some_and(|s| now.duration_since(s.shown_at).as_secs() > 10)
-        {
-            if let Some(expired) = self.suggestion.take() {
+            && let Some(expired) = self.suggestion.take() {
                 self.suggestion_history.push_back(expired);
                 if self.suggestion_history.len() > 10 {
                     self.suggestion_history.pop_front();
                 }
             }
-        }
 
         // Self-test runner: advance one step per frame.
         if self.selftest.as_ref().is_some_and(|r| !r.is_done()) {
@@ -979,12 +977,11 @@ impl App {
             }
 
             // Falling edge: terminal just left alt-screen.
-            if !is_detached && prev {
-                if let Some(&secondary_id) = self.alt_screen_secondaries.get(&app_id) {
+            if !is_detached && prev
+                && let Some(&secondary_id) = self.alt_screen_secondaries.get(&app_id) {
                     // Start fade animation if not already fading.
                     self.alt_screen_fade.entry(secondary_id).or_insert(0.0);
                 }
-            }
         }
 
         for (primary_id, label) in to_split {
@@ -1331,10 +1328,7 @@ mod tests {
             let timed_out =
                 git_refresh_spawned_at.is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
             let finished = git_refresh_handle.as_ref().is_some_and(|h| h.is_finished());
-            if timed_out {
-                git_refresh_handle = None;
-                git_refresh_spawned_at = None;
-            } else if finished {
+            if timed_out || finished {
                 git_refresh_handle = None;
                 git_refresh_spawned_at = None;
             }
@@ -1382,10 +1376,7 @@ mod tests {
             let timed_out =
                 git_refresh_spawned_at.is_some_and(|t| now.duration_since(t) > GIT_REFRESH_TIMEOUT);
             let finished = git_refresh_handle.as_ref().is_some_and(|h| h.is_finished());
-            if timed_out {
-                git_refresh_handle = None;
-                git_refresh_spawned_at = None;
-            } else if finished {
+            if timed_out || finished {
                 git_refresh_handle = None;
                 git_refresh_spawned_at = None;
             }
@@ -1515,7 +1506,7 @@ mod tests {
         let last_input_time = base + Duration::from_secs(1);
 
         // Build three dummy instants: one before input, two after.
-        let instants = vec![
+        let instants = [
             base,                               // before input — must not count
             last_input_time + Duration::from_millis(100), // after input
             last_input_time + Duration::from_millis(200), // after input

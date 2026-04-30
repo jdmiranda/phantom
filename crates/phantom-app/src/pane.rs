@@ -368,8 +368,8 @@ impl App {
 
         // Resize remaining adapters to fill the reclaimed space.
         for app_id in self.coordinator.all_app_ids() {
-            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
-                if let Ok(rect) = self.layout.get_pane_rect(pane_id) {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id)
+                && let Ok(rect) = self.layout.get_pane_rect(pane_id) {
                     let (cols, rows) = pane_cols_rows(self.cell_size, rect);
                     let _ = self.coordinator.send_command(
                         app_id,
@@ -377,7 +377,6 @@ impl App {
                         &serde_json::json!({"cols": cols, "rows": rows}),
                     );
                 }
-            }
         }
 
         // Remove tracking entries.
@@ -410,8 +409,8 @@ impl App {
 
         // Resize remaining adapters to fit the reclaimed space.
         for app_id in self.coordinator.all_app_ids() {
-            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
-                if let Ok(rect) = self.layout.get_pane_rect(pane_id) {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id)
+                && let Ok(rect) = self.layout.get_pane_rect(pane_id) {
                     let (cols, rows) = pane_cols_rows(self.cell_size, rect);
                     let _ = self.coordinator.send_command(
                         app_id,
@@ -419,7 +418,6 @@ impl App {
                         &serde_json::json!({"cols": cols, "rows": rows}),
                     );
                 }
-            }
         }
 
         info!("Pane closed, focused: {:?}", self.coordinator.focused());

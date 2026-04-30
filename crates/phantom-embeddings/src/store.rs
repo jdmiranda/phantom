@@ -274,14 +274,13 @@ impl EmbeddingStore for InMemoryStore {
         k: usize,
         filter: Option<&QueryFilter>,
     ) -> Result<Vec<QueryHit>, StoreError> {
-        if let Some(expected) = self.fixed_dim {
-            if query_vec.len() != expected {
+        if let Some(expected) = self.fixed_dim
+            && query_vec.len() != expected {
                 return Err(StoreError::DimensionMismatch {
                     expected,
                     actual: query_vec.len(),
                 });
             }
-        }
 
         let k = k.min(MAX_QUERY_RESULTS);
 

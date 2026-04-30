@@ -55,6 +55,7 @@ impl OllamaBackend {
     }
 
     /// Create a backend using `phi3.5:latest` at the default local URL.
+    #[must_use] 
     pub fn default_model() -> Self {
         Self::new("phi3.5:latest", DEFAULT_URL)
     }
@@ -62,6 +63,7 @@ impl OllamaBackend {
     /// Returns `true` when Ollama is running and reachable.
     ///
     /// Pings `/api/tags` which responds quickly without loading a model.
+    #[must_use] 
     pub fn is_available(&self) -> bool {
         let url = format!("{}/api/tags", self.base_url);
         let agent = ureq::Agent::config_builder()
@@ -75,11 +77,13 @@ impl OllamaBackend {
     }
 
     /// Return the model name in use.
+    #[must_use] 
     pub fn model(&self) -> &str {
         &self.model
     }
 
     /// Return the base URL in use.
+    #[must_use] 
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -209,6 +213,7 @@ struct GenerateResponse {
 ///
 /// Pings the `/api/tags` endpoint which returns quickly.
 /// Returns `true` if the server responds with 200.
+#[must_use] 
 pub fn is_available() -> bool {
     let url = format!("{DEFAULT_URL}/api/tags");
     let agent = ureq::Agent::config_builder()
@@ -278,6 +283,7 @@ pub fn generate(model: &str, prompt: &str, max_tokens: u32) -> Result<(String, f
 ///
 /// The local model receives a concise prompt asking it to summarize the error
 /// and suggest a fix in 1-2 sentences. Keeps token count low for fast inference.
+#[must_use] 
 pub fn build_error_triage_prompt(
     command: &str,
     errors: &[phantom_semantic::DetectedError],

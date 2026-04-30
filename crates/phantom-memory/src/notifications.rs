@@ -40,6 +40,7 @@ pub struct NotificationId(u64);
 
 impl NotificationId {
     /// The underlying integer value.
+    #[must_use]
     pub fn value(self) -> u64 {
         self.0
     }
@@ -102,36 +103,43 @@ pub struct Notification {
 
 impl Notification {
     /// The notification's unique, store-assigned identifier.
+    #[must_use]
     pub fn id(&self) -> NotificationId {
         self.id
     }
 
     /// Semantic kind of this notification.
+    #[must_use]
     pub fn kind(&self) -> NotificationKind {
         self.kind
     }
 
     /// Short human-readable title (suitable for a badge or toast header).
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
 
     /// Full human-readable description of the event.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 
     /// The agent that produced this notification, if applicable.
+    #[must_use]
     pub fn agent_id(&self) -> Option<u64> {
         self.agent_id
     }
 
     /// Whether this notification has been marked as read.
+    #[must_use]
     pub fn is_read(&self) -> bool {
         self.read
     }
 
     /// Creation time in milliseconds since the Unix epoch.
+    #[must_use]
     pub fn created_at_ms(&self) -> u64 {
         self.created_at_ms
     }
@@ -287,21 +295,25 @@ impl NotificationStore {
     }
 
     /// All notifications in insertion order (oldest first).
+    #[must_use]
     pub fn all(&self) -> &[Notification] {
         &self.notifications
     }
 
     /// Unread notifications in insertion order (oldest first).
+    #[must_use]
     pub fn unread(&self) -> Vec<&Notification> {
         self.notifications.iter().filter(|n| !n.read).collect()
     }
 
     /// Count of unread notifications.
+    #[must_use]
     pub fn unread_count(&self) -> usize {
         self.notifications.iter().filter(|n| !n.read).count()
     }
 
     /// Notifications filtered by [`NotificationKind`], in insertion order.
+    #[must_use]
     pub fn by_kind(&self, kind: NotificationKind) -> Vec<&Notification> {
         self.notifications
             .iter()
@@ -310,11 +322,13 @@ impl NotificationStore {
     }
 
     /// Look up a notification by id.
+    #[must_use]
     pub fn get(&self, id: NotificationId) -> Option<&Notification> {
         self.notifications.iter().find(|n| n.id == id)
     }
 
     /// Total number of notifications (read and unread).
+    #[must_use]
     pub fn count(&self) -> usize {
         self.notifications.len()
     }

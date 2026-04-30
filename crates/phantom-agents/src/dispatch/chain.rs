@@ -64,11 +64,10 @@ pub(super) fn taint_from_source_chain(
         }
 
         // Check if the source agent is quarantined (Failed) → Tainted.
-        if let Some(agent_id) = source_agent_id_from_envelope(ev) {
-            if agent_is_quarantined(agent_id, registry) {
+        if let Some(agent_id) = source_agent_id_from_envelope(ev)
+            && agent_is_quarantined(agent_id, registry) {
                 accumulated = accumulated.merge(TaintLevel::Tainted);
             }
-        }
 
         // Short-circuit: Tainted is the maximum, no need to walk further.
         if accumulated == TaintLevel::Tainted {

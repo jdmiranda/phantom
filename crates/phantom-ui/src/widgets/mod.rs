@@ -145,6 +145,7 @@ pub enum ConnectionIndicator {
 
 impl ConnectionIndicator {
     /// Short label displayed in the status bar (empty when connected).
+    #[must_use] 
     pub fn label(&self) -> String {
         match self {
             Self::Connected => String::new(),
@@ -154,6 +155,7 @@ impl ConnectionIndicator {
     }
 
     /// RGBA color for the indicator text.
+    #[must_use] 
     pub fn color(&self) -> [f32; 4] {
         match self {
             Self::Connected => [0.6, 0.7, 0.6, 1.0],
@@ -184,6 +186,7 @@ pub struct StatusBar {
 
 impl StatusBar {
     /// Create a status bar with sensible defaults.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             cwd: String::from("~"),
@@ -202,6 +205,7 @@ impl StatusBar {
     }
 
     /// Whether the privacy mode indicator is currently shown.
+    #[must_use] 
     pub fn privacy_mode(&self) -> bool {
         self.privacy_mode
     }
@@ -240,6 +244,7 @@ impl StatusBar {
     }
 
     /// The current connection indicator, if any.
+    #[must_use] 
     pub fn connection(&self) -> Option<&ConnectionIndicator> {
         self.connection.as_ref()
     }
@@ -381,6 +386,7 @@ pub struct TabBar {
 
 impl TabBar {
     /// Create an empty tab bar with no tabs.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             tabs: Vec::new(),
@@ -430,11 +436,13 @@ impl TabBar {
     }
 
     /// Return the index of the currently active tab.
+    #[must_use] 
     pub fn active(&self) -> usize {
         self.active
     }
 
     /// Return the number of tabs.
+    #[must_use] 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
     }

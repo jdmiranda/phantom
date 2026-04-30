@@ -53,6 +53,7 @@ impl McpToolRoute {
     /// Canonical provenance tag: `mcp:{server}/{tool}`.
     ///
     /// Matches the format the issue spec names for `ToolProvenance.tool_name`.
+    #[must_use] 
     pub fn provenance_tag(&self) -> String {
         format!("mcp:{}/{}", self.server_name, self.tool_name)
     }
@@ -107,6 +108,7 @@ pub struct McpToolRegistry {
 
 impl McpToolRegistry {
     /// Create an empty registry.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
@@ -144,6 +146,7 @@ impl McpToolRegistry {
     /// Find which server handles `tool_name`.
     ///
     /// Returns `None` when no registered server advertises the tool.
+    #[must_use] 
     pub fn resolve_tool(&self, tool_name: &str) -> Option<McpToolRoute> {
         self.tool_index.get(tool_name).map(|server_name| McpToolRoute {
             server_name: server_name.clone(),
@@ -228,11 +231,13 @@ impl McpToolRegistry {
     }
 
     /// Number of registered servers.
+    #[must_use] 
     pub fn server_count(&self) -> usize {
         self.registered_servers.len()
     }
 
     /// Number of indexed tools across all servers.
+    #[must_use] 
     pub fn tool_count(&self) -> usize {
         self.tool_index.len()
     }

@@ -170,6 +170,7 @@ impl MemoryStore {
     }
 
     /// Get a memory entry by key.
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<&MemoryEntry> {
         self.entries.iter().find(|e| e.key == key)
     }
@@ -186,11 +187,13 @@ impl MemoryStore {
     }
 
     /// Get all entries.
+    #[must_use]
     pub fn all(&self) -> &[MemoryEntry] {
         &self.entries
     }
 
     /// Get entries by category.
+    #[must_use]
     pub fn by_category(&self, category: MemoryCategory) -> Vec<&MemoryEntry> {
         self.entries
             .iter()
@@ -199,6 +202,7 @@ impl MemoryStore {
     }
 
     /// Search entries where `query` appears in the key or value (case-insensitive).
+    #[must_use]
     pub fn search(&self, query: &str) -> Vec<&MemoryEntry> {
         let q = query.to_lowercase();
         self.entries
@@ -208,6 +212,7 @@ impl MemoryStore {
     }
 
     /// Get total entry count.
+    #[must_use]
     pub fn count(&self) -> usize {
         self.entries.len()
     }
@@ -233,6 +238,7 @@ impl MemoryStore {
     /// Format all memories as context for an AI agent.
     ///
     /// Returns a bulleted list: `- [category] key: value`
+    #[must_use]
     pub fn agent_context(&self) -> String {
         if self.entries.is_empty() {
             return String::from("No project memories stored.");

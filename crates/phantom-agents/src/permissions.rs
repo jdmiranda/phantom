@@ -48,6 +48,7 @@ pub struct PermissionSet {
 
 impl PermissionSet {
     /// Create a permission set from a slice of permissions.
+    #[must_use] 
     pub fn new(perms: &[Permission]) -> Self {
         Self {
             granted: perms.iter().copied().collect(),
@@ -55,6 +56,7 @@ impl PermissionSet {
     }
 
     /// All permissions granted.
+    #[must_use] 
     pub fn all() -> Self {
         Self {
             granted: Permission::ALL.iter().copied().collect(),
@@ -62,11 +64,13 @@ impl PermissionSet {
     }
 
     /// Read-only: `ReadFiles` + `GitAccess` only.
+    #[must_use] 
     pub fn read_only() -> Self {
         Self::new(&[Permission::ReadFiles, Permission::GitAccess])
     }
 
     /// Check whether a specific permission is granted.
+    #[must_use] 
     pub fn has(&self, perm: Permission) -> bool {
         self.granted.contains(&perm)
     }
@@ -117,6 +121,7 @@ impl std::error::Error for PermissionDenied {}
 // ---------------------------------------------------------------------------
 
 /// Map a tool type to the permission required to execute it.
+#[must_use] 
 pub fn required_permission(tool: &ToolType) -> Permission {
     match tool {
         ToolType::ReadFile | ToolType::SearchFiles | ToolType::ListFiles => Permission::ReadFiles,

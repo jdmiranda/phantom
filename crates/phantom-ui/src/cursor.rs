@@ -71,6 +71,7 @@ impl CursorBlink {
     ///
     /// Panics if `period_ms` is zero, as a zero period would cause a
     /// divide-by-zero in [`tick`](CursorBlink::tick).
+    #[must_use] 
     pub fn new(period_ms: u64) -> Self {
         assert!(period_ms > 0, "period_ms must be greater than zero");
         Self {
@@ -88,6 +89,7 @@ impl CursorBlink {
     /// # Panics
     ///
     /// Panics if `period_ms` is zero.
+    #[must_use] 
     pub fn new_at(period_ms: u64, now_ms: u64) -> Self {
         assert!(period_ms > 0, "period_ms must be greater than zero");
         Self {
@@ -98,11 +100,13 @@ impl CursorBlink {
     }
 
     /// Return the configured blink period in milliseconds.
+    #[must_use] 
     pub fn period_ms(&self) -> u64 {
         self.period_ms
     }
 
     /// Return the current visibility without advancing the timer.
+    #[must_use] 
     pub fn is_visible(&self) -> bool {
         self.visible
     }
@@ -111,6 +115,7 @@ impl CursorBlink {
     ///
     /// Alias for [`is_visible`](CursorBlink::is_visible) kept for
     /// backward compatibility with call sites not yet updated.
+    #[must_use] 
     pub fn visible(&self) -> bool {
         self.visible
     }
@@ -169,6 +174,7 @@ impl CursorBlink {
     /// // Cursor starts visible, so color is unchanged.
     /// assert_eq!(color, tokens.colors.text_primary);
     /// ```
+    #[must_use] 
     pub fn color(&self, base_color: [f32; 4]) -> [f32; 4] {
         if self.visible {
             base_color
@@ -179,6 +185,7 @@ impl CursorBlink {
 
     /// Convenience wrapper: resolve `tokens.colors.text_primary`, modulate by
     /// visibility, and return the resulting RGBA.
+    #[must_use] 
     pub fn text_primary_color(&self, tokens: &Tokens) -> [f32; 4] {
         self.color(tokens.colors.text_primary)
     }

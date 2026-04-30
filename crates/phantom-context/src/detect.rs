@@ -79,6 +79,7 @@ pub enum Framework {
 // ---------------------------------------------------------------------------
 
 /// Detect project type from marker files in `dir`.
+#[must_use]
 pub fn detect_project(dir: &Path) -> ProjectType {
     // Order matters: check the most distinctive markers first.
     if dir.join("Cargo.toml").exists() {
@@ -139,6 +140,7 @@ fn has_csharp_marker(dir: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Detect the package manager for a project directory.
+#[must_use]
 pub fn detect_package_manager(dir: &Path) -> PackageManager {
     // Rust
     if dir.join("Cargo.toml").exists() {
@@ -220,6 +222,7 @@ pub fn detect_package_manager(dir: &Path) -> PackageManager {
 // ---------------------------------------------------------------------------
 
 /// Detect the framework used by reading config/manifest file contents.
+#[must_use]
 pub fn detect_framework(dir: &Path, project_type: &ProjectType) -> Framework {
     match project_type {
         ProjectType::Node => detect_node_framework(dir),
@@ -337,6 +340,7 @@ fn detect_java_framework(dir: &Path) -> Framework {
 // ---------------------------------------------------------------------------
 
 /// Detect standard build/test/run/lint/format commands for a project.
+#[must_use]
 pub fn detect_commands(
     dir: &Path,
     project_type: &ProjectType,

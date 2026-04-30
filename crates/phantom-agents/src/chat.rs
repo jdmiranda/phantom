@@ -94,12 +94,14 @@ pub struct ChatResponse {
 
 impl ChatResponse {
     /// Wrap an existing [`ApiHandle`].
+    #[must_use] 
     pub fn from_handle(handle: ApiHandle) -> Self {
         Self { handle }
     }
 
     /// Wrap a raw receiver. Useful for backends that drive the channel
     /// directly without going through [`api::send_message`].
+    #[must_use] 
     pub fn from_receiver(rx: mpsc::Receiver<ApiEvent>) -> Self {
         Self {
             handle: ApiHandle::from_receiver(rx),
@@ -112,12 +114,14 @@ impl ChatResponse {
     }
 
     /// Whether the request has completed.
+    #[must_use] 
     pub fn is_done(&self) -> bool {
         self.handle.is_done()
     }
 
     /// Consume into the underlying [`ApiHandle`] for callers that need the
     /// existing concrete type (e.g. the agent pane caches it directly).
+    #[must_use] 
     pub fn into_handle(self) -> ApiHandle {
         self.handle
     }
@@ -174,16 +178,19 @@ pub enum ChatModel {
 
 impl ChatModel {
     /// The default Claude model used today by every existing caller.
+    #[must_use] 
     pub fn default_claude() -> Self {
         Self::Claude("claude-opus-4-7".to_owned())
     }
 
     /// The default OpenAI model.
+    #[must_use] 
     pub fn default_openai() -> Self {
         Self::OpenAi("gpt-4o".to_owned())
     }
 
     /// Returns the backend's stable name (`"claude"` or `"openai"`).
+    #[must_use] 
     pub fn backend_name(&self) -> &'static str {
         match self {
             Self::Claude(_) => "claude",
@@ -195,6 +202,7 @@ impl ChatModel {
     ///
     /// Returns `None` when the variable is unset or its value is not
     /// recognized — callers fall through to [`Self::default()`].
+    #[must_use] 
     pub fn from_env() -> Option<Self> {
         let raw = std::env::var("PHANTOM_AGENT_MODEL").ok()?;
         Self::from_env_str(&raw)
@@ -210,6 +218,7 @@ impl ChatModel {
     ///
     /// Anything else returns `None` so the caller can fall through to a
     /// default. Whitespace and case are ignored.
+    #[must_use] 
     pub fn from_env_str(raw: &str) -> Option<Self> {
         let s = raw.trim().to_ascii_lowercase();
         if let Some((backend, model)) = s.split_once(':') {
@@ -280,6 +289,7 @@ impl PrivacyGuard {
     /// Wrap `inner` with a privacy guard.
     ///
     /// When `privacy_mode` is `false` the guard is a zero-cost pass-through.
+    #[must_use] 
     pub fn new(inner: Box<dyn ChatBackend>, privacy_mode: bool) -> Self {
         Self {
             inner,
@@ -341,17 +351,20 @@ impl ClaudeBackend {
     }
 
     /// Construct from an explicit config.
+    #[must_use] 
     pub fn from_config(config: ClaudeConfig) -> Self {
         Self { config }
     }
 
     /// Override the model id.
+    #[must_use] 
     pub fn with_model(mut self, model: String) -> Self {
         self.config.model = model;
         self
     }
 
     /// Borrow the underlying [`ClaudeConfig`].
+    #[must_use] 
     pub fn config(&self) -> &ClaudeConfig {
         &self.config
     }
@@ -414,6 +427,7 @@ impl OpenAiChatBackend {
     }
 
     /// Override the model id.
+    #[must_use] 
     pub fn with_model(mut self, model: String) -> Self {
         self.model = model;
         self
@@ -700,11 +714,10 @@ fn parse_openai_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
     };
 
     // Assistant text (may be null when only tool calls are returned).
-    if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
-        if !content.is_empty() {
+    if let Some(content) = message.get("content").and_then(|v| v.as_str())
+        && !content.is_empty() {
             let _ = tx.send(ApiEvent::TextDelta(content.to_owned()));
         }
-    }
 
     // Tool calls.
     if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
@@ -1642,12 +1655,9 @@ mod tests {
         };
         // complete() dispatches to a background thread; we just verify it does
         // NOT return PrivacyModeViolation synchronously.
-        match guard.complete(request) {
-            Err(ChatError::PrivacyModeViolation { .. }) => {
-                panic!("PrivacyGuard must not block when privacy_mode=false");
-            }
-            _ => {} // Ok or other error — both acceptable
-        }
+        if let Err(ChatError::PrivacyModeViolation { .. }) = guard.complete(request) {
+            panic!("PrivacyGuard must not block when privacy_mode=false");
+        } // Ok or other error — both acceptable
     }
 
     #[test]

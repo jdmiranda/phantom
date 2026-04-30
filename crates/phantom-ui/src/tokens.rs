@@ -39,6 +39,7 @@ pub struct ColorRoles {
 
 impl ColorRoles {
     /// The default Phosphor mapping. Themes may override.
+    #[must_use] 
     pub const fn phosphor() -> Self {
         Self {
             surface_base: [0.04, 0.06, 0.05, 1.0],
@@ -78,10 +79,12 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    #[must_use] 
     pub fn new(colors: ColorRoles, ctx: RenderCtx) -> Self {
         Self { colors, ctx }
     }
 
+    #[must_use] 
     pub fn phosphor(ctx: RenderCtx) -> Self {
         Self {
             colors: ColorRoles::phosphor(),
@@ -90,51 +93,65 @@ impl Tokens {
     }
 
     // -- Spacing scale (4px-base, scales with the cell on dense fonts) --
+    #[must_use] 
     pub fn space_0(&self) -> f32 {
         0.0
     }
+    #[must_use] 
     pub fn space_1(&self) -> f32 {
         4.0
     }
+    #[must_use] 
     pub fn space_2(&self) -> f32 {
         8.0
     }
+    #[must_use] 
     pub fn space_3(&self) -> f32 {
         12.0
     }
+    #[must_use] 
     pub fn space_4(&self) -> f32 {
         16.0
     }
+    #[must_use] 
     pub fn space_5(&self) -> f32 {
         24.0
     }
+    #[must_use] 
     pub fn space_6(&self) -> f32 {
         32.0
     }
 
     // -- Radii --
+    #[must_use] 
     pub fn radius_sm(&self) -> f32 {
         2.0
     }
+    #[must_use] 
     pub fn radius_md(&self) -> f32 {
         4.0
     }
+    #[must_use] 
     pub fn radius_lg(&self) -> f32 {
         6.0
     }
 
     // -- Line widths --
+    #[must_use] 
     pub fn hair(&self) -> f32 {
         1.0
     }
+    #[must_use] 
     pub fn frame(&self) -> f32 {
         2.0
     }
 
     // -- Convenience accessors that flow through the ctx --
+    #[must_use] 
     pub fn cell_w(&self) -> f32 {
         self.ctx.cell_w()
     }
+    #[must_use] 
     pub fn cell_h(&self) -> f32 {
         self.ctx.cell_h()
     }

@@ -83,6 +83,7 @@ pub const INTERNAL_ERROR: i32 = -32603;
 // ---------------------------------------------------------------------------
 
 /// Build a JSON-RPC request with a numeric `id`.
+#[must_use] 
 pub fn create_request(id: u64, method: &str, params: serde_json::Value) -> JsonRpcRequest {
     JsonRpcRequest {
         jsonrpc: JSONRPC_VERSION.to_owned(),
@@ -93,6 +94,7 @@ pub fn create_request(id: u64, method: &str, params: serde_json::Value) -> JsonR
 }
 
 /// Build a successful JSON-RPC response.
+#[must_use] 
 pub fn create_response(id: serde_json::Value, result: serde_json::Value) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.to_owned(),
@@ -103,6 +105,7 @@ pub fn create_response(id: serde_json::Value, result: serde_json::Value) -> Json
 }
 
 /// Build an error JSON-RPC response.
+#[must_use] 
 pub fn create_error(id: serde_json::Value, code: i32, message: &str) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.to_owned(),

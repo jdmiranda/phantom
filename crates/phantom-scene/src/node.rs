@@ -84,6 +84,7 @@ pub struct SceneNode {
 
 impl SceneNode {
     /// Create a new node with sensible defaults and `DirtyFlags::ALL`.
+    #[must_use] 
     pub fn new(id: NodeId, kind: NodeKind) -> Self {
         Self {
             id,
@@ -101,18 +102,21 @@ impl SceneNode {
     }
 
     /// Builder: set local transform.
+    #[must_use] 
     pub fn with_transform(mut self, x: f32, y: f32, w: f32, h: f32) -> Self {
         self.transform = Transform { x, y, width: w, height: h };
         self
     }
 
     /// Builder: set z-order.
+    #[must_use] 
     pub fn with_z_order(mut self, z: i32) -> Self {
         self.z_order = z;
         self
     }
 
     /// Builder: set render layer.
+    #[must_use] 
     pub fn with_layer(mut self, layer: RenderLayer) -> Self {
         self.render_layer = layer;
         self

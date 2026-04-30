@@ -155,35 +155,35 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         // ------------------------------------------------------------------
         // Agent commands
         // ------------------------------------------------------------------
-        if input.starts_with("agent") || input == "agents" {
-            if let Some(cmd) = parse_agent_command(&input) {
-                let output = execute_agent_command(&cmd, &mut agents);
-                for line in &output {
-                    println!("{line}");
-                }
-
-                // If we just spawned an agent and have an API key, drive it.
-                let is_spawn = matches!(
-                    cmd,
-                    AgentCommand::Spawn { .. }
-                        | AgentCommand::SpawnFix { .. }
-                        | AgentCommand::SpawnReview
-                        | AgentCommand::SpawnWatch { .. }
-                );
-                if is_spawn {
-                    if let Some(ref cfg) = claude_config {
-                        tool_use_ids.clear();
-                        run_agent_loop(&mut agents, cfg, &project_dir, &mut tool_use_ids);
-                    } else {
-                        println!("Warning: ANTHROPIC_API_KEY not set. Agent spawned but cannot reason.");
-                    }
-                }
-
-                drain_brain(&brain);
-                print!("[USER]: ");
-                io::stdout().flush()?;
-                continue;
+        if (input.starts_with("agent") || input == "agents")
+            && let Some(cmd) = parse_agent_command(&input)
+        {
+            let output = execute_agent_command(&cmd, &mut agents);
+            for line in &output {
+                println!("{line}");
             }
+
+            // If we just spawned an agent and have an API key, drive it.
+            let is_spawn = matches!(
+                cmd,
+                AgentCommand::Spawn { .. }
+                    | AgentCommand::SpawnFix { .. }
+                    | AgentCommand::SpawnReview
+                    | AgentCommand::SpawnWatch { .. }
+            );
+            if is_spawn {
+                if let Some(ref cfg) = claude_config {
+                    tool_use_ids.clear();
+                    run_agent_loop(&mut agents, cfg, &project_dir, &mut tool_use_ids);
+                } else {
+                    println!("Warning: ANTHROPIC_API_KEY not set. Agent spawned but cannot reason.");
+                }
+            }
+
+            drain_brain(&brain);
+            print!("[USER]: ");
+            io::stdout().flush()?;
+            continue;
         }
 
         // ------------------------------------------------------------------
@@ -364,8 +364,7 @@ fn run_agent_loop(
 
     let tools = available_tools();
 
-    loop {
-        let Some(agent) = agents.get(agent_id) else { break };
+    while let Some(agent) = agents.get(agent_id) {
         if agent.status() != AgentStatus::Working && agent.status() != AgentStatus::WaitingForTool {
             break;
         }
@@ -418,8 +417,10 @@ fn run_agent_loop(
                 }
                 Some(ApiEvent::Done) => {
                     println!("\n[AGENT #{}]: turn complete", agent_id);
-                    if !got_tool_use {
-                        if let Some(a) = agents.get_mut(agent_id) { a.complete(true); }
+                    if !got_tool_use
+                        && let Some(a) = agents.get_mut(agent_id)
+                    {
+                        a.complete(true);
                     }
                     break;
                 }
@@ -564,6 +565,7 @@ fn print_status(context: &ProjectContext, agents: &AgentManager, memory: &Memory
 /// Chat gets one meta-tool: `spawn_agent`. When it needs to read files,
 /// run commands, or modify code, it spawns an agent with the minimum
 /// permission set for the task.
+#[allow(clippy::too_many_arguments)]
 fn run_chat(
     config: &ClaudeConfig,
     user_msg: &str,

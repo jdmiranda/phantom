@@ -5,7 +5,9 @@
 /// The default is [`Disposition::Chat`] (zero-side-effect) so existing call
 /// sites that don't set a disposition are unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum Disposition {
+    #[default]
     Chat,
     Feature,
     BugFix,
@@ -52,8 +54,3 @@ impl Disposition {
     }
 }
 
-impl Default for Disposition {
-    fn default() -> Self {
-        Self::Chat
-    }
-}

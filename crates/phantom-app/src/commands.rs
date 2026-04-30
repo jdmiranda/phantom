@@ -452,7 +452,7 @@ impl App {
                 // we pretty-print to the console.
                 let op = cmd; // e.g. "dag.focus_node"
                 // Everything after the first space is the JSON args (optional).
-                let args_str = input.trim().splitn(2, ' ').nth(1).unwrap_or("{}");
+                let args_str = input.trim().split_once(' ').map(|x| x.1).unwrap_or("{}");
                 let args: serde_json::Value = serde_json::from_str(args_str)
                     .unwrap_or(serde_json::json!({}));
 

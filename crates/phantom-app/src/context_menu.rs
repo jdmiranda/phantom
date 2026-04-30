@@ -39,7 +39,14 @@ const ITEM_HEIGHT: f32 = 28.0;
 const PADDING: f32 = 8.0;
 const MENU_WIDTH: f32 = 180.0;
 
+impl Default for ContextMenu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContextMenu {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             x: 0.0,
@@ -65,6 +72,7 @@ impl ContextMenu {
     }
 
     /// Returns the `MenuItem` index at the given pixel position, or `None`.
+    #[must_use] 
     pub fn hit_test(&self, mx: f32, my: f32) -> Option<usize> {
         if !self.visible {
             return None;
@@ -92,21 +100,25 @@ impl ContextMenu {
     }
 
     /// Total height of the menu for rendering.
+    #[must_use] 
     pub fn height(&self) -> f32 {
         PADDING * 2.0 + self.items.len() as f32 * ITEM_HEIGHT
     }
 
     /// Menu width constant exposed for rendering.
+    #[must_use] 
     pub fn width(&self) -> f32 {
         MENU_WIDTH
     }
 
     /// Item height constant exposed for rendering.
+    #[must_use] 
     pub fn item_height(&self) -> f32 {
         ITEM_HEIGHT
     }
 
     /// Padding constant exposed for rendering.
+    #[must_use] 
     pub fn padding(&self) -> f32 {
         PADDING
     }

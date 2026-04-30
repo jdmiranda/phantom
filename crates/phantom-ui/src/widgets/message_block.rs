@@ -59,6 +59,7 @@ pub enum MessageRole {
 
 impl MessageRole {
     /// Single uppercase ASCII initial for the avatar glyph column.
+    #[must_use] 
     pub fn initial(self) -> char {
         match self {
             Self::User => 'U',
@@ -70,6 +71,7 @@ impl MessageRole {
     }
 
     /// Short display label rendered on the first body line.
+    #[must_use] 
     pub fn label(self) -> &'static str {
         match self {
             Self::User => "User",
@@ -88,6 +90,7 @@ impl MessageRole {
     /// - `System`     → `text_secondary`  (muted)
     /// - `ToolUse`    → `status_info`     (cyan)
     /// - `ToolResult` → `status_ok`       (green OK)
+    #[must_use] 
     pub fn color(self, tokens: &Tokens) -> [f32; 4] {
         let c = &tokens.colors;
         match self {
@@ -158,6 +161,7 @@ impl MessageBlock {
     ///
     /// Height = `(1 + wrapped_line_count) * cell_h`, where the leading `1`
     /// accounts for the role-label row.
+    #[must_use] 
     pub fn compute_height(&self, rect_width: f32) -> f32 {
         let line_count = self.wrapped_lines(rect_width).len();
         // role-label row (1) + body rows
@@ -173,6 +177,7 @@ impl MessageBlock {
     /// ```
     /// An empty body returns an empty `Vec`.  A `cell_w` of `0.0` (degenerate
     /// context) is treated as `1.0` to avoid division by zero.
+    #[must_use] 
     pub fn wrapped_lines(&self, rect_width: f32) -> Vec<String> {
         let cell_w = self.ctx.cell_w().max(1.0);
         let body_px = (rect_width - AVATAR_W - AVATAR_GAP).max(0.0);

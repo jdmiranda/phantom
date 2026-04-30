@@ -63,8 +63,8 @@ impl AppCore for MonitorAdapter {
         let changed = self.handle.poll_changed();
 
         // Emit a bus event when new stats arrive from the sysmon thread.
-        if changed {
-            if let Some(ref stats) = self.handle.latest {
+        if changed
+            && let Some(ref stats) = self.handle.latest {
                 let data = json!({
                     "cpu_usage": stats.cpu_usage,
                     "load_avg_1m": stats.load_avg_1m,
@@ -98,7 +98,6 @@ impl AppCore for MonitorAdapter {
                     timestamp: 0,
                 });
             }
-        }
     }
 
     fn get_state(&self) -> serde_json::Value {

@@ -55,21 +55,25 @@ pub struct DecompositionStep {
 
 impl DecompositionStep {
     /// Human-readable description of what this step accomplishes.
+    #[must_use] 
     pub fn description(&self) -> &str {
         &self.description
     }
 
     /// Optional tool / agent-type hint for this step.
+    #[must_use] 
     pub fn tool(&self) -> Option<&str> {
         self.tool.as_deref()
     }
 
     /// Relative priority in [0.0, 1.0]. Higher = execute sooner.
+    #[must_use] 
     pub fn priority(&self) -> f32 {
         self.priority
     }
 
     /// Estimated wall-clock cost in milliseconds.
+    #[must_use] 
     pub fn cost_ms(&self) -> u32 {
         self.cost_ms
     }
@@ -111,21 +115,25 @@ pub struct DecompositionResult {
 
 impl DecompositionResult {
     /// The original goal string that was decomposed.
+    #[must_use] 
     pub fn goal(&self) -> &str {
         &self.goal
     }
 
     /// Steps sorted in descending priority order (index 0 = highest priority).
+    #[must_use] 
     pub fn steps(&self) -> &[DecompositionStep] {
         &self.steps
     }
 
     /// Sum of `cost_ms` across all steps.
+    #[must_use] 
     pub fn estimated_total_ms(&self) -> u32 {
         self.estimated_total_ms
     }
 
     /// `true` if there is at least one step to execute.
+    #[must_use] 
     pub fn is_achievable(&self) -> bool {
         !self.steps.is_empty()
     }
@@ -173,6 +181,7 @@ pub struct GoalDecomposer;
 
 impl GoalDecomposer {
     /// Create a new `GoalDecomposer`.
+    #[must_use] 
     pub fn new() -> Self {
         Self
     }

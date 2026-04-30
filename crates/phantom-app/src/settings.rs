@@ -70,18 +70,21 @@ impl Default for CrtSettings {
 
 impl PhantomSettings {
     /// Default settings file path.
+    #[must_use] 
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         PathBuf::from(home).join(".config/phantom/settings.toml")
     }
 
     /// Load settings from the default path, falling back to defaults.
+    #[must_use] 
     pub fn load() -> Self {
         Self::load_from(&Self::default_path())
     }
 
     /// Load settings from a specific path, falling back to defaults.
     #[allow(dead_code)]
+    #[must_use] 
     pub fn load_from(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(contents) => match toml::from_str(&contents) {
@@ -139,9 +142,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test_settings.toml");
 
-        let mut settings = PhantomSettings::default();
-        settings.theme = "amber".into();
-        settings.font_size = 20.0;
+        let settings = PhantomSettings {
+            theme: "amber".into(),
+            font_size: 20.0,
+            ..PhantomSettings::default()
+        };
         settings.save_to(&path).unwrap();
 
         let reloaded = PhantomSettings::load_from(&path);

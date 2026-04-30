@@ -61,6 +61,7 @@ pub struct McpToolDef {
 
 /// Every MCP tool currently advertised by `phantom-mcp::server::builtin_tools`,
 /// tagged with its capability class. Order is stable.
+#[must_use] 
 pub fn all_mcp_tools() -> Vec<McpToolDef> {
     vec![
         // -- Sense ---------------------------------------------------------
@@ -260,6 +261,7 @@ pub fn all_mcp_tools() -> Vec<McpToolDef> {
 /// concatenate the result with [`crate::tools::available_tools`] to present
 /// a single flat tool list to the model, with security gating already
 /// applied at the source.
+#[must_use] 
 pub fn mcp_tool_definitions(role: &AgentRole) -> Vec<McpToolDef> {
     let manifest = role.manifest();
     all_mcp_tools()
@@ -324,6 +326,7 @@ pub struct MockMcpDispatcher {
 
 impl MockMcpDispatcher {
     /// Construct a dispatcher that returns `response` for every call.
+    #[must_use] 
     pub fn new(response: serde_json::Value) -> Self {
         Self { response }
     }

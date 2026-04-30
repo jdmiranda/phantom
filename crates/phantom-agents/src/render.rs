@@ -31,6 +31,7 @@ pub struct AgentPaneStyle {
 
 impl AgentPaneStyle {
     /// Select the appropriate style for an agent's current status.
+    #[must_use] 
     pub fn for_status(status: AgentStatus) -> Self {
         match status {
             AgentStatus::Working | AgentStatus::WaitingForTool => Self::working(),
@@ -133,6 +134,7 @@ impl AgentPaneStyle {
 ///
 /// `elapsed` is the time in seconds since the application started (or any
 /// monotonically-increasing clock value).
+#[must_use] 
 pub fn animated_border_color(style: &AgentPaneStyle, elapsed: f32) -> [f32; 4] {
     if style.pulse_speed == 0.0 {
         return style.border_color;
@@ -156,6 +158,7 @@ pub fn animated_border_color(style: &AgentPaneStyle, elapsed: f32) -> [f32; 4] {
 /// ```text
 /// ■ AGENT #3 — Fix: build error [WORKING 4.2s]
 /// ```
+#[must_use] 
 pub fn agent_header(agent: &Agent) -> String {
     let task_desc = match &agent.task() {
         AgentTask::FixError { error_summary, .. } => {
@@ -190,6 +193,7 @@ pub fn agent_header(agent: &Agent) -> String {
 ///
 /// If the log has more than `max_lines` entries, only the most recent
 /// `max_lines` are returned (the pane scrolls to the bottom).
+#[must_use] 
 pub fn agent_output_lines(agent: &Agent, max_lines: usize) -> Vec<String> {
     let log = agent.output_log();
     if log.len() <= max_lines {

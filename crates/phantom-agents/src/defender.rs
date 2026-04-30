@@ -49,6 +49,7 @@ pub const DEFAULT_DEFENDER_TTL_SECS: u64 = 5 * 60;
 /// The default deadline is [`DEFAULT_DEFENDER_TTL_SECS`]; callers wanting a
 /// different TTL should override the returned rule's `spawn.params` payload
 /// before registration.
+#[must_use] 
 pub fn defender_spawn_rule() -> SpawnRule {
     SpawnRule::on_any(KindPattern::CapabilityDenied)
         .spawn_if_not_running(AgentRole::Defender, "defender-on-denial")

@@ -132,6 +132,7 @@ pub struct KeyCombo {
 
 impl KeyCombo {
     /// Bare key, no modifiers.
+    #[must_use] 
     pub const fn bare(key: Key) -> Self {
         Self {
             key,
@@ -143,6 +144,7 @@ impl KeyCombo {
     }
 
     /// Cmd/Super + key.
+    #[must_use] 
     pub const fn cmd(key: Key) -> Self {
         Self {
             key,
@@ -154,6 +156,7 @@ impl KeyCombo {
     }
 
     /// Cmd/Super + Shift + key.
+    #[must_use] 
     pub const fn cmd_shift(key: Key) -> Self {
         Self {
             key,
@@ -165,6 +168,7 @@ impl KeyCombo {
     }
 
     /// Ctrl + key.
+    #[must_use] 
     pub const fn ctrl(key: Key) -> Self {
         Self {
             key,
@@ -176,6 +180,7 @@ impl KeyCombo {
     }
 
     /// Ctrl + Shift + key.
+    #[must_use] 
     pub const fn ctrl_shift(key: Key) -> Self {
         Self {
             key,
@@ -215,6 +220,7 @@ pub struct KeybindRegistry {
 
 impl KeybindRegistry {
     /// Create a registry loaded with the default macOS-centric bindings.
+    #[must_use] 
     pub fn new() -> Self {
         let mut registry = Self {
             bindings: HashMap::with_capacity(32),
@@ -225,6 +231,7 @@ impl KeybindRegistry {
 
     /// Look up an action for a given key combo. Returns `None` when the combo
     /// should pass through to the terminal PTY.
+    #[must_use] 
     pub fn lookup(&self, combo: &KeyCombo) -> Option<&Action> {
         self.bindings.get(combo)
     }
@@ -241,11 +248,13 @@ impl KeybindRegistry {
     }
 
     /// Number of active bindings.
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.bindings.len()
     }
 
     /// Whether the registry has no bindings at all.
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }

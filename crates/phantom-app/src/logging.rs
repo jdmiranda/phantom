@@ -41,6 +41,7 @@ bitflags! {
 }
 
 /// Maps a log target string to a channel bit.
+#[must_use] 
 pub fn channel_for_target(target: &str) -> Channels {
     // Extract the subsystem name from targets like "phantom::brain" or "phantom_brain"
     let name = target
@@ -91,6 +92,7 @@ pub struct PhantomLogger {
 
 impl PhantomLogger {
     /// Create a new logger, optionally mirroring to a file in `log_dir`.
+    #[must_use] 
     pub fn new(log_dir: Option<PathBuf>, stderr: bool) -> Self {
         let file = log_dir.and_then(|dir| {
             fs::create_dir_all(&dir).ok()?;
@@ -190,9 +192,9 @@ impl log::Log for PhantomLogger {
         );
 
         // Write to file
-        if let Ok(mut file) = self.file.lock() {
-            if let Some(f) = file.as_mut() {
-                if let Err(_e) = writeln!(f, "{msg}") {
+        if let Ok(mut file) = self.file.lock()
+            && let Some(f) = file.as_mut()
+                && let Err(_e) = writeln!(f, "{msg}") {
                     let prev = self.file_write_errors.fetch_add(1, Ordering::Relaxed);
                     if prev == 0 {
                         eprintln!(
@@ -200,8 +202,6 @@ impl log::Log for PhantomLogger {
                         );
                     }
                 }
-            }
-        }
 
         // Write to stderr if enabled
         if self.stderr {

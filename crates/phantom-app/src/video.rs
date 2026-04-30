@@ -32,14 +32,13 @@ pub(crate) fn pick_video_file() -> Option<String> {
 /// Find ffmpeg/ffprobe binary. Checks PATH first, then common brew locations.
 fn find_binary(name: &str) -> String {
     // Check if it's on PATH.
-    if let Ok(output) = Command::new("which").arg(name).output() {
-        if output.status.success() {
+    if let Ok(output) = Command::new("which").arg(name).output()
+        && output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
                 return path;
             }
         }
-    }
     // Common homebrew paths.
     for dir in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         let full = format!("{dir}/{name}");
@@ -163,11 +162,10 @@ impl VideoPlayback {
 
     /// Check if the decoder thread has finished.
     pub fn poll_finished(&mut self) {
-        if let Some(ref thread) = self.thread {
-            if thread.is_finished() {
+        if let Some(ref thread) = self.thread
+            && thread.is_finished() {
                 self.finished = true;
             }
-        }
     }
 
     /// Stop playback.

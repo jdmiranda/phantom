@@ -17,6 +17,7 @@ pub struct ResourceId(pub u64);
 
 impl ResourceId {
     /// Create a [`ResourceId`] from a path string by hashing it.
+    #[must_use] 
     pub fn from_path(path: &str) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         path.hash(&mut hasher);
@@ -65,6 +66,7 @@ pub struct ResourceManager {
 
 impl ResourceManager {
     /// Create an empty resource manager.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             resources: Mutex::new(HashMap::new()),
@@ -85,12 +87,11 @@ impl ResourceManager {
             .lock()
             .map_err(|_| anyhow::anyhow!("lock poisoned"))?;
 
-        if let Some(entry) = resources.get(&id) {
-            if entry.status == LoadStatus::Ready {
+        if let Some(entry) = resources.get(&id)
+            && entry.status == LoadStatus::Ready {
                 entry.ref_count.fetch_add(1, Ordering::Relaxed);
                 return Ok(ResourceHandle { id });
             }
-        }
 
         let resource = loader()?;
         resources.insert(
@@ -148,11 +149,10 @@ impl ResourceManager {
 
     /// Mark an async load as failed.
     pub fn fail_load(&self, id: ResourceId) {
-        if let Ok(mut resources) = self.resources.lock() {
-            if let Some(entry) = resources.get_mut(&id) {
+        if let Ok(mut resources) = self.resources.lock()
+            && let Some(entry) = resources.get_mut(&id) {
                 entry.status = LoadStatus::Failed;
             }
-        }
     }
 
     /// Try to get a loaded resource. Returns `None` if not ready.
@@ -178,8 +178,8 @@ impl ResourceManager {
     /// Release a reference. If ref count hits zero, resource stays loaded
     /// until [`gc`](Self::gc) is called.
     pub fn release(&self, id: ResourceId) {
-        if let Ok(resources) = self.resources.lock() {
-            if let Some(entry) = resources.get(&id) {
+        if let Ok(resources) = self.resources.lock()
+            && let Some(entry) = resources.get(&id) {
                 let prev = entry.ref_count.load(Ordering::Relaxed);
                 if prev == 0 {
                     log::error!(
@@ -190,7 +190,6 @@ impl ResourceManager {
                 }
                 entry.ref_count.fetch_sub(1, Ordering::Relaxed);
             }
-        }
     }
 
     /// Remove all resources with zero references. Returns the number of

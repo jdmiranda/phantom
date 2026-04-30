@@ -75,6 +75,7 @@ struct BannerState {
 
 impl NotificationBanner {
     /// Construct an empty banner (hidden until `set_message` is called).
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             state: None,
@@ -98,12 +99,14 @@ impl NotificationBanner {
     }
 
     /// `true` if there is an active banner waiting to render.
+    #[must_use] 
     pub fn is_visible(&self) -> bool {
         self.state.is_some()
     }
 
     /// Pixel height the banner occupies when visible. Returns `0.0` when
     /// hidden so the App can use this in layout math without a branch.
+    #[must_use] 
     pub fn height(&self) -> f32 {
         if self.is_visible() {
             NOTIFICATION_BANNER_HEIGHT

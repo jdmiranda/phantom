@@ -440,11 +440,10 @@ impl AgentPane {
 
         let agent_id = agent.id();
         let mut journal = open_agent_journal(agent_id);
-        if let Some(ref mut j) = journal {
-            if let Err(e) = j.record_spawn(agent_id, &task_desc) {
+        if let Some(ref mut j) = journal
+            && let Err(e) = j.record_spawn(agent_id, &task_desc) {
                 warn!("AgentJournal::record_spawn failed: {e}");
             }
-        }
 
         Self {
             task: task_desc,
@@ -562,11 +561,10 @@ impl AgentPane {
                     self.current_assistant_text.push_str(&text);
                     if let Some(ref mut j) = self.journal {
                         let first_line = text.lines().next().unwrap_or("").to_string();
-                        if !first_line.is_empty() {
-                            if let Err(e) = j.record_output(self.agent.id() as u64, first_line) {
+                        if !first_line.is_empty()
+                            && let Err(e) = j.record_output(self.agent.id(), first_line) {
                                 warn!("AgentJournal::record_output failed: {e}");
                             }
-                        }
                     }
                     // Cap output to prevent unbounded memory growth.
                     if self.output.len() > 65536 {
@@ -581,11 +579,10 @@ impl AgentPane {
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
-                    if let Some(ref mut j) = self.journal {
-                        if let Err(e) = j.record_tool_call(self.agent.id() as u64, call.tool.api_name(), &args_display) {
+                    if let Some(ref mut j) = self.journal
+                        && let Err(e) = j.record_tool_call(self.agent.id(), call.tool.api_name(), &args_display) {
                             warn!("AgentJournal::record_tool_call failed: {e}");
                         }
-                    }
                     if args_display.is_empty() {
                         self.output
                             .push_str(&format!("\n▶ {}\n", call.tool.api_name()));
@@ -620,7 +617,7 @@ impl AgentPane {
                                 "~{}in/~{}out tokens, {} tool calls",
                                 self.input_tokens, self.output_tokens, self.tool_call_count
                             );
-                            if let Err(e) = j.record_completion(self.agent.id() as u64, true, summary) {
+                            if let Err(e) = j.record_completion(self.agent.id(), true, summary) {
                                 warn!("AgentJournal::record_completion failed: {e}");
                             }
                         }
@@ -642,11 +639,10 @@ impl AgentPane {
                 }
                 Some(ApiEvent::Error(e)) => {
                     self.output.push_str(&format!("\n\n✗ Error: {e}\n"));
-                    if let Some(ref mut j) = self.journal {
-                        if let Err(je) = j.record_flatline(self.agent.id() as u64, &e) {
+                    if let Some(ref mut j) = self.journal
+                        && let Err(je) = j.record_flatline(self.agent.id(), &e) {
                             warn!("AgentJournal::record_flatline failed: {je}");
                         }
-                    }
                     self.rollback_if_dirty();
                     self.flush_capture_record();
                     self.status = AgentPaneStatus::Failed;

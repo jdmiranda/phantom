@@ -174,11 +174,10 @@ fn parse_blockers(body: &str) -> Vec<u64> {
         if let Some(rest) = stripped.strip_prefix("blocked by:") {
             // rest = " #24, #30" etc.
             for tok in rest.split([',', ' ', '\t']) {
-                if let Some(num_str) = tok.strip_prefix('#') {
-                    if let Ok(n) = num_str.parse::<u64>() {
+                if let Some(num_str) = tok.strip_prefix('#')
+                    && let Ok(n) = num_str.parse::<u64>() {
                         out.push(n);
                     }
-                }
             }
         }
     }

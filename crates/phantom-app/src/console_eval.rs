@@ -67,6 +67,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
 /// Returns immediately for built-in commands. For everything else,
 /// returns `EvalResult::Pending` -- the caller should submit the input
 /// to the NLP/brain pipeline via the job queue.
+#[must_use] 
 pub fn evaluate(input: &str) -> EvalResult {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -93,11 +94,10 @@ pub fn evaluate(input: &str) -> EvalResult {
         _ => {
             // Check for parameterized builtins
             if let Some(rest) = lower.strip_prefix("log.verbose ") {
-                if let Result::Ok(level) = rest.trim().parse::<u8>() {
-                    if level <= 4 {
+                if let Result::Ok(level) = rest.trim().parse::<u8>()
+                    && level <= 4 {
                         return EvalResult::Ok(Some(format!("Verbosity set to {level}.")));
                     }
-                }
                 return EvalResult::Err("Usage: log.verbose <0-4>".into());
             }
 

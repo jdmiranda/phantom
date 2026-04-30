@@ -514,6 +514,7 @@ pub fn execute_agent_command(cmd: &AgentCommand, manager: &mut AgentManager) -> 
 // ---------------------------------------------------------------------------
 
 /// Format the agent list as a table (for `agents` command).
+#[must_use] 
 pub fn format_agent_list(manager: &AgentManager) -> Vec<String> {
     let agents = manager.agents();
     if agents.is_empty() {
@@ -526,12 +527,13 @@ pub fn format_agent_list(manager: &AgentManager) -> Vec<String> {
         ];
     }
 
-    let mut lines = Vec::new();
-    lines.push("+------------------------------------------------------------------+".into());
-    lines.push("|  PHANTOM AGENTS                                                  |".into());
-    lines.push("+------------------------------------------------------------------+".into());
-    lines.push("|  ID    | STATUS   | TASK                        | TIME          |".into());
-    lines.push("|--------|----------|-----------------------------|---------------|".into());
+    let mut lines: Vec<String> = vec![
+        "+------------------------------------------------------------------+".into(),
+        "|  PHANTOM AGENTS                                                  |".into(),
+        "+------------------------------------------------------------------+".into(),
+        "|  ID    | STATUS   | TASK                        | TIME          |".into(),
+        "|--------|----------|-----------------------------|---------------|".into(),
+    ];
 
     for agent in agents {
         let id = format!("#{}", agent.id());
@@ -549,6 +551,7 @@ pub fn format_agent_list(manager: &AgentManager) -> Vec<String> {
 }
 
 /// Format a single agent's details (for `agent 3` command).
+#[must_use] 
 pub fn format_agent_detail(agent: &Agent) -> Vec<String> {
     let mut lines = Vec::new();
 

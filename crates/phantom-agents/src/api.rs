@@ -36,6 +36,7 @@ impl ClaudeConfig {
     /// Load from the `ANTHROPIC_API_KEY` environment variable.
     ///
     /// Returns `None` if the variable is unset or empty.
+    #[must_use] 
     pub fn from_env() -> Option<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").ok()?;
         if api_key.is_empty() {
@@ -64,6 +65,7 @@ impl ClaudeConfig {
     }
 
     /// Override max tokens.
+    #[must_use] 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
         self
@@ -129,12 +131,14 @@ impl ApiHandle {
     }
 
     /// Whether the request has completed (either successfully or with an error).
+    #[must_use] 
     pub fn is_done(&self) -> bool {
         self.done
     }
 
     /// Create a handle from a raw receiver. Used by test harnesses to inject
     /// synthetic API events without hitting the network.
+    #[must_use] 
     pub fn from_receiver(rx: mpsc::Receiver<ApiEvent>) -> Self {
         Self { rx, done: false }
     }
@@ -372,6 +376,7 @@ fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
 /// Returns an [`ApiHandle`] that the main thread polls each frame via
 /// [`ApiHandle::try_recv`]. The background thread uses `reqwest::blocking`
 /// so no async runtime is needed.
+#[must_use] 
 pub fn send_message(
     config: &ClaudeConfig,
     agent: &Agent,

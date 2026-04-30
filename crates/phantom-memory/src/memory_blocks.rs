@@ -194,6 +194,7 @@ impl MemoryStore {
     /// argument) the existing block's `read_only` setting is preserved.
     /// `perm` controls *this handle's* capability and is independent of
     /// other handles to the same block.
+    #[must_use]
     pub fn attach(&self, key: BlockKey, perm: Permission, read_only: bool) -> BlockHandle {
         let block = self
             .blocks

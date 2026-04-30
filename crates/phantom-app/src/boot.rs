@@ -239,11 +239,13 @@ pub struct BootSequence {
 
 impl BootSequence {
     /// Create a new boot sequence, starting at `BlackScreen` / t=0.
+    #[must_use] 
     pub fn new() -> Self {
         Self::with_size(DEFAULT_COLS, DEFAULT_ROWS)
     }
 
     /// Create a boot sequence sized to the given terminal dimensions.
+    #[must_use] 
     pub fn with_size(cols: usize, rows: usize) -> Self {
         Self {
             elapsed: 0.0,
@@ -341,22 +343,26 @@ impl BootSequence {
     }
 
     /// The current boot phase.
+    #[must_use] 
     pub fn phase(&self) -> BootPhase {
         self.phase
     }
 
     /// Returns `true` once the boot sequence is finished and the app should
     /// switch to normal terminal rendering.
+    #[must_use] 
     pub fn is_done(&self) -> bool {
         self.phase == BootPhase::Done
     }
 
     /// Total elapsed time since boot start, in seconds.
+    #[must_use] 
     pub fn elapsed(&self) -> f32 {
         self.elapsed
     }
 
     /// Whether the blinking cursor should currently be visible.
+    #[must_use] 
     pub fn cursor_visible(&self) -> bool {
         self.cursor_on
     }
@@ -370,6 +376,7 @@ impl BootSequence {
     /// - `BlackScreen`: 0.0 (no CRT effects).
     /// - `CrtWarmup`: smooth ramp from 0.0 to 1.0.
     /// - All later phases: 1.0.
+    #[must_use] 
     pub fn crt_intensity(&self) -> f32 {
         match self.phase {
             BootPhase::BlackScreen => 0.0,
@@ -383,6 +390,7 @@ impl BootSequence {
 
     /// Phosphor glow intensity, slightly offset from CRT warmup for a layered
     /// feel. Peaks at 1.0 during `LogoReveal` and stays there.
+    #[must_use] 
     pub fn glow_intensity(&self) -> f32 {
         match self.phase {
             BootPhase::BlackScreen => 0.0,
@@ -396,6 +404,7 @@ impl BootSequence {
     }
 
     /// Scanline intensity, fading in during warmup.
+    #[must_use] 
     pub fn scanline_intensity(&self) -> f32 {
         match self.phase {
             BootPhase::BlackScreen => 0.0,
@@ -409,6 +418,7 @@ impl BootSequence {
 
     /// Transition-to-terminal progress (0.0 at start of transition, 1.0 at end).
     /// Useful for fading out the boot screen or cross-fading to the terminal.
+    #[must_use] 
     pub fn transition_progress(&self) -> f32 {
         match self.phase {
             BootPhase::TransitionToTerminal => {
@@ -422,6 +432,7 @@ impl BootSequence {
 
     /// Overall boot screen opacity. 1.0 for most phases, fades to 0.0 during
     /// the transition so the terminal can appear underneath.
+    #[must_use] 
     pub fn screen_opacity(&self) -> f32 {
         1.0 - self.transition_progress()
     }
@@ -439,6 +450,7 @@ impl BootSequence {
     /// - Glitching ASCII logo (from `LogoReveal` onward)
     /// - System-check status lines with progress bars (from `SystemCheck` onward)
     /// - SYSTEM READY + blinking prompt (from `Welcome` onward)
+    #[must_use] 
     pub fn visible_text(&self) -> Vec<BootTextLine> {
         let mut lines = Vec::new();
 
@@ -866,6 +878,7 @@ impl BootSequence {
     }
 
     /// Returns true if the boot sequence is paused waiting for user input.
+    #[must_use] 
     pub fn is_waiting(&self) -> bool {
         self.waiting_for_keypress
     }

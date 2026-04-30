@@ -1,20 +1,20 @@
-/// Desktop PATH resolution for GUI launches.
-///
-/// When Phantom is launched as a desktop application (e.g. via a .app bundle
-/// on macOS or a .desktop file on Linux), the inherited `PATH` is typically
-/// stripped down to the bare system defaults and does not include user-shell
-/// paths such as `/usr/local/bin`, `/opt/homebrew/bin`, or `~/.cargo/bin`.
-///
-/// `resolve_desktop_path` probes the user's login shell for its full `PATH`
-/// and merges that into the current process environment so that every
-/// subsequent tool-spawn (git, cargo, node, …) can find its binary.
-///
-/// # Platform notes
-/// - **macOS / Linux**: spawns `$SHELL -l -c 'echo $PATH'` with a 3-second
-///   timeout; falls back to `$SHELL -i -c 'echo $PATH'` if the first attempt
-///   fails.
-/// - **Windows**: no-op (PATH handling is different there and not needed for
-///   the desktop-launch scenario).
+//! Desktop PATH resolution for GUI launches.
+//!
+//! When Phantom is launched as a desktop application (e.g. via a .app bundle
+//! on macOS or a .desktop file on Linux), the inherited `PATH` is typically
+//! stripped down to the bare system defaults and does not include user-shell
+//! paths such as `/usr/local/bin`, `/opt/homebrew/bin`, or `~/.cargo/bin`.
+//!
+//! `resolve_desktop_path` probes the user's login shell for its full `PATH`
+//! and merges that into the current process environment so that every
+//! subsequent tool-spawn (git, cargo, node, …) can find its binary.
+//!
+//! # Platform notes
+//! - **macOS / Linux**: spawns `$SHELL -l -c 'echo $PATH'` with a 3-second
+//!   timeout; falls back to `$SHELL -i -c 'echo $PATH'` if the first attempt
+//!   fails.
+//! - **Windows**: no-op (PATH handling is different there and not needed for
+//!   the desktop-launch scenario).
 
 #[cfg(not(target_os = "windows"))]
 use std::time::Duration;

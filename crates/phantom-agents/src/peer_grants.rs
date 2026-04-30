@@ -89,6 +89,7 @@ impl PeerGrants {
     ///
     /// The `peer_id` field is set to [`PeerId::ZERO`] — callers must override
     /// it before inserting into the registry.
+    #[must_use] 
     pub fn default_remote() -> Self {
         Self {
             peer_id: PeerId(String::new()),
@@ -98,6 +99,7 @@ impl PeerGrants {
     }
 
     /// Returns `true` iff this grant record has not yet expired.
+    #[must_use] 
     pub fn is_valid(&self) -> bool {
         match self.until {
             None => true,
@@ -106,6 +108,7 @@ impl PeerGrants {
     }
 
     /// Returns `true` iff this grant allows `class`.
+    #[must_use] 
     pub fn allows(&self, class: CapabilityClass) -> bool {
         self.is_valid() && self.allowed_classes.contains(&class)
     }
@@ -135,6 +138,7 @@ pub struct PeerGrantRegistry {
 impl PeerGrantRegistry {
     /// Create an empty registry. Unknown peers will receive an empty grant
     /// (deny all) unless explicitly registered.
+    #[must_use] 
     pub fn new() -> Self {
         Self::default()
     }
@@ -166,6 +170,7 @@ impl PeerGrantRegistry {
     /// - Known peer with valid (non-expired) grant → their `allowed_classes`.
     /// - Known peer with expired grant → empty set (deny all).
     /// - Unknown peer → empty set (deny all).
+    #[must_use] 
     pub fn effective_classes(&self, peer_id: &PeerId) -> HashSet<CapabilityClass> {
         match self.grants.get(peer_id) {
             Some(g) if g.is_valid() => g.allowed_classes.clone(),
@@ -177,6 +182,7 @@ impl PeerGrantRegistry {
     ///
     /// - `true`: known peer with a valid (non-expired) grant that includes `class`.
     /// - `false`: unknown peer, expired grant, or class not in grant.
+    #[must_use] 
     pub fn check(&self, peer_id: &PeerId, class: CapabilityClass) -> bool {
         match self.grants.get(peer_id) {
             Some(g) => g.allows(class),

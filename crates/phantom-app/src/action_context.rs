@@ -60,8 +60,8 @@ impl ActionHandler for AppActionHandler<'_> {
 
     fn show_notification(&mut self, msg: String) {
         info!("[PHANTOM]: {msg}");
-        if let Some(store) = self.notification_store {
-            if let Err(e) = store.push(
+        if let Some(store) = self.notification_store
+            && let Err(e) = store.push(
                 phantom_memory::notifications::NotificationKind::PlanReady,
                 "Phantom",
                 &msg,
@@ -69,7 +69,6 @@ impl ActionHandler for AppActionHandler<'_> {
             ) {
                 warn!("NotificationStore::push failed: {e}");
             }
-        }
     }
 
     fn update_memory(&mut self, key: String, value: String) {

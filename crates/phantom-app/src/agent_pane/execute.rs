@@ -84,14 +84,13 @@ impl AgentPane {
         use log::warn;
 
         if self.turn_count >= MAX_TOOL_ROUNDS {
-            if let Some(ref mut j) = self.journal {
-                if let Err(e) = j.record_flatline(
-                    self.agent.id() as u64,
+            if let Some(ref mut j) = self.journal
+                && let Err(e) = j.record_flatline(
+                    self.agent.id(),
                     format!("iteration limit reached ({MAX_TOOL_ROUNDS} tool rounds)"),
                 ) {
                     warn!("AgentJournal::record_flatline (limit) failed: {e}");
                 }
-            }
             self.output.push_str(&format!(
                 "\n\n✗ Agent hit iteration limit ({MAX_TOOL_ROUNDS} tool rounds).\n"
             ));

@@ -50,6 +50,7 @@ struct NegEntry {
 
 impl LayoutArbiter {
     /// Create a new arbiter with the given available content area and cell size.
+    #[must_use] 
     pub fn new(available: (f32, f32), cell_size: (f32, f32)) -> Self {
         Self {
             available,
@@ -66,6 +67,7 @@ impl LayoutArbiter {
     ///
     /// Layout direction: vertical stack. Each adapter gets full width;
     /// height is the negotiated dimension.
+    #[must_use] 
     pub fn negotiate(&self, preferences: &[(AppId, SpatialPreference)]) -> LayoutPlan {
         if preferences.is_empty() {
             return LayoutPlan {
@@ -90,8 +92,8 @@ impl LayoutArbiter {
 
                 // Aspect ratio constraint: if set, adjust preferred_h so that
                 // width / height == aspect_ratio. Width is always available_w.
-                if let Some(ratio) = pref.aspect_ratio {
-                    if ratio > 0.0 {
+                if let Some(ratio) = pref.aspect_ratio
+                    && ratio > 0.0 {
                         let ratio_h = available_w / ratio;
                         // Clamp to min/max.
                         preferred_h = ratio_h.max(min_h);
@@ -99,7 +101,6 @@ impl LayoutArbiter {
                             preferred_h = preferred_h.min(mx);
                         }
                     }
-                }
 
                 NegEntry {
                     app_id: *id,
@@ -265,6 +266,7 @@ impl LayoutArbiter {
     ///
     /// Treats the requested `new_size` (in pixels) as that adapter's new
     /// preferred size, converts to cols/rows, and re-runs `negotiate`.
+    #[must_use] 
     pub fn request_resize(
         &self,
         _current_plan: &LayoutPlan,

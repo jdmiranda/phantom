@@ -133,11 +133,11 @@ impl ApplicationHandler for Phantom {
                         log::error!("Input panic: {}", panic_message(panic));
                     }
                 }
-                if let Some(app) = &mut self.app {
-                    if app.should_quit() {
-                        app.shutdown();
-                        event_loop.exit();
-                    }
+                if let Some(app) = &mut self.app
+                    && app.should_quit()
+                {
+                    app.shutdown();
+                    event_loop.exit();
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -162,10 +162,10 @@ impl ApplicationHandler for Phantom {
                 let frame_result = if let Some(app) = &mut self.app {
                     // Raw-write frame trace to disk (survives SIGKILL, bypasses logger).
                     // Only writes every ~500 frames to avoid I/O overhead.
-                    if let Some(trace) = app.watchdog_trace(500) {
-                        if let Some(log_path) = LOG_PATH.get() {
-                            raw_append_to_log(log_path, trace.as_bytes());
-                        }
+                    if let Some(trace) = app.watchdog_trace(500)
+                        && let Some(log_path) = LOG_PATH.get()
+                    {
+                        raw_append_to_log(log_path, trace.as_bytes());
                     }
 
                     std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -336,18 +336,18 @@ extern "C" fn signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx:
     pos = append(&mut buf, pos, b"\n");
 
     // Write to crash file.
-    if let Some(path) = SIGNAL_CRASH_PATH.get() {
-        if let Ok(cstr) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) {
-            unsafe {
-                let fd = libc::open(
-                    cstr.as_ptr(),
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                    0o644,
-                );
-                if fd >= 0 {
-                    libc::write(fd, buf.as_ptr() as *const libc::c_void, pos);
-                    libc::close(fd);
-                }
+    if let Some(path) = SIGNAL_CRASH_PATH.get()
+        && let Ok(cstr) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+    {
+        unsafe {
+            let fd = libc::open(
+                cstr.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            );
+            if fd >= 0 {
+                libc::write(fd, buf.as_ptr() as *const libc::c_void, pos);
+                libc::close(fd);
             }
         }
     }
@@ -475,17 +475,15 @@ fn main() -> Result<()> {
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("phantom-mcp-") && name.ends_with(".sock") {
-                    // Extract PID from socket name and check if process is alive.
-                    if let Some(pid_str) = name.strip_prefix("phantom-mcp-").and_then(|s| s.strip_suffix(".sock")) {
-                        if let Ok(pid) = pid_str.parse::<i32>() {
-                            // kill(pid, 0) checks if process exists without sending a signal.
-                            if unsafe { libc::kill(pid, 0) } != 0 {
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
-                    }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("phantom-mcp-")
+                && name.ends_with(".sock")
+                && let Some(pid_str) = name.strip_prefix("phantom-mcp-").and_then(|s| s.strip_suffix(".sock"))
+                && let Ok(pid) = pid_str.parse::<i32>()
+            {
+                // kill(pid, 0) checks if process exists without sending a signal.
+                if unsafe { libc::kill(pid, 0) } != 0 {
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }
@@ -628,58 +626,58 @@ fn main() -> Result<()> {
             }
             "--font-size" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(v) = args[i].parse::<f32>() {
-                        config.font_size = v;
-                    }
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<f32>()
+                {
+                    config.font_size = v;
                 }
             }
             "--scanlines" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(v) = args[i].parse::<f32>() {
-                        config.shader_overrides.scanline_intensity = Some(v);
-                    }
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<f32>()
+                {
+                    config.shader_overrides.scanline_intensity = Some(v);
                 }
             }
             "--bloom" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(v) = args[i].parse::<f32>() {
-                        config.shader_overrides.bloom_intensity = Some(v);
-                    }
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<f32>()
+                {
+                    config.shader_overrides.bloom_intensity = Some(v);
                 }
             }
             "--aberration" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(v) = args[i].parse::<f32>() {
-                        config.shader_overrides.chromatic_aberration = Some(v);
-                    }
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<f32>()
+                {
+                    config.shader_overrides.chromatic_aberration = Some(v);
                 }
             }
             "--curvature" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(v) = args[i].parse::<f32>() {
-                        config.shader_overrides.curvature = Some(v);
-                    }
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<f32>()
+                {
+                    config.shader_overrides.curvature = Some(v);
                 }
             }
             "--vignette" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(v) = args[i].parse::<f32>() {
-                        config.shader_overrides.vignette_intensity = Some(v);
-                    }
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<f32>()
+                {
+                    config.shader_overrides.vignette_intensity = Some(v);
                 }
             }
             "--noise" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(v) = args[i].parse::<f32>() {
-                        config.shader_overrides.noise_intensity = Some(v);
-                    }
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<f32>()
+                {
+                    config.shader_overrides.noise_intensity = Some(v);
                 }
             }
             "--no-boot" => {

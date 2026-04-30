@@ -106,7 +106,7 @@ fn taint_cycle_walk_terminates_and_returns_tainted() {
         Some(1), // C's parent = B
     ];
     // Initial taint levels for each node.
-    let node_taint = vec![
+    let node_taint = [
         TaintLevel::Tainted, // A is tainted (was denied)
         TaintLevel::Suspect, // B is upstream
         TaintLevel::Clean,   // C is clean

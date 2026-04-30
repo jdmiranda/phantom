@@ -162,8 +162,8 @@ pub fn dispatch_tool(
     // capability check or handler runs. The quarantine registry is checked via
     // its own lock; if the lock is poisoned, we fail open (conservative) to
     // avoid wedging the dispatch path.
-    if let Some(quarantine) = ctx.quarantine.as_ref() {
-        if quarantine_registry_blocks(ctx.self_ref.id, quarantine) {
+    if let Some(quarantine) = ctx.quarantine.as_ref()
+        && quarantine_registry_blocks(ctx.self_ref.id, quarantine) {
             return result(
                 PLACEHOLDER_TOOL,
                 false,
@@ -173,7 +173,6 @@ pub fn dispatch_tool(
                 ),
             );
         }
-    }
 
     // ---- Issue #105: SpawnOnly gate (layer-3) ------------------------------
     //
@@ -181,8 +180,8 @@ pub fn dispatch_tool(
     // All other tools are denied before any capability check or handler runs.
     // The denial is recorded in the event log for audit completeness.
     if !ctx.runtime_mode.permits(name) {
-        if let Some(log) = ctx.event_log.as_ref() {
-            if let Ok(mut guard) = log.lock() {
+        if let Some(log) = ctx.event_log.as_ref()
+            && let Ok(mut guard) = log.lock() {
                 let _ = guard.append(
                     phantom_memory::event_log::EventSource::Agent { id: ctx.self_ref.id },
                     "runtime.denied",
@@ -193,7 +192,6 @@ pub fn dispatch_tool(
                     }),
                 );
             }
-        }
         return result(
             PLACEHOLDER_TOOL,
             false,

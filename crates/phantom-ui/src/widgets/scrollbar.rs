@@ -75,6 +75,7 @@ pub struct ScrollState {
 
 impl ScrollState {
     /// Create a scroll state.
+    #[must_use] 
     pub fn new(display_offset: usize, history_size: usize, visible_rows: usize) -> Self {
         Self {
             display_offset,
@@ -84,16 +85,19 @@ impl ScrollState {
     }
 
     /// Lines of history above the visible viewport (0 = scrolled to bottom).
+    #[must_use] 
     pub fn display_offset(&self) -> usize {
         self.display_offset
     }
 
     /// Total scrollback lines available above the viewport.
+    #[must_use] 
     pub fn history_size(&self) -> usize {
         self.history_size
     }
 
     /// Number of lines currently visible in the pane.
+    #[must_use] 
     pub fn visible_rows(&self) -> usize {
         self.visible_rows
     }
@@ -102,11 +106,13 @@ impl ScrollState {
     ///
     /// Returns `false` when the content fits entirely on screen (no history)
     /// or when the values are all zero.
+    #[must_use] 
     pub fn is_scrollable(&self) -> bool {
         self.history_size > 0 && self.visible_rows > 0
     }
 
     /// Thumb height as a fraction of the track (clamped to `[0, 1]`).
+    #[must_use] 
     pub fn thumb_ratio(&self) -> f32 {
         let total = self.history_size + self.visible_rows;
         if total == 0 {
@@ -116,6 +122,7 @@ impl ScrollState {
     }
 
     /// Scroll fraction: 0.0 = scrolled to bottom, 1.0 = scrolled to top.
+    #[must_use] 
     pub fn scroll_fraction(&self) -> f32 {
         if self.history_size == 0 {
             return 0.0;
@@ -163,6 +170,7 @@ pub struct Scrollbar {
 
 impl Scrollbar {
     /// Create a scrollbar with Phosphor-default colors.
+    #[must_use] 
     pub fn new(state: ScrollState) -> Self {
         Self {
             colors: ColorRoles::phosphor(),
@@ -171,6 +179,7 @@ impl Scrollbar {
     }
 
     /// Create a scrollbar with explicit color roles (e.g. from the active theme).
+    #[must_use] 
     pub fn with_colors(state: ScrollState, colors: ColorRoles) -> Self {
         Self { colors, state }
     }
@@ -181,6 +190,7 @@ impl Scrollbar {
     }
 
     /// The current scroll state.
+    #[must_use] 
     pub fn state(&self) -> ScrollState {
         self.state
     }

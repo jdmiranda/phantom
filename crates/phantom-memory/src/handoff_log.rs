@@ -95,34 +95,42 @@ impl HandoffEntry {
     }
 
     /// The agent that transferred the task.
+    #[must_use]
     pub fn from_agent(&self) -> u64 {
         self.from_agent
     }
     /// The agent that received the task.
+    #[must_use]
     pub fn to_agent(&self) -> u64 {
         self.to_agent
     }
     /// Application-level task identifier.
+    #[must_use]
     pub fn task_id(&self) -> &str {
         &self.task_id
     }
     /// Brief summary of what the from-agent accomplished.
+    #[must_use]
     pub fn summary(&self) -> &str {
         &self.summary
     }
     /// Descriptions of already-tried, already-failed approaches.
+    #[must_use]
     pub fn failed_attempts(&self) -> &[String] {
         &self.failed_attempts
     }
     /// Memory-block identifiers the receiving agent should consult.
+    #[must_use]
     pub fn memory_refs(&self) -> &[String] {
         &self.memory_refs
     }
     /// Optional causality token linking this handoff to a pipeline run.
+    #[must_use]
     pub fn correlation_id(&self) -> Option<&str> {
         self.correlation_id.as_deref()
     }
     /// Wall-clock time in milliseconds since the Unix epoch.
+    #[must_use]
     pub fn ts_unix_ms(&self) -> i64 {
         self.ts_unix_ms
     }

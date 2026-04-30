@@ -82,11 +82,13 @@ pub struct TerminalAdapter {
 
 impl TerminalAdapter {
     /// Wrap an already-spawned terminal in the adapter.
+    #[must_use] 
     pub fn new(terminal: PhantomTerminal) -> Self {
         Self::with_theme(terminal, TerminalThemeColors::default())
     }
 
     /// Wrap a terminal with specific theme colors for grid rendering.
+    #[must_use] 
     pub fn with_theme(terminal: PhantomTerminal, theme_colors: TerminalThemeColors) -> Self {
         Self {
             terminal,
@@ -111,6 +113,7 @@ impl TerminalAdapter {
     }
 
     /// Immutable access to the inner terminal.
+    #[must_use] 
     pub fn terminal(&self) -> &PhantomTerminal {
         &self.terminal
     }
@@ -121,11 +124,13 @@ impl TerminalAdapter {
     }
 
     /// The raw output buffer (last ~8 KiB of PTY output).
+    #[must_use] 
     pub fn output_buf(&self) -> &str {
         &self.output_buf
     }
 
     /// Whether new PTY output arrived since the last clear.
+    #[must_use] 
     pub fn has_new_output(&self) -> bool {
         self.has_new_output
     }
@@ -136,16 +141,19 @@ impl TerminalAdapter {
     }
 
     /// Whether the terminal is detached (alt-screen program running).
+    #[must_use] 
     pub fn is_detached(&self) -> bool {
         self.is_detached
     }
 
     /// Label of the detached foreground process (e.g. "vim", "htop").
+    #[must_use] 
     pub fn detached_label(&self) -> &str {
         &self.detached_label
     }
 
     /// Whether an error notification has been sent for the current output.
+    #[must_use] 
     pub fn error_notified(&self) -> bool {
         self.error_notified
     }
@@ -313,8 +321,8 @@ impl AppCore for TerminalAdapter {
         // push a fresh render snapshot so the view adapter always has the
         // latest grid data.  We use a dummy full-screen rect here; the view
         // adapter re-anchors to its own rect in render().
-        if self.is_detached {
-            if let Some(ref snapshot) = self.alt_screen_snapshot {
+        if self.is_detached
+            && let Some(ref snapshot) = self.alt_screen_snapshot {
                 let dummy_rect = phantom_adapter::adapter::Rect {
                     x: 0.0,
                     y: 0.0,
@@ -327,7 +335,6 @@ impl AppCore for TerminalAdapter {
                     *guard = Some(render_out);
                 }
             }
-        }
     }
 
     fn attach_alt_screen_snapshot(

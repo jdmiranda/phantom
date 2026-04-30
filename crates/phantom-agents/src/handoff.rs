@@ -63,6 +63,7 @@ impl HandoffContext {
     ///
     /// `from_agent` → `to_agent` is the direction of the handoff.
     /// `task` is the task being transferred.
+    #[must_use] 
     pub fn builder(from_agent: AgentId, to_agent: AgentId, task: AgentTask) -> HandoffContextBuilder {
         HandoffContextBuilder {
             from_agent,
@@ -78,36 +79,43 @@ impl HandoffContext {
     // ── Accessors ─────────────────────────────────────────────────────────
 
     /// The agent that is handing off.
+    #[must_use] 
     pub fn from_agent(&self) -> AgentId {
         self.from_agent
     }
 
     /// The agent that is receiving.
+    #[must_use] 
     pub fn to_agent(&self) -> AgentId {
         self.to_agent
     }
 
     /// The task being transferred.
+    #[must_use] 
     pub fn task(&self) -> &AgentTask {
         &self.task
     }
 
     /// What the from-agent accomplished before handing off.
+    #[must_use] 
     pub fn summary(&self) -> &str {
         &self.summary
     }
 
     /// Descriptions of already-tried, already-failed approaches.
+    #[must_use] 
     pub fn failed_attempts(&self) -> &[String] {
         &self.failed_attempts
     }
 
     /// Memory-block identifiers the receiving agent should consult.
+    #[must_use] 
     pub fn memory_refs(&self) -> &[String] {
         &self.memory_refs
     }
 
     /// Correlation id linking this handoff to a pipeline run.
+    #[must_use] 
     pub fn correlation_id(&self) -> Option<CorrelationId> {
         self.correlation_id
     }
@@ -210,12 +218,14 @@ impl HandoffContextBuilder {
     }
 
     /// Attach a correlation id (links this handoff to a pipeline run).
+    #[must_use] 
     pub fn correlation_id(mut self, cid: CorrelationId) -> Self {
         self.correlation_id = Some(cid);
         self
     }
 
     /// Finalise and return the [`HandoffContext`].
+    #[must_use] 
     pub fn build(self) -> HandoffContext {
         HandoffContext {
             from_agent: self.from_agent,

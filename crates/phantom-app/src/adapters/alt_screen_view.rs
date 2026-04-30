@@ -28,6 +28,7 @@ use serde_json::json;
 pub type AltScreenSnapshot = Arc<Mutex<Option<RenderOutput>>>;
 
 /// Create a new empty snapshot handle.
+#[must_use] 
 pub fn new_snapshot() -> AltScreenSnapshot {
     Arc::new(Mutex::new(None))
 }
@@ -51,6 +52,7 @@ impl AltScreenViewAdapter {
     }
 
     /// The shared snapshot handle (hand this to the primary adapter).
+    #[must_use] 
     pub fn snapshot_arc(&self) -> AltScreenSnapshot {
         Arc::clone(&self.snapshot)
     }
@@ -86,8 +88,8 @@ impl AppCore for AltScreenViewAdapter {
 impl Renderable for AltScreenViewAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
         // Attempt to read the latest snapshot pushed by the primary terminal.
-        if let Ok(guard) = self.snapshot.lock() {
-            if let Some(mut output) = guard.clone() {
+        if let Ok(guard) = self.snapshot.lock()
+            && let Some(mut output) = guard.clone() {
                 // Re-anchor the grid origin to this adapter's rect, since the
                 // primary may have been positioned differently.
                 if let Some(ref mut grid) = output.grid {
@@ -95,7 +97,6 @@ impl Renderable for AltScreenViewAdapter {
                 }
                 return output;
             }
-        }
         // No snapshot yet — return empty output.
         RenderOutput::default()
     }

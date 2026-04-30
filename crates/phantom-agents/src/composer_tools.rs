@@ -309,7 +309,7 @@ pub fn wait_for_agent(
             // caller polls after the fact.
             let tail = g.tail(4096);
             for ev in tail.into_iter().rev() {
-                if !kinds.iter().any(|k| ev.kind == *k) {
+                if !kinds.contains(&ev.kind) {
                     continue;
                 }
                 let matches_id = ev

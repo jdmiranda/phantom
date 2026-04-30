@@ -71,6 +71,7 @@ pub struct SkillStore {
 
 impl SkillStore {
     /// Create an empty skill store.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             skills: HashMap::new(),
@@ -177,6 +178,7 @@ impl SkillStore {
     /// retrieval (Voyager uses OpenAI Embeddings + Chroma with cosine similarity).
     ///
     /// Returns skills sorted by relevance (best first), capped at `RETRIEVAL_TOP_K`.
+    #[must_use] 
     pub fn retrieve(&self, query: &str) -> Vec<&SkillEntry> {
         if self.skills.is_empty() {
             return Vec::new();
@@ -225,6 +227,7 @@ impl SkillStore {
     ///
     /// Mirrors Voyager's pattern of injecting top-5 relevant skills into
     /// the action agent's prompt so it can compose them.
+    #[must_use] 
     pub fn format_for_prompt(&self, query: &str) -> String {
         let skills = self.retrieve(query);
         if skills.is_empty() {
@@ -246,16 +249,19 @@ impl SkillStore {
     }
 
     /// Get all skill names (for curriculum context).
+    #[must_use] 
     pub fn list_skill_names(&self) -> Vec<String> {
         self.skills.keys().cloned().collect()
     }
 
     /// Total number of skills in the library.
+    #[must_use] 
     pub fn count(&self) -> usize {
         self.skills.len()
     }
 
     /// Get a skill by name.
+    #[must_use] 
     pub fn get(&self, name: &str) -> Option<&SkillEntry> {
         self.skills.get(name)
     }

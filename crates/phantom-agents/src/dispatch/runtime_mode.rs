@@ -26,6 +26,7 @@ pub enum RuntimeMode {
 
 impl RuntimeMode {
     /// Machine-readable label used in event-log payloads.
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
@@ -37,6 +38,7 @@ impl RuntimeMode {
     ///
     /// In `Normal` mode every tool is permitted (capability gating applies
     /// separately). In `SpawnOnly` mode only `"spawn_subagent"` passes.
+    #[must_use] 
     pub fn permits(self, tool_name: &str) -> bool {
         match self {
             Self::Normal => true,

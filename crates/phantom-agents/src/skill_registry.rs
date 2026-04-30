@@ -76,6 +76,7 @@ pub struct SkillRegistry {
 impl SkillRegistry {
     /// Create a new registry pre-populated with the built-in skills and
     /// the default disposition → skill mappings.
+    #[must_use] 
     pub fn new() -> Self {
         let mut reg = Self {
             skills: HashMap::new(),
@@ -104,7 +105,7 @@ impl SkillRegistry {
         ] {
             reg.disposition_map
                 .entry(d)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push("tdd".to_string());
         }
 
@@ -114,14 +115,14 @@ impl SkillRegistry {
             Disposition::Synthesize,
             Disposition::Decompose,
         ] {
-            let names = reg.disposition_map.entry(d).or_insert_with(Vec::new);
+            let names = reg.disposition_map.entry(d).or_default();
             names.push("planning".to_string());
             names.push("spec-gate".to_string());
         }
 
         // Actor-type dispositions: bugfix, refactor.
         for d in [Disposition::BugFix, Disposition::Refactor] {
-            let names = reg.disposition_map.entry(d).or_insert_with(Vec::new);
+            let names = reg.disposition_map.entry(d).or_default();
             names.push("actor".to_string());
             names.push("safety".to_string());
         }
@@ -134,7 +135,7 @@ impl SkillRegistry {
             // append "composer" here.
             reg.disposition_map
                 .entry(d)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push("composer".to_string());
         }
 
@@ -155,6 +156,7 @@ impl SkillRegistry {
     /// Skills whose names are in the disposition map but whose content is not
     /// in the registry (e.g. registered but later removed) are silently
     /// skipped.
+    #[must_use] 
     pub fn skills_for(&self, disposition: &Disposition) -> Vec<(&str, &str)> {
         let Some(names) = self.disposition_map.get(disposition) else {
             return Vec::new();
@@ -280,7 +282,7 @@ mod tests {
         // Manually wire it to a disposition to verify skills_for picks it up.
         reg.disposition_map
             .entry(Disposition::Audit)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push("myskill".to_string());
 
         let skills = reg.skills_for(&Disposition::Audit);

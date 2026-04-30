@@ -13,6 +13,7 @@ pub struct Clock {
 
 impl Clock {
     /// Create a new clock that starts running immediately.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             elapsed: Duration::ZERO,
@@ -23,6 +24,7 @@ impl Clock {
     }
 
     /// Create a new clock that starts in a paused state.
+    #[must_use] 
     pub fn new_paused() -> Self {
         Self {
             elapsed: Duration::ZERO,
@@ -47,16 +49,19 @@ impl Clock {
     }
 
     /// Total elapsed scaled time since creation.
+    #[must_use] 
     pub fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
     /// Elapsed as `f32` seconds (convenience for passing to `update(dt)`).
+    #[must_use] 
     pub fn elapsed_secs_f32(&self) -> f32 {
         self.elapsed.as_secs_f32()
     }
 
     /// Elapsed as `f64` seconds (higher precision).
+    #[must_use] 
     pub fn elapsed_secs_f64(&self) -> f64 {
         self.elapsed.as_secs_f64()
     }
@@ -72,6 +77,7 @@ impl Clock {
     }
 
     /// Returns `true` if the clock is paused.
+    #[must_use] 
     pub fn is_paused(&self) -> bool {
         self.is_paused
     }
@@ -82,6 +88,7 @@ impl Clock {
     }
 
     /// Current time scale.
+    #[must_use] 
     pub fn time_scale(&self) -> f32 {
         self.time_scale
     }
@@ -93,6 +100,7 @@ impl Clock {
     }
 
     /// When this clock was created (wall-clock).
+    #[must_use] 
     pub fn created_at(&self) -> Instant {
         self.created_at
     }
@@ -113,11 +121,13 @@ pub struct DtClamp {
 
 impl DtClamp {
     /// Create a clamp with explicit target and max durations.
+    #[must_use] 
     pub fn new(target_dt: Duration, max_dt: Duration) -> Self {
         Self { target_dt, max_dt }
     }
 
     /// Standard 60 fps clamp (16.6 ms target, 100 ms max).
+    #[must_use] 
     pub fn default_60fps() -> Self {
         Self {
             target_dt: Duration::from_micros(16_667),
@@ -126,6 +136,7 @@ impl DtClamp {
     }
 
     /// If `measured` exceeds `max_dt`, return `target_dt` instead.
+    #[must_use] 
     pub fn apply(&self, measured: Duration) -> Duration {
         if measured > self.max_dt {
             self.target_dt
@@ -135,11 +146,13 @@ impl DtClamp {
     }
 
     /// The nominal target frame duration.
+    #[must_use] 
     pub fn target_dt(&self) -> Duration {
         self.target_dt
     }
 
     /// The maximum tolerable frame duration before clamping kicks in.
+    #[must_use] 
     pub fn max_dt(&self) -> Duration {
         self.max_dt
     }
@@ -159,6 +172,7 @@ impl Cadence {
     /// Create a cadence that fires at `target_hz` ticks per second.
     ///
     /// A `target_hz` of 0 (or negative) means the cadence never fires.
+    #[must_use] 
     pub fn new(target_hz: f32) -> Self {
         let interval = if target_hz > 0.0 {
             Duration::from_secs_f64(1.0 / f64::from(target_hz))
@@ -173,6 +187,7 @@ impl Cadence {
     }
 
     /// Unlimited cadence — always ticks (for the renderer at frame rate).
+    #[must_use] 
     pub fn unlimited() -> Self {
         Self {
             target_hz: f32::INFINITY,
@@ -196,6 +211,7 @@ impl Cadence {
     }
 
     /// The declared target frequency in Hz.
+    #[must_use] 
     pub fn target_hz(&self) -> f32 {
         self.target_hz
     }
@@ -207,11 +223,7 @@ mod tests {
 
     /// Assert two durations are within 1 microsecond (accounts for `mul_f32` rounding).
     fn assert_duration_approx(actual: Duration, expected: Duration) {
-        let diff = if actual > expected {
-            actual - expected
-        } else {
-            expected - actual
-        };
+        let diff = actual.abs_diff(expected);
         assert!(
             diff < Duration::from_micros(1),
             "durations differ by {diff:?}: actual={actual:?}, expected={expected:?}",

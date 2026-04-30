@@ -89,6 +89,7 @@ pub struct ShutdownGuard {
 
 impl ShutdownGuard {
     /// Create a new guard, marking the app as "started".
+    #[must_use] 
     pub fn new() -> Self {
         Self { started: true }
     }

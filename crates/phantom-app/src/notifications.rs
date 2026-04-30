@@ -131,6 +131,7 @@ impl Default for NotificationCenter {
 impl NotificationCenter {
     /// Construct a center with the documented defaults
     /// (3 denials in 60s → a 30s Danger banner).
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             banners: Vec::new(),
@@ -144,6 +145,7 @@ impl NotificationCenter {
     /// Construct a center with explicit thresholds. Reserved for tests so
     /// they don't have to wait minutes of wall clock to exercise expiry.
     #[cfg(test)]
+    #[must_use] 
     pub fn with_config(threshold: usize, window_ms: u64, banner_ttl_ms: u64) -> Self {
         Self {
             banners: Vec::new(),
@@ -219,6 +221,7 @@ impl NotificationCenter {
     /// Severity is ordered Info < Warn < Danger; ties broken by *most
     /// recently inserted* (later in `banners` wins). The renderer reads
     /// this each frame to decide whether to draw the banner widget.
+    #[must_use] 
     pub fn current_banner(&self) -> Option<&Banner> {
         self.banners
             .iter()
@@ -227,12 +230,14 @@ impl NotificationCenter {
 
     /// Active banner count. Test/debug helper.
     #[cfg(test)]
+    #[must_use] 
     pub fn banner_count(&self) -> usize {
         self.banners.len()
     }
 
     /// Recent-denial count for `agent_id`. Test helper to confirm pruning.
     #[cfg(test)]
+    #[must_use] 
     pub fn denial_count(&self, agent_id: u64) -> usize {
         self.denial_history
             .get(&agent_id)

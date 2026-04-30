@@ -69,11 +69,13 @@ impl Goal {
     }
 
     /// The goal description.
+    #[must_use] 
     pub fn description(&self) -> &str {
         &self.description
     }
 
     /// The success criteria.
+    #[must_use] 
     pub fn success_criteria(&self) -> &str {
         &self.success_criteria
     }
@@ -106,6 +108,7 @@ pub struct Step {
 
 impl Step {
     /// Create a new [`Step`].
+    #[must_use] 
     pub fn new(
         description: String,
         max_attempts: u8,
@@ -121,21 +124,25 @@ impl Step {
     }
 
     /// The human-readable description of what this step should do.
+    #[must_use] 
     pub fn description(&self) -> &str {
         &self.description
     }
 
     /// Maximum number of agent attempts before this step is marked failed.
+    #[must_use] 
     pub fn max_attempts(&self) -> u8 {
         self.max_attempts
     }
 
     /// Optional hint naming which tool or agent type should handle this step.
+    #[must_use] 
     pub fn tool_hint(&self) -> Option<&str> {
         self.tool_hint.as_deref()
     }
 
     /// 0-based indices of steps that must complete before this one starts.
+    #[must_use] 
     pub fn dependencies(&self) -> &[usize] {
         &self.dependencies
     }
@@ -195,6 +202,7 @@ impl ClaudeChatBackend {
     }
 
     /// Create a backend using `claude-sonnet-4-20250514` with 1024 max tokens.
+    #[must_use] 
     pub fn default_model() -> Self {
         Self::new("claude-sonnet-4-20250514", 1024)
     }
@@ -305,6 +313,7 @@ fn build_decomposition_prompt(goal: &Goal, ctx: &ProjectContext) -> String {
 ///
 /// Lines that don't start with a digit followed by `.` are skipped.
 /// Dependency and tool annotations are optional.
+#[must_use] 
 pub fn parse_steps(response: &str) -> Vec<Step> {
     let mut steps = Vec::new();
 
@@ -348,8 +357,8 @@ fn extract_annotations(line: &str) -> (String, Option<String>, Vec<usize>) {
     let mut description = line.to_string();
 
     // Extract [tool: X] annotation.
-    if let Some(start) = description.find("[tool:") {
-        if let Some(end) = description[start..].find(']') {
+    if let Some(start) = description.find("[tool:")
+        && let Some(end) = description[start..].find(']') {
             let annotation = &description[start..start + end + 1];
             let inner = annotation
                 .trim_start_matches("[tool:")
@@ -364,11 +373,10 @@ fn extract_annotations(line: &str) -> (String, Option<String>, Vec<usize>) {
                 &description[start + end + 1..].trim_start()
             );
         }
-    }
 
     // Extract [depends: N, M, ...] annotation.
-    if let Some(start) = description.find("[depends:") {
-        if let Some(end) = description[start..].find(']') {
+    if let Some(start) = description.find("[depends:")
+        && let Some(end) = description[start..].find(']') {
             let annotation = &description[start..start + end + 1];
             let inner = annotation
                 .trim_start_matches("[depends:")
@@ -376,12 +384,11 @@ fn extract_annotations(line: &str) -> (String, Option<String>, Vec<usize>) {
                 .trim();
             for part in inner.split(',') {
                 let part = part.trim();
-                if let Ok(n) = part.parse::<usize>() {
-                    if n >= 1 {
+                if let Ok(n) = part.parse::<usize>()
+                    && n >= 1 {
                         // Convert from 1-based to 0-based.
                         dependencies.push(n - 1);
                     }
-                }
             }
             description = format!(
                 "{}{}",
@@ -389,7 +396,6 @@ fn extract_annotations(line: &str) -> (String, Option<String>, Vec<usize>) {
                 &description[start + end + 1..].trim_start()
             );
         }
-    }
 
     (description.trim().to_string(), tool_hint, dependencies)
 }

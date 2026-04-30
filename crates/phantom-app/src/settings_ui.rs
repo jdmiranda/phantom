@@ -183,21 +183,19 @@ impl SettingsPanel {
 
     /// Navigate to next item (wraps within current section).
     pub fn next_item(&mut self) {
-        if let Some(section) = self.sections.get(self.selected_section) {
-            if !section.items.is_empty() {
+        if let Some(section) = self.sections.get(self.selected_section)
+            && !section.items.is_empty() {
                 self.selected_item = (self.selected_item + 1) % section.items.len();
             }
-        }
     }
 
     /// Navigate to previous item.
     pub fn prev_item(&mut self) {
-        if let Some(section) = self.sections.get(self.selected_section) {
-            if !section.items.is_empty() {
+        if let Some(section) = self.sections.get(self.selected_section)
+            && !section.items.is_empty() {
                 self.selected_item =
                     (self.selected_item + section.items.len() - 1) % section.items.len();
             }
-        }
     }
 
     /// Switch to next section.

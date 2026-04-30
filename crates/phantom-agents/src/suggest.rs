@@ -76,6 +76,7 @@ const COLOR_OPTIONS: [f32; 4] = [0.0, 0.85, 0.4, 0.7];
 /// - The command succeeded without errors.
 /// - The output contains only warnings (no compiler/runtime errors).
 /// - `ErrorHighlighter` decides a fix suggestion is not warranted.
+#[must_use] 
 pub fn suggest(parsed: &ParsedOutput, working_dir: &str) -> Option<AgentSuggestion> {
     if !ErrorHighlighter::should_suggest_fix(parsed) {
         return None;
@@ -102,6 +103,7 @@ pub fn suggest(parsed: &ParsedOutput, working_dir: &str) -> Option<AgentSuggesti
 /// Format a suggestion as terminal output lines with RGBA colors.
 ///
 /// Returns a list of `(text, color)` pairs ready for the renderer.
+#[must_use] 
 pub fn format_suggestion(suggestion: &AgentSuggestion) -> Vec<(String, [f32; 4])> {
     let options_line = suggestion
         .options
@@ -150,8 +152,8 @@ fn default_options() -> Vec<SuggestionOption> {
 /// 4. Otherwise use the raw summary as the error description.
 fn build_task(parsed: &ParsedOutput, working_dir: &str) -> AgentTask {
     // Test failure path -- specific task shape.
-    if let ContentType::TestResults(ref summary) = parsed.content_type {
-        if summary.failed > 0 {
+    if let ContentType::TestResults(ref summary) = parsed.content_type
+        && summary.failed > 0 {
             let failure_list = if summary.failures.is_empty() {
                 format!("{} test(s) failed", summary.failed)
             } else {
@@ -166,7 +168,6 @@ fn build_task(parsed: &ParsedOutput, working_dir: &str) -> AgentTask {
                 context: build_context(parsed, working_dir),
             };
         }
-    }
 
     // Find the best structured error (prefer ones with file info).
     let primary_error = parsed
@@ -234,11 +235,10 @@ fn build_context(parsed: &ParsedOutput, working_dir: &str) -> String {
     }
 
     // Append compiler suggestion if the primary error has one.
-    if let Some(err) = parsed.errors.first() {
-        if let Some(suggestion) = &err.suggestion {
+    if let Some(err) = parsed.errors.first()
+        && let Some(suggestion) = &err.suggestion {
             ctx.push_str(&format!("\nCompiler suggests: {suggestion}"));
         }
-    }
 
     ctx
 }

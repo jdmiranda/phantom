@@ -426,6 +426,7 @@ impl App {
 
     /// Render a generic monitor panel at a given position/width.
     /// Returns the panel height.
+    #[allow(clippy::too_many_arguments)]
     fn render_monitor_panel(
         &mut self,
         title: &str,

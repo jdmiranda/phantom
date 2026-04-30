@@ -96,6 +96,7 @@ pub enum ResponseCurve {
 
 impl ResponseCurve {
     /// Evaluate the curve for a given input in [0.0, 1.0].
+    #[must_use] 
     pub fn evaluate(&self, input: f32) -> f32 {
         let input = input.clamp(0.0, 1.0);
         match self {
@@ -135,6 +136,7 @@ impl ResponseCurve {
     // -- Convenience constructors --
 
     /// Linear curve: 0 at input=0, `max_score` at input=1.
+    #[must_use] 
     pub fn linear(max_score: f32) -> Self {
         Self::Linear {
             slope: max_score,
@@ -144,6 +146,7 @@ impl ResponseCurve {
     }
 
     /// Polynomial with exponent 2 (quadratic ramp).
+    #[must_use] 
     pub fn quadratic(max_score: f32) -> Self {
         Self::Polynomial {
             exponent: 2.0,
@@ -153,6 +156,7 @@ impl ResponseCurve {
     }
 
     /// Logistic S-curve centered at 0.5 with moderate steepness.
+    #[must_use] 
     pub fn logistic(max_score: f32) -> Self {
         Self::Logistic {
             midpoint: 0.5,
@@ -162,6 +166,7 @@ impl ResponseCurve {
     }
 
     /// Step function that returns `score` when input >= threshold.
+    #[must_use] 
     pub fn step(threshold: f32, score: f32) -> Self {
         Self::Step {
             threshold,
@@ -227,13 +232,13 @@ impl std::fmt::Debug for Consideration {
 impl Consideration {
     /// Evaluate this consideration against a scoring context.
     /// Returns the score contribution (0.0 if filtered out).
+    #[must_use] 
     pub fn evaluate(&self, ctx: &ScoringContext) -> f32 {
         // Check filter gate.
-        if let Some(ref filter) = self.filter {
-            if !(filter.gate)(ctx) {
+        if let Some(ref filter) = self.filter
+            && !(filter.gate)(ctx) {
                 return 0.0;
             }
-        }
         // Read input and apply curve.
         let input = (self.input_fn)(ctx);
         self.curve.evaluate(input)
@@ -262,6 +267,7 @@ pub enum ActionClass {
 
 impl ActionClass {
     /// The base score for this class (minimum when the behavior fires).
+    #[must_use] 
     pub fn base_score(self) -> f32 {
         match self {
             Self::Basic => 0.0,
@@ -272,6 +278,7 @@ impl ActionClass {
     }
 
     /// The maximum dynamic range within this class.
+    #[must_use] 
     pub fn dynamic_range(self) -> f32 {
         match self {
             Self::Basic => 10.0,
@@ -353,6 +360,7 @@ pub struct Behavior {
     /// entire behavior is treated as non-viable and returns 0.0 (the behavior
     /// cannot even earn its class base score). This is the DA:I root-filter
     /// that prevents non-applicable behaviors from polluting the score table.
+    #[allow(clippy::type_complexity)]
     pub viable: Option<Box<dyn Fn(&ScoringContext) -> bool + Send>>,
     /// The considerations that compose this behavior's score.
     /// Score = base_score + sum(consideration.evaluate()).
@@ -366,13 +374,13 @@ impl Behavior {
     /// Returns 0.0 immediately if the `viable` gate is present and fails.
     /// This is the DA:I additive composition: start at base_score for the
     /// action class, then add each consideration's curve output.
+    #[must_use] 
     pub fn evaluate(&self, ctx: &ScoringContext) -> f32 {
         // Root viability check — if the behavior can't possibly apply, score 0.
-        if let Some(ref gate) = self.viable {
-            if !gate(ctx) {
+        if let Some(ref gate) = self.viable
+            && !gate(ctx) {
                 return 0.0;
             }
-        }
 
         let base = self.class.base_score();
         let max_add = self.class.dynamic_range();
@@ -420,6 +428,7 @@ pub struct Momentum {
 }
 
 impl Momentum {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             active_behavior: None,
@@ -445,6 +454,7 @@ impl Momentum {
     ///
     /// Returns > 0.0 if this behavior is the currently active one and the
     /// bonus hasn't fully decayed. Returns 0.0 otherwise.
+    #[must_use] 
     pub fn bonus_for(&self, behavior_id: &str) -> f32 {
         let Some(ref active) = self.active_behavior else {
             return 0.0;
@@ -515,6 +525,7 @@ pub struct BehaviorDecisionSystem {
 }
 
 impl BehaviorDecisionSystem {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             behaviors: Vec::new(),
@@ -593,6 +604,7 @@ impl Default for BehaviorDecisionSystem {
 /// This maps the current hardcoded scorers in `scoring.rs` to the DA:I
 /// data-driven system. Each former scorer method becomes a `Behavior`
 /// with explicit considerations and response curves.
+#[must_use] 
 pub fn build_default_behaviors() -> Vec<Behavior> {
     vec![
         // -- Quiet baseline (Basic class, always viable) --
@@ -823,16 +835,19 @@ pub struct LinearCurve {
 
 impl LinearCurve {
     /// Create a custom linear curve `score = m * x + b`.
+    #[must_use] 
     pub fn new(m: f32, b: f32) -> Self {
         Self { m, b }
     }
 
     /// Rising ramp from 0 to 1 (`m=1, b=0`).
+    #[must_use] 
     pub fn rising() -> Self {
         Self { m: 1.0, b: 0.0 }
     }
 
     /// Falling ramp from 1 to 0 (`m=-1, b=1`).
+    #[must_use] 
     pub fn falling() -> Self {
         Self { m: -1.0, b: 1.0 }
     }
@@ -871,6 +886,7 @@ pub struct ExponentialCurve {
 
 impl ExponentialCurve {
     /// Create a power-law curve with exponent `k`.
+    #[must_use] 
     pub fn new(k: f32) -> Self {
         Self {
             k: k.max(f32::EPSILON),
@@ -878,11 +894,13 @@ impl ExponentialCurve {
     }
 
     /// Quadratic ramp (`k = 2`): accelerating urgency.
+    #[must_use] 
     pub fn quadratic() -> Self {
         Self { k: 2.0 }
     }
 
     /// Square-root ramp (`k = 0.5`): fast initial gain, diminishing returns.
+    #[must_use] 
     pub fn sqrt() -> Self {
         Self { k: 0.5 }
     }
@@ -927,6 +945,7 @@ pub struct LogisticCurve {
 
 impl LogisticCurve {
     /// Create a logistic curve with custom midpoint and steepness.
+    #[must_use] 
     pub fn new(midpoint: f32, steepness: f32) -> Self {
         Self {
             midpoint,
@@ -935,6 +954,7 @@ impl LogisticCurve {
     }
 
     /// Standard sigmoid centered at 0.5 with moderate steepness (10).
+    #[must_use] 
     pub fn standard() -> Self {
         Self {
             midpoint: 0.5,
@@ -943,6 +963,7 @@ impl LogisticCurve {
     }
 
     /// Sharp transition (steepness = 20) centered at 0.5.
+    #[must_use] 
     pub fn sharp() -> Self {
         Self {
             midpoint: 0.5,
@@ -989,6 +1010,7 @@ pub struct StepCurve {
 
 impl StepCurve {
     /// Create a step with custom threshold and values.
+    #[must_use] 
     pub fn new(threshold: f32, on_value: f32, off_value: f32) -> Self {
         Self {
             threshold,
@@ -998,6 +1020,7 @@ impl StepCurve {
     }
 
     /// Binary 0/1 step that activates at `threshold`.
+    #[must_use] 
     pub fn on_at(threshold: f32) -> Self {
         Self {
             threshold,
@@ -1007,6 +1030,7 @@ impl StepCurve {
     }
 
     /// Always-on constant (threshold = 0).
+    #[must_use] 
     pub fn always_on() -> Self {
         Self {
             threshold: 0.0,
@@ -1111,6 +1135,7 @@ pub struct CompositeCurve {
 
 impl CompositeCurve {
     /// Create without validation (weights clamped to ≥ 0 at evaluation).
+    #[must_use] 
     pub fn new(components: Vec<(Box<dyn UtilityCurve>, f32)>) -> Self {
         Self { components }
     }
@@ -1124,11 +1149,13 @@ impl CompositeCurve {
     }
 
     /// Number of component curves.
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.components.len()
     }
 
     /// True if no component curves are registered.
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.components.is_empty()
     }
@@ -1708,7 +1735,7 @@ mod tests {
         for x in [0.0f32, 0.499, 0.5, 0.501, 1.0] {
             let s = c.score(x);
             assert!(
-                s >= 0.0 && s <= 1.0,
+                (0.0..=1.0).contains(&s),
                 "logistic output {s} out of [0,1] at x={x}"
             );
         }
@@ -1769,7 +1796,7 @@ mod tests {
         for x in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
             let s = c.score(x);
             assert!(
-                s >= 0.0 && s <= 1.0,
+                (0.0..=1.0).contains(&s),
                 "inverted output {s} out of [0,1] at x={x}"
             );
         }
@@ -1832,7 +1859,7 @@ mod tests {
         for x in [0.0f32, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
             let s = c.score(x);
             assert!(
-                s >= 0.0 && s <= 1.0,
+                (0.0..=1.0).contains(&s),
                 "composite output {s} out of [0,1] at x={x}"
             );
         }

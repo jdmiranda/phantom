@@ -55,8 +55,8 @@ pub fn parse_mention<'a>(
     let trimmed = input.trim_start();
 
     // :role: prefix.
-    if trimmed.starts_with(':') {
-        if let Some(end) = trimmed[1..].find(':') {
+    if trimmed.starts_with(':')
+        && let Some(end) = trimmed[1..].find(':') {
             let role_token = &trimmed[1..=end]; // exclusive of trailing ':'
             let body = trimmed[(end + 2)..].trim_start().to_owned();
             if let Some(role) = parse_role_token(role_token) {
@@ -68,7 +68,6 @@ pub fn parse_mention<'a>(
                 };
             }
         }
-    }
 
     // @label prefix.
     if let Some(rest) = trimmed.strip_prefix('@') {
@@ -135,10 +134,8 @@ mod tests {
 
     #[test]
     fn at_label_routes_to_matching_agent() {
-        let agents = vec![
-            ref_for(7, AgentRole::Watcher, "contradictions"),
-            ref_for(8, AgentRole::Watcher, "build-watcher"),
-        ];
+        let agents = [ref_for(7, AgentRole::Watcher, "contradictions"),
+            ref_for(8, AgentRole::Watcher, "build-watcher")];
         let p = parse_mention("@contradictions what did you see?", agents.iter());
         assert_eq!(p.target, MentionTarget::Agent(7));
         assert_eq!(p.body, "what did you see?");
@@ -146,7 +143,7 @@ mod tests {
 
     #[test]
     fn at_label_no_body_returns_empty_body() {
-        let agents = vec![ref_for(1, AgentRole::Watcher, "alpha")];
+        let agents = [ref_for(1, AgentRole::Watcher, "alpha")];
         let p = parse_mention("@alpha", agents.iter());
         assert_eq!(p.target, MentionTarget::Agent(1));
         assert_eq!(p.body, "");
@@ -154,7 +151,7 @@ mod tests {
 
     #[test]
     fn at_unknown_label_returns_unmatched_with_body_kept() {
-        let agents = vec![ref_for(1, AgentRole::Watcher, "real")];
+        let agents = [ref_for(1, AgentRole::Watcher, "real")];
         let p = parse_mention("@ghost are you there?", agents.iter());
         assert_eq!(
             p.target,
@@ -200,7 +197,7 @@ mod tests {
 
     #[test]
     fn leading_whitespace_is_tolerated() {
-        let agents = vec![ref_for(1, AgentRole::Watcher, "x")];
+        let agents = [ref_for(1, AgentRole::Watcher, "x")];
         let p = parse_mention("   @x hello", agents.iter());
         assert_eq!(p.target, MentionTarget::Agent(1));
         assert_eq!(p.body, "hello");
@@ -209,7 +206,7 @@ mod tests {
     #[test]
     fn at_in_middle_is_not_a_mention() {
         // Plain text containing '@' but not at the start should route to default.
-        let agents = vec![ref_for(1, AgentRole::Watcher, "label")];
+        let agents = [ref_for(1, AgentRole::Watcher, "label")];
         let p = parse_mention("email me @ a@b.com", agents.iter());
         assert_eq!(p.target, MentionTarget::DefaultConversational);
     }
@@ -225,7 +222,7 @@ mod tests {
     fn unmatched_label_falls_through_to_useful_body() {
         // Important UX: even when the label is wrong, the body is kept so
         // caller can route to default with a "did you mean…?" hint.
-        let agents = vec![ref_for(1, AgentRole::Watcher, "real")];
+        let agents = [ref_for(1, AgentRole::Watcher, "real")];
         let p = parse_mention("@typo do the thing", agents.iter());
         assert_eq!(p.body, "do the thing");
     }

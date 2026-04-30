@@ -66,11 +66,13 @@ pub struct Divider {
 
 impl Divider {
     /// Create a 1 px horizontal divider using the fallback render context.
+    #[must_use] 
     pub fn horizontal() -> Self {
         Self::new(Orientation::Horizontal, RenderCtx::fallback())
     }
 
     /// Create a 1 px vertical divider using the fallback render context.
+    #[must_use] 
     pub fn vertical() -> Self {
         Self::new(Orientation::Vertical, RenderCtx::fallback())
     }
@@ -79,6 +81,7 @@ impl Divider {
     ///
     /// `thickness` defaults to `tokens.hair()` (1 px). Call
     /// [`Self::with_thickness`] to override after construction.
+    #[must_use] 
     pub fn new(orientation: Orientation, ctx: RenderCtx) -> Self {
         let thickness = Tokens::phosphor(ctx).hair();
         Self {
@@ -101,6 +104,7 @@ impl Divider {
     }
 
     /// The axis along which this divider line runs.
+    #[must_use] 
     pub fn orientation(&self) -> Orientation {
         self.orientation
     }
@@ -109,12 +113,14 @@ impl Divider {
     ///
     /// For a [`Orientation::Horizontal`] divider this is the height;
     /// for a [`Orientation::Vertical`] divider this is the width.
+    #[must_use] 
     pub fn thickness(&self) -> f32 {
         self.thickness
     }
 
     /// The preferred minor-axis size (height for horizontal, width for
     /// vertical) that the caller should reserve in the layout budget.
+    #[must_use] 
     pub fn preferred_size(&self) -> f32 {
         self.thickness
     }

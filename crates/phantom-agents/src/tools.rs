@@ -40,6 +40,7 @@ pub enum ToolType {
 
 impl ToolType {
     /// The wire name sent to the Claude API.
+    #[must_use] 
     pub fn api_name(&self) -> &'static str {
         match self {
             Self::ReadFile => "read_file",
@@ -54,6 +55,7 @@ impl ToolType {
     }
 
     /// Parse from the wire name returned by the Claude API.
+    #[must_use] 
     pub fn from_api_name(name: &str) -> Option<Self> {
         match name {
             "read_file" => Some(Self::ReadFile),
@@ -76,6 +78,7 @@ impl ToolType {
     /// [`CapabilityClass::Act`]. The value is consumed by
     /// [`crate::dispatch::dispatch_tool`] — the single source of truth for
     /// capability gating — before the tool handler runs (issue #104).
+    #[must_use] 
     pub fn capability_class(&self) -> CapabilityClass {
         match self {
             Self::ReadFile
@@ -118,6 +121,7 @@ impl DispatchError {
     /// Uses the exact phrasing the agent runtime surfaces to the model
     /// (e.g. `"capability denied: Act not in Watcher manifest"`). The
     /// model uses this to self-correct on its next turn.
+    #[must_use] 
     pub fn to_tool_result_message(&self) -> String {
         match self {
             Self::CapabilityDenied { role, tool_class } => {
@@ -361,6 +365,7 @@ pub struct ToolDefinition {
 }
 
 /// Get all available tool definitions for the AI model.
+#[must_use] 
 pub fn available_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -562,6 +567,7 @@ fn sandbox_path(working_dir: &Path, relative: &str) -> Result<PathBuf, String> {
 /// The returned [`ToolResult`] is tagged with provenance computed from the
 /// tool name and JSON args. Callers that have a substrate event id should
 /// use [`execute_tool_with_provenance`] instead so the chain is complete.
+#[must_use] 
 pub fn execute_tool(
     tool: ToolType,
     args: &serde_json::Value,
@@ -590,6 +596,7 @@ pub fn execute_tool(
 /// first 16 hex chars of `blake3(args_json)` — same algorithm the audit
 /// log uses, so the in-memory chain and the on-disk audit record refer to
 /// identical hashes.
+#[must_use] 
 pub fn execute_tool_with_provenance(
     tool: ToolType,
     args: &serde_json::Value,
@@ -711,13 +718,11 @@ fn execute_write_file(root: &Path, args: &serde_json::Value) -> ToolResult {
     let target = root.join(path_str);
 
     // Ensure parent directory exists.
-    if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            if let Err(e) = fs::create_dir_all(parent) {
+    if let Some(parent) = target.parent()
+        && !parent.exists()
+            && let Err(e) = fs::create_dir_all(parent) {
                 return tool_err(tool, format!("cannot create directories: {e}"));
             }
-        }
-    }
 
     // Now sandbox_path will succeed since parent exists.
     let resolved = match sandbox_path(root, path_str) {

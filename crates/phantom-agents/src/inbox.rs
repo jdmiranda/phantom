@@ -123,6 +123,7 @@ impl AgentRegistry {
     /// number of agents that successfully received it. Failed deliveries
     /// (closed inboxes, full channels) are silently skipped — broadcast is
     /// best-effort by design.
+    #[must_use] 
     pub fn broadcast_role(&self, role: AgentRole, msg: InboxMessage) -> usize {
         let mut delivered = 0usize;
         // We only have one `msg`. Build a fresh `Reconfigure`/etc per send by
@@ -140,6 +141,7 @@ impl AgentRegistry {
     }
 
     /// All live agent refs, in insertion-order-ish (HashMap iteration).
+    #[must_use] 
     pub fn list(&self) -> Vec<&AgentRef> {
         self.by_id.values().map(|h| &h.agent_ref).collect()
     }
@@ -147,6 +149,7 @@ impl AgentRegistry {
     /// First handle whose label matches `label` exactly. Returns `None` if no
     /// agent has that label. Labels aren't guaranteed unique by the registry;
     /// the spawner is responsible for label discipline.
+    #[must_use] 
     pub fn find_by_label(&self, label: &str) -> Option<&AgentHandle> {
         self.by_id.values().find(|h| h.agent_ref.label == label)
     }

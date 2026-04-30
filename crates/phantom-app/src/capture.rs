@@ -438,7 +438,7 @@ impl crate::app::App {
         // Snapshot the (app_id, rect) pairs first so we can release the
         // coordinator borrow before mutating self.capture_state.
         let outputs = self.coordinator.render_all(&self.layout, self.cell_size);
-        let mut pane_rects: Vec<(AppId, (u32, u32), (u32, u32))> = Vec::new();
+        let mut pane_rects = Vec::new();
         for (app_id, rect, _ro) in &outputs {
             // Convert pixel-space f32 rect to integer texel origin/extent.
             let x = rect.x.max(0.0).floor() as u32;
@@ -495,13 +495,12 @@ impl crate::app::App {
             };
 
             // Dedup gate: skip if the hash matches the last stored frame.
-            if let Some(prev) = pane_state.last_dhash {
-                if hamming_distance(prev, hash) <= DEDUP_HAMMING_THRESHOLD {
+            if let Some(prev) = pane_state.last_dhash
+                && hamming_distance(prev, hash) <= DEDUP_HAMMING_THRESHOLD {
                     pane_state.consecutive_identical =
                         pane_state.consecutive_identical.saturating_add(1);
                     continue;
                 }
-            }
             pane_state.consecutive_identical = 0;
             pane_state.last_dhash = Some(hash);
 
@@ -519,9 +518,9 @@ impl crate::app::App {
                 use phantom_protocol::Event;
                 let msg = BusMessage {
                     topic_id: self.topic_capture_frame,
-                    sender: u32::from(app_id),
+                    sender: app_id,
                     event: Event::FrameCaptured {
-                        pane_id: u32::from(app_id),
+                        pane_id: app_id,
                         timestamp_ms: frame_timestamp_ms,
                     },
                     frame: 0,
@@ -774,9 +773,11 @@ mod tests {
             width: 100,
             height: 100,
         });
-        let mut ps = PaneCaptureState::default();
-        ps.open_bundle = Some(bundle);
-        ps.pending_pixels = vec![vec![0xAA, 0xBB, 0xCC, 0xDD]];
+        let ps = PaneCaptureState {
+            open_bundle: Some(bundle),
+            pending_pixels: vec![vec![0xAA, 0xBB, 0xCC, 0xDD]],
+            ..PaneCaptureState::default()
+        };
         state.panes.insert(pane, ps);
 
         assert_eq!(state.open_frame_count(), 1, "1 frame open before seal");
@@ -1143,9 +1144,11 @@ mod tests {
                 height: 2,
             });
         }
-        let mut ps = PaneCaptureState::default();
-        ps.open_bundle = Some(bundle);
-        ps.pending_pixels = vec![vec![1; 16], vec![2; 16]];
+        let ps = PaneCaptureState {
+            open_bundle: Some(bundle),
+            pending_pixels: vec![vec![1; 16], vec![2; 16]],
+            ..PaneCaptureState::default()
+        };
         state.panes.insert(pane, ps);
 
         // Mirror the seal_pane_bundle body.

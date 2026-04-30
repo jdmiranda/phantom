@@ -157,8 +157,8 @@ impl App {
                 self.quit_requested = true;
             }
             Action::Copy => {
-                if let Some(focused) = self.coordinator.focused() {
-                    if let Ok(text) = self.coordinator.send_command(
+                if let Some(focused) = self.coordinator.focused()
+                    && let Ok(text) = self.coordinator.send_command(
                         focused,
                         "select_copy",
                         &serde_json::json!({}),
@@ -172,15 +172,13 @@ impl App {
                             debug!("Copy: no selection");
                         }
                     }
-                }
             }
             Action::Paste => {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    if let Ok(text) = clipboard.get_text() {
+                if let Ok(mut clipboard) = arboard::Clipboard::new()
+                    && let Ok(text) = clipboard.get_text() {
                         self.coordinator.route_bytes(text.as_bytes());
                         info!("Pasted {} bytes from clipboard", text.len());
                     }
-                }
             }
             // Phantom is panes-first; tabs are not a shipped concept.
             // Redirect tab actions to their pane equivalents so the keybind
@@ -382,12 +380,11 @@ impl App {
         self.last_input_time = Instant::now();
 
         // Escape dismisses context menu.
-        if self.context_menu.visible {
-            if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+        if self.context_menu.visible
+            && matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
                 self.context_menu.hide();
                 return;
             }
-        }
 
         // Escape exits fullscreen mode.
         if self.fullscreen_pane.is_some()
@@ -486,12 +483,11 @@ impl App {
             && modifiers.state().shift_key()
             && matches!(&event.logical_key, Key::Character(s) if s == "D" || s == "d")
         {
-            if let Some(focused) = self.coordinator.focused() {
-                if self.coordinator.is_floating(focused) {
+            if let Some(focused) = self.coordinator.focused()
+                && self.coordinator.is_floating(focused) {
                     self.coordinator
                         .dock_to_grid(focused, &mut self.layout, &mut self.scene);
                 }
-            }
             return;
         }
 
@@ -520,16 +516,14 @@ impl App {
         if !modifiers.state().control_key()
             && !modifiers.state().alt_key()
             && !modifiers.state().super_key()
-        {
-            if matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
+            && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
                 self.console.toggle();
                 debug!("Console toggled open");
                 return;
             }
-        }
 
-        if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers) {
-            if let Some(action) = self.keybinds.lookup(&combo) {
+        if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers)
+            && let Some(action) = self.keybinds.lookup(&combo) {
                 // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
                 // Let them fall through to the PTY so the program receives them.
                 let is_scroll = matches!(
@@ -558,7 +552,6 @@ impl App {
                     return;
                 }
             }
-        }
 
         if self.state == AppState::Boot {
             self.boot.skip();

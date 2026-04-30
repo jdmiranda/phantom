@@ -76,6 +76,7 @@ impl Default for PhantomConfig {
 
 impl PhantomConfig {
     /// Load config from the standard path, or return defaults if not found.
+    #[must_use] 
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(config) => {
@@ -173,6 +174,7 @@ impl PhantomConfig {
     }
 
     /// Resolve the theme: load the named built-in, then apply shader overrides.
+    #[must_use] 
     pub fn resolve_theme(&self) -> Theme {
         let mut theme = themes::builtin_by_name(&self.theme_name).unwrap_or_else(|| {
             warn!(
@@ -210,16 +212,19 @@ impl PhantomConfig {
     ///
     /// Use this accessor instead of accessing `nlp_llm_enabled` directly from
     /// outside the crate.
+    #[must_use] 
     pub fn nlp_llm_enabled(&self) -> bool {
         self.nlp_llm_enabled
     }
 
     /// Returns whether privacy mode is enabled.
+    #[must_use] 
     pub fn privacy_mode(&self) -> bool {
         self.privacy_mode
     }
 
     /// Returns whether offline mode is enabled.
+    #[must_use] 
     pub fn offline_mode(&self) -> bool {
         self.offline_mode
     }
