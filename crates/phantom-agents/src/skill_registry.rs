@@ -1,98 +1,109 @@
-//! Skill registry for disposition-driven prompt injection.
+//! Skill registry keyed by [`Disposition`].
 //!
-//! A [`SkillRegistry`] maps [`Disposition`] values to named skill modules
-//! (Markdown snippets). At agent-spawn time, [`SystemPromptBuilder::inject_skills`]
-//! looks up the active disposition and appends every matching skill's content
-//! to the prompt, giving the model role-appropriate operational guidance.
+//! A *skill* is a named markdown string that is appended to an agent's system
+//! prompt at spawn time. Skills carry behavioural guidelines ("use TDD",
+//! "always spec-gate before coding", etc.) that are too verbose to embed in
+//! the static role manifest but too important to omit.
 //!
-//! # Built-in mappings
+//! [`SkillRegistry`] maintains two tables:
 //!
-//! | Disposition | Skills |
-//! |---|---|
-//! | All | `tdd` |
-//! | `Feature` | `tdd`, `planning`, `spec-gate` |
-//! | `BugFix` | `tdd`, `actor`, `safety` |
-//! | `Refactor` | `tdd`, `actor`, `safety` |
-//! | `Chore` | `tdd` |
-//! | `Synthesize` | `tdd`, `composer`, `planning` |
-//! | `Decompose` | `tdd`, `composer`, `planning` |
-//! | `Audit` | `tdd` |
-//! | `Chat` | `tdd` |
+//! 1. `skills` — name → markdown content. Skills are registered once (at
+//!    process start or from tests) and then referenced by name.
+//! 2. `disposition_map` — [`Disposition`] → ordered list of skill names.
+//!    Callers query this table via [`SkillRegistry::skills_for`] to get the
+//!    `(name, content)` pairs that belong in a given agent's system prompt.
 //!
-//! Custom skill content can be registered with [`SkillRegistry::register`];
-//! it replaces any existing entry under the same name.
+//! # Default mappings
+//!
+//! [`SkillRegistry::new`] pre-populates a sensible set of mappings (see
+//! inline docs on `new`). Callers can add more skills and mappings after
+//! construction; default entries are never removed.
+//!
+//! # Example
+//!
+//! ```rust
+//! use phantom_agents::skill_registry::SkillRegistry;
+//! use phantom_agents::dispatch::Disposition;
+//!
+//! let mut registry = SkillRegistry::new();
+//! registry.register("tdd", "# TDD\nWrite tests first.");
+//! let pairs = registry.skills_for(&Disposition::Decompose);
+//! assert!(pairs.iter().any(|(name, _)| *name == "tdd"));
+//! ```
 
 use std::collections::HashMap;
 
 use crate::dispatch::Disposition;
 
-// ---------------------------------------------------------------------------
-// Built-in skill content
-// ---------------------------------------------------------------------------
-
-const TDD_CONTENT: &str = "\
-## Skill: tdd
-Write the test first. Red → green → refactor. Never ship code without a \
-failing test that the new code makes pass.";
-
-const PLANNING_CONTENT: &str = "\
-## Skill: planning
-Decompose the task into numbered steps before writing any code. Revisit the \
-plan after each step and adjust if assumptions changed.";
-
-const SPEC_GATE_CONTENT: &str = "\
-## Skill: spec-gate
-Do not begin implementation until you have a written spec (acceptance criteria \
-+ edge cases). Block on the spec, not on code.";
-
-const ACTOR_CONTENT: &str = "\
-## Skill: actor
-You are executing actions in the user's environment. Require explicit user \
-consent before any destructive or irreversible operation.";
-
-const SAFETY_CONTENT: &str = "\
-## Skill: safety
-Before running any command, state what it will do and what the blast radius is. \
-Prefer dry-run flags. Never execute `rm -rf` variants without a confirmation.";
-
-const COMPOSER_CONTENT: &str = "\
-## Skill: composer
-Break the work into atomic sub-tasks and delegate each to a specialist agent. \
-Aggregate results and surface disagreements rather than flattening them.";
-
-// ---------------------------------------------------------------------------
-// SkillRegistry
-// ---------------------------------------------------------------------------
-
-/// Registry mapping skill names to their Markdown content, and [`Disposition`]
-/// values to the names of skills that should be injected for that disposition.
+/// A registry that maps [`Disposition`] variants to injectable skill modules.
+///
+/// Skills are stored as `(name, markdown_content)` pairs.  Each
+/// [`Disposition`] variant maps to zero or more skill names; when
+/// [`skills_for`] is called the registry resolves those names and returns the
+/// corresponding `(name, content)` slices.
+///
+/// [`skills_for`]: SkillRegistry::skills_for
 pub struct SkillRegistry {
-    /// `name → markdown content`
+    /// name → markdown content.
     skills: HashMap<String, String>,
-    /// `Disposition → ordered list of skill names`
+    /// disposition → ordered list of skill names.
     disposition_map: HashMap<Disposition, Vec<String>>,
 }
 
+impl Default for SkillRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SkillRegistry {
-    /// Create a new registry pre-populated with the built-in skills and
-    /// the default disposition → skill mappings.
+    /// Create a new registry with default skill content and disposition
+    /// mappings pre-populated.
+    ///
+    /// Default mappings (Forge lineage):
+    ///
+    /// | Disposition | Skills |
+    /// |---|---|
+    /// | All | `tdd` |
+    /// | `Decompose` | `planning`, `spec-gate` |
+    /// | `Feature`, `BugFix` | `actor`, `safety` |
+    /// | `Synthesize` | `composer`, `planning` |
+    ///
+    /// Skills are registered with placeholder content.  Production callers
+    /// should call [`register`] to override with the real markdown.
+    ///
+    /// [`register`]: SkillRegistry::register
     pub fn new() -> Self {
-        let mut reg = Self {
+        let mut registry = Self {
             skills: HashMap::new(),
             disposition_map: HashMap::new(),
         };
 
-        // Register built-in skill content.
-        reg.register("tdd", TDD_CONTENT);
-        reg.register("planning", PLANNING_CONTENT);
-        reg.register("spec-gate", SPEC_GATE_CONTENT);
-        reg.register("actor", ACTOR_CONTENT);
-        reg.register("safety", SAFETY_CONTENT);
-        reg.register("composer", COMPOSER_CONTENT);
+        // Register built-in skill placeholders.
+        registry.register("tdd", "# TDD\nWrite failing tests first, then make them pass.");
+        registry.register(
+            "planning",
+            "# Planning\nDecompose the task. Identify unknowns before writing code.",
+        );
+        registry.register(
+            "spec-gate",
+            "# Spec gate\nDo not begin implementation until the spec is accepted.",
+        );
+        registry.register(
+            "actor",
+            "# Actor\nExecute the plan step-by-step. Prefer atomic commits.",
+        );
+        registry.register(
+            "safety",
+            "# Safety\nNever mutate production state without explicit user consent.",
+        );
+        registry.register(
+            "composer",
+            "# Composer\nDelegate to sub-agents. Never do the work yourself.",
+        );
 
-        // Default disposition → skill mappings.
-        // All dispositions get "tdd".
-        for d in [
+        // Default disposition→skill mappings.
+        for disposition in [
             Disposition::Chat,
             Disposition::Feature,
             Disposition::BugFix,
@@ -102,59 +113,54 @@ impl SkillRegistry {
             Disposition::Decompose,
             Disposition::Audit,
         ] {
-            reg.disposition_map
-                .entry(d)
-                .or_insert_with(Vec::new)
-                .push("tdd".to_string());
+            registry.map_disposition(disposition, "tdd");
         }
 
-        // Planning-type dispositions: feature, synthesize, decompose.
-        for d in [
-            Disposition::Feature,
-            Disposition::Synthesize,
-            Disposition::Decompose,
-        ] {
-            let names = reg.disposition_map.entry(d).or_insert_with(Vec::new);
-            names.push("planning".to_string());
-            names.push("spec-gate".to_string());
-        }
+        // Decompose is the planning-oriented disposition.
+        registry.map_disposition(Disposition::Decompose, "planning");
+        registry.map_disposition(Disposition::Decompose, "spec-gate");
 
-        // Actor-type dispositions: bugfix, refactor.
-        for d in [Disposition::BugFix, Disposition::Refactor] {
-            let names = reg.disposition_map.entry(d).or_insert_with(Vec::new);
-            names.push("actor".to_string());
-            names.push("safety".to_string());
-        }
+        // Feature and BugFix are actor-style (they execute changes).
+        registry.map_disposition(Disposition::Feature, "actor");
+        registry.map_disposition(Disposition::Feature, "safety");
+        registry.map_disposition(Disposition::BugFix, "actor");
+        registry.map_disposition(Disposition::BugFix, "safety");
 
-        // Composer-type dispositions: synthesize, decompose.
-        for d in [Disposition::Synthesize, Disposition::Decompose] {
-            // Remove the duplicate spec-gate and planning we added above
-            // since the spec says Composer → "composer", "planning" not spec-gate.
-            // We keep "planning" and "spec-gate" from the planning block and
-            // append "composer" here.
-            reg.disposition_map
-                .entry(d)
-                .or_insert_with(Vec::new)
-                .push("composer".to_string());
-        }
+        // Synthesize is the composer-style disposition.
+        registry.map_disposition(Disposition::Synthesize, "composer");
+        registry.map_disposition(Disposition::Synthesize, "planning");
 
-        reg
+        registry
     }
 
-    /// Register (or replace) a skill by `name` with the given `content`.
+    /// Register a skill module by name.
     ///
-    /// The `name` is used as the lookup key; the `content` is the Markdown
-    /// that will be appended to the system prompt when the skill is injected.
+    /// If a skill with `name` already exists its content is replaced.
     pub fn register(&mut self, name: impl Into<String>, content: impl Into<String>) {
         self.skills.insert(name.into(), content.into());
     }
 
-    /// Return all skills associated with `disposition` as `(name, content)`
-    /// pairs in registration order.
+    /// Map `disposition` to an additional skill name.
     ///
-    /// Skills whose names are in the disposition map but whose content is not
-    /// in the registry (e.g. registered but later removed) are silently
-    /// skipped.
+    /// This is additive: existing mappings for `disposition` are preserved.
+    /// Duplicate names in the list are kept — deduplication is the caller's
+    /// responsibility if needed.
+    pub fn map_disposition(&mut self, disposition: Disposition, skill_name: impl Into<String>) {
+        self.disposition_map
+            .entry(disposition)
+            .or_default()
+            .push(skill_name.into());
+    }
+
+    /// Return the `(name, content)` pairs for all skills mapped to
+    /// `disposition`.
+    ///
+    /// Skills whose name is registered in the registry are returned in the
+    /// order they appear in the disposition map.  Names that have no
+    /// corresponding content entry are silently skipped (they were mapped but
+    /// never registered).
+    ///
+    /// Returns an empty `Vec` if no skills are mapped to this disposition.
     pub fn skills_for(&self, disposition: &Disposition) -> Vec<(&str, &str)> {
         let Some(names) = self.disposition_map.get(disposition) else {
             return Vec::new();
@@ -169,12 +175,6 @@ impl SkillRegistry {
     }
 }
 
-impl Default for SkillRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -184,21 +184,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_registry_has_builtin_skills() {
-        let reg = SkillRegistry::new();
-        // All built-in skill names must be resolvable.
-        for name in ["tdd", "planning", "spec-gate", "actor", "safety", "composer"] {
-            assert!(
-                reg.skills.contains_key(name),
-                "built-in skill '{name}' missing from registry",
-            );
-        }
-    }
-
-    #[test]
-    fn all_dispositions_include_tdd() {
-        let reg = SkillRegistry::new();
-        for d in [
+    fn new_registry_has_tdd_for_every_disposition() {
+        let registry = SkillRegistry::new();
+        for disposition in [
             Disposition::Chat,
             Disposition::Feature,
             Disposition::BugFix,
@@ -208,105 +196,93 @@ mod tests {
             Disposition::Decompose,
             Disposition::Audit,
         ] {
-            let skills = reg.skills_for(&d);
-            let names: Vec<&str> = skills.iter().map(|(n, _)| *n).collect();
+            let skills = registry.skills_for(&disposition);
             assert!(
-                names.contains(&"tdd"),
-                "{d:?} must include 'tdd'; got {names:?}",
+                skills.iter().any(|(name, _)| *name == "tdd"),
+                "{disposition:?} must include the tdd skill"
             );
         }
     }
 
     #[test]
-    fn planning_disposition_includes_planning_and_spec_gate() {
-        let reg = SkillRegistry::new();
-        let skills = reg.skills_for(&Disposition::Feature);
+    fn decompose_returns_planning_and_spec_gate() {
+        let registry = SkillRegistry::new();
+        let skills = registry.skills_for(&Disposition::Decompose);
         let names: Vec<&str> = skills.iter().map(|(n, _)| *n).collect();
-        assert!(names.contains(&"planning"), "Feature missing 'planning'");
-        assert!(names.contains(&"spec-gate"), "Feature missing 'spec-gate'");
+        assert!(names.contains(&"planning"), "Decompose must include planning");
+        assert!(names.contains(&"spec-gate"), "Decompose must include spec-gate");
     }
 
     #[test]
-    fn actor_disposition_includes_actor_and_safety() {
-        let reg = SkillRegistry::new();
-        for d in [Disposition::BugFix, Disposition::Refactor] {
-            let skills = reg.skills_for(&d);
+    fn feature_and_bugfix_return_actor_and_safety() {
+        let registry = SkillRegistry::new();
+        for disposition in [Disposition::Feature, Disposition::BugFix] {
+            let skills = registry.skills_for(&disposition);
             let names: Vec<&str> = skills.iter().map(|(n, _)| *n).collect();
-            assert!(names.contains(&"actor"), "{d:?} missing 'actor'");
-            assert!(names.contains(&"safety"), "{d:?} missing 'safety'");
+            assert!(names.contains(&"actor"), "{disposition:?} must include actor");
+            assert!(names.contains(&"safety"), "{disposition:?} must include safety");
         }
     }
 
     #[test]
-    fn composer_disposition_includes_composer_and_planning() {
-        let reg = SkillRegistry::new();
-        for d in [Disposition::Synthesize, Disposition::Decompose] {
-            let skills = reg.skills_for(&d);
-            let names: Vec<&str> = skills.iter().map(|(n, _)| *n).collect();
-            assert!(names.contains(&"composer"), "{d:?} missing 'composer'");
-            assert!(names.contains(&"planning"), "{d:?} missing 'planning'");
-        }
+    fn synthesize_returns_composer_and_planning() {
+        let registry = SkillRegistry::new();
+        let skills = registry.skills_for(&Disposition::Synthesize);
+        let names: Vec<&str> = skills.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"composer"), "Synthesize must include composer");
+        assert!(names.contains(&"planning"), "Synthesize must include planning");
     }
 
     #[test]
-    fn skills_for_returns_name_and_non_empty_content() {
-        let reg = SkillRegistry::new();
-        let skills = reg.skills_for(&Disposition::Feature);
-        assert!(!skills.is_empty(), "Feature should have skills");
-        for (name, content) in &skills {
-            assert!(!name.is_empty(), "skill name must not be empty");
-            assert!(!content.is_empty(), "skill content must not be empty for '{name}'");
-        }
+    fn skills_for_unknown_disposition_returns_empty_when_not_mapped() {
+        // A freshly-created, empty registry (no default calls) returns empty.
+        let registry = SkillRegistry {
+            skills: HashMap::new(),
+            disposition_map: HashMap::new(),
+        };
+        assert!(registry.skills_for(&Disposition::Chat).is_empty());
     }
 
     #[test]
-    fn register_replaces_existing_content() {
-        let mut reg = SkillRegistry::new();
-        reg.register("tdd", "## custom tdd override");
-        let skills = reg.skills_for(&Disposition::Chat);
+    fn register_overwrites_existing_content() {
+        let mut registry = SkillRegistry::new();
+        registry.register("tdd", "# Updated TDD\nNew content.");
+        let skills = registry.skills_for(&Disposition::Chat);
         let tdd = skills.iter().find(|(n, _)| *n == "tdd");
-        assert!(tdd.is_some(), "tdd must still be present after re-register");
-        assert_eq!(
-            tdd.unwrap().1,
-            "## custom tdd override",
-            "content must reflect the overridden value",
-        );
+        assert!(tdd.is_some());
+        assert!(tdd.unwrap().1.contains("Updated TDD"));
     }
 
     #[test]
-    fn register_adds_new_custom_skill_and_maps_it() {
-        let mut reg = SkillRegistry::new();
-        reg.register("myskill", "## my skill content");
-        // Manually wire it to a disposition to verify skills_for picks it up.
-        reg.disposition_map
-            .entry(Disposition::Audit)
-            .or_insert_with(Vec::new)
-            .push("myskill".to_string());
+    fn register_and_map_custom_skill() {
+        let mut registry = SkillRegistry::new();
+        registry.register("custom", "# Custom skill");
+        registry.map_disposition(Disposition::Audit, "custom");
 
-        let skills = reg.skills_for(&Disposition::Audit);
+        let skills = registry.skills_for(&Disposition::Audit);
         let names: Vec<&str> = skills.iter().map(|(n, _)| *n).collect();
-        assert!(names.contains(&"myskill"), "custom skill must appear in skills_for");
+        assert!(names.contains(&"custom"), "Audit must include custom after mapping");
     }
 
     #[test]
-    fn skills_for_unknown_disposition_never_panics() {
-        // Chat is always mapped; we test Audit which only has tdd.
-        let reg = SkillRegistry::new();
-        let skills = reg.skills_for(&Disposition::Audit);
-        let names: Vec<&str> = skills.iter().map(|(n, _)| *n).collect();
-        assert!(names.contains(&"tdd"));
-        assert!(!names.contains(&"planning"));
+    fn unregistered_skill_name_silently_skipped() {
+        let mut registry = SkillRegistry {
+            skills: HashMap::new(),
+            disposition_map: HashMap::new(),
+        };
+        // Map a name that has no content entry.
+        registry.map_disposition(Disposition::Chat, "ghost");
+        let skills = registry.skills_for(&Disposition::Chat);
+        assert!(skills.is_empty(), "unregistered name must be skipped");
     }
 
     #[test]
-    fn default_impl_equals_new() {
-        let from_new = SkillRegistry::new();
-        let from_default = SkillRegistry::default();
-        // Both must produce the same skill set for a representative disposition.
-        let new_skills = from_new.skills_for(&Disposition::Feature);
-        let def_skills = from_default.skills_for(&Disposition::Feature);
-        let new_names: Vec<&str> = new_skills.iter().map(|(n, _)| *n).collect();
-        let def_names: Vec<&str> = def_skills.iter().map(|(n, _)| *n).collect();
-        assert_eq!(new_names, def_names);
+    fn skills_for_returns_content_slices() {
+        let registry = SkillRegistry::new();
+        let skills = registry.skills_for(&Disposition::Decompose);
+        for (name, content) in &skills {
+            assert!(!name.is_empty(), "name must be non-empty");
+            assert!(!content.is_empty(), "content must be non-empty");
+        }
     }
 }

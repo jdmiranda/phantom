@@ -9,12 +9,12 @@
 //! Each LanceDB table is named after its modality (e.g. `"text"`, `"intent"`).
 //! Rows follow this Arrow schema:
 //!
-//! | column          | type            | notes                              |
-//! |-----------------|-----------------|------------------------------------|
-//! | `bundle_id`     | `Utf8`          | UUID string                        |
-//! | `embedding`     | `FixedSizeList` | dim fixed on first upsert          |
-//! | `metadata`      | `Utf8`          | JSON blob (reserved for future use)|
-//! | `created_at_ms` | `Int64`         | Unix epoch milliseconds            |
+//! | column        | type            | notes                              |
+//! |---------------|-----------------|------------------------------------|
+//! | `bundle_id`   | `Utf8`          | UUID string                        |
+//! | `embedding`   | `FixedSizeList` | dim fixed on first upsert          |
+//! | `metadata`    | `Utf8`          | JSON blob (reserved for future use)|
+//! | `created_at_ms` | `Int64`       | Unix epoch milliseconds            |
 //!
 //! ## Async bridging
 //!
@@ -28,12 +28,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use arrow_array::{
-    Array, FixedSizeListArray, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+    FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray,
+    cast::AsArray,
 };
 use arrow_schema::{DataType, Field, Schema};
-use futures::TryStreamExt;
-use lancedb::connection::Connection as LanceConnection;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::{Connection as LanceConnection, Table};
+use lancedb::query::ExecutableQuery;
 use phantom_bundles::BundleId;
 use tokio::runtime::Runtime;
 
@@ -59,6 +59,10 @@ impl DimCache {
             ))),
             Some(_) => Ok(()),
         }
+    }
+
+    fn dim(&self, modality: &str) -> Option<usize> {
+        self.0.get(modality).copied()
     }
 }
 
@@ -86,8 +90,8 @@ impl LanceDbIndex {
     /// [`lancedb::connect`] call resolves.
     pub fn open(db_path: &std::path::Path) -> Result<Self, StoreError> {
         std::fs::create_dir_all(db_path)?;
-        let rt =
-            Runtime::new().map_err(|e| StoreError::Vector(format!("tokio runtime init: {e}")))?;
+        let rt = Runtime::new()
+            .map_err(|e| StoreError::Vector(format!("tokio runtime init: {e}")))?;
         let path_str = db_path
             .to_str()
             .ok_or_else(|| StoreError::Vector("db path is not valid UTF-8".into()))?
@@ -119,11 +123,7 @@ impl LanceDbIndex {
             Ok::<_, StoreError>(cache)
         })?;
 
-        Ok(Self {
-            rt: Arc::new(rt),
-            conn,
-            dims: Mutex::new(dims),
-        })
+        Ok(Self { rt: Arc::new(rt), conn, dims: Mutex::new(dims) })
     }
 
     // ---------------------------------------------------------------------------
@@ -136,18 +136,17 @@ impl LanceDbIndex {
         &self,
         modality: &str,
         dim: usize,
-    ) -> Result<lancedb::Table, StoreError> {
+    ) -> Result<Table, StoreError> {
+        let schema = Arc::new(table_schema(dim));
+        // Try to open an existing table first; if it doesn't exist, create it.
         match self.conn.open_table(modality).execute().await {
             Ok(tbl) => Ok(tbl),
             Err(_) => {
                 // Create with an empty initial batch so the schema is committed.
-                let schema = Arc::new(table_schema(dim));
                 let empty = empty_batch(&schema, dim);
-                let reader: Box<dyn RecordBatchReader + Send> = Box::new(
-                    arrow_array::RecordBatchIterator::new(vec![Ok(empty)], schema),
-                );
+                let batches = RecordBatchIterator::new(vec![Ok(empty)], schema.clone());
                 self.conn
-                    .create_table(modality, reader)
+                    .create_table(modality, Box::new(batches))
                     .execute()
                     .await
                     .map_err(|e| StoreError::Vector(format!("create_table {modality:?}: {e}")))
@@ -184,14 +183,15 @@ impl VectorIndex for LanceDbIndex {
 
             // Delete any existing row for this bundle_id so upsert is idempotent.
             let id_str = bundle_id.to_string();
-            let _ = tbl.delete(&format!("bundle_id = '{id_str}'")).await;
+            let _ = tbl
+                .delete(&format!("bundle_id = '{id_str}'"))
+                .await;
 
             let schema = Arc::new(table_schema(dim));
             let batch = single_row_batch(&schema, bundle_id, &vector, dim)?;
-            let reader: Box<dyn RecordBatchReader + Send> = Box::new(
-                arrow_array::RecordBatchIterator::new(vec![Ok(batch)], schema),
-            );
-            tbl.add(reader)
+            let batches =
+                RecordBatchIterator::new(vec![Ok(batch)], schema);
+            tbl.add(Box::new(batches))
                 .execute()
                 .await
                 .map_err(|e| StoreError::Vector(format!("add to {modality:?}: {e}")))?;
@@ -225,7 +225,7 @@ impl VectorIndex for LanceDbIndex {
             return Ok(Vec::new());
         }
         let modality = modality.to_string();
-        let query_vec = query.to_vec();
+        let query = query.to_vec();
         let rt = Arc::clone(&self.rt);
         rt.block_on(async {
             let tbl = match self.conn.open_table(&modality).execute().await {
@@ -239,13 +239,14 @@ impl VectorIndex for LanceDbIndex {
             }
 
             let results = tbl
-                .vector_search(query_vec)
+                .vector_search(&query)
                 .map_err(|e| StoreError::Vector(format!("vector_search build: {e}")))?
                 .limit(limit)
                 .execute()
                 .await
                 .map_err(|e| StoreError::Vector(format!("vector_search execute: {e}")))?;
 
+            use futures::TryStreamExt;
             let batches: Vec<RecordBatch> = results
                 .try_collect()
                 .await
@@ -260,10 +261,7 @@ impl VectorIndex for LanceDbIndex {
                     .column_by_name("_distance")
                     .ok_or_else(|| StoreError::Vector("_distance column missing".into()))?;
 
-                let ids = id_col
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| StoreError::Vector("bundle_id is not Utf8".into()))?;
+                let ids = id_col.as_string::<i32>();
                 let dists = dist_col
                     .as_any()
                     .downcast_ref::<arrow_array::Float32Array>()
@@ -274,14 +272,11 @@ impl VectorIndex for LanceDbIndex {
                     let bundle_id: BundleId = id_str
                         .parse()
                         .map_err(|e| StoreError::Vector(format!("uuid parse: {e}")))?;
-                    // LanceDB returns L2 distance; convert to a similarity in (0,1].
-                    // Distance 0 → similarity 1.0.
+                    // LanceDB returns L2 distance; convert to cosine-like similarity
+                    // in [-1, 1] range. Distance 0 → similarity 1.0.
                     let dist = dists.value(i);
-                    let similarity = 1.0_f32 / (1.0 + dist);
-                    hits.push(VectorHit {
-                        bundle_id,
-                        similarity,
-                    });
+                    let similarity = 1.0 / (1.0 + dist);
+                    hits.push(VectorHit { bundle_id, similarity });
                 }
             }
 
@@ -306,13 +301,14 @@ impl VectorIndex for LanceDbIndex {
             };
             let results = match tbl
                 .query()
-                .select(Select::Columns(vec!["bundle_id".into()]))
+                .select(lancedb::query::Select::Columns(vec!["bundle_id".into()]))
                 .execute()
                 .await
             {
                 Ok(r) => r,
                 Err(_) => return Vec::new(),
             };
+            use futures::TryStreamExt;
             let batches: Vec<RecordBatch> = match results.try_collect().await {
                 Ok(b) => b,
                 Err(_) => return Vec::new(),
@@ -320,11 +316,10 @@ impl VectorIndex for LanceDbIndex {
             let mut ids = Vec::new();
             for batch in &batches {
                 if let Some(col) = batch.column_by_name("bundle_id") {
-                    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                        for i in 0..arr.len() {
-                            if let Ok(id) = arr.value(i).parse::<BundleId>() {
-                                ids.push(id);
-                            }
+                    let arr = col.as_string::<i32>();
+                    for i in 0..arr.len() {
+                        if let Ok(id) = arr.value(i).parse::<BundleId>() {
+                            ids.push(id);
                         }
                     }
                 }
@@ -335,7 +330,13 @@ impl VectorIndex for LanceDbIndex {
 
     fn modalities(&self) -> Vec<String> {
         let rt = Arc::clone(&self.rt);
-        rt.block_on(async { self.conn.table_names().execute().await.unwrap_or_default() })
+        rt.block_on(async {
+            self.conn
+                .table_names()
+                .execute()
+                .await
+                .unwrap_or_default()
+        })
     }
 }
 
@@ -365,22 +366,24 @@ fn embedding_dim_from_schema(schema: &Schema) -> Result<usize, StoreError> {
         .map_err(|_| StoreError::Vector("embedding field missing from schema".into()))?;
     match field.data_type() {
         DataType::FixedSizeList(_, dim) => Ok(*dim as usize),
-        _ => Err(StoreError::Vector(
-            "embedding column is not FixedSizeList".into(),
-        )),
+        _ => Err(StoreError::Vector("embedding column is not FixedSizeList".into())),
     }
 }
 
-fn empty_batch(schema: &Arc<Schema>, dim: usize) -> RecordBatch {
+fn empty_batch(schema: &Schema, dim: usize) -> RecordBatch {
     let id_arr = StringArray::from(Vec::<&str>::new());
-    let emb_arr = FixedSizeListArray::from_iter_primitive::<arrow_array::types::Float32Type, _, _>(
+    let emb_arr = FixedSizeListArray::from_iter_primitive::<
+        arrow_array::types::Float32Type,
+        _,
+        _,
+    >(
         std::iter::empty::<Option<Vec<Option<f32>>>>(),
         dim as i32,
     );
     let meta_arr = StringArray::from(Vec::<Option<&str>>::new());
     let ts_arr = Int64Array::from(Vec::<i64>::new());
     RecordBatch::try_new(
-        Arc::clone(schema),
+        Arc::new(schema.clone()),
         vec![
             Arc::new(id_arr),
             Arc::new(emb_arr),
@@ -392,7 +395,7 @@ fn empty_batch(schema: &Arc<Schema>, dim: usize) -> RecordBatch {
 }
 
 fn single_row_batch(
-    schema: &Arc<Schema>,
+    schema: &Schema,
     bundle_id: BundleId,
     vector: &[f32],
     dim: usize,
@@ -404,7 +407,11 @@ fn single_row_batch(
 
     let id_arr = StringArray::from(vec![bundle_id.to_string()]);
     let items: Vec<Option<f32>> = vector.iter().map(|&v| Some(v)).collect();
-    let emb_arr = FixedSizeListArray::from_iter_primitive::<arrow_array::types::Float32Type, _, _>(
+    let emb_arr = FixedSizeListArray::from_iter_primitive::<
+        arrow_array::types::Float32Type,
+        _,
+        _,
+    >(
         std::iter::once(Some(items)),
         dim as i32,
     );
@@ -412,7 +419,7 @@ fn single_row_batch(
     let ts_arr = Int64Array::from(vec![now_ms]);
 
     RecordBatch::try_new(
-        Arc::clone(schema),
+        Arc::new(schema.clone()),
         vec![
             Arc::new(id_arr),
             Arc::new(emb_arr),

@@ -5,7 +5,7 @@
 //! less), the primary pane renders the normal-screen history while a sibling
 //! `AltScreenViewAdapter` renders the alt-screen program. Both share the same
 //! `Arc<Mutex<Option<RenderOutput>>>` snapshot that the primary writes each
-//! frame via its `update()` override.
+//! frame via [`AltScreenViewAdapter::snapshot_arc`].
 //!
 //! The view adapter is intentionally minimal: no PTY, no input, no commands.
 //! It exists only to give the coordinator a second pane slot so the layout
@@ -129,7 +129,11 @@ impl InputHandler for AltScreenViewAdapter {
 }
 
 impl Commandable for AltScreenViewAdapter {
-    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+    fn accept_command(
+        &mut self,
+        cmd: &str,
+        _args: &serde_json::Value,
+    ) -> anyhow::Result<String> {
         Err(anyhow::anyhow!(
             "alt_screen_view adapter does not accept commands: {cmd}"
         ))
@@ -217,11 +221,7 @@ mod tests {
         let adapter = AltScreenViewAdapter::new(Arc::clone(&snap), "vim".into());
 
         // Push a grid snapshot with an arbitrary origin.
-        let cells = vec![TerminalCell {
-            ch: 'A',
-            fg: [1.0; 4],
-            bg: [0.0; 4],
-        }];
+        let cells = vec![TerminalCell { ch: 'A', fg: [1.0; 4], bg: [0.0; 4] }];
         let grid = GridData {
             cells,
             cols: 1,
@@ -231,10 +231,7 @@ mod tests {
         };
         {
             let mut guard = snap.lock().unwrap();
-            *guard = Some(RenderOutput {
-                grid: Some(grid),
-                ..Default::default()
-            });
+            *guard = Some(RenderOutput { grid: Some(grid), ..Default::default() });
         }
 
         let rect = Rect {

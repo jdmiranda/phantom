@@ -13,7 +13,7 @@
 //! | Field             | Default | Former constant              |
 //! |-------------------|---------|------------------------------|
 //! | `max_attempts`    | `3`     | `PlanStep::max_attempts = 3` |
-//! | `timeout_seconds` | `1800`  | `DEFAULT_STALL_TIMEOUT` (30-min orchestration rule) |
+//! | `timeout_seconds` | `1800`  | `DEFAULT_STALL_TIMEOUT` (300 s — raised to the 30-min orchestration rule) |
 //! | `auto_approve`    | `false` | n/a                          |
 //! | `skip_planning`   | `false` | n/a                          |
 

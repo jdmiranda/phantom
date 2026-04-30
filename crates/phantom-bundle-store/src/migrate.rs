@@ -30,8 +30,8 @@ use std::path::PathBuf;
 use phantom_bundles::BundleId;
 use serde::{Deserialize, Serialize};
 
-use crate::StoreError;
 use crate::lance::{InMemoryVectorIndex, VectorIndex};
+use crate::StoreError;
 
 // ---------------------------------------------------------------------------
 // Migration file schema
@@ -116,10 +116,7 @@ pub fn import_migration_file(index: &dyn VectorIndex) -> Result<usize, StoreErro
     std::fs::remove_file(&path)
         .map_err(|e| StoreError::Vector(format!("delete migration file: {e}")))?;
 
-    tracing::info!(
-        count = total,
-        "imported in-memory vector index from migration file"
-    );
+    tracing::info!(count = total, "imported in-memory vector index from migration file");
     Ok(total)
 }
 
@@ -158,19 +155,12 @@ pub fn export_migration_file(index: &InMemoryVectorIndex) -> Result<usize, Store
             //
             // We delegate to a helper that does a direct lookup.
             if let Some(vector) = vector_for_id(index, bundle_id, &modality) {
-                entries.push(MigrationEntry {
-                    bundle_id,
-                    modality: modality.clone(),
-                    vector,
-                });
+                entries.push(MigrationEntry { bundle_id, modality: modality.clone(), vector });
             }
         }
     }
 
-    let mf = MigrationFile {
-        schema_version: MIGRATION_SCHEMA_VERSION,
-        entries,
-    };
+    let mf = MigrationFile { schema_version: MIGRATION_SCHEMA_VERSION, entries };
     let json = serde_json::to_vec_pretty(&mf)?;
 
     if let Some(parent) = path.parent() {
@@ -179,11 +169,7 @@ pub fn export_migration_file(index: &InMemoryVectorIndex) -> Result<usize, Store
     std::fs::write(&path, &json)?;
 
     let count = mf.entries.len();
-    tracing::info!(
-        count,
-        ?path,
-        "serialized in-memory vector index for migration"
-    );
+    tracing::info!(count, ?path, "serialized in-memory vector index for migration");
     Ok(count)
 }
 
@@ -269,10 +255,7 @@ mod tests {
                     }
                 }
             }
-            let mf = MigrationFile {
-                schema_version: MIGRATION_SCHEMA_VERSION,
-                entries,
-            };
+            let mf = MigrationFile { schema_version: MIGRATION_SCHEMA_VERSION, entries };
             serde_json::to_vec_pretty(&mf).unwrap()
         };
         std::fs::write(&path, &json).unwrap();
@@ -285,8 +268,7 @@ mod tests {
         // Import into a fresh index.
         let dst = InMemoryVectorIndex::new();
         for entry in mf.entries {
-            dst.upsert(entry.bundle_id, &entry.modality, &entry.vector)
-                .unwrap();
+            dst.upsert(entry.bundle_id, &entry.modality, &entry.vector).unwrap();
         }
         assert!(dst.ids_for_modality("text").contains(&a));
         assert!(dst.ids_for_modality("text").contains(&b));
@@ -305,8 +287,7 @@ mod tests {
         .unwrap();
         let mf: MigrationFile = serde_json::from_slice(&bytes).unwrap();
         for entry in mf.entries {
-            dst.upsert(entry.bundle_id, &entry.modality, &entry.vector)
-                .unwrap();
+            dst.upsert(entry.bundle_id, &entry.modality, &entry.vector).unwrap();
         }
         assert_eq!(dst.modalities().len(), 0);
     }
