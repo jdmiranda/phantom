@@ -9,11 +9,29 @@ use phantom_renderer::postfx::PostFxParams;
 use phantom_renderer::quads::QuadInstance as QI;
 use phantom_ui::widgets::Widget;
 
+use phantom_adapter::adapter::CursorShape;
+
 use crate::app::{App, AppState};
 use crate::pane::{
     CONTAINER_PAD_X_CELLS, CONTAINER_TITLE_H_CELLS, container_rect, pane_inner_rect,
     scrollbar_thumb_rect, scrollbar_track_rect,
 };
+
+/// Return the (width, height) of the cursor quad for the given shape.
+///
+/// - `Block`: full cell — the safe default that matches legacy behaviour.
+/// - `Bar`: a 2-pixel-wide vertical bar on the left edge of the cell.
+/// - `Underline`: a 2-pixel-tall horizontal bar at the bottom of the cell.
+///
+/// The caller is responsible for adjusting the Y origin for `Underline` so the
+/// bar sits flush with the cell bottom rather than the cell top.
+fn cursor_shape_size(shape: CursorShape, cell_size: (f32, f32)) -> (f32, f32) {
+    match shape {
+        CursorShape::Block => (cell_size.0, cell_size.1),
+        CursorShape::Bar => (2.0_f32.max(cell_size.0 * 0.1), cell_size.1),
+        CursorShape::Underline => (cell_size.0, 2.0_f32.max(cell_size.1 * 0.1)),
+    }
+}
 
 impl App {
     // Render
@@ -359,12 +377,19 @@ impl App {
                     glyphs.append(&mut glyph_instances);
 
                     if let Some(ref cursor) = grid.cursor {
-                        if cursor.visible {
+                        let blink_visible = !cursor.blinking || self.cursor_blink.is_visible();
+                        if cursor.visible && blink_visible {
                             let cx = margin + cursor.col as f32 * self.cell_size.0;
                             let cy = margin + cursor.row as f32 * self.cell_size.1;
+                            let (cw, ch) = cursor_shape_size(cursor.shape, self.cell_size);
+                            let cy = if matches!(cursor.shape, CursorShape::Underline) {
+                                cy + self.cell_size.1 - ch
+                            } else {
+                                cy
+                            };
                             quads.push(QI {
                                 pos: [cx, cy],
-                                size: [self.cell_size.0, self.cell_size.1],
+                                size: [cw, ch],
                                 color: [
                                     self.theme.colors.cursor[0],
                                     self.theme.colors.cursor[1],
@@ -629,13 +654,28 @@ impl App {
                 glyphs.append(&mut glyph_instances);
 
                 // Render cursor.
+                // The cursor is drawn only when:
+                //   (a) the terminal reports it as visible (DECTCEM on), AND
+                //   (b) the clock-driven blink timer is in the "on" half-cycle
+                //       (or the terminal did not request blinking at all).
+                // This decouples blink timing from repaint frequency so that
+                // spinner-heavy TUIs (gemini, htop, lazygit) that repaint the
+                // prompt row on every frame no longer cause the cursor quad to
+                // strobe through rapid cell churn.
                 if let Some(ref cursor) = grid.cursor {
-                    if cursor.visible {
+                    let blink_visible = !cursor.blinking || self.cursor_blink.is_visible();
+                    if cursor.visible && blink_visible {
                         let cx = grid.origin.0 + cursor.col as f32 * self.cell_size.0;
                         let cy = grid.origin.1 + cursor.row as f32 * self.cell_size.1;
+                        let (cw, ch) = cursor_shape_size(cursor.shape, self.cell_size);
+                        let cy = if matches!(cursor.shape, CursorShape::Underline) {
+                            cy + self.cell_size.1 - ch
+                        } else {
+                            cy
+                        };
                         quads.push(QI {
                             pos: [cx, cy],
-                            size: [self.cell_size.0, self.cell_size.1],
+                            size: [cw, ch],
                             color: self.theme.colors.cursor,
                             border_radius: 0.0,
                         });

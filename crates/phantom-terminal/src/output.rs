@@ -98,6 +98,11 @@ pub struct CursorState {
     pub col: usize,
     pub visible: bool,
     pub shape: CursorShape,
+    /// Whether the terminal program requested cursor blinking (DECSCUSR codes
+    /// 1/3/5 set this; 2/4/6 clear it).  When `true`, the renderer should
+    /// suppress the cursor during the "off" half of the blink cycle.  When
+    /// `false`, the cursor is always drawn while visible.
+    pub blinking: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +350,11 @@ fn extract_cursor<T: EventListener>(term: &Term<T>) -> CursorState {
         AlacCursorShape::Hidden => CursorShape::Block, // shape is irrelevant when hidden
     };
 
+    // Blink flag: read from the active cursor style so the renderer can drive
+    // blink timing independently from the repaint cadence.  DECSCUSR codes
+    // 1/3/5 set blinking=true; 2/4/6 leave it false.
+    let blinking = term.cursor_style().blinking;
+
     // The cursor's grid line (0 = top of live screen, negative = scrollback).
     // Convert to viewport row: viewport_row = grid_line + display_offset.
     // Hide the cursor if it falls outside the visible viewport [0, screen_lines).
@@ -360,6 +370,7 @@ fn extract_cursor<T: EventListener>(term: &Term<T>) -> CursorState {
         col,
         visible,
         shape,
+        blinking,
     }
 }
 

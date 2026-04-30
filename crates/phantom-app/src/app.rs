@@ -132,6 +132,13 @@ pub struct App {
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
 
+    // -- Clock-driven terminal cursor blink timer.
+    //    Ticked once per frame with wall-clock milliseconds.  The terminal
+    //    renderer consults `cursor_blink.is_visible()` instead of drawing the
+    //    cursor on every repaint, so rapidly-repainting TUIs (gemini, htop,
+    //    lazygit) no longer cause the cursor quad to strobe.
+    pub(crate) cursor_blink: phantom_ui::CursorBlink,
+
     // -- Cached metrics --
     pub(crate) cell_size: (f32, f32),
 
@@ -1023,6 +1030,7 @@ impl App {
             demo_post_boot_done: false,
             start_time: now,
             last_frame: now,
+            cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
             supervisor,

@@ -647,6 +647,7 @@ mod tests {
                 row: 0,
                 shape: CursorShape::Block,
                 visible: true,
+                blinking: false,
             }),
         };
         assert_eq!(grid.cells.len(), 2);
