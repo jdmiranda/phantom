@@ -77,6 +77,7 @@ impl GridRenderer {
     /// * `format` — surface texture format for the color target.
     /// * `atlas_bind_group_layout` — bind group layout from `GlyphAtlas::bind_group_layout()`,
     ///   bound at group 1 (texture + sampler).
+    #[must_use]
     pub fn new(
         device: &Device,
         format: TextureFormat,
@@ -186,6 +187,7 @@ impl GridRenderer {
     /// Uses `shaders/text_color.wgsl` which samples RGBA directly from the
     /// `ColorGlyphAtlas` (Rgba8UnormSrgb) without applying the foreground tint
     /// multiply. Bind group layout must come from `ColorGlyphAtlas::bind_group_layout()`.
+    #[must_use]
     pub fn new_color(
         device: &Device,
         format: TextureFormat,
@@ -357,11 +359,13 @@ impl GridRenderer {
     }
 
     /// Number of glyphs that will be drawn on the next `render` call.
+    #[must_use]
     pub fn glyph_count(&self) -> u32 {
         self.instance_count
     }
 
     /// Current instance buffer capacity in number of glyphs.
+    #[must_use]
     pub fn capacity(&self) -> u32 {
         self.instance_capacity
     }
@@ -460,6 +464,8 @@ impl GridRenderData {
     /// # Returns
     /// `(background_quads, glyph_batch)`. Route `glyph_batch.mono` to the
     /// monochrome pipeline and `glyph_batch.color` to the color pipeline.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         cells: &[GridCell],
         cols: usize,
@@ -525,6 +531,8 @@ impl GridRenderData {
     /// color into wider quads, reducing draw overhead for colored rows.
     ///
     /// Otherwise identical to `prepare`.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_merged(
         cells: &[GridCell],
         cols: usize,

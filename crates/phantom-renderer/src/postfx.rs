@@ -114,6 +114,8 @@ const _: () = assert!(size_of::<PostFxParams>() == 64);
 
 impl PostFxParams {
     /// Create params from theme shader params, elapsed time, and screen dimensions.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn from_theme(
         scanline_intensity: f32,
         bloom_intensity: f32,
@@ -176,6 +178,7 @@ impl PostFxPipeline {
     ///
     /// The offscreen texture is created at the given dimensions and matches the
     /// surface format so the scene can render directly into it.
+    #[must_use]
     pub fn new(device: &Device, surface_format: TextureFormat, width: u32, height: u32) -> Self {
         // -- Shader module --
         // `crt_wgsl_source()` returns the embedded compile-time copy in
@@ -341,6 +344,7 @@ impl PostFxPipeline {
     /// The scene pass uses this as its color attachment. After the scene pass
     /// completes, call [`render`](Self::render) to composite the CRT effects
     /// onto the final surface.
+    #[must_use]
     pub fn scene_view(&self) -> &TextureView {
         &self.offscreen_view
     }
@@ -350,6 +354,7 @@ impl PostFxPipeline {
     /// The texture is created with `COPY_SRC` usage so it can be copied into
     /// a staging buffer for PNG encoding. This is the pre-CRT scene — clean
     /// pixels, useful for UI debugging without shader distortion.
+    #[must_use]
     pub fn scene_texture(&self) -> &Texture {
         &self.offscreen_texture
     }

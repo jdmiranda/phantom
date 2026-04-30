@@ -72,6 +72,7 @@ impl GlyphInstance {
         3 => Float32x2,
     ];
 
+    #[must_use]
     pub fn buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GlyphInstance>() as wgpu::BufferAddress,
@@ -134,6 +135,7 @@ impl TextRenderer {
     ///
     /// Initializes the system font database and configures for monospace rendering.
     /// Line height is set to 1.2x the font size by default, suitable for terminal use.
+    #[must_use]
     pub fn new(font_size: f32) -> Self {
         let font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
@@ -150,6 +152,7 @@ impl TextRenderer {
     }
 
     /// Access the underlying font system.
+    #[must_use]
     pub fn font_system(&self) -> &FontSystem {
         &self.font_system
     }
@@ -165,11 +168,13 @@ impl TextRenderer {
     }
 
     /// Get the configured font size.
+    #[must_use]
     pub fn font_size(&self) -> f32 {
         self.font_size
     }
 
     /// Get the configured line height.
+    #[must_use]
     pub fn line_height(&self) -> f32 {
         self.line_height
     }
@@ -364,6 +369,7 @@ impl TextRenderer {
 
     /// Shape a single character through cosmic-text ONCE and return the cache key
     /// + positioning offsets. Returns None if the character produces no glyphs.
+    #[allow(clippy::must_use_candidate)]
     fn shape_char(&mut self, ch: char, cell_w: f32, cell_h: f32) -> Option<(CacheKey, f32, f32)> {
         let metrics = Metrics::new(self.font_size, self.line_height);
         let attrs = Attrs::new().family(Family::Monospace);
@@ -379,7 +385,7 @@ impl TextRenderer {
         buffer.shape_until_scroll(&mut self.font_system, true);
 
         for run in buffer.layout_runs() {
-            for glyph in run.glyphs.iter() {
+            if let Some(glyph) = run.glyphs.iter().next() {
                 let physical = glyph.physical((0.0, 0.0), 1.0);
                 return Some((physical.cache_key, run.line_y, physical.x as f32));
             }

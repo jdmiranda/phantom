@@ -75,6 +75,7 @@ pub struct GlyphAtlas {
 
 impl GlyphAtlas {
     /// Create a new glyph atlas with the given GPU device.
+    #[must_use]
     pub fn new(device: &Device, _queue: &Queue) -> Self {
         let width = ATLAS_SIZE;
         let height = ATLAS_SIZE;
@@ -294,26 +295,31 @@ impl GlyphAtlas {
     /// The bind group layout for the atlas texture + sampler.
     ///
     /// Bind at group index appropriate for your pipeline (typically group 1).
+    #[must_use]
     pub fn bind_group_layout(&self) -> &BindGroupLayout {
         &self.bind_group_layout
     }
 
     /// The bind group containing the atlas texture view and sampler.
+    #[must_use]
     pub fn bind_group(&self) -> &BindGroup {
         &self.bind_group
     }
 
     /// The texture view, in case you need it outside the standard bind group.
+    #[must_use]
     pub fn texture_view(&self) -> &TextureView {
         &self.view
     }
 
     /// Atlas dimensions in pixels.
+    #[must_use]
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
     /// Number of cached glyphs.
+    #[must_use]
     pub fn glyph_count(&self) -> usize {
         self.cache.len()
     }
@@ -354,6 +360,7 @@ pub struct ColorGlyphAtlas {
 
 impl ColorGlyphAtlas {
     /// Create a new color glyph atlas with the given GPU device.
+    #[must_use]
     pub fn new(device: &Device, _queue: &Queue) -> Self {
         let width = COLOR_ATLAS_SIZE;
         let height = COLOR_ATLAS_SIZE;
@@ -548,26 +555,31 @@ impl ColorGlyphAtlas {
     }
 
     /// The bind group layout for the color atlas texture + sampler.
+    #[must_use]
     pub fn bind_group_layout(&self) -> &BindGroupLayout {
         &self.bind_group_layout
     }
 
     /// The bind group containing the color atlas texture view and sampler.
+    #[must_use]
     pub fn bind_group(&self) -> &BindGroup {
         &self.bind_group
     }
 
     /// The texture view for the color atlas.
+    #[must_use]
     pub fn texture_view(&self) -> &TextureView {
         &self.view
     }
 
     /// Color atlas dimensions in pixels.
+    #[must_use]
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
     /// Number of cached color glyphs.
+    #[must_use]
     pub fn glyph_count(&self) -> usize {
         self.cache.len()
     }

@@ -155,6 +155,7 @@ pub struct DecodedImage {
 
 impl DecodedImage {
     /// Decode a PNG file from raw bytes into an RGBA `DecodedImage`.
+    #[must_use]
     pub fn from_png(png_bytes: &[u8]) -> Option<Self> {
         let decoder = png::Decoder::new(png_bytes);
         let mut reader = decoder.read_info().ok()?;
@@ -208,6 +209,7 @@ impl DecodedImage {
     }
 
     /// Create a `DecodedImage` from raw RGB data (24-bit, no alpha).
+    #[must_use]
     pub fn from_rgb(width: u32, height: u32, rgb: &[u8]) -> Option<Self> {
         let expected = (width * height * 3) as usize;
         if rgb.len() < expected {
@@ -228,6 +230,7 @@ impl DecodedImage {
     }
 
     /// Create a `DecodedImage` from raw RGBA data (32-bit).
+    #[must_use]
     pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Option<Self> {
         let expected = (width * height * 4) as usize;
         if rgba.len() < expected {
@@ -292,6 +295,7 @@ pub struct ImageManager {
 
 impl ImageManager {
     /// Create the image rendering pipeline.
+    #[must_use]
     pub fn new(device: &Device, format: TextureFormat) -> Self {
         // -- Shader module --
         let shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -542,6 +546,7 @@ impl ImageManager {
     }
 
     /// Number of placed images.
+    #[must_use]
     pub fn image_count(&self) -> usize {
         self.images.len()
     }
@@ -607,6 +612,7 @@ impl ImageManager {
     }
 
     /// Get a reference to a placed image by ID.
+    #[must_use]
     pub fn get(&self, id: u32) -> Option<&ImagePlacement> {
         self.images.get(&id)
     }
