@@ -196,6 +196,16 @@ impl StatusBar {
         }
     }
 
+    /// Enable or disable the privacy mode lock indicator.
+    pub fn set_privacy_mode(&mut self, enabled: bool) {
+        self.privacy_mode = enabled;
+    }
+
+    /// Whether the privacy mode indicator is currently shown.
+    pub fn privacy_mode(&self) -> bool {
+        self.privacy_mode
+    }
+
     /// Update the displayed working directory.
     pub fn set_cwd(&mut self, path: &str) {
         self.cwd = path.to_owned();
@@ -237,11 +247,6 @@ impl StatusBar {
     /// Set offline mode indicator.
     pub fn set_offline_mode(&mut self, enabled: bool) {
         self.offline_mode = enabled;
-    }
-
-    /// Set privacy mode indicator.
-    pub fn set_privacy_mode(&mut self, enabled: bool) {
-        self.privacy_mode = enabled;
     }
 
     /// Truncate `text` so it fits within `max_chars`, prepending `...` if needed.

@@ -391,6 +391,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_empty_config_privacy_mode_is_false() {
+        let config = PhantomConfig::parse("").unwrap();
+        assert!(!config.privacy_mode);
+    }
+
+    #[test]
     fn privacy_mode_accessor_matches_field() {
         let mut config = PhantomConfig::default();
         assert!(!config.privacy_mode());

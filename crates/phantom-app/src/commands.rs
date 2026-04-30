@@ -7,6 +7,7 @@ use log::{debug, info, warn};
 
 use phantom_agents::cli::{AgentCommand, parse_agent_command};
 use phantom_agents::{AgentSpawnOpts, AgentTask};
+use phantom_brain::events::AiEvent;
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
 use phantom_nlp::{Intent, translate};
@@ -404,6 +405,38 @@ impl App {
                     }
                 }
             }
+            "ghost" => {
+                // `ghost privacy on` / `ghost privacy off` — toggle privacy mode.
+                match (parts.get(1), parts.get(2)) {
+                    (Some(&"privacy"), Some(&"on")) => {
+                        self.privacy_mode = true;
+                        self.status_bar.set_privacy_mode(true);
+                        if let Some(ref brain) = self.brain {
+                            let _ = brain.send_event(AiEvent::SetPrivacyMode(true));
+                        }
+                        self.console
+                            .system("[P] Privacy mode ON — cloud APIs blocked");
+                    }
+                    (Some(&"privacy"), Some(&"off")) => {
+                        self.privacy_mode = false;
+                        self.status_bar.set_privacy_mode(false);
+                        if let Some(ref brain) = self.brain {
+                            let _ = brain.send_event(AiEvent::SetPrivacyMode(false));
+                        }
+                        self.console.system("Privacy mode OFF — cloud APIs allowed");
+                    }
+                    (Some(&"privacy"), _) => {
+                        let state = if self.privacy_mode { "ON" } else { "OFF" };
+                        self.console.output(format!("Privacy mode: {state}"));
+                        self.console
+                            .output("Usage: ghost privacy on | ghost privacy off");
+                    }
+                    _ => {
+                        self.console
+                            .output("Usage: ghost privacy on | ghost privacy off");
+                    }
+                }
+            }
             "selftest" => {
                 self.console
                     .system("SELFTEST: brain exercising its own features...");
@@ -470,6 +503,10 @@ impl App {
                     .output("  selftest            Brain exercises its own features");
                 self.console
                     .output("  selfheal            selftest + auto-fix + commit + push");
+                self.console
+                    .output("  ghost privacy on    Enable privacy mode (block cloud APIs)");
+                self.console
+                    .output("  ghost privacy off   Disable privacy mode");
                 self.console
                     .output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");

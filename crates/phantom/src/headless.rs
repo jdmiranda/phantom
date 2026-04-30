@@ -56,6 +56,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         quiet_threshold: 0.5,
         router: None,
         catalog: None,
+        privacy_mode: false,
     });
 
     // Agent manager (max 5 concurrent agents).

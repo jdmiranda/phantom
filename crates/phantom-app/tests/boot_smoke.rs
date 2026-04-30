@@ -137,6 +137,7 @@ fn brain_spawns_and_channel_is_open() {
         quiet_threshold: 1.0, // suppress all actions so the thread stays quiet
         router: None,
         catalog: None,
+        privacy_mode: false,
     });
 
     // The channel must be open immediately after spawn.
@@ -197,6 +198,7 @@ fn boot_smoke_full_invariants() {
         quiet_threshold: 1.0,
         router: None,
         catalog: None,
+        privacy_mode: false,
     });
 
     assert!(
