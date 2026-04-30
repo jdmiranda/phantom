@@ -21,6 +21,7 @@ use phantom_adapter::{
 use phantom_terminal::output::{
     self, CursorShape as TermCursorShape, CursorState, TerminalThemeColors,
 };
+use phantom_terminal::takeover::TakeoverDetector;
 use phantom_terminal::terminal::PhantomTerminal;
 
 /// Maximum bytes retained in the output buffer before the front is drained.
@@ -70,6 +71,8 @@ pub struct TerminalAdapter {
     /// Shared render snapshot written each frame when alt-screen is active.
     /// Set by `attach_alt_screen_snapshot`; cleared by `detach_alt_screen_snapshot`.
     alt_screen_snapshot: Option<Arc<Mutex<Option<RenderOutput>>>>,
+    /// Edge-detector for subprocess takeover events (issue #364).
+    takeover_detector: TakeoverDetector,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +100,7 @@ impl TerminalAdapter {
             app_id: 0,
             outbox: Vec::new(),
             alt_screen_snapshot: None,
+            takeover_detector: TakeoverDetector::default(),
         }
     }
 
@@ -267,6 +271,43 @@ impl AppCore for TerminalAdapter {
 
         self.was_alt_screen = is_alt;
 
+        // -- Subprocess takeover detection (issue #364) ----------------------
+        // Run the structured detector alongside the legacy is_detached flag.
+        // The detector emits typed bus events consumed by #366/#367 (tethers).
+        // Detection is read-only; no pane split or PTY reparenting happens here.
+        match self
+            .takeover_detector
+            .tick(self.terminal.term(), self.terminal.pty_fd())
+        {
+            phantom_terminal::takeover::TakeoverEvent::Detected(candidate) => {
+                self.outbox.push(phantom_adapter::BusMessage {
+                    topic_id: 0,
+                    sender: self.app_id,
+                    event: phantom_protocol::Event::SubprocessTakeoverDetected {
+                        app_id: self.app_id,
+                        process_name: candidate.process_name,
+                        pgid: candidate.pgid,
+                        alt_screen: candidate.signal
+                            == phantom_terminal::takeover::TakeoverSignal::AltScreen,
+                    },
+                    frame: 0,
+                    timestamp: 0,
+                });
+            }
+            phantom_terminal::takeover::TakeoverEvent::Cleared => {
+                self.outbox.push(phantom_adapter::BusMessage {
+                    topic_id: 0,
+                    sender: self.app_id,
+                    event: phantom_protocol::Event::SubprocessTakeoverCleared {
+                        app_id: self.app_id,
+                    },
+                    frame: 0,
+                    timestamp: 0,
+                });
+            }
+            phantom_terminal::takeover::TakeoverEvent::None => {}
+        }
+
         // When alt-screen is active and a secondary pane has been wired in,
         // push a fresh render snapshot so the view adapter always has the
         // latest grid data.  We use a dummy full-screen rect here; the view
@@ -310,10 +351,16 @@ impl AppCore for TerminalAdapter {
             "type": "terminal",
             "alive": true,
             "is_detached": self.is_detached,
+            // Label of the foreground process (e.g. "vim", "htop"). Empty when
+            // not in a takeover. Read by poll_alt_screen_transitions in update.rs.
+            "detached_label": self.detached_label,
             "has_new_output": self.has_new_output,
             "history_size": self.terminal.history_size(),
             "display_offset": self.terminal.display_offset(),
             "mouse_mode": mouse_mode,
+            // Structured takeover state (issue #364): true when the edge-detector
+            // considers a subprocess to be actively taking over this terminal.
+            "takeover_active": self.takeover_detector.is_active(),
         })
     }
 

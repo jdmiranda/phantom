@@ -26,6 +26,42 @@ pub enum Event {
     CommandStarted { app_id: AppId, command: String },
     CommandComplete { app_id: AppId, exit_code: i32 },
 
+    /// A subprocess has taken over the terminal (rising edge).
+    ///
+    /// Emitted by `TerminalAdapter` on the **first frame** the takeover
+    /// condition becomes true. Consumers (#366, #367) use this to render
+    /// tethers and, eventually, to split the pane (issue #368/#369 — not in
+    /// this PR).
+    ///
+    /// # Lineage-model contract (issue #365)
+    ///
+    /// `app_id` is the *parent* terminal pane. `pgid` is the foreground
+    /// process group, which the lineage model can use to build a parent→child
+    /// edge. The `process_name` field provides the human-readable label.
+    SubprocessTakeoverDetected {
+        /// The parent terminal pane that spawned the subprocess.
+        app_id: AppId,
+        /// Human-readable process name (e.g. `"vim"`, `"htop"`).
+        /// `None` when the name could not be resolved.
+        process_name: Option<String>,
+        /// Foreground process-group ID from `TIOCGPGRP`.
+        /// `None` when the ioctl failed.
+        pgid: Option<i32>,
+        /// Whether the detection was caused by alt-screen entry or a
+        /// known-program name match.
+        alt_screen: bool,
+    },
+
+    /// A previously detected subprocess takeover has ended (falling edge).
+    ///
+    /// Emitted on the frame the takeover condition clears (e.g. the user quits
+    /// vim and the alt-screen is restored). Consumers use this to remove
+    /// tethers and collapse secondary panes.
+    SubprocessTakeoverCleared {
+        /// The parent terminal pane whose takeover just ended.
+        app_id: AppId,
+    },
+
     // -- Agents --------------------------------------------------------------
     AgentSpawned { agent_id: AgentId, task: String },
     AgentProgress { agent_id: AgentId, fraction: f32, message: String },
@@ -86,7 +122,9 @@ impl Event {
         match self {
             Self::TerminalOutput { .. }
             | Self::CommandStarted { .. }
-            | Self::CommandComplete { .. } => EventTopic::Terminal,
+            | Self::CommandComplete { .. }
+            | Self::SubprocessTakeoverDetected { .. }
+            | Self::SubprocessTakeoverCleared { .. } => EventTopic::Terminal,
 
             Self::AgentSpawned { .. }
             | Self::AgentProgress { .. }
@@ -128,6 +166,44 @@ mod tests {
         for event in &events {
             assert_eq!(event.topic(), EventTopic::Terminal);
         }
+    }
+
+    #[test]
+    fn subprocess_takeover_detected_has_terminal_topic() {
+        let event = Event::SubprocessTakeoverDetected {
+            app_id: 7,
+            process_name: Some("vim".into()),
+            pgid: Some(1234),
+            alt_screen: true,
+        };
+        assert_eq!(event.topic(), EventTopic::Terminal);
+    }
+
+    #[test]
+    fn subprocess_takeover_cleared_has_terminal_topic() {
+        let event = Event::SubprocessTakeoverCleared { app_id: 7 };
+        assert_eq!(event.topic(), EventTopic::Terminal);
+    }
+
+    #[test]
+    fn subprocess_takeover_detected_is_clone_and_debug() {
+        let event = Event::SubprocessTakeoverDetected {
+            app_id: 3,
+            process_name: None,
+            pgid: None,
+            alt_screen: false,
+        };
+        let cloned = event.clone();
+        let s = format!("{cloned:?}");
+        assert!(s.contains("SubprocessTakeoverDetected"));
+    }
+
+    #[test]
+    fn subprocess_takeover_cleared_is_clone_and_debug() {
+        let event = Event::SubprocessTakeoverCleared { app_id: 5 };
+        let cloned = event.clone();
+        let s = format!("{cloned:?}");
+        assert!(s.contains("SubprocessTakeoverCleared"));
     }
 
     #[test]
