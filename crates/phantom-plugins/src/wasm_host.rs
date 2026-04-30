@@ -202,10 +202,10 @@ impl PluginRuntime for WasmRuntime {
         // Call `ph_init` if the plugin exports it; otherwise this is a no-op.
         if self.has_export("ph_init") {
             let results = self.call("ph_init", &[])?;
-            if let Some(Val::I32(code)) = results.first() {
-                if *code != 0 {
-                    bail!("ph_init returned non-zero error code: {code}");
-                }
+            if let Some(Val::I32(code)) = results.first()
+                && *code != 0
+            {
+                bail!("ph_init returned non-zero error code: {code}");
             }
         }
         Ok(())
@@ -357,6 +357,7 @@ mod tests {
             hooks: vec![],
             commands: vec![],
             status_bar: None,
+            scaffold: false,
         }
     }
 

@@ -170,6 +170,7 @@ pub struct MockRuntime {
 }
 
 impl MockRuntime {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             initialized: false,
@@ -181,27 +182,32 @@ impl MockRuntime {
     }
 
     /// Pre-configure a response for a specific hook discriminant name (e.g. "OnStartup").
+    #[must_use]
     pub fn on_hook(mut self, hook_key: &str, response: HookResponse) -> Self {
         self.hook_responses.insert(hook_key.into(), response);
         self
     }
 
     /// Pre-configure a response for a command invocation.
+    #[must_use]
     pub fn on_command(mut self, cmd: &str, output: &str) -> Self {
         self.command_responses.insert(cmd.into(), output.into());
         self
     }
 
     /// Pre-configure the status-bar text.
+    #[must_use]
     pub fn with_status_text(mut self, text: &str) -> Self {
         self.status_text = Some(text.into());
         self
     }
 
+    #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
 
+    #[must_use]
     pub fn is_shutdown(&self) -> bool {
         self.shutdown_called
     }
@@ -236,13 +242,13 @@ impl PluginRuntime for MockRuntime {
         // stored "OnCommand:git *").
         if let HookType::OnCommand(cmd) = hook {
             for (stored_key, resp) in &self.hook_responses {
-                if let Some(pattern) = stored_key.strip_prefix("OnCommand:") {
-                    if crate::manifest::hook_matches(
+                if let Some(pattern) = stored_key.strip_prefix("OnCommand:")
+                    && crate::manifest::hook_matches(
                         &HookType::OnCommand(pattern.to_string()),
                         &HookType::OnCommand(cmd.clone()),
-                    ) {
-                        return Ok(Some(resp.clone()));
-                    }
+                    )
+                {
+                    return Ok(Some(resp.clone()));
                 }
             }
         }
@@ -302,6 +308,7 @@ mod tests {
                 usage: "hello".into(),
             }],
             status_bar: None,
+            scaffold: false,
         }
     }
 

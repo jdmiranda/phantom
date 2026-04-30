@@ -34,18 +34,21 @@ impl ScriptRuntime {
     }
 
     /// Register a shell command to run when a specific hook fires.
+    #[must_use]
     pub fn on_hook(mut self, hook_key: &str, shell_cmd: &str) -> Self {
         self.hook_scripts.insert(hook_key.into(), shell_cmd.into());
         self
     }
 
     /// Register a shell command to run for a named plugin command.
+    #[must_use]
     pub fn on_command(mut self, name: &str, shell_cmd: &str) -> Self {
         self.command_scripts.insert(name.into(), shell_cmd.into());
         self
     }
 
     /// Register a shell command that produces status bar text.
+    #[must_use]
     pub fn with_status_command(mut self, shell_cmd: &str) -> Self {
         self.status_command = Some(shell_cmd.into());
         self
@@ -144,6 +147,7 @@ mod tests {
             hooks: vec![HookType::OnStartup],
             commands: vec![],
             status_bar: None,
+            scaffold: false,
         }
     }
 
@@ -253,6 +257,7 @@ mod tests {
                 usage: "greet".into(),
             }],
             status_bar: None,
+            scaffold: false,
         };
 
         let rt = ScriptRuntime::new("/tmp")
