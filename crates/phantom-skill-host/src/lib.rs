@@ -46,13 +46,17 @@
 //! `tokio::spawn`)
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod drain_reaper;
 pub mod ffi;
 pub mod host;
 pub mod llm_ffi;
 pub mod llm_host;
 pub mod llm_loader;
 pub mod loader;
+pub mod swap_manager;
 pub mod watcher;
 
+pub use drain_reaper::all_swap_states;
 pub use host::{SemanticSkill, SkillHost};
 pub use llm_host::{LlmHost, LlmSkill, LlmSkillAdapter};
+pub use swap_manager::{SwapManager, SwapState, SwapStatus, pending_swaps};
