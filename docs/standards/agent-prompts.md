@@ -116,4 +116,4 @@ Run the audit before opening a PR that touches any of these files.
 - [handoff-schema.md](handoff-schema.md) — "Next Agent Should" instructions go directly into spawn prompts. Apply this rule there.
 - [review-rubric.md](review-rubric.md) — reviewer routing instructions must be imperatives.
 - [definition-of-done.md](definition-of-done.md) — orchestrator routing logic must be declarative constraints.
-- CLAUDE.md orchestration rule #9.
+- CLAUDE.md orchestration rule #8.

@@ -25,8 +25,8 @@
 //! `send_command` API (see [`crate::dag_commands`]). These commands mutate
 //! the [`DagViewerState`] and [`DagHighlightState`] owned by this adapter.
 //! All other state (snapshot, tokens) remains read-only from outside.
-//! The `accepts_commands` predicate returns `true` only when the adapter
-//! has a DAG loaded; commands issued before a DAG is loaded return an error.
+//! The `accepts_commands` predicate always returns `true`; the guard for
+//! "no DAG loaded" is enforced inside `accept_command` where it can return an error.
 
 use std::sync::{Arc, RwLock};
 

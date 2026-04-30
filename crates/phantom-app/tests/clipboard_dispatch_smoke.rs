@@ -2,7 +2,7 @@
 //!
 //! Guards against future drift between the three copy/paste paths:
 //!   1. `Action::Copy` / `Action::Paste` in `dispatch_action`  (keybind layer)
-//!   2. Physical-key intercept in `handle_key_with_mods`       (Cmd+C / Ctrl+Shift+C)
+//!   2. Physical-key intercept in `dispatch_action`            (Cmd+C / Ctrl+Shift+C, converted to Action before dispatch)
 //!   3. `MenuAction::Copy` / `MenuAction::Paste`               (context menu)
 //!
 //! All three paths ultimately call the same coordinator commands:

@@ -127,8 +127,6 @@ unsafe extern "C" fn complete_ffi(
 
     // SAFETY: pointer/length pairs are borrowed for the duration of the call;
     // checked UTF-8 conversion — non-UTF-8 input writes a descriptive error.
-    // SAFETY: pointer/length pairs are borrowed for the duration of the call;
-    // checked UTF-8 conversion — non-UTF-8 input writes a descriptive error.
     // out_ptr / out_len / out_err are non-null (guarded above).
     let sys_bytes = unsafe { std::slice::from_raw_parts(system_prompt, system_prompt_len) };
     let sys = match std::str::from_utf8(sys_bytes) {

@@ -1072,10 +1072,11 @@ impl App {
         self.ooda_agent_just_completed = false; // consume: fires for one tick only
 
         // --- file / git change ----------------------------------------------
-        // `ooda_git_changed` is a one-frame pulse set by `drain_bus_to_brain`
-        // when an `AgentTaskComplete`/`AgentError` event carries git-state
-        // side effects. We also OR in `context.git.is_dirty` so the OODA loop
-        // knows the repo is dirty even before an explicit change event fires.
+        // `ooda_git_changed` is a one-frame pulse set by the git-refresh reap
+        // path (line 315) when the background git-refresh thread finishes, and
+        // also by `drain_bus_to_brain` when a `GitStateChanged` event arrives.
+        // We also OR in `context.git.is_dirty` so the OODA loop knows the repo
+        // is dirty even before an explicit change event fires.
         let git_dirty = self
             .context
             .as_ref()
@@ -1113,7 +1114,7 @@ impl App {
             has_errors,
             error_count,
             has_active_process,
-            false, // new_pattern_detected: not yet wired; requires memory pattern engine
+            false, // new_pattern_detected: not yet wired; requires memory pattern engine (#28, #62)
             agent_just_completed,
             file_or_git_changed,
             in_repl,

@@ -234,6 +234,7 @@ fn builtin_tools() -> Vec<McpTool> {
                 "type": "object",
                 "properties": {
                     "pane_id": {"type": "string", "description": "Pane to capture (optional)"},
+                    "path": {"type": "string", "description": "File path to write the PNG to (optional)"},
                 },
             }),
         },

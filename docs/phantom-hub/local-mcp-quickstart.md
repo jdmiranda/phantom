@@ -107,7 +107,7 @@ All 9 tools — descriptions from `crates/phantom-mcp/src/server.rs:201-304`.
 |---|---|---|---|
 | `phantom.run_command` | `command` | `pane_id` | Execute a shell command in a pane |
 | `phantom.read_output` | — | `pane_id`, `lines` (default 50) | Get the last command's parsed output |
-| `phantom.screenshot` | — | `pane_id`, `path` | Capture the terminal state as text; returns PNG path + dimensions |
+| `phantom.screenshot` | — | `pane_id` | Capture the terminal state as text |
 | `phantom.send_key` | `key` | — | Send a keypress. Named: `Enter Tab Escape Space Backspace Up Down Left Right`. Anything else sent verbatim. Also dismisses boot screen. |
 | `phantom.split_pane` | — | `direction` (`horizontal`\|`vertical`), `pane_id` | Create a new pane by splitting an existing one |
 | `phantom.get_context` | — | — | Get project context (language, framework, etc.) |

@@ -164,9 +164,10 @@ impl App {
                         &serde_json::json!({}),
                     ) {
                         if !text.is_empty() {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let _ = clipboard.set_text(&text);
-                            }
+                            if let Ok(mut clipboard) = arboard::Clipboard::new()
+                                && let Err(e) = clipboard.set_text(&text) {
+                                    debug!("clipboard write failed: {e}");
+                                }
                             info!("Copied {} chars to clipboard", text.len());
                         } else {
                             debug!("Copy: no selection");
