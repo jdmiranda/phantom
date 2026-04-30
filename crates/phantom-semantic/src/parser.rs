@@ -12,6 +12,7 @@ impl SemanticParser {
     // -----------------------------------------------------------------------
 
     /// Classify a command string into a [`CommandType`].
+    #[must_use]
     pub fn classify_command(cmd: &str) -> CommandType {
         let trimmed = cmd.trim();
 
@@ -64,6 +65,7 @@ impl SemanticParser {
     }
 
     /// Full parse pipeline: classify, detect content type, extract errors.
+    #[must_use]
     pub fn parse(
         cmd: &str,
         stdout: &str,
@@ -456,11 +458,7 @@ impl SemanticParser {
                 _ => Severity::Info,
             };
 
-            let error_type = if severity == Severity::Warning {
-                ErrorType::Compiler
-            } else {
-                ErrorType::Compiler
-            };
+            let error_type = ErrorType::Compiler;
 
             // Try to find a suggestion near this diagnostic.
             // We search the text following this match for help/suggestion lines.

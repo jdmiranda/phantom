@@ -5668,6 +5668,7 @@ dependencies = [
  "phantom-scene",
  "phantom-semantic",
  "phantom-session",
+ "phantom-skill-host",
  "phantom-stt",
  "phantom-terminal",
  "phantom-ui",
@@ -5982,6 +5983,18 @@ dependencies = [
  "phantom-context",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "phantom-skill-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libloading",
+ "log",
+ "notify",
+ "phantom-semantic",
  "tempfile",
 ]
 

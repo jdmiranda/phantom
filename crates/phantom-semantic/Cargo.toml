@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Build as both a normal rlib (for direct linking) AND a cdylib (for
+# phantom-skill-host hot-module loading).  The cdylib artifact lands at
+# `target/debug/libphantom_semantic.{dylib,so,dll}` and exports the
+# `phantom_skill_register` C symbol (see `src/skill_export.rs`).
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 log.workspace = true
 anyhow.workspace = true

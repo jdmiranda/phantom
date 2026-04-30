@@ -582,7 +582,7 @@ impl App {
                         .coordinator
                         .terminal_output_buf(*app_id)
                         .unwrap_or_default();
-                    let parsed = phantom_semantic::parser::SemanticParser::parse(
+                    let parsed = self.semantic_skill.parse(
                         &command,
                         "",
                         &raw_output,

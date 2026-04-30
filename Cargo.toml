@@ -38,6 +38,8 @@ members = [
     "crates/phantom-net",
     # Railway-hosted MCP fleet control hub (issue #394).
     "crates/phantom-hub",
+    # Hot-module reload host — Phase 1 dylib loading (issue #382).
+    "crates/phantom-skill-host",
 ]
 resolver = "2"
 
@@ -77,3 +79,9 @@ anyhow = "1"
 bitflags = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Hot-module reload infrastructure (phantom-skill-host, issue #382).
+libloading = "0.8"
+arc-swap   = "1.7"
+notify     = "6"
+tempfile   = "3"

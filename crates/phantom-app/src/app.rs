@@ -164,6 +164,12 @@ pub struct App {
     // -- AI Brain (OODA loop on dedicated thread) --
     pub(crate) brain: Option<BrainHandle>,
 
+    // -- Semantic skill (SkillHost-routed parser used by the CommandComplete handler).
+    //    Built once at startup via SkillHost::build(): static path in release and by
+    //    default in debug; dylib hot-reload path when PHANTOM_HOT_MODULES=1.
+    //    Stored as Arc<dyn SemanticSkill> so the dispatch site is backend-agnostic.
+    pub(crate) semantic_skill: std::sync::Arc<dyn phantom_skill_host::SemanticSkill>,
+
     // -- Per-frame OODA loop (Observe/Orient/Decide/Act driven by render clock).
     //    Runs synchronously in update() — see ooda.rs and issue #45.
     pub(crate) ooda_loop: OodaLoop,
@@ -700,6 +706,13 @@ impl App {
         }
         info!("AI brain spawned");
 
+        // -- Semantic skill (SkillHost-routed — static or dylib, with fallback).
+        //    SkillHost::build() tries the dylib when PHANTOM_HOT_MODULES=1 and the
+        //    hot-modules feature is active; on any failure it falls back to the
+        //    static SemanticParser path so boot is never blocked.
+        let semantic_skill = phantom_skill_host::SkillHost::build();
+        info!("Semantic skill host initialized");
+
         // -- NLP translate channel (bounded at 8 outstanding requests) --
         let (nlp_translate_tx, nlp_translate_rx) =
             std::sync::mpsc::sync_channel::<NlpTranslateResult>(8);
@@ -1071,6 +1084,7 @@ impl App {
             debug_hud: false,
             debug_hud_selected: 0,
             brain: Some(brain),
+            semantic_skill,
             ooda_loop: OodaLoop::new(OodaConfig::default()),
             runtime,
             context: Some(context),
