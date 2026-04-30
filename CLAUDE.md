@@ -370,6 +370,8 @@ Rules that govern how autonomous agents coordinate within the Phantom multi-agen
 
 7. **Spec gate**: Before spawning any executor agent, a spec agent must first produce SPEC.md, PLAN.md, and TASKS.md in the worktree. The executor receives only TASKS.md — not the raw issue. Any issue scoring ≥7/10 on the MAST rubric may skip the spec agent; lower-scoring issues must pass through it.
 
+8. **Prompt phrasing**: Agent prompts contain no question-mark sentences. See [docs/standards/agent-prompts.md](docs/standards/agent-prompts.md) — questions produce commentary instead of action.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
