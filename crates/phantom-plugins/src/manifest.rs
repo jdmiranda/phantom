@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// Every plugin ships a manifest describing its identity, capabilities,
 /// required permissions, and the events it reacts to.
+///
+/// ## Scaffold manifests
+///
+/// When a plugin is installed via the marketplace scaffold path (no real WASM
+/// binary was downloaded), `scaffold` is `true`. A scaffold plugin can be
+/// discovered and enumerated but **cannot be executed** — the WASM runtime will
+/// reject it because no usable binary exists. Check `self.is_scaffold()` before
+/// attempting to load a plugin into the runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub name: String,
@@ -15,6 +23,8 @@ pub struct PluginManifest {
     #[serde(default)]
     pub homepage: Option<String>,
     /// Relative path to the compiled WASM module (e.g. "plugin.wasm").
+    /// For scaffold installs this is an empty string — no real binary exists.
+    #[serde(default)]
     pub entry_point: String,
     #[serde(default)]
     pub permissions: Vec<Permission>,
@@ -24,6 +34,11 @@ pub struct PluginManifest {
     pub commands: Vec<CommandDef>,
     #[serde(default)]
     pub status_bar: Option<StatusBarDef>,
+    /// `true` when this manifest was produced by the marketplace scaffold path.
+    /// No real WASM binary is present; the plugin cannot be executed until a
+    /// real artifact is installed (tracked by issue #48).
+    #[serde(default)]
+    pub scaffold: bool,
 }
 
 /// Permission a plugin can request. The host must grant each permission
@@ -93,7 +108,10 @@ impl PluginManifest {
         Ok(manifest)
     }
 
-    /// Basic validation — name non-empty, version non-empty, entry_point non-empty.
+    /// Basic validation — name non-empty, version non-empty.
+    ///
+    /// For scaffold manifests (`scaffold = true`) the `entry_point` is allowed
+    /// to be empty because no real WASM binary has been downloaded yet.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.name.is_empty() {
             anyhow::bail!("plugin name must not be empty");
@@ -101,23 +119,37 @@ impl PluginManifest {
         if self.version.is_empty() {
             anyhow::bail!("plugin version must not be empty");
         }
-        if self.entry_point.is_empty() {
-            anyhow::bail!("plugin entry_point must not be empty");
+        if !self.scaffold && self.entry_point.is_empty() {
+            anyhow::bail!(
+                "plugin entry_point must not be empty (set scaffold = true if this is a \
+                 placeholder install)"
+            );
         }
         Ok(())
     }
 
+    /// Returns `true` when this manifest was produced by the marketplace
+    /// scaffold path and no real WASM binary is available. The plugin cannot
+    /// be executed until a real artifact is installed (issue #48).
+    #[must_use]
+    pub fn is_scaffold(&self) -> bool {
+        self.scaffold
+    }
+
     /// Check whether this plugin requests a given permission.
+    #[must_use]
     pub fn has_permission(&self, perm: &Permission) -> bool {
         self.permissions.contains(perm)
     }
 
     /// Returns true if this plugin defines a status-bar widget.
+    #[must_use]
     pub fn has_status_bar(&self) -> bool {
         self.status_bar.is_some()
     }
 
     /// Check whether this plugin hooks into the given event type.
+    #[must_use]
     pub fn listens_for(&self, hook: &HookType) -> bool {
         self.hooks.iter().any(|h| hook_matches(h, hook))
     }
@@ -128,6 +160,7 @@ impl PluginManifest {
 /// For `OnCommand`, matching uses a simple glob: `*` matches any substring.
 /// All other variants match by discriminant (the inner data is ignored on the
 /// registration side for `OnInterval`).
+#[must_use]
 pub fn hook_matches(registered: &HookType, incoming: &HookType) -> bool {
     match (registered, incoming) {
         (HookType::OnCommand(pattern), HookType::OnCommand(cmd)) => {
@@ -202,6 +235,7 @@ mod tests {
                 position: StatusBarPosition::Right,
                 update_interval_ms: 5000,
             }),
+            scaffold: false,
         }
     }
 

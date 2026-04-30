@@ -70,6 +70,7 @@ impl PluginRegistry {
     }
 
     /// Create an empty registry with no plugin directory. Plugins are disabled.
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             plugins: Vec::new(),
@@ -78,6 +79,7 @@ impl PluginRegistry {
     }
 
     /// The directory this registry scans for plugins.
+    #[must_use]
     pub fn plugin_dir(&self) -> &Path {
         &self.plugin_dir
     }
@@ -157,6 +159,7 @@ impl PluginRegistry {
     }
 
     /// All currently loaded plugins (enabled and disabled).
+    #[must_use]
     pub fn plugins(&self) -> &[LoadedPlugin] {
         &self.plugins
     }
@@ -281,6 +284,7 @@ impl PluginRegistry {
     }
 
     /// List all loaded plugins with their summary info.
+    #[must_use]
     pub fn list(&self) -> Vec<PluginInfo> {
         self.plugins
             .iter()
@@ -308,11 +312,13 @@ impl PluginRegistry {
     }
 
     /// Number of currently loaded plugins.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.plugins.len()
     }
 
     /// Whether the registry has zero loaded plugins.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
@@ -381,6 +387,7 @@ mod tests {
                 position: StatusBarPosition::Right,
                 update_interval_ms: 1000,
             }),
+            scaffold: false,
         }
     }
 

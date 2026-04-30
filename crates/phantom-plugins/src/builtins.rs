@@ -14,6 +14,7 @@ use crate::manifest::{
 // ---------------------------------------------------------------------------
 
 /// All official plugin manifests, ordered by name.
+#[must_use]
 pub fn official_plugins() -> Vec<PluginManifest> {
     vec![
         git_enhanced(),
@@ -25,6 +26,7 @@ pub fn official_plugins() -> Vec<PluginManifest> {
 }
 
 /// Look up an official plugin by exact name.
+#[must_use]
 pub fn get_official(name: &str) -> Option<PluginManifest> {
     official_plugins().into_iter().find(|p| p.name == name)
 }
@@ -58,6 +60,7 @@ fn git_enhanced() -> PluginManifest {
             },
         ],
         status_bar: None,
+        scaffold: false,
     }
 }
 
@@ -92,6 +95,7 @@ fn docker_dashboard() -> PluginManifest {
             position: StatusBarPosition::Right,
             update_interval_ms: 5000,
         }),
+        scaffold: false,
     }
 }
 
@@ -118,6 +122,7 @@ fn api_inspector() -> PluginManifest {
             usage: "api <method> <url> [--header <k:v>] [--body <json>]".into(),
         }],
         status_bar: None,
+        scaffold: false,
     }
 }
 
@@ -141,6 +146,7 @@ fn spotify_controls() -> PluginManifest {
             position: StatusBarPosition::Center,
             update_interval_ms: 5000,
         }),
+        scaffold: false,
     }
 }
 
@@ -174,6 +180,7 @@ fn github_notifications() -> PluginManifest {
             position: StatusBarPosition::Right,
             update_interval_ms: 60_000,
         }),
+        scaffold: false,
     }
 }
 

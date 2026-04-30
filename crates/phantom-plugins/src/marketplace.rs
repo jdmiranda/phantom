@@ -1,9 +1,21 @@
-//! Plugin marketplace — discovery, installation, and management.
+//! Plugin marketplace — discovery, scaffold-installation, and management.
 //!
 //! The marketplace maintains a catalog of available plugins (both official and
-//! community) and handles the local install/uninstall lifecycle. Actual WASM
-//! downloads are stubbed for now; installation creates the expected directory
-//! structure so the rest of the plugin system can load manifests.
+//! community) and handles the local install/uninstall lifecycle.
+//!
+//! ## Scaffolding vs. real installation
+//!
+//! [`Marketplace::install`] currently performs **scaffolding only**: it creates
+//! the expected directory layout and writes `manifest.toml` so that the rest of
+//! the plugin system can discover and enumerate the plugin, but it does **not**
+//! download a real WASM binary. A marker file (`plugin.wasm.scaffold`) is written
+//! in place of a real `plugin.wasm` so that callers and the plugin loader can
+//! distinguish scaffold installs from fully-functional ones.
+//!
+//! Real artifact downloading, signature verification, and staged installation are
+//! tracked by issue #48 (WASM host) and future product work. Until then, every
+//! install produces a [`ScaffoldInstall`] outcome and callers must not treat the
+//! scaffold directory as a usable plugin runtime.
 
 use std::fs;
 use std::path::PathBuf;
@@ -12,6 +24,24 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::builtins;
+
+// ---------------------------------------------------------------------------
+// ScaffoldInstall
+// ---------------------------------------------------------------------------
+
+/// The result of a scaffolding-only marketplace install.
+///
+/// This is **not** a real plugin installation — no WASM binary has been
+/// downloaded. The directory structure is created so that the plugin registry
+/// can enumerate the plugin, but the plugin cannot be executed until a real
+/// artifact is obtained (tracked by issue #48).
+#[derive(Debug, Clone)]
+pub struct ScaffoldInstall {
+    /// Directory that was created for this plugin.
+    pub plugin_dir: PathBuf,
+    /// Human-readable notice that callers should surface to users.
+    pub notice: String,
+}
 
 // ---------------------------------------------------------------------------
 // MarketplaceListing
@@ -41,9 +71,16 @@ pub struct Marketplace {
     plugin_dir: PathBuf,
 }
 
+impl Default for Marketplace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Marketplace {
     /// Create a marketplace backed by the default plugin directory
     /// (`~/.phantom/plugins`).
+    #[must_use]
     pub fn new() -> Self {
         let plugin_dir = dirs_or_default().join("plugins");
         Self {
@@ -54,6 +91,7 @@ impl Marketplace {
 
     /// Create a marketplace rooted at a specific plugin directory.
     /// Useful for testing and custom installs.
+    #[must_use]
     pub fn with_dir(plugin_dir: PathBuf) -> Self {
         Self {
             cache: Self::seed_catalog(),
@@ -63,6 +101,7 @@ impl Marketplace {
 
     /// Search the catalog by name or tag. Returns all listings whose name
     /// contains `query` or that carry a matching tag. Case-insensitive.
+    #[must_use]
     pub fn search(&self, query: &str) -> Vec<&MarketplaceListing> {
         let q = query.to_lowercase();
         self.cache
@@ -75,15 +114,23 @@ impl Marketplace {
     }
 
     /// Get a listing by exact name.
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&MarketplaceListing> {
         self.cache.iter().find(|l| l.name == name)
     }
 
-    /// Install a plugin by name.
+    /// Scaffold a plugin installation by name.
     ///
-    /// For now this creates the expected directory structure and writes the
-    /// manifest as TOML. Actual WASM download is a future concern.
-    pub fn install(&self, name: &str) -> Result<PathBuf> {
+    /// This creates the expected directory layout and writes `manifest.toml` so
+    /// that the plugin registry can discover the plugin. It does **not** download
+    /// a real WASM binary — a marker file `plugin.wasm.scaffold` is written
+    /// instead of a functional `plugin.wasm`.
+    ///
+    /// Callers **must** surface the [`ScaffoldInstall::notice`] to the user so
+    /// it is clear that the plugin is not yet executable.
+    ///
+    /// Real artifact downloading is blocked on issue #48 (WASM host / wasmtime).
+    pub fn install(&self, name: &str) -> Result<ScaffoldInstall> {
         let listing = match self.get(name) {
             Some(l) => l,
             None => bail!("plugin '{}' not found in marketplace", name),
@@ -91,17 +138,23 @@ impl Marketplace {
 
         let dest = self.plugin_dir.join(name);
         if dest.exists() {
-            bail!("plugin '{}' is already installed at {}", name, dest.display());
+            bail!(
+                "plugin '{}' scaffold already exists at {}",
+                name,
+                dest.display()
+            );
         }
 
         fs::create_dir_all(&dest)?;
 
-        // Write a minimal manifest.toml so the loader can pick it up.
+        // Write a minimal manifest.toml so the loader can enumerate the plugin.
+        // The `scaffold = true` key signals that no real WASM binary is present.
         let manifest_toml = format!(
             r#"name = "{name}"
 version = "{version}"
 description = "{description}"
 author = "{author}"
+scaffold = true
 "#,
             name = listing.name,
             version = listing.version,
@@ -110,11 +163,26 @@ author = "{author}"
         );
         fs::write(dest.join("manifest.toml"), manifest_toml)?;
 
-        // Placeholder for the WASM binary.
-        fs::write(dest.join("plugin.wasm"), b"")?;
+        // Write a clearly-named marker file instead of an empty plugin.wasm so
+        // that no tool accidentally treats this directory as a runnable plugin.
+        // Real binary installation is tracked by issue #48.
+        fs::write(
+            dest.join("plugin.wasm.scaffold"),
+            b"# scaffold placeholder - no real WASM binary has been downloaded\n",
+        )?;
 
-        log::info!("installed plugin '{}' to {}", name, dest.display());
-        Ok(dest)
+        let notice = format!(
+            "Scaffolded plugin '{}' at {} (placeholder only — \
+             plugin is not executable until a real WASM artifact is installed; \
+             see issue #48)",
+            name,
+            dest.display()
+        );
+        log::warn!("{}", notice);
+        Ok(ScaffoldInstall {
+            plugin_dir: dest,
+            notice,
+        })
     }
 
     /// Uninstall a plugin by removing its directory. Returns `true` if the
@@ -140,10 +208,11 @@ author = "{author}"
         for entry in fs::read_dir(&self.plugin_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() && path.join("manifest.toml").exists() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    names.push(name.to_owned());
-                }
+            if path.is_dir()
+                && path.join("manifest.toml").exists()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            {
+                names.push(name.to_owned());
             }
         }
         names.sort();
@@ -333,18 +402,49 @@ mod tests {
         assert!(listing.is_official);
     }
 
-    // -- Install / Uninstall --
+    // -- Scaffold install / Uninstall --
 
     #[test]
-    fn install_creates_directory_and_manifest() {
+    fn scaffold_install_creates_directory_and_manifest() {
         let (mp, _tmp) = test_marketplace();
-        let dest = mp.install("pomodoro").expect("install should succeed");
-        assert!(dest.exists());
-        assert!(dest.join("manifest.toml").exists());
-        assert!(dest.join("plugin.wasm").exists());
+        let outcome = mp.install("pomodoro").expect("scaffold should succeed");
+        assert!(outcome.plugin_dir.exists());
+        assert!(outcome.plugin_dir.join("manifest.toml").exists());
 
-        let content = fs::read_to_string(dest.join("manifest.toml")).unwrap();
+        let content = fs::read_to_string(outcome.plugin_dir.join("manifest.toml")).unwrap();
         assert!(content.contains("name = \"pomodoro\""));
+        assert!(
+            content.contains("scaffold = true"),
+            "manifest.toml must carry scaffold = true"
+        );
+    }
+
+    #[test]
+    fn scaffold_install_writes_marker_not_real_wasm() {
+        let (mp, _tmp) = test_marketplace();
+        let outcome = mp.install("pomodoro").expect("scaffold should succeed");
+
+        // A marker file signals that no real binary was downloaded.
+        assert!(
+            outcome.plugin_dir.join("plugin.wasm.scaffold").exists(),
+            "plugin.wasm.scaffold marker must be present"
+        );
+        // No empty plugin.wasm that could be mistaken for a real artifact.
+        assert!(
+            !outcome.plugin_dir.join("plugin.wasm").exists(),
+            "plugin.wasm must NOT be written during scaffolding"
+        );
+    }
+
+    #[test]
+    fn scaffold_install_notice_mentions_placeholder() {
+        let (mp, _tmp) = test_marketplace();
+        let outcome = mp.install("pomodoro").expect("scaffold should succeed");
+        assert!(
+            outcome.notice.contains("placeholder") || outcome.notice.contains("scaffold"),
+            "notice must clearly state the install is a scaffold/placeholder: {}",
+            outcome.notice
+        );
     }
 
     #[test]
