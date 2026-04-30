@@ -14,8 +14,6 @@ hot-modules = ["dep:libloading", "dep:notify"]
 [dependencies]
 log.workspace = true
 anyhow.workspace = true
-# ArcSwap provides a lock-free atomic pointer swap — the core of SwapManager.
-arc-swap.workspace = true
 
 # Optional: only pulled in when the `hot-modules` feature is enabled.
 libloading = { workspace = true, optional = true }

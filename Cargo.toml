@@ -82,6 +82,5 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Hot-module reload infrastructure (phantom-skill-host, issue #382).
 libloading = "0.8"
-arc-swap   = "1.7"
 notify     = "6"
 tempfile   = "3"

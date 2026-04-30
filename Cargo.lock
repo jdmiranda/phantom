@@ -5992,7 +5992,6 @@ name = "phantom-skill-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "libloading",
  "log",
  "notify",
