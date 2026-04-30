@@ -44,23 +44,32 @@
 //!
 //! # Replay mitigation
 //!
-//! The registration flow includes a server-generated nonce (see
-//! `POST /auth/register`).  Phantom signs `(nonce || peer_id)` with its
-//! Ed25519 identity key; the hub verifies the signature before issuing a JWT.
-//! This prevents replay: an attacker who captures a past registration request
-//! cannot replay it because the nonce is single-use and the hub discards it
-//! after verification.
+//! The registration flow requires a nonce (see `POST /auth/register`).
+//! Phantom signs `(nonce || peer_id)` with its Ed25519 identity key; the hub
+//! verifies the signature before issuing a JWT.  After signature verification
+//! the hub calls [`NonceCache::try_claim`] which atomically records the nonce
+//! as consumed and returns `false` on any subsequent replay attempt.  A replay
+//! of the same signed request is rejected with `409 Conflict` before a JWT is
+//! issued.
+//!
+//! [`NonceCache`] is backed by an LRU cache (capacity 10 000, TTL 10 minutes).
+//! Entries are evicted lazily on the oldest-first basis when the cache is full;
+//! there is no full-clear fallback.  The TTL window (10 minutes) is
+//! intentionally much shorter than the JWT lifetime (30 days) — it covers the
+//! realistic registration-to-WSS-connect interval while keeping memory bounded.
 //!
 //! Short-lived replay window on the WSS registration frame: the JWT itself
 //! has a 30-day exp.  Clock skew tolerance is ±5 minutes.  A stolen JWT can
 //! be used until its exp; rotation is via `phantom auth register --renew`
 //! (ticket 09).
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -77,6 +86,104 @@ pub const JWT_EXP_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Clock skew tolerance for JWT validation (±5 minutes).
 pub const JWT_LEEWAY_SECS: u64 = 5 * 60;
+
+/// Maximum number of nonces tracked simultaneously by [`NonceCache`].
+///
+/// At 10 000 entries the cache uses roughly 640 KB at worst (64-byte nonce
+/// strings + 16-byte `Instant`).  This is well within the hub's memory budget.
+pub const NONCE_CACHE_CAPACITY: usize = 10_000;
+
+/// How long a claimed nonce is remembered before it is eligible for eviction.
+///
+/// Set to 10 minutes — twice the JWT clock-skew leeway (5 min) and well within
+/// any realistic registration-to-WSS-connect window.
+pub const NONCE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+// ---------------------------------------------------------------------------
+// NonceCache — replay protection for POST /auth/register
+// ---------------------------------------------------------------------------
+
+/// Single-use nonce tracker for `POST /auth/register`.
+///
+/// Backed by an LRU cache (capacity [`NONCE_CACHE_CAPACITY`], TTL
+/// [`NONCE_CACHE_TTL`]).  On every `try_claim` call the Mutex is acquired
+/// once; check and insert are performed under the same acquisition so the
+/// operation is atomic — there is no window between the check and the insert.
+///
+/// The lock is never held across an `.await` point.  `NonceCache` is `Send +
+/// Sync` by construction (`Mutex<LruCache<...>>`).
+///
+/// # Eviction
+///
+/// When the cache reaches capacity, the LRU entry is evicted before the new
+/// nonce is inserted.  Additionally, `try_claim` performs lazy TTL eviction:
+/// if an existing entry for the same nonce key is found but its recorded
+/// `Instant` is older than [`NONCE_CACHE_TTL`], the entry is treated as
+/// expired and the nonce is re-claimable (returns `true`).
+pub struct NonceCache {
+    inner: Mutex<LruCache<String, Instant>>,
+    ttl: Duration,
+}
+
+impl NonceCache {
+    /// Create a [`NonceCache`] with production defaults:
+    /// capacity [`NONCE_CACHE_CAPACITY`], TTL [`NONCE_CACHE_TTL`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_capacity_and_ttl(NONCE_CACHE_CAPACITY, NONCE_CACHE_TTL)
+    }
+
+    /// Create a [`NonceCache`] with explicit capacity and TTL.
+    ///
+    /// Intended for tests that need a small cache to exercise eviction without
+    /// inserting 10 000 entries.  Production code must use [`NonceCache::new`].
+    #[must_use]
+    pub fn with_capacity_and_ttl(capacity: usize, ttl: Duration) -> Self {
+        let cap = std::num::NonZeroUsize::new(capacity.max(1))
+            .expect("capacity is always ≥ 1 after max(1)");
+        Self {
+            inner: Mutex::new(LruCache::new(cap)),
+            ttl,
+        }
+    }
+
+    /// Atomically claim `nonce`.
+    ///
+    /// Returns `true` on the first successful claim.  Returns `false` when
+    /// `nonce` has already been claimed and its TTL has not yet expired.
+    ///
+    /// An expired nonce (older than [`Self::ttl`]) is evicted and treated as
+    /// a new nonce — returns `true`.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal `Mutex` is poisoned, which cannot happen
+    /// unless a previous thread panicked while holding the lock.
+    pub fn try_claim(&self, nonce: &str) -> bool {
+        let mut cache = self.inner.lock().expect("NonceCache mutex poisoned");
+        let now = Instant::now();
+
+        // peek without promoting to LRU-head so we don't disturb eviction order
+        // for a stale entry we are about to replace.
+        if let Some(&claimed_at) = cache.peek(nonce)
+            && now.duration_since(claimed_at) < self.ttl
+        {
+            // Still within TTL — this is a replay.
+            return false;
+        }
+        // Not found or expired — fall through to insert with a fresh timestamp.
+
+        // First claim (or expired re-claim): insert/update and return true.
+        cache.put(nonce.to_owned(), now);
+        true
+    }
+}
+
+impl Default for NonceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // JWT claims
@@ -633,6 +740,91 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("Authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
         assert!(extract_bearer(&headers).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // NonceCache — replay protection regression tests (P0 security, issue #398)
+    // -----------------------------------------------------------------------
+
+    /// A captured registration payload replayed a second time must be rejected.
+    ///
+    /// Both calls share the same [`NonceCache`] instance (via `Arc::clone` on
+    /// the same `AppState`).  First call returns `true` (claim succeeds),
+    /// second call returns `false` (replay detected).
+    #[test]
+    fn nonce_cache_replayed_nonce_rejected() {
+        let cache = NonceCache::new();
+        let nonce = "unique-nonce-replay-test-abc123";
+
+        let first = cache.try_claim(nonce);
+        let second = cache.try_claim(nonce);
+
+        assert!(first, "first claim of a nonce must succeed");
+        assert!(!second, "replayed nonce must be rejected");
+    }
+
+    /// Two distinct nonces must both be claimable — blocking one must not
+    /// affect the other.
+    #[test]
+    fn nonce_cache_distinct_nonces_both_succeed() {
+        let cache = NonceCache::new();
+
+        let first = cache.try_claim("nonce-alpha-1");
+        let second = cache.try_claim("nonce-beta-2");
+
+        assert!(first, "first distinct nonce must be claimed");
+        assert!(second, "second distinct nonce must also be claimed");
+    }
+
+    /// LRU eviction: filling the cache to capacity and inserting one more must
+    /// evict the oldest (LRU) entry, making that nonce re-claimable as new,
+    /// while more-recently-used entries remain blocked as replays.
+    ///
+    /// Uses a small cache (capacity 4) to exercise eviction without 10 000
+    /// inserts.
+    ///
+    /// The test is structured in two stages to avoid the cascade: re-inserting
+    /// the evicted entry (A) would itself consume the last free slot and evict
+    /// the next-oldest (B).  Stage 1 verifies that B/C/D/E are all still
+    /// present (replay-rejected) after only one eviction.  Stage 2, using a
+    /// fresh cache, verifies that the evicted entry is re-claimable.
+    #[test]
+    fn nonce_cache_eviction_lru_oldest() {
+        // ---- Stage 1: middle entries stay blocked after a single eviction ----
+        let cache = NonceCache::with_capacity_and_ttl(
+            4,
+            Duration::from_secs(3600), // long TTL — eviction is capacity-driven only
+        );
+
+        // Fill to capacity: A(LRU) → B → C → D(MRU).
+        assert!(cache.try_claim("nonce-A"), "A: initial claim (slot 1/4)");
+        assert!(cache.try_claim("nonce-B"), "B: initial claim (slot 2/4)");
+        assert!(cache.try_claim("nonce-C"), "C: initial claim (slot 3/4)");
+        assert!(cache.try_claim("nonce-D"), "D: initial claim (slot 4/4)");
+
+        // Inserting E evicts A (the LRU).  Cache now: B(LRU), C, D, E(MRU).
+        assert!(cache.try_claim("nonce-E"), "E: claim triggers eviction of A");
+
+        // B, C, D, E remain in the cache — must be rejected as replays.
+        assert!(!cache.try_claim("nonce-B"), "nonce-B still cached — must be replay");
+        assert!(!cache.try_claim("nonce-C"), "nonce-C still cached — must be replay");
+        assert!(!cache.try_claim("nonce-D"), "nonce-D still cached — must be replay");
+        assert!(!cache.try_claim("nonce-E"), "nonce-E still cached — must be replay");
+
+        // ---- Stage 2: evicted entry is re-claimable (separate cache) --------
+        let cache2 = NonceCache::with_capacity_and_ttl(4, Duration::from_secs(3600));
+        cache2.try_claim("nonce-A");
+        cache2.try_claim("nonce-B");
+        cache2.try_claim("nonce-C");
+        cache2.try_claim("nonce-D");
+        // E evicts A.
+        cache2.try_claim("nonce-E");
+
+        // A is no longer in the cache — re-claiming it must succeed.
+        assert!(
+            cache2.try_claim("nonce-A"),
+            "evicted nonce-A must be re-claimable after LRU eviction"
+        );
     }
 
     // -----------------------------------------------------------------------

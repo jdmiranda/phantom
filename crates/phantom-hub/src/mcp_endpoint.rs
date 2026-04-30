@@ -124,6 +124,7 @@ mod tests {
         crate::AppState {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::from_raw_keys(std::iter::once(key))),
+            nonce_cache: Arc::new(crate::auth::NonceCache::new()),
         }
     }
 
@@ -131,6 +132,7 @@ mod tests {
         crate::AppState {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::default()),
+            nonce_cache: Arc::new(crate::auth::NonceCache::new()),
         }
     }
 

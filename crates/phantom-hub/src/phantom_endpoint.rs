@@ -10,8 +10,11 @@
 //!    may add a server-side challenge round-trip).
 //! 2. Phantom signs (nonce_bytes || peer_id_bytes) with its Ed25519 key.
 //! 3. Phantom POSTs { peer_id, public_key_hex, nonce_hex, signature_hex }.
-//! 4. Hub verifies the signature, then issues a JWT bound to peer_id.
-//! 5. Phantom stores the JWT via `phantom_net::DeviceCredentials`.
+//! 4. Hub verifies the signature.
+//! 5. Hub calls NonceCache::try_claim — returns 409 Conflict if nonce was
+//!    already used (replay protection, issue #398).
+//! 6. Hub issues a JWT bound to peer_id.
+//! 7. Phantom stores the JWT via `phantom_net::DeviceCredentials`.
 //! ```
 //!
 //! # WSS connect
@@ -45,7 +48,8 @@ pub struct RegisterRequest {
     ///
     /// v1: the client generates the nonce itself and includes it in the
     /// request.  The hub verifies the signature over (nonce || peer_id) which
-    /// proves key ownership.
+    /// proves key ownership, then records the nonce in [`auth::NonceCache`] to
+    /// prevent replay attacks.
     pub nonce_hex: String,
     /// Ed25519 signature over `(nonce_bytes || peer_id_bytes)`, hex-encoded
     /// (128 hex chars = 64 bytes).
@@ -65,7 +69,11 @@ pub struct RegisterResponse {
 
 /// Handler for `POST /auth/register`.
 ///
-/// Verifies the Ed25519 registration signature and issues a JWT device token.
+/// Verifies the Ed25519 registration signature, enforces nonce single-use via
+/// [`auth::NonceCache`], and issues a JWT device token.
+///
+/// Returns `409 Conflict` when the nonce has already been claimed — this is the
+/// replay-rejection path.
 pub async fn register(
     State(state): State<AppState>,
     Json(body): Json<RegisterRequest>,
@@ -110,7 +118,8 @@ pub async fn register(
         }
     };
 
-    // Verify the registration signature.
+    // Verify the registration signature BEFORE claiming the nonce so that an
+    // attacker cannot burn nonces without possessing a valid signing key.
     if let Err(e) = auth::verify_registration_signature(
         &body.peer_id,
         &nonce_str,
@@ -119,6 +128,18 @@ pub async fn register(
     ) {
         warn!(phantom_id = %body.peer_id, "register: {e} — auth_failure");
         return (StatusCode::UNAUTHORIZED, "signature verification failed").into_response();
+    }
+
+    // Claim the nonce.  try_claim is atomic (single Mutex acquisition —
+    // check + insert happen together with no window between them).
+    // Returns false when the nonce was already used within the TTL window.
+    if !state.nonce_cache.try_claim(&nonce_str) {
+        warn!(phantom_id = %body.peer_id, "register: nonce already used — replay_rejected");
+        return (
+            StatusCode::CONFLICT,
+            "nonce already used — registration request must not be replayed",
+        )
+            .into_response();
     }
 
     // Issue the JWT.
@@ -240,7 +261,7 @@ fn from_hex_digit(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{ApiKeyStore, JwtAuthority};
+    use crate::auth::{ApiKeyStore, JwtAuthority, NonceCache};
     use axum::body::Body;
     use axum::http::{Method, Request};
     use std::sync::Arc;
@@ -252,15 +273,17 @@ mod tests {
         AppState {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::default()),
+            nonce_cache: Arc::new(NonceCache::new()),
         }
     }
 
-    fn make_register_body(peer_id: &str) -> RegisterRequest {
+    /// Build a valid RegisterRequest for `peer_id` using a freshly generated
+    /// Ed25519 keypair and the provided `nonce`.
+    fn make_register_body_with_nonce(peer_id: &str, nonce: &str) -> RegisterRequest {
         use ed25519_dalek::{Signer, SigningKey};
         use rand::rngs::OsRng;
 
         let signing_key = SigningKey::generate(&mut OsRng);
-        let nonce = "test-nonce-12345";
 
         let mut msg = Vec::new();
         msg.extend_from_slice(nonce.as_bytes());
@@ -282,6 +305,10 @@ mod tests {
             nonce_hex,
             signature_hex: sig_hex,
         }
+    }
+
+    fn make_register_body(peer_id: &str) -> RegisterRequest {
+        make_register_body_with_nonce(peer_id, "test-nonce-12345")
     }
 
     // -----------------------------------------------------------------------
@@ -340,6 +367,160 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -----------------------------------------------------------------------
+    // P0 regression: replayed nonce returns 409 Conflict
+    //
+    // Both requests share the same AppState (same NonceCache).  The first
+    // succeeds (200); the second is rejected (409) because the nonce was
+    // already claimed.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn register_replayed_nonce_returns_409() {
+        let state = test_state();
+        // Use separate apps but the same state so both share the NonceCache.
+        let body = make_register_body_with_nonce("replay-peer", "replay-nonce-xyz");
+
+        let first_resp = crate::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Replay the identical request (same nonce, same signature).
+        let second_resp = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first_resp.status(),
+            StatusCode::OK,
+            "first registration must succeed"
+        );
+        assert_eq!(
+            second_resp.status(),
+            StatusCode::CONFLICT,
+            "replayed nonce must return 409 Conflict"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0 regression: two distinct nonces both succeed
+    //
+    // Two different valid nonces signed by two different keypairs must both
+    // receive 200 — the cache must not block legitimate concurrent registrations.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn register_distinct_nonces_both_succeed() {
+        let state = test_state();
+
+        let body_a = make_register_body_with_nonce("peer-alpha", "nonce-alpha-unique-001");
+        let body_b = make_register_body_with_nonce("peer-beta", "nonce-beta-unique-002");
+
+        let resp_a = crate::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body_a).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let resp_b = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body_b).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp_a.status(),
+            StatusCode::OK,
+            "first distinct nonce registration must succeed"
+        );
+        assert_eq!(
+            resp_b.status(),
+            StatusCode::OK,
+            "second distinct nonce registration must also succeed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0 regression: LRU eviction — oldest entry is evicted when cache is full
+    //
+    // Uses NonceCache::with_capacity_and_ttl directly (unit-level) to verify
+    // that capacity-driven eviction makes the oldest nonce re-claimable while
+    // more-recently-used entries remain blocked.
+    //
+    // Note: This test operates on NonceCache directly (not via HTTP) because
+    // driving LRU eviction via the register handler would require
+    // NONCE_CACHE_CAPACITY (10 000) round-trips through axum.  The handler
+    // integration path is covered by register_replayed_nonce_returns_409.
+    //
+    // Two-stage design: re-inserting the evicted nonce in the same cache would
+    // cascade-evict the next-oldest entry.  Stage 1 verifies the remaining
+    // entries are blocked; Stage 2 (fresh cache) verifies the evicted entry is
+    // re-claimable.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nonce_cache_eviction_lru_oldest() {
+        use std::time::Duration;
+        // ---- Stage 1: middle entries blocked after one eviction ----
+        let cache = NonceCache::with_capacity_and_ttl(4, Duration::from_secs(3600));
+
+        // Fill: A(LRU) → B → C → D(MRU).
+        assert!(cache.try_claim("evict-nonce-A"), "A: initial claim (1/4)");
+        assert!(cache.try_claim("evict-nonce-B"), "B: initial claim (2/4)");
+        assert!(cache.try_claim("evict-nonce-C"), "C: initial claim (3/4)");
+        assert!(cache.try_claim("evict-nonce-D"), "D: initial claim (4/4)");
+
+        // E evicts A (the LRU).  Cache: B(LRU), C, D, E(MRU).
+        assert!(cache.try_claim("evict-nonce-E"), "E: claim evicts A");
+
+        // B, C, D, E still present — must be replay-rejected.
+        assert!(!cache.try_claim("evict-nonce-B"), "B still cached — replay");
+        assert!(!cache.try_claim("evict-nonce-C"), "C still cached — replay");
+        assert!(!cache.try_claim("evict-nonce-D"), "D still cached — replay");
+        assert!(!cache.try_claim("evict-nonce-E"), "E still cached — replay");
+
+        // ---- Stage 2: evicted entry is re-claimable (fresh cache) ----
+        let cache2 = NonceCache::with_capacity_and_ttl(4, Duration::from_secs(3600));
+        cache2.try_claim("evict-nonce-A");
+        cache2.try_claim("evict-nonce-B");
+        cache2.try_claim("evict-nonce-C");
+        cache2.try_claim("evict-nonce-D");
+        cache2.try_claim("evict-nonce-E"); // evicts A
+
+        assert!(
+            cache2.try_claim("evict-nonce-A"),
+            "evicted nonce-A must be re-claimable after LRU eviction"
+        );
     }
 
     // -----------------------------------------------------------------------
