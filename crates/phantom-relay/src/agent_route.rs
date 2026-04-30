@@ -93,6 +93,34 @@ pub struct AgentEnvelope {
 // AgentRouteError
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CapabilityClass — relay-local enum for grant enforcement
+// ---------------------------------------------------------------------------
+
+/// The capability class a peer must hold to perform an action via the relay.
+///
+/// This mirrors `phantom_agents::role::CapabilityClass` in shape and meaning.
+/// It is defined here so `phantom-relay` stays dep-free from `phantom-agents`.
+/// The caller is responsible for converting between the two representations
+/// when wiring up the grant check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapabilityClass {
+    /// Observe state (read-only).
+    Sense,
+    /// Coordinate agent actions — minimum required to forward messages.
+    Coordinate,
+    /// Execute mutating actions.
+    Act,
+    /// Self-reflection and reasoning.
+    Reflect,
+    /// Run computationally expensive tasks.
+    Compute,
+}
+
+// ---------------------------------------------------------------------------
+// GrantDenied
+// ---------------------------------------------------------------------------
+
 /// Failure modes for [`route_agent_envelope`].
 #[derive(Debug, thiserror::Error)]
 pub enum AgentRouteError {
@@ -105,18 +133,44 @@ pub enum AgentRouteError {
     /// The relay rejected the message (rate limit, serialization error, etc.).
     #[error("relay error: {0}")]
     RelayError(String),
+    /// The sender peer's capability grant does not permit this action.
+    ///
+    /// The peer must be explicitly granted the required capability before
+    /// routing will succeed. Unknown peers are deny-all by default.
+    #[error("peer {0} lacks capability grant for relay agent forward")]
+    GrantDenied(PeerId),
 }
+
+// ---------------------------------------------------------------------------
+// GrantChecker type alias
+// ---------------------------------------------------------------------------
+
+/// Function type for per-peer capability grant checks.
+///
+/// Returns `true` iff `peer_id` is allowed to use `class`. Callers wire this
+/// to [`phantom_agents::PeerGrantRegistry::check`] or a test double.
+pub type GrantChecker<'a> = Option<&'a dyn Fn(&PeerId, CapabilityClass) -> bool>;
 
 // ---------------------------------------------------------------------------
 // route_agent_envelope
 // ---------------------------------------------------------------------------
 
-/// Route an [`AgentEnvelope`] using a [`Router`].
+/// Route an [`AgentEnvelope`] using a [`Router`], with an optional capability
+/// grant check.
 ///
 /// - `Local` targets: returns [`AgentRouteError::LocalDelivery`]. The caller
 ///   must dispatch locally through the in-process agent registry.
 /// - `Remote` targets: serializes the envelope into a relay [`Envelope`] and
 ///   forwards it via the [`Router`] on behalf of `from_peer`.
+///
+/// # Grant check
+///
+/// When `grant_check` is `Some(f)`, the function `f(peer_id, capability)` is
+/// called before routing. Forwarding an agent envelope requires at minimum
+/// [`CapabilityClass::Coordinate`]. If the check returns `false`, this function
+/// returns [`AgentRouteError::GrantDenied`].
+///
+/// Pass `None` to skip the check (for relay-internal or trusted local paths).
 ///
 /// # Errors
 ///
@@ -125,12 +179,25 @@ pub fn route_agent_envelope(
     router: &mut Router,
     from_peer: &PeerId,
     env: AgentEnvelope,
+    grant_check: GrantChecker<'_>,
 ) -> Result<(), AgentRouteError> {
     match &env.target {
+        // Local delivery — no grant check; the caller dispatches in-process.
         AgentTarget::Local(_) => Err(AgentRouteError::LocalDelivery),
         AgentTarget::Remote {
             peer_id: to_peer, ..
         } => {
+            // --- capability grant check (issue #8) ---
+            //
+            // Forwarding a message to a remote agent requires at minimum
+            // `Coordinate` capability. Unknown / unregistered peers are
+            // deny-all by default. Local targets bypass this check because
+            // the local dispatch path is governed by the existing role/taint
+            // model, not the peer grant registry.
+            if grant_check.is_some_and(|check| !check(from_peer, CapabilityClass::Coordinate)) {
+                return Err(AgentRouteError::GrantDenied(from_peer.clone()));
+            }
+
             let payload = serde_json::to_value(&env).unwrap_or(serde_json::Value::Null);
             let wire = Envelope {
                 from: from_peer.clone(),
@@ -253,7 +320,8 @@ mod tests {
             target: AgentTarget::Local(1),
             payload: serde_json::json!(null),
         };
-        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env);
+        // Grant check not reached for local targets; pass None.
+        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None);
         assert!(matches!(result, Err(AgentRouteError::LocalDelivery)));
     }
 
@@ -273,7 +341,8 @@ mod tests {
             payload: serde_json::json!({"agent_id": 5, "content": {"UserSpeak": "hi"}}),
         };
 
-        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env);
+        // No grant check — trusted internal path.
+        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None);
         assert!(result.is_ok(), "routing should succeed: {result:?}");
 
         // Bob's session channel should have received the forwarded envelope.
@@ -298,10 +367,159 @@ mod tests {
             payload: serde_json::json!(null),
         };
 
-        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env);
+        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None);
         assert!(
             matches!(result, Err(AgentRouteError::PeerNotFound(ref p)) if p.0 == "ghost"),
             "expected PeerNotFound(ghost), got {result:?}"
+        );
+    }
+
+    // ── Issue #8 — per-peer capability grant enforcement ─────────────────────
+
+    /// An unknown peer (no entry in the grant check) is denied by default.
+    #[test]
+    fn grant_denied_blocks_routing_for_unknown_peer() {
+        let mut router = Router::new(100, 10);
+        let (_, alice_handle) = make_session("alice");
+        let (_, bob_handle) = make_session("bob");
+        router.register(alice_handle).unwrap();
+        router.register(bob_handle).unwrap();
+
+        let env = AgentEnvelope {
+            target: AgentTarget::Remote {
+                peer_id: PeerId("bob".into()),
+                agent_id: 1,
+            },
+            payload: serde_json::json!(null),
+        };
+
+        // Deny-all grant check simulating an empty PeerGrantRegistry.
+        let deny_all = |_peer: &PeerId, _class: CapabilityClass| false;
+        let result = route_agent_envelope(
+            &mut router,
+            &PeerId("unknown-peer".into()),
+            env,
+            Some(&deny_all),
+        );
+        assert!(
+            matches!(result, Err(AgentRouteError::GrantDenied(_))),
+            "expected GrantDenied, got {result:?}"
+        );
+    }
+
+    /// A peer with an explicit Coordinate grant is allowed through.
+    #[test]
+    fn granted_peer_routes_successfully() {
+        let mut router = Router::new(100, 10);
+        let (_alice_session, alice_handle) = make_session("alice");
+        let (_bob_session, bob_handle) = make_session("bob"); // keep alive so channel stays open
+        router.register(alice_handle).unwrap();
+        router.register(bob_handle).unwrap();
+
+        let env = AgentEnvelope {
+            target: AgentTarget::Remote {
+                peer_id: PeerId("bob".into()),
+                agent_id: 2,
+            },
+            payload: serde_json::json!(null),
+        };
+
+        // Allow-all grant check simulating a fully-trusted peer entry.
+        let allow_coordinate = |_peer: &PeerId, class: CapabilityClass| {
+            matches!(class, CapabilityClass::Coordinate)
+        };
+        let result = route_agent_envelope(
+            &mut router,
+            &PeerId("alice".into()),
+            env,
+            Some(&allow_coordinate),
+        );
+        assert!(result.is_ok(), "granted peer should route: {result:?}");
+    }
+
+    /// Expired grant (simulated by deny returning false) is enforced.
+    #[test]
+    fn expired_grant_blocks_routing() {
+        let mut router = Router::new(100, 10);
+        let (_, src_handle) = make_session("src");
+        let (_, dst_handle) = make_session("dst");
+        router.register(src_handle).unwrap();
+        router.register(dst_handle).unwrap();
+
+        let env = AgentEnvelope {
+            target: AgentTarget::Remote {
+                peer_id: PeerId("dst".into()),
+                agent_id: 3,
+            },
+            payload: serde_json::json!(null),
+        };
+
+        // Expired grant returns false (as PeerGrantRegistry::check does after expiry).
+        let expired = |_peer: &PeerId, _class: CapabilityClass| false;
+        let result =
+            route_agent_envelope(&mut router, &PeerId("src".into()), env, Some(&expired));
+        assert!(
+            matches!(result, Err(AgentRouteError::GrantDenied(_))),
+            "expired grant must be denied, got {result:?}"
+        );
+    }
+
+    /// Revoked grant is denied after revocation.
+    #[test]
+    fn revoked_grant_blocks_routing() {
+        let mut router = Router::new(100, 10);
+        let (_alice_session, alice_handle) = make_session("alice");
+        let (_bob_session, bob_handle) = make_session("bob");
+        router.register(alice_handle).unwrap();
+        router.register(bob_handle).unwrap();
+
+        let env = AgentEnvelope {
+            target: AgentTarget::Remote {
+                peer_id: PeerId("bob".into()),
+                agent_id: 4,
+            },
+            payload: serde_json::json!(null),
+        };
+
+        // Post-revocation the checker returns false.
+        let after_revoke = |_peer: &PeerId, _class: CapabilityClass| false;
+        let result = route_agent_envelope(
+            &mut router,
+            &PeerId("alice".into()),
+            env,
+            Some(&after_revoke),
+        );
+        assert!(
+            matches!(result, Err(AgentRouteError::GrantDenied(_))),
+            "revoked grant must be denied, got {result:?}"
+        );
+    }
+
+    /// Local agents bypass the grant check — the registry is never consulted.
+    ///
+    /// The grant check closure runs only for remote peers. If the target is
+    /// Local, `LocalDelivery` is returned before the check fires.
+    #[test]
+    fn local_target_bypasses_grant_check() {
+        let mut router = Router::new(100, 10);
+        let env = AgentEnvelope {
+            target: AgentTarget::Local(9),
+            payload: serde_json::json!(null),
+        };
+        // A deny-all checker that should never be called for local targets.
+        let should_not_be_called = |_peer: &PeerId, _class: CapabilityClass| {
+            panic!("grant check must not fire for local targets");
+        };
+        // The result must be LocalDelivery, not GrantDenied.
+        let result = route_agent_envelope(
+            &mut router,
+            &PeerId("alice".into()),
+            env,
+            Some(&should_not_be_called),
+        );
+        assert!(
+            matches!(result, Err(AgentRouteError::LocalDelivery)),
+            "expected LocalDelivery for local target, got {result:?}"
         );
     }
 

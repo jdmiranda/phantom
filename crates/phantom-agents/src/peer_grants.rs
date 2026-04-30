@@ -19,37 +19,20 @@
 //!
 //! # Integration point
 //!
-//! The relay's inbound dispatch path checks each incoming [`AgentEnvelope`]'s
-//! sender peer against this registry before routing it to the local agent. See
-//! `phantom-relay`'s `router` module for the integration site.
+//! The relay router (`phantom-relay::router`) consults this registry on every
+//! inbound [`AgentEnvelope`] forward, enforcing capability grants before the
+//! envelope reaches the destination agent.
+//!
+//! # PeerId
+//!
+//! Uses the canonical [`crate::peer_routing::PeerId`] from PR #349. No separate
+//! newtype is defined here; `PeerId` is a type alias for import convenience.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use crate::peer_routing::PeerId;
 use crate::role::CapabilityClass;
-
-// ---------------------------------------------------------------------------
-// PeerId re-export shim
-// ---------------------------------------------------------------------------
-
-/// Opaque identifier for a connected peer.
-///
-/// Mirrors `phantom_relay::envelope::PeerId` so `phantom-agents` can express
-/// peer grants without taking a dependency on `phantom-relay`. When the two
-/// crates are compiled together, callers convert with `.0` / `PeerId(s)`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct PeerId(pub String);
-
-impl PeerId {
-    /// Sentinel value used as a placeholder before a real id is assigned.
-    pub const ZERO: PeerId = PeerId(String::new());
-}
-
-impl std::fmt::Display for PeerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // PeerGrants
@@ -87,12 +70,12 @@ impl PeerGrants {
     /// Default grant for an unknown remote peer: `Sense` + `Coordinate` only,
     /// permanent (no expiry).
     ///
-    /// The `peer_id` field is set to [`PeerId::ZERO`] — callers must override
-    /// it before inserting into the registry.
-    #[must_use] 
+    /// The `peer_id` field is set to an empty string sentinel. Callers must
+    /// override it before inserting into the registry.
+    #[must_use]
     pub fn default_remote() -> Self {
         Self {
-            peer_id: PeerId(String::new()),
+            peer_id: PeerId::new(""),
             allowed_classes: HashSet::from([CapabilityClass::Sense, CapabilityClass::Coordinate]),
             until: None,
         }
@@ -211,7 +194,7 @@ mod tests {
     use std::time::Duration;
 
     fn peer(s: &str) -> PeerId {
-        PeerId(s.into())
+        PeerId::new(s)
     }
 
     // ── PeerGrants ────────────────────────────────────────────────────────────

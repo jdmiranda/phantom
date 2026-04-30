@@ -6,7 +6,8 @@
 use log::{debug, info, warn};
 
 use phantom_agents::cli::{AgentCommand, parse_agent_command};
-use phantom_agents::{AgentSpawnOpts, AgentTask};
+use phantom_agents::role::CapabilityClass;
+use phantom_agents::{AgentSpawnOpts, AgentTask, PeerId};
 use phantom_brain::events::AiEvent;
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
@@ -73,7 +74,7 @@ impl App {
             }
         }
 
-        let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
         if parts.is_empty() {
             return;
         }
@@ -407,8 +408,11 @@ impl App {
             }
             "ghost" => {
                 // `ghost privacy on` / `ghost privacy off` — toggle privacy mode.
-                match (parts.get(1), parts.get(2)) {
-                    (Some(&"privacy"), Some(&"on")) => {
+                // `ghost grant <peer> <capability>`  — grant capability to a remote peer.
+                // `ghost revoke <peer>`              — revoke all grants for a peer.
+                // `ghost grants [list]`              — list all active peer grants.
+                match (parts.get(1).copied(), parts.get(2).copied(), parts.get(3).copied()) {
+                    (Some("privacy"), Some("on"), _) => {
                         self.privacy_mode = true;
                         self.status_bar.set_privacy_mode(true);
                         if let Some(ref brain) = self.brain {
@@ -417,7 +421,7 @@ impl App {
                         self.console
                             .system("[P] Privacy mode ON — cloud APIs blocked");
                     }
-                    (Some(&"privacy"), Some(&"off")) => {
+                    (Some("privacy"), Some("off"), _) => {
                         self.privacy_mode = false;
                         self.status_bar.set_privacy_mode(false);
                         if let Some(ref brain) = self.brain {
@@ -425,15 +429,98 @@ impl App {
                         }
                         self.console.system("Privacy mode OFF — cloud APIs allowed");
                     }
-                    (Some(&"privacy"), _) => {
+                    (Some("privacy"), _, _) => {
                         let state = if self.privacy_mode { "ON" } else { "OFF" };
                         self.console.output(format!("Privacy mode: {state}"));
                         self.console
                             .output("Usage: ghost privacy on | ghost privacy off");
                     }
-                    _ => {
+                    // ghost grant <peer_id> <capability>
+                    (Some("grant"), Some(peer_str), Some(cap_str)) => {
+                        let cap = parse_capability_class(cap_str);
+                        match cap {
+                            Some(class) => {
+                                let peer = PeerId::new(peer_str);
+                                // Merge with any existing grant rather than replacing.
+                                let mut classes = self
+                                    .peer_grant_registry
+                                    .effective_classes(&peer);
+                                classes.insert(class);
+                                self.peer_grant_registry.grant(peer.clone(), classes, None);
+                                crate::peer_grants::save_peer_grant_registry(
+                                    &self.peer_grant_registry,
+                                );
+                                self.console.system(format!(
+                                    "Grant: peer {peer_str} now has {cap_str} capability"
+                                ));
+                            }
+                            None => {
+                                self.console.error(format!(
+                                    "Unknown capability '{cap_str}'. \
+                                     Valid: Sense, Coordinate, Act, Reflect, Compute"
+                                ));
+                            }
+                        }
+                    }
+                    (Some("grant"), _, _) => {
                         self.console
-                            .output("Usage: ghost privacy on | ghost privacy off");
+                            .output("Usage: ghost grant <peer_id> <capability>");
+                        self.console
+                            .output("  capability: Sense | Coordinate | Act | Reflect | Compute");
+                    }
+                    // ghost revoke <peer_id>
+                    (Some("revoke"), Some(peer_str), _) => {
+                        let peer = PeerId::new(peer_str);
+                        self.peer_grant_registry.revoke(&peer);
+                        crate::peer_grants::save_peer_grant_registry(
+                            &self.peer_grant_registry,
+                        );
+                        self.console
+                            .system(format!("Revoked: all grants for peer {peer_str} removed"));
+                    }
+                    (Some("revoke"), None, _) => {
+                        self.console.output("Usage: ghost revoke <peer_id>");
+                    }
+                    // ghost grants [list]
+                    (Some("grants"), _, _) => {
+                        let grants: Vec<_> = self.peer_grant_registry.iter().collect();
+                        if grants.is_empty() {
+                            self.console.output("No active peer grants.");
+                        } else {
+                            self.console.output(format!("{} active peer grant(s):", grants.len()));
+                            for g in grants {
+                                let classes: Vec<&str> = g
+                                    .allowed_classes
+                                    .iter()
+                                    .map(|c| capability_class_str(*c))
+                                    .collect();
+                                let expiry = g
+                                    .until
+                                    .map(|t| {
+                                        let remaining = t
+                                            .checked_duration_since(std::time::Instant::now())
+                                            .unwrap_or_default();
+                                        format!("expires in {}s", remaining.as_secs())
+                                    })
+                                    .unwrap_or_else(|| "permanent".into());
+                                self.console.output(format!(
+                                    "  {} → [{}] ({})",
+                                    g.peer_id,
+                                    classes.join(", "),
+                                    expiry,
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        self.console.output(
+                            "Usage: ghost <subcommand> [args]",
+                        );
+                        self.console.output("  ghost privacy on|off                    Toggle privacy mode");
+                        self.console.output("  ghost grant <peer_id> <capability>      Grant capability to a remote peer");
+                        self.console.output("  ghost revoke <peer_id>                  Revoke all grants for a peer");
+                        self.console.output("  ghost grants [list]                     List all active peer grants");
+                        self.console.output("  Capabilities: Sense | Coordinate | Act | Reflect | Compute");
                     }
                 }
             }
@@ -541,9 +628,17 @@ impl App {
                 self.console
                     .output("  selfheal            selftest + auto-fix + commit + push");
                 self.console
-                    .output("  ghost privacy on    Enable privacy mode (block cloud APIs)");
+                    .output("  ghost privacy on                Enable privacy mode (block cloud APIs)");
                 self.console
-                    .output("  ghost privacy off   Disable privacy mode");
+                    .output("  ghost privacy off               Disable privacy mode");
+                self.console
+                    .output("  ghost grant <peer> <cap>        Grant capability to a remote peer");
+                self.console
+                    .output("  ghost revoke <peer>             Revoke all grants for a peer");
+                self.console
+                    .output("  ghost grants                    List all active peer grants");
+                self.console
+                    .output("    Capabilities: Sense | Coordinate | Act | Reflect | Compute");
                 self.console
                     .output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");
@@ -802,5 +897,158 @@ pub(crate) fn intent_to_translate_result(intent: Intent) -> NlpTranslateResult {
             display: format!("({question})"),
             action: None,
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capability helpers (issue #8)
+// ---------------------------------------------------------------------------
+
+/// Parse a capability class name from a console command argument.
+fn parse_capability_class(s: &str) -> Option<CapabilityClass> {
+    match s {
+        "Sense" | "sense" => Some(CapabilityClass::Sense),
+        "Coordinate" | "coordinate" => Some(CapabilityClass::Coordinate),
+        "Act" | "act" => Some(CapabilityClass::Act),
+        "Reflect" | "reflect" => Some(CapabilityClass::Reflect),
+        "Compute" | "compute" => Some(CapabilityClass::Compute),
+        _ => None,
+    }
+}
+
+/// Return the canonical display name for a capability class.
+fn capability_class_str(c: CapabilityClass) -> &'static str {
+    match c {
+        CapabilityClass::Sense => "Sense",
+        CapabilityClass::Coordinate => "Coordinate",
+        CapabilityClass::Act => "Act",
+        CapabilityClass::Reflect => "Reflect",
+        CapabilityClass::Compute => "Compute",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_capability_class_case_insensitive() {
+        assert_eq!(parse_capability_class("Sense"), Some(CapabilityClass::Sense));
+        assert_eq!(parse_capability_class("sense"), Some(CapabilityClass::Sense));
+        assert_eq!(parse_capability_class("Coordinate"), Some(CapabilityClass::Coordinate));
+        assert_eq!(parse_capability_class("Act"), Some(CapabilityClass::Act));
+        assert_eq!(parse_capability_class("Reflect"), Some(CapabilityClass::Reflect));
+        assert_eq!(parse_capability_class("Compute"), Some(CapabilityClass::Compute));
+        assert_eq!(parse_capability_class("unknown"), None);
+        assert_eq!(parse_capability_class(""), None);
+    }
+
+    #[test]
+    fn capability_class_str_round_trip() {
+        for cap in [
+            CapabilityClass::Sense,
+            CapabilityClass::Coordinate,
+            CapabilityClass::Act,
+            CapabilityClass::Reflect,
+            CapabilityClass::Compute,
+        ] {
+            let s = capability_class_str(cap);
+            let parsed = parse_capability_class(s);
+            assert_eq!(parsed, Some(cap), "round-trip failed for {cap:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the `ghost grant` CLI dispatch path (issue #8)
+    //
+    // The root bug: `splitn(3, ' ')` yields at most 3 tokens (indices 0..=2),
+    // so `parts.get(3)` always returned `None` and the
+    // `(Some("grant"), Some(peer), Some(cap))` match arm never fired.
+    // Fixing to `splitn(4, ' ')` makes index 3 available.
+    //
+    // These tests exercise the exact tokenisation logic used in
+    // `execute_user_command` without constructing a full `App` (which requires
+    // a GPU window).
+    // -----------------------------------------------------------------------
+
+    /// `splitn(4)` must yield 4 tokens for `ghost grant <peer> <cap>`.
+    /// This is the minimal regression that catches the original splitn(3) bug:
+    /// with splitn(3) `parts.get(3)` returns None and the grant arm never fires.
+    #[test]
+    fn ghost_grant_splitn4_yields_four_parts() {
+        let input = "ghost grant peer123 coordinate";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.len(), 4, "splitn(4) must produce 4 tokens for 'ghost grant <peer> <cap>'");
+        assert_eq!(parts[0], "ghost");
+        assert_eq!(parts[1], "grant");
+        assert_eq!(parts[2], "peer123");
+        assert_eq!(parts[3], "coordinate");
+        // Verify the match tuple that the dispatch arm checks
+        assert_eq!(parts.get(1).copied(), Some("grant"));
+        assert_eq!(parts.get(2).copied(), Some("peer123"));
+        assert_eq!(parts.get(3).copied(), Some("coordinate"));
+    }
+
+    /// Confirm that `splitn(3)` — the original broken value — would have
+    /// swallowed the capability argument.
+    #[test]
+    fn ghost_grant_splitn3_was_broken() {
+        let input = "ghost grant peer123 coordinate";
+        let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
+        // With the old splitn(3) the capability token is absent.
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.get(3), None, "splitn(3) must NOT yield a 4th token (documents the regression)");
+    }
+
+    /// The capability string parsed from `parts[3]` must be recognised.
+    #[test]
+    fn ghost_grant_dispatch_capability_parsed() {
+        let input = "ghost grant peer-A Coordinate";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        let cap_str = parts.get(3).copied().unwrap_or("");
+        let cap = parse_capability_class(cap_str);
+        assert_eq!(cap, Some(CapabilityClass::Coordinate));
+    }
+
+    /// `ghost revoke <peer>` only needs 3 tokens — splitn(4) is backward-compatible.
+    #[test]
+    fn ghost_revoke_dispatch_still_works() {
+        let input = "ghost revoke peer123";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.first().copied(), Some("ghost"));
+        assert_eq!(parts.get(1).copied(), Some("revoke"));
+        assert_eq!(parts.get(2).copied(), Some("peer123"));
+        // No 4th token needed for revoke — arm pattern is (Some("revoke"), Some(peer), _)
+        assert!(parts.get(3).is_none());
+    }
+
+    /// `ghost grants` needs only 2 tokens — splitn(4) is backward-compatible.
+    #[test]
+    fn ghost_grants_list_dispatch_still_works() {
+        let input = "ghost grants";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.first().copied(), Some("ghost"));
+        assert_eq!(parts.get(1).copied(), Some("grants"));
+        assert!(parts.get(2).is_none());
+        assert!(parts.get(3).is_none());
+    }
+
+    /// Capabilities with spaces in future inputs must not be accidentally split —
+    /// splitn(4) stops splitting after the 4th token.
+    #[test]
+    fn ghost_grant_extra_trailing_text_does_not_overflow() {
+        // If a user accidentally adds trailing text, the 4th element absorbs it.
+        let input = "ghost grant peer-B Act extra-junk";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[3], "Act extra-junk");
+        // parse_capability_class should return None for the garbage suffix,
+        // triggering the "Unknown capability" error path — not a panic.
+        let cap = parse_capability_class(parts[3]);
+        assert_eq!(cap, None);
     }
 }

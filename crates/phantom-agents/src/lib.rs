@@ -60,7 +60,7 @@ pub use dispatch::Disposition;
 pub use failure_store::{FailureRecord, FailureStore};
 pub use lifecycle::{LifecycleEvent, LifecycleHook, LifecycleHooks};
 pub use manager::*;
-pub use peer_grants::{PeerId as PeerGrantId, PeerGrants, PeerGrantRegistry};
+pub use peer_grants::{PeerGrants, PeerGrantRegistry};
 pub use peer_routing::{
     AgentRouter, AnyAgentRef, PeerId, RemoteAgentInfo, RemoteInboxMessage, RemoteMessageContent,
     RemoteRouteError, decode_inbound,

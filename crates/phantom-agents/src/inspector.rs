@@ -43,7 +43,7 @@ use serde::ser::{SerializeStruct, Serializer};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::peer_grants::PeerId;
+use crate::peer_routing::PeerId;
 use crate::role::{AgentRef, CapabilityClass, SpawnSource};
 
 // ---------------------------------------------------------------------------

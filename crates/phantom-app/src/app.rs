@@ -471,6 +471,14 @@ pub struct App {
     //    - The status strip shows a lock indicator.
     pub(crate) privacy_mode: bool,
 
+    // -- Per-peer capability grant registry (issue #8).
+    //    Governs what remote peers are allowed to do when their agent envelopes
+    //    arrive via the relay. Unknown peers default to deny-all; explicit
+    //    grants are added via `ghost grant <peer> <capability>`.
+    //    Persisted to `~/.config/phantom/peer_grants.json` on every mutation
+    //    and reloaded on boot so grants survive restarts.
+    pub(crate) peer_grant_registry: phantom_agents::PeerGrantRegistry,
+
     // -- OODA signal cache (#358) -------------------------------------------
     //
     // Lightweight cache updated from bus events so `build_world_state()` can
@@ -1168,6 +1176,7 @@ impl App {
             alt_screen_fade: std::collections::HashMap::new(),
             alt_screen_pending_collapses: Vec::new(),
             privacy_mode: config.privacy_mode,
+            peer_grant_registry: crate::peer_grants::load_peer_grant_registry(),
             // OODA signal cache — all start zeroed; populated by drain_bus_to_brain.
             ooda_last_parsed: None,
             ooda_agent_just_completed: false,
