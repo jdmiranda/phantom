@@ -11,6 +11,7 @@ phantom-ui = { path = "../phantom-ui" }
 phantom-protocol = { path = "../phantom-protocol" }
 phantom-brain = { path = "../phantom-brain" }
 phantom-semantic = { path = "../phantom-semantic" }
+phantom-skill-host = { path = "../phantom-skill-host" }
 phantom-context = { path = "../phantom-context" }
 phantom-memory = { path = "../phantom-memory" }
 phantom-nlp = { path = "../phantom-nlp" }
