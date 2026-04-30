@@ -265,6 +265,19 @@ pub fn build_backend(model: &ChatModel) -> Result<Box<dyn ChatBackend>, ChatErro
 // ---------------------------------------------------------------------------
 // PrivacyGuard — centralized cloud-call interceptor
 // ---------------------------------------------------------------------------
+//
+// AUDIT INVARIANTS (verified in #459, post-PR #350 3-round merge):
+//
+// 1. PrivacyGuard wraps EVERY backend returned by build_backend_with_privacy.
+//    The only external call site is phantom-app/src/agent_pane/mod.rs:353,
+//    which always calls build_backend_with_privacy (not bare build_backend).
+//
+// 2. is_cloud_provider() delegates to the inner backend, not a hard-coded
+//    value. ClaudeBackend and OpenAiChatBackend both return true; Ollama-
+//    based and mock backends return false.
+//
+// 3. PrivacyGuard::complete() checks (privacy_mode && inner.is_cloud_provider())
+//    BEFORE calling inner.complete(). No network call is made on violation.
 
 /// A [`ChatBackend`] wrapper that enforces privacy mode.
 ///

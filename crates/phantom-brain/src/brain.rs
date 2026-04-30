@@ -455,6 +455,11 @@ fn brain_loop(
         }
 
         // Handle runtime privacy-mode toggle.
+        // AUDIT INVARIANT (#459): SetPrivacyMode is the sole path that
+        // mutates router.config.privacy_mode at runtime. It flows from
+        // phantom-app/src/commands.rs (ghost privacy on/off) via
+        // brain.send_event(). The router propagates the flag to every
+        // subsequent route() / route_checked() call on the same thread.
         if let AiEvent::SetPrivacyMode(enabled) = event {
             router.set_privacy_mode(enabled);
             log::info!("AI brain: privacy mode set to {enabled}");
@@ -1037,6 +1042,16 @@ fn observe_terminal_output(
     }
 
     // Try Claude.
+    // AUDIT NOTE (#459): route() (not route_checked()) is intentional here.
+    // route() already excludes cloud backends when privacy_mode is true
+    // (router.rs line 300), so Claude will simply be absent from the returned
+    // list and the `let Some(backend) = claude_backend else { return None }`
+    // branch below handles the privacy-blocked case silently. This path does
+    // NOT call route_checked() because this is a best-effort observation on
+    // a proactive tick — a PrivacyModeViolation error return here would serve
+    // no caller (the return type is Option<AiAction>, not Result). Privacy is
+    // still enforced; the call is just suppressed rather than surfaced as an
+    // error.
     let claude_backend: Option<ModelBackend> = router
         .route(TaskComplexity::Simple)
         .iter()
