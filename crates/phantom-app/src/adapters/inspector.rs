@@ -19,11 +19,14 @@
 //! call — no adapter restart needed. `render()` takes a short read lock to
 //! snapshot the current token values and releases it before laying out quads.
 //!
-//! ## Read-only by design
+//! ## Command surface
 //!
-//! `accepts_input` is `false` and `accepts_commands` is `false` — the
-//! inspector is a window into substrate state, not a control surface. Click
-//! handling and "kill agent" actions belong in a separate phase.
+//! The inspector now accepts `dag.*` commands via the coordinator's
+//! `send_command` API (see [`crate::dag_commands`]). These commands mutate
+//! the [`DagViewerState`] and [`DagHighlightState`] owned by this adapter.
+//! All other state (snapshot, tokens) remains read-only from outside.
+//! The `accepts_commands` predicate returns `true` only when the adapter
+//! has a DAG loaded; commands issued before a DAG is loaded return an error.
 
 use std::sync::{Arc, RwLock};
 
@@ -38,6 +41,7 @@ use phantom_dag::CodeDag;
 use phantom_ui::tokens::Tokens;
 
 use crate::adapters::dag_viewer::DagViewerState;
+use crate::dag_commands::{DagHighlightState, execute_dag_command, parse_dag_command};
 
 /// Number of events shown at the bottom of the pane (fixed cap, separate from
 /// the snapshot's `recent_events` cap).
@@ -107,6 +111,8 @@ pub struct InspectorAdapter {
     active_tab: InspectorTab,
     /// Force-directed layout state for the DAG tab.
     dag_viewer: DagViewerState,
+    /// Transient highlight state — node ids painted with the highlight tint.
+    dag_highlight: DagHighlightState,
     /// The DAG being visualised. `None` until one is loaded.
     dag: Option<CodeDag>,
 }
@@ -124,6 +130,7 @@ impl InspectorAdapter {
             app_id: 0,
             active_tab: InspectorTab::Overview,
             dag_viewer: DagViewerState::new(),
+            dag_highlight: DagHighlightState::new(),
             dag: None,
         }
     }
@@ -697,14 +704,42 @@ impl InputHandler for InspectorAdapter {
 }
 
 impl Commandable for InspectorAdapter {
-    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
-        Err(anyhow::anyhow!(
-            "inspector adapter does not accept commands: {cmd}"
-        ))
+    /// Accept a `dag.*` command and execute it against the DAG viewer state.
+    ///
+    /// The response is a JSON-encoded [`DagCommandResult`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no DAG has been loaded yet, the command name is
+    /// unrecognised, required arguments are missing, or a referenced node id
+    /// does not exist in the current layout.
+    ///
+    /// [`DagCommandResult`]: crate::dag_commands::DagCommandResult
+    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+        // Guard: require a loaded DAG so command execution has positions to
+        // work against.  Commands that don't reference node ids (zoom, reset)
+        // still require a loaded DAG for consistency — callers shouldn't
+        // assume the viewer is interactive before a DAG is present.
+        if self.dag.is_none() {
+            return Err(anyhow::anyhow!(
+                "DAG viewer has no DAG loaded; load one via InspectorAdapter::load_dag first"
+            ));
+        }
+
+        let dag_cmd = parse_dag_command(cmd, args)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let result = execute_dag_command(&mut self.dag_viewer, &mut self.dag_highlight, dag_cmd);
+
+        result.to_json()
     }
 
     fn accepts_commands(&self) -> bool {
-        false
+        // Always return `true` so the coordinator's static registry snapshot
+        // routes `dag.*` commands to this adapter.  The actual guard — "no DAG
+        // loaded yet" — is enforced in `accept_command` where it can return a
+        // typed error rather than silently dropping the command.
+        true
     }
 }
 
@@ -936,10 +971,28 @@ mod tests {
     }
 
     #[test]
-    fn inspector_adapter_does_not_accept_commands() {
+    fn inspector_adapter_accepts_commands_true() {
+        let adapter = InspectorAdapter::with_view(InspectorView::empty());
+        // accepts_commands is always true; the DAG-loaded guard lives in
+        // accept_command itself.
+        assert!(adapter.accepts_commands());
+    }
+
+    #[test]
+    fn inspector_adapter_unknown_command_returns_err() {
         let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
-        assert!(!adapter.accepts_commands());
-        let res = adapter.accept_command("anything", &serde_json::json!({}));
+        // Load a DAG so we pass the DAG-present guard.
+        use phantom_dag::{DagNode, NodeKind};
+        let mut dag = CodeDag::new();
+        dag.add_node(DagNode::new(
+            "a".to_owned(),
+            NodeKind::Function,
+            std::path::PathBuf::from("src/lib.rs"),
+            1,
+        ));
+        adapter.load_dag(dag);
+
+        let res = adapter.accept_command("anything_unknown", &serde_json::json!({}));
         assert!(res.is_err());
     }
 
@@ -1248,5 +1301,152 @@ mod tests {
             "alt adapter: INSPECTOR header should be blue-dominant, got {:?}",
             hdr_a.color,
         );
+    }
+
+    // ---- Issue #372: DAG command surface via Commandable -------------------
+
+    fn dag_with_nodes(ids: &[&str]) -> CodeDag {
+        use phantom_dag::{DagNode, NodeKind};
+        let mut dag = CodeDag::new();
+        for &id in ids {
+            dag.add_node(DagNode::new(
+                id.to_owned(),
+                NodeKind::Function,
+                std::path::PathBuf::from("src/lib.rs"),
+                1,
+            ));
+        }
+        dag
+    }
+
+    /// `accepts_commands` always returns true (guard is in accept_command).
+    #[test]
+    fn inspector_adapter_always_accepts_commands() {
+        let adapter = InspectorAdapter::with_view(InspectorView::empty());
+        assert!(adapter.accepts_commands());
+    }
+
+    /// Before a DAG is loaded, `accept_command` must return Err (explicit guard).
+    #[test]
+    fn inspector_adapter_rejects_dag_commands_before_dag_loaded() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+
+        let result = adapter.accept_command("dag.reset_view", &serde_json::json!({}));
+        assert!(result.is_err(), "must error before DAG is loaded");
+    }
+
+    /// dag.focus_node on an existing node returns JSON with status=ok.
+    #[test]
+    fn dag_cmd_focus_node_existing_returns_ok_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["node_a", "node_b"]));
+
+        let args = serde_json::json!({"id": "node_a"});
+        let resp = adapter.accept_command("dag.focus_node", &args).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "ok", "focus_node on existing node: {v}");
+    }
+
+    /// dag.focus_node on a missing node returns JSON with status=not_found
+    /// (not an Err from accept_command itself — the wire layer returns Ok(json)).
+    #[test]
+    fn dag_cmd_focus_node_missing_returns_not_found_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["exists"]));
+
+        let args = serde_json::json!({"id": "does_not_exist"});
+        let resp = adapter.accept_command("dag.focus_node", &args).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "not_found");
+        assert_eq!(v["id"], "does_not_exist");
+    }
+
+    /// dag.clear_focus returns status=ok.
+    #[test]
+    fn dag_cmd_clear_focus_returns_ok_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["a"]));
+
+        let resp = adapter.accept_command("dag.clear_focus", &serde_json::json!({})).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    /// dag.scroll_to existing node returns status=ok.
+    #[test]
+    fn dag_cmd_scroll_to_existing_returns_ok_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["target"]));
+
+        let args = serde_json::json!({"id": "target"});
+        let resp = adapter.accept_command("dag.scroll_to", &args).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    /// dag.zoom with a valid factor returns status=ok.
+    #[test]
+    fn dag_cmd_zoom_valid_returns_ok_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["a"]));
+
+        let args = serde_json::json!({"factor": 2.0});
+        let resp = adapter.accept_command("dag.zoom", &args).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    /// dag.highlight with known ids returns status=ok.
+    #[test]
+    fn dag_cmd_highlight_known_ids_returns_ok_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["x", "y"]));
+
+        let args = serde_json::json!({"ids": ["x", "y"]});
+        let resp = adapter.accept_command("dag.highlight", &args).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    /// dag.clear_highlight returns status=ok.
+    #[test]
+    fn dag_cmd_clear_highlight_returns_ok_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["a"]));
+
+        let resp = adapter.accept_command("dag.clear_highlight", &serde_json::json!({})).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    /// dag.reset_view returns status=ok.
+    #[test]
+    fn dag_cmd_reset_view_returns_ok_json() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["a"]));
+
+        let resp = adapter.accept_command("dag.reset_view", &serde_json::json!({})).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    /// Unknown dag command returns Err from accept_command.
+    #[test]
+    fn dag_cmd_unknown_op_returns_err() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["a"]));
+
+        let result = adapter.accept_command("dag.fly_to_moon", &serde_json::json!({}));
+        assert!(result.is_err());
+    }
+
+    /// Non-dag command returns Err.
+    #[test]
+    fn non_dag_command_returns_err() {
+        let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
+        adapter.load_dag(dag_with_nodes(&["a"]));
+
+        let result = adapter.accept_command("inspector.kill_agent", &serde_json::json!({"id": 1}));
+        assert!(result.is_err());
     }
 }

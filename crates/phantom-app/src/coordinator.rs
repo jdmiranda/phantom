@@ -890,6 +890,22 @@ impl AppCoordinator {
         &self.registry
     }
 
+    /// Find the first running adapter whose `app_type()` matches `ty`.
+    ///
+    /// Returns `None` when no matching adapter is registered. Useful for
+    /// routing commands to a specific adapter type without knowing its `AppId`
+    /// at call time (e.g. the inspector adapter for `dag.*` commands).
+    pub fn find_adapter_by_type(&self, ty: &str) -> Option<AppId> {
+        self.registry
+            .all_running()
+            .into_iter()
+            .find(|&id| {
+                self.registry
+                    .get(id)
+                    .is_some_and(|e| e.app_type == ty)
+            })
+    }
+
     /// Mutable access to the app registry.
     pub fn registry_mut(&mut self) -> &mut AppRegistry {
         &mut self.registry
