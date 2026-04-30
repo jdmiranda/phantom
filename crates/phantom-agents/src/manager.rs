@@ -27,7 +27,7 @@ pub struct AgentManager {
     next_id: AgentId,
     max_concurrent: usize,
     /// Cross-peer routing state (optional relay connection + remote agent cache).
-    pub router: AgentRouter,
+    pub(crate) router: AgentRouter,
 }
 
 impl AgentManager {
@@ -45,8 +45,8 @@ impl AgentManager {
     /// Resolve an [`AnyAgentRef`] to a local agent.
     ///
     /// Returns the local [`Agent`] when `any_ref` is `Local` and the id is
-    /// known. Returns `None` for `Remote` refs — the caller must use
-    /// `self.router` for remote delivery.
+    /// known. Returns `None` for `Remote` refs — remote delivery is handled
+    /// inside the brain's own [`crate::peer_routing::AgentRouter`] instance.
     #[must_use]
     pub fn resolve(&self, any_ref: &AnyAgentRef) -> Option<&Agent> {
         match any_ref {
