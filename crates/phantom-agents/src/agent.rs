@@ -370,6 +370,19 @@ impl Agent {
         self.status = status;
     }
 
+    /// Test-only escape hatch that forces an agent into a specific lifecycle
+    /// status, bypassing all FSM guards.
+    ///
+    /// Hidden from rustdoc and intended **only** for downstream-crate tests
+    /// (e.g. `phantom-session`) that need to construct fixtures in arbitrary
+    /// lifecycle states to exercise snapshot/normalisation behaviour. Calling
+    /// this from production code is a bug — use the FSM transition helpers
+    /// (`approve_plan`, `complete`, `flatline`, ...) instead.
+    #[doc(hidden)]
+    pub fn force_status_for_test(&mut self, status: AgentStatus) {
+        self.status = status;
+    }
+
     /// Return the full conversation history.
     #[must_use]
     pub fn messages(&self) -> &[AgentMessage] {
