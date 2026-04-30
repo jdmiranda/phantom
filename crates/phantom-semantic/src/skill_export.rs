@@ -119,11 +119,13 @@ unsafe extern "C" fn parse_ffi(
     exit_code: i32,
     out_len: *mut usize,
 ) -> *mut u8 {
-    // SAFETY: callers guarantee all slices are valid UTF-8.
+    // SAFETY: ptr/len pairs are validated non-null by the caller contract;
+    // we perform checked UTF-8 conversion — non-UTF-8 input produces an empty
+    // string fallback rather than UB. This matches `classify_command_ffi`.
     let (cmd_str, stdout_str, stderr_str) = unsafe {
         let to_str = |ptr: *const u8, len: usize| -> &str {
             let bytes = std::slice::from_raw_parts(ptr, len);
-            std::str::from_utf8_unchecked(bytes)
+            std::str::from_utf8(bytes).unwrap_or("")
         };
         (to_str(cmd, cmd_len), to_str(stdout, stdout_len), to_str(stderr, stderr_len))
     };
