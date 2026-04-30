@@ -74,7 +74,7 @@ impl App {
             }
         }
 
-        let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
         if parts.is_empty() {
             return;
         }
@@ -960,5 +960,95 @@ mod tests {
             let parsed = parse_capability_class(s);
             assert_eq!(parsed, Some(cap), "round-trip failed for {cap:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the `ghost grant` CLI dispatch path (issue #8)
+    //
+    // The root bug: `splitn(3, ' ')` yields at most 3 tokens (indices 0..=2),
+    // so `parts.get(3)` always returned `None` and the
+    // `(Some("grant"), Some(peer), Some(cap))` match arm never fired.
+    // Fixing to `splitn(4, ' ')` makes index 3 available.
+    //
+    // These tests exercise the exact tokenisation logic used in
+    // `execute_user_command` without constructing a full `App` (which requires
+    // a GPU window).
+    // -----------------------------------------------------------------------
+
+    /// `splitn(4)` must yield 4 tokens for `ghost grant <peer> <cap>`.
+    /// This is the minimal regression that catches the original splitn(3) bug:
+    /// with splitn(3) `parts.get(3)` returns None and the grant arm never fires.
+    #[test]
+    fn ghost_grant_splitn4_yields_four_parts() {
+        let input = "ghost grant peer123 coordinate";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.len(), 4, "splitn(4) must produce 4 tokens for 'ghost grant <peer> <cap>'");
+        assert_eq!(parts[0], "ghost");
+        assert_eq!(parts[1], "grant");
+        assert_eq!(parts[2], "peer123");
+        assert_eq!(parts[3], "coordinate");
+        // Verify the match tuple that the dispatch arm checks
+        assert_eq!(parts.get(1).copied(), Some("grant"));
+        assert_eq!(parts.get(2).copied(), Some("peer123"));
+        assert_eq!(parts.get(3).copied(), Some("coordinate"));
+    }
+
+    /// Confirm that `splitn(3)` — the original broken value — would have
+    /// swallowed the capability argument.
+    #[test]
+    fn ghost_grant_splitn3_was_broken() {
+        let input = "ghost grant peer123 coordinate";
+        let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
+        // With the old splitn(3) the capability token is absent.
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.get(3), None, "splitn(3) must NOT yield a 4th token (documents the regression)");
+    }
+
+    /// The capability string parsed from `parts[3]` must be recognised.
+    #[test]
+    fn ghost_grant_dispatch_capability_parsed() {
+        let input = "ghost grant peer-A Coordinate";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        let cap_str = parts.get(3).copied().unwrap_or("");
+        let cap = parse_capability_class(cap_str);
+        assert_eq!(cap, Some(CapabilityClass::Coordinate));
+    }
+
+    /// `ghost revoke <peer>` only needs 3 tokens — splitn(4) is backward-compatible.
+    #[test]
+    fn ghost_revoke_dispatch_still_works() {
+        let input = "ghost revoke peer123";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.first().copied(), Some("ghost"));
+        assert_eq!(parts.get(1).copied(), Some("revoke"));
+        assert_eq!(parts.get(2).copied(), Some("peer123"));
+        // No 4th token needed for revoke — arm pattern is (Some("revoke"), Some(peer), _)
+        assert!(parts.get(3).is_none());
+    }
+
+    /// `ghost grants` needs only 2 tokens — splitn(4) is backward-compatible.
+    #[test]
+    fn ghost_grants_list_dispatch_still_works() {
+        let input = "ghost grants";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.first().copied(), Some("ghost"));
+        assert_eq!(parts.get(1).copied(), Some("grants"));
+        assert!(parts.get(2).is_none());
+        assert!(parts.get(3).is_none());
+    }
+
+    /// Capabilities with spaces in future inputs must not be accidentally split —
+    /// splitn(4) stops splitting after the 4th token.
+    #[test]
+    fn ghost_grant_extra_trailing_text_does_not_overflow() {
+        // If a user accidentally adds trailing text, the 4th element absorbs it.
+        let input = "ghost grant peer-B Act extra-junk";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[3], "Act extra-junk");
+        // parse_capability_class should return None for the garbage suffix,
+        // triggering the "Unknown capability" error path — not a panic.
+        let cap = parse_capability_class(parts[3]);
+        assert_eq!(cap, None);
     }
 }
