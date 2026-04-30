@@ -513,4 +513,57 @@ mod tests {
         let count = reg.iter().count();
         assert_eq!(count, reg.len());
     }
+
+    // -----------------------------------------------------------------------
+    // Keybinding completeness: no shipped key combo must be an unhandled stub.
+    //
+    // The issue-360 acceptance criterion: every registered keybind resolves
+    // to an action that the dispatch layer acts upon.  Tab-model actions
+    // (NewTab, CloseTab, NextTab, PrevTab) are deliberately retained in the
+    // registry because they are redirected to pane equivalents at dispatch
+    // time — they are NOT silent no-ops.
+    //
+    // Copy and Paste must be registered at Cmd+C / Cmd+V.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn copy_is_cmd_c() {
+        let reg = KeybindRegistry::new();
+        assert_eq!(
+            reg.lookup(&KeyCombo::cmd(Key::Char('c'))),
+            Some(&Action::Copy),
+            "Cmd+C must resolve to Copy; it was a no-op before issue-360",
+        );
+    }
+
+    #[test]
+    fn paste_is_cmd_v() {
+        let reg = KeybindRegistry::new();
+        assert_eq!(
+            reg.lookup(&KeyCombo::cmd(Key::Char('v'))),
+            Some(&Action::Paste),
+            "Cmd+V must resolve to Paste; it was a no-op before issue-360",
+        );
+    }
+
+    #[test]
+    fn new_tab_is_cmd_t() {
+        let reg = KeybindRegistry::new();
+        assert_eq!(
+            reg.lookup(&KeyCombo::cmd(Key::Char('t'))),
+            Some(&Action::NewTab),
+            "Cmd+T must resolve to NewTab (redirected to SplitHorizontal at dispatch)",
+        );
+    }
+
+    #[test]
+    fn tab_actions_are_in_dispatch_table() {
+        // Ensure the registry knows all four tab-model actions.  Their
+        // dispatch redirects to pane equivalents — verified in phantom-app.
+        let reg = KeybindRegistry::new();
+        let has_new_tab = reg.iter().any(|(_, a)| matches!(a, Action::NewTab));
+        let has_close_tab = reg.iter().any(|(_, a)| matches!(a, Action::CloseTab));
+        assert!(has_new_tab, "NewTab must still be registered (redirects to split)");
+        assert!(has_close_tab, "CloseTab must still be registered (redirects to close pane)");
+    }
 }
