@@ -151,6 +151,17 @@ impl App {
             }
         }
 
+        // Issue #437: wire a real DagExplorerContext for Cartographer-role panes.
+        // A fresh DagStore is created per-pane so each Cartographer session
+        // operates on its own isolated task DAG. The graceful error-string
+        // fallback is preserved: if the inspector adapter is absent the DAG
+        // viewer commands simply will not fire, but the Cartographer's in-memory
+        // task-management tools (list, annotate, mark_complete, …) still work.
+        if agent_pane.role == phantom_agents::role::AgentRole::Cartographer {
+            let dag_ctx = phantom_agents::dag_explorer::DagExplorerContext::empty();
+            agent_pane.set_dag_explorer_context(dag_ctx);
+        }
+
         // Wire the history capture sidecar so this agent's tool calls and
         // output are recorded in the session's agents.jsonl sidecar.
         if let Some(ref capture) = self.agent_capture {
