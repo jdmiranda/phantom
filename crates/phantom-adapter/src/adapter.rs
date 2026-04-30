@@ -272,6 +272,11 @@ pub struct CursorData {
     pub row: usize,
     pub shape: CursorShape,
     pub visible: bool,
+    /// Whether the terminal program requested cursor blinking.  The renderer
+    /// uses an independent clock-driven `CursorBlink` timer and suppresses
+    /// the cursor during the "off" half when this is `true`.  When `false`
+    /// the cursor is drawn unconditionally while visible.
+    pub blinking: bool,
 }
 
 /// Cursor visual style.

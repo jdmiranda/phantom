@@ -418,6 +418,11 @@ impl App {
             .unwrap_or(0);
         self.notifications.tick(now_ms_tick);
 
+        // Advance the clock-driven cursor blink timer.  This runs once per
+        // frame so blink timing is independent of repaint cadence — rapidly
+        // updating TUIs no longer amplify cursor strobing through cell churn.
+        self.cursor_blink.tick(now_ms_tick);
+
         // Poll the live shader reloader (no-op in release builds).
         self.poll_shader_reload(now_ms_tick);
 

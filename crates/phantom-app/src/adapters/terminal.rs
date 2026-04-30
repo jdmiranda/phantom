@@ -45,6 +45,7 @@ fn convert_cursor(state: &CursorState) -> CursorData {
         row: state.row,
         shape: convert_cursor_shape(state.shape),
         visible: state.visible,
+        blinking: state.blinking,
     }
 }
 
