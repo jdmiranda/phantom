@@ -134,6 +134,10 @@ cargo run --bin phantom -- --help
   - Resources: `phantom://terminal/state`, `phantom://project/context`, `phantom://history/recent`
 - **MCP Client**: Phantom's agents can use external MCP servers
 
+## Use Phantom from Claude Code
+
+Point Claude Code at Phantom's local Unix socket and get 9 terminal-native tools with zero setup. See **[docs/phantom-hub/local-mcp-quickstart.md](docs/phantom-hub/local-mcp-quickstart.md)**.
+
 ### Plugin System (WASM)
 - Trait-based plugin runtime (wasmtime pluggable)
 - TOML/JSON plugin manifests with declared permissions
