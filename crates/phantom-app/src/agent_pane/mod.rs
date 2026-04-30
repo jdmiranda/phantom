@@ -244,6 +244,21 @@ pub(crate) struct AgentPane {
     /// `None` for legacy / test callers that do not wire a quarantine registry;
     /// the gate skips the check (fail-open) so old paths are unaffected.
     pub(super) quarantine: Option<Arc<Mutex<phantom_agents::quarantine::QuarantineRegistry>>>,
+
+    /// Issue #437: DAG explorer context for the Cartographer role.
+    ///
+    /// Populated at spawn time when the pane's role is
+    /// [`phantom_agents::role::AgentRole::Cartographer`]. The context holds an
+    /// `Arc<Mutex<DagStore>>` shared across all dispatch turns for this pane so
+    /// every Cartographer tool call (list_nodes, mark_complete, annotate, …)
+    /// operates on the same in-memory task DAG for the lifetime of the session.
+    ///
+    /// `None` for all non-Cartographer panes and for any Cartographer pane
+    /// spawned before the wiring is applied (legacy / headless). When `None`,
+    /// the DAG tools return the canonical `"dag explorer not available"` error
+    /// string instead of panicking — the graceful fallback is always preserved.
+    pub(super) dag_explorer:
+        Option<phantom_agents::dag_explorer::DagExplorerContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +318,7 @@ impl AgentPane {
             agent_capture: None,
             capture_session_uuid: uuid::Uuid::nil(),
             capture_tool_calls: Vec::new(),
+            dag_explorer: None,
         }
     }
 
@@ -483,6 +499,7 @@ impl AgentPane {
             capture_session_uuid: uuid::Uuid::nil(),
             capture_tool_calls: Vec::new(),
             quarantine: None,
+            dag_explorer: None,
         }
     }
 
@@ -531,6 +548,23 @@ impl AgentPane {
         dispatcher: Arc<phantom_agents::dispatcher::GhTicketDispatcher>,
     ) {
         self.ticket_dispatcher = Some(dispatcher);
+    }
+
+    /// Wire the DAG explorer context for Cartographer-role panes.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` when the pane's role is
+    /// [`phantom_agents::role::AgentRole::Cartographer`] and a shared
+    /// `DagStore` is available. The context is then forwarded into every
+    /// `DispatchContext` this pane creates so that Cartographer tool calls
+    /// (dag_list_nodes, dag_mark_complete, etc.) operate on a real store
+    /// instead of returning the graceful `"dag explorer not available"` error.
+    ///
+    /// `None` is the safe default — all non-Cartographer panes keep `None`.
+    pub(crate) fn set_dag_explorer_context(
+        &mut self,
+        ctx: phantom_agents::dag_explorer::DagExplorerContext,
+    ) {
+        self.dag_explorer = Some(ctx);
     }
 
     /// Wire the history capture sidecar into this pane.

@@ -89,6 +89,18 @@ impl AgentPane {
             None
         };
 
+        // Issue #437: forward the real DagExplorerContext for Cartographer
+        // panes. The context is populated at spawn time by
+        // `App::spawn_agent_pane_with_opts` via `set_dag_explorer_context`.
+        // For all non-Cartographer panes, and for Cartographer panes spawned
+        // without App wiring (headless / test), this remains `None` — the
+        // dispatch gate returns the graceful error string rather than panicking.
+        let dag_explorer = if self.role == phantom_agents::role::AgentRole::Cartographer {
+            self.dag_explorer.clone()
+        } else {
+            None
+        };
+
         Some(phantom_agents::dispatch::DispatchContext {
             self_ref,
             role: self.role,
@@ -104,12 +116,7 @@ impl AgentPane {
             correlation_id: None,
             ticket_dispatcher,
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
-            // Issue #67: DAG explorer context for the Cartographer role.
-            // `None` for all non-Cartographer panes and for Cartographer panes
-            // whose parent App has not yet wired a DagExplorerContext (Phase 2
-            // wiring; the Cartographer pane will populate this when the DAG
-            // viewer surface is available).
-            dag_explorer: None,
+            dag_explorer,
         })
     }
 }
