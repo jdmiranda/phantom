@@ -81,6 +81,7 @@ pub enum EventTopic {
 
 impl Event {
     /// Returns the topic this event belongs to.
+    #[must_use]
     pub fn topic(&self) -> EventTopic {
         match self {
             Self::TerminalOutput { .. }

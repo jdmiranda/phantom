@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn working_status_normalised_to_queued() {
         let mut agent = free_agent(2, "working agent");
-        agent.status = AgentStatus::Working;
+        agent.force_status_for_test(AgentStatus::Working);
         let snap = AgentSnapshot::from_agent(&agent);
         assert_eq!(snap.status(), AgentStatus::Queued,
             "Working must normalise to Queued for clean restart");
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn waiting_for_tool_normalised_to_queued() {
         let mut agent = free_agent(3, "waiting agent");
-        agent.status = AgentStatus::WaitingForTool;
+        agent.force_status_for_test(AgentStatus::WaitingForTool);
         let snap = AgentSnapshot::from_agent(&agent);
         assert_eq!(snap.status(), AgentStatus::Queued);
     }
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn planning_status_normalised_to_queued() {
         let mut agent = free_agent(4, "planning agent");
-        agent.status = AgentStatus::Planning;
+        agent.force_status_for_test(AgentStatus::Planning);
         let snap = AgentSnapshot::from_agent(&agent);
         assert_eq!(snap.status(), AgentStatus::Queued,
             "Planning must normalise to Queued for clean restart");
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn awaiting_approval_normalised_to_queued() {
         let mut agent = free_agent(5, "awaiting agent");
-        agent.status = AgentStatus::AwaitingApproval;
+        agent.force_status_for_test(AgentStatus::AwaitingApproval);
         let snap = AgentSnapshot::from_agent(&agent);
         assert_eq!(snap.status(), AgentStatus::Queued,
             "AwaitingApproval must normalise to Queued for clean restart");
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn done_status_preserved() {
         let mut agent = free_agent(4, "done agent");
-        agent.status = AgentStatus::Done;
+        agent.force_status_for_test(AgentStatus::Done);
         let snap = AgentSnapshot::from_agent(&agent);
         assert_eq!(snap.status(), AgentStatus::Done);
     }
@@ -769,7 +769,7 @@ mod tests {
 
         let agent1 = free_agent(1, "ongoing");
         let mut agent2 = free_agent(2, "done agent");
-        agent2.status = AgentStatus::Done;
+        agent2.force_status_for_test(AgentStatus::Done);
 
         persister.save_agents(&[&agent1, &agent2], false).unwrap();
 
@@ -786,7 +786,7 @@ mod tests {
 
         let agent1 = free_agent(1, "ongoing");
         let mut agent2 = free_agent(2, "done agent");
-        agent2.status = AgentStatus::Done;
+        agent2.force_status_for_test(AgentStatus::Done);
 
         persister.save_agents(&[&agent1, &agent2], true).unwrap();
 

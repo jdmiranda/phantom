@@ -38,11 +38,13 @@ pub const RESTART_WINDOW_SECS: u64 = 60;
 // ---------------------------------------------------------------------------
 
 /// Returns the canonical socket path for a supervisor with the given PID.
+#[must_use]
 pub fn socket_path(supervisor_pid: u32) -> PathBuf {
     PathBuf::from(format!("/tmp/phantom-{supervisor_pid}.sock"))
 }
 
 /// Scans `/tmp` for an existing `phantom-*.sock` file and returns the first match.
+#[must_use]
 pub fn find_socket() -> Option<PathBuf> {
     let Ok(entries) = std::fs::read_dir("/tmp") else {
         return None;
@@ -78,6 +80,7 @@ pub enum SupervisorCommand {
 
 impl SupervisorCommand {
     /// Serialize to the wire format (without trailing newline).
+    #[must_use]
     pub fn to_line(&self) -> String {
         match self {
             Self::Set { key, value } => format!("CMD:SET:{key}:{value}"),
@@ -89,6 +92,7 @@ impl SupervisorCommand {
     }
 
     /// Parse from a wire-format line (without trailing newline).
+    #[must_use]
     pub fn from_line(s: &str) -> Option<Self> {
         let s = s.strip_prefix("CMD:")?;
         if let Some(rest) = s.strip_prefix("SET:") {
@@ -130,6 +134,7 @@ pub enum AppMessage {
 }
 
 impl AppMessage {
+    #[must_use]
     pub fn to_line(&self) -> String {
         match self {
             Self::Heartbeat => "HEARTBEAT".into(),
@@ -140,6 +145,7 @@ impl AppMessage {
         }
     }
 
+    #[must_use]
     pub fn from_line(s: &str) -> Option<Self> {
         if let Some(msg) = s.strip_prefix("LOG:") {
             Some(Self::Log(msg.to_owned()))
@@ -174,6 +180,7 @@ pub enum UserCommand {
 }
 
 impl UserCommand {
+    #[must_use]
     pub fn to_line(&self) -> String {
         match self {
             Self::Restart => "USER:RESTART".into(),
@@ -187,6 +194,7 @@ impl UserCommand {
         }
     }
 
+    #[must_use]
     pub fn from_line(s: &str) -> Option<Self> {
         let s = s.strip_prefix("USER:")?;
         if let Some(rest) = s.strip_prefix("SET:") {
@@ -223,6 +231,7 @@ pub enum Response {
 }
 
 impl Response {
+    #[must_use]
     pub fn to_line(&self) -> String {
         match self {
             Self::Ok(None) => "OK".into(),
@@ -231,6 +240,7 @@ impl Response {
         }
     }
 
+    #[must_use]
     pub fn from_line(s: &str) -> Option<Self> {
         if let Some(msg) = s.strip_prefix("ERR:") {
             Some(Self::Err(msg.to_owned()))
