@@ -101,6 +101,7 @@ impl App {
             &claude_config,
             Some(self.blocked_event_sink.clone()),
             None,
+            self.privacy_mode,
         );
 
         // Wire the substrate handles so chat-tool / composer-tool dispatch

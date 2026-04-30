@@ -86,6 +86,12 @@ pub enum AiEvent {
     /// Enable or disable offline mode (filter to local backends only).
     SetOfflineMode { enabled: bool },
 
+    /// Runtime privacy-mode toggle from the `ghost privacy on/off` command.
+    ///
+    /// When `true`, the brain router must stop routing tasks to cloud backends
+    /// until the next `SetPrivacyMode(false)` event is received.
+    SetPrivacyMode(bool),
+
     /// Graceful shutdown request.
     Shutdown,
 }

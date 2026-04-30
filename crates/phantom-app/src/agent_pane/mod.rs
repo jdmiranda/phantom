@@ -19,7 +19,7 @@ use log::{info, warn};
 
 use phantom_agents::agent::{Agent, AgentMessage};
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig};
-use phantom_agents::chat::{ChatBackend, ChatModel, build_backend};
+use phantom_agents::chat::{ChatBackend, ChatError, ChatModel, build_backend_with_privacy};
 use phantom_agents::permissions::PermissionSet;
 use phantom_agents::role::{AgentRole, CapabilityClass};
 use phantom_agents::spawn_rules::SubstrateEvent;
@@ -316,7 +316,7 @@ impl AgentPane {
     /// substrate `AgentBlocked` events.
     #[allow(dead_code)]
     pub(crate) fn spawn(task: AgentTask, claude_config: &ClaudeConfig) -> Self {
-        Self::spawn_with_opts(AgentSpawnOpts::new(task), claude_config, None, None)
+        Self::spawn_with_opts(AgentSpawnOpts::new(task), claude_config, None, None, false)
     }
 
     /// Create a new agent pane with explicit spawn options.
@@ -337,6 +337,7 @@ impl AgentPane {
         claude_config: &ClaudeConfig,
         blocked_event_sink: Option<BlockedEventSink>,
         denied_event_sink: Option<DeniedEventSink>,
+        privacy_mode: bool,
     ) -> Self {
         let task = opts.task.clone();
         // Capture the requested role before opts fields are consumed.
@@ -345,14 +346,20 @@ impl AgentPane {
         // Resolve the chat model (explicit > env-var > default Claude).
         let resolved = opts.resolve_model();
 
-        // Only build a backend when something steered us off the default.
-        // When the resolution lands on plain Claude AND no explicit model
-        // was given, leave `chat_backend = None` so we hit `send_message`
-        // directly (byte-for-byte legacy path).
-        let chat_backend: Option<Box<dyn ChatBackend>> = match (&opts.chat_model, &resolved) {
-            (None, ChatModel::Claude(_)) => None,
-            _ => match build_backend(&resolved) {
+        // Always build a backend so every agent pane goes through
+        // `PrivacyGuard`. When privacy_mode is true the guard rejects cloud
+        // API calls before they leave the process.
+        let chat_backend: Option<Box<dyn ChatBackend>> =
+            match build_backend_with_privacy(&resolved, privacy_mode) {
                 Ok(b) => Some(b),
+                Err(ChatError::NotConfigured(msg)) => {
+                    warn!(
+                        "Could not build chat backend for {:?}: {msg}; \
+                         falling back to default Claude path",
+                        resolved
+                    );
+                    None
+                }
                 Err(e) => {
                     warn!(
                         "Could not build chat backend for {:?}: {e}; \
@@ -361,8 +368,7 @@ impl AgentPane {
                     );
                     None
                 }
-            },
-        };
+            };
 
         let task_desc = match &task {
             AgentTask::FreeForm { prompt } => prompt.clone(),

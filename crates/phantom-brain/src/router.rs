@@ -283,9 +283,12 @@ impl BrainRouter {
             .backends
             .iter()
             .filter(|b| {
-                b.available && b.capabilities.contains(&complexity) &&
-                // If offline mode is on, reject cloud backends
-                !(self.config.offline_mode && b.is_cloud_provider())
+                b.available
+                    && b.capabilities.contains(&complexity)
+                    // If offline mode is on, reject cloud backends
+                    && !(self.config.offline_mode && b.is_cloud_provider())
+                    // If privacy mode is on, reject cloud backends
+                    && !(self.config.privacy_mode && b.is_cloud_provider())
             })
             .collect();
 
@@ -942,6 +945,8 @@ mod tests {
             }],
             cascade: true,
             confidence_threshold: 0.7,
+            privacy_mode: false,
+            offline_mode: false,
         };
         let mut router = BrainRouter::new(config);
         router.set_privacy_mode(true);

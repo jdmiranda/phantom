@@ -249,11 +249,6 @@ impl StatusBar {
         self.offline_mode = enabled;
     }
 
-    /// Set privacy mode indicator.
-    pub fn set_privacy_mode(&mut self, enabled: bool) {
-        self.privacy_mode = enabled;
-    }
-
     /// Truncate `text` so it fits within `max_chars`, prepending `...` if needed.
     fn truncate_path(text: &str, max_chars: usize) -> String {
         if max_chars < 4 {

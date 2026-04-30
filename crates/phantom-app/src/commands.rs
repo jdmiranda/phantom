@@ -7,6 +7,7 @@ use log::{debug, info, warn};
 
 use phantom_agents::cli::{AgentCommand, parse_agent_command};
 use phantom_agents::{AgentSpawnOpts, AgentTask};
+use phantom_brain::events::AiEvent;
 use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
 use phantom_nlp::{Intent, translate};
@@ -410,12 +411,18 @@ impl App {
                     (Some(&"privacy"), Some(&"on")) => {
                         self.privacy_mode = true;
                         self.status_bar.set_privacy_mode(true);
+                        if let Some(ref brain) = self.brain {
+                            let _ = brain.send_event(AiEvent::SetPrivacyMode(true));
+                        }
                         self.console
                             .system("[P] Privacy mode ON — cloud APIs blocked");
                     }
                     (Some(&"privacy"), Some(&"off")) => {
                         self.privacy_mode = false;
                         self.status_bar.set_privacy_mode(false);
+                        if let Some(ref brain) = self.brain {
+                            let _ = brain.send_event(AiEvent::SetPrivacyMode(false));
+                        }
                         self.console.system("Privacy mode OFF — cloud APIs allowed");
                     }
                     (Some(&"privacy"), _) => {

@@ -393,6 +393,13 @@ fn brain_loop(
             break;
         }
 
+        // Handle runtime privacy-mode toggle.
+        if let AiEvent::SetPrivacyMode(enabled) = event {
+            router.set_privacy_mode(enabled);
+            log::info!("AI brain: privacy mode set to {enabled}");
+            continue;
+        }
+
         // Handle goal-setting: activate goal pursuit mode.
         if let AiEvent::GoalSet {
             ref objective,
