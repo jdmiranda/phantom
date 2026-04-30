@@ -31,6 +31,7 @@ use phantom_ui::widgets::{StatusBar, TabBar};
 
 use phantom_adapter::{DataType, EventBus, TopicId};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
+use phantom_brain::capability_audit::{AuditConfig, CapabilityReport};
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::{OodaConfig, OodaLoop};
 use phantom_context::ProjectContext;
@@ -613,6 +614,25 @@ impl App {
                 None
             }
         };
+
+        // -- Capability audit (offline-readiness report, Issue #362) --
+        // Run before the brain thread starts so the report is in the log
+        // before any AI dispatch happens.  The audit is synchronous and
+        // short (≤ 2 s Ollama ping).  We run it on this thread because
+        // `with_config_scaled` is already called off the render thread.
+        {
+            let audit_config = AuditConfig {
+                privacy_mode: false, // PR #350 will expose privacy_mode from PhantomConfig
+            };
+            let report = CapabilityReport::compute(&audit_config);
+            report.log_report();
+            if !report.all_online_or_blocked() {
+                warn!(
+                    "[capability-audit] {} subsystem(s) unavailable — some AI features will not work",
+                    report.unavailable_entries().len()
+                );
+            }
+        }
 
         // -- AI Brain thread --
         let brain = spawn_brain(BrainConfig {

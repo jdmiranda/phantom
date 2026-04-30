@@ -41,6 +41,7 @@
 
 pub mod attention;
 pub mod brain;
+pub mod capability_audit;
 pub mod chat_backend;
 pub mod claude;
 pub mod curriculum;
@@ -63,6 +64,7 @@ pub mod skill_store;
 
 pub use attention::{Attention, PaneSnapshot};
 pub use brain::*;
+pub use capability_audit::{AuditConfig, CapabilityAuditEntry, CapabilityReport, CapabilityStatus};
 pub use chat_backend::{
     ChatBackend as UnifiedChatBackend, ChatOptions, ChatResponse, ClaudeBackend,
     Message as ChatMessage, OllamaBackend, OpenAiBackend, RoutingCatalog,
