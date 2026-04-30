@@ -44,6 +44,10 @@ pub fn is_available() -> bool {
 ///
 /// Returns `(response_text, latency_ms)` on success.
 pub fn generate(model: &str, prompt: &str, max_tokens: u32) -> Result<(String, f32), String> {
+    // No PeerGrantRegistry check here: phantom-brain is a local-only subsystem.
+    // Claude calls originate from the brain's OODA loop thread within this
+    // process and do not traverse the relay. The relay enforces
+    // CapabilityClass::Llm for cross-peer LLM dispatch.
     let api_key =
         std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set".to_string())?;
 

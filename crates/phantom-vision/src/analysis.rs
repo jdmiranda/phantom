@@ -315,6 +315,10 @@ impl VisionBackend for OpenAiVisionBackend {
         screenshot: &Screenshot,
         prompt: &str,
     ) -> Result<Analysis, VisionError> {
+        // No PeerGrantRegistry check here: phantom-vision is a local-only
+        // backend trait. The caller (within this process) is responsible for
+        // gate-keeping access; the relay layer enforces CapabilityClass::Vision
+        // grants for cross-peer calls before they ever reach this backend.
         let png = screenshot.png_bytes();
 
         if png.len() > MAX_IMAGE_BYTES {

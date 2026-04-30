@@ -109,6 +109,10 @@ impl TranscriptBackend for OpenAiBackend {
         &self,
         mut audio_rx: mpsc::Receiver<AudioChunk>,
     ) -> Result<BoxedTranscriptStream, SttError> {
+        // No PeerGrantRegistry check here: phantom-stt is a local-only backend
+        // trait. Cross-peer STT calls are gated at the relay router by
+        // CapabilityClass::Stt before they reach this in-process backend.
+
         // 1. Drain audio, downmix to mono PCM16, validate sample rate.
         let mut pcm16: Vec<i16> = Vec::new();
         let mut sample_rate: Option<u32> = None;

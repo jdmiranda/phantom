@@ -109,6 +109,9 @@ impl VoiceSynth for OpenAiTtsBackend {
         text: String,
         voice: &VoiceProfile,
     ) -> Result<BoxedVoiceStream, VoiceError> {
+        // No PeerGrantRegistry check here: phantom-voice is a local-only
+        // backend trait. Cross-peer TTS calls are gated at the relay router
+        // by CapabilityClass::Voice before they reach this in-process backend.
         let url = format!("{}/audio/speech", self.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.model,

@@ -126,6 +126,10 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
     }
 
     async fn embed(&self, request: EmbedRequest) -> Result<Vec<Embedding>, EmbedError> {
+        // No PeerGrantRegistry check here: phantom-embeddings is a local-only
+        // backend trait. Cross-peer embedding calls are gated at the relay
+        // router by CapabilityClass::Embeddings before reaching this backend.
+
         if !self.supports(request.modality) {
             return Err(EmbedError::UnsupportedModality(request.modality));
         }
