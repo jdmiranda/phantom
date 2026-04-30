@@ -29,6 +29,7 @@ pub mod inbox;
 pub mod inspector;
 pub mod manager;
 pub mod mcp_tools;
+pub mod peer_grants;
 pub mod permissions;
 pub mod plan;
 pub mod quarantine;
@@ -57,6 +58,7 @@ pub use chat::{
 pub use failure_store::{FailureRecord, FailureStore};
 pub use defender::defender_spawn_rule;
 pub use manager::*;
+pub use peer_grants::{PeerId, PeerGrants, PeerGrantRegistry};
 pub use role::{
     AgentId as RoleAgentId, AgentRef, AgentRole, CapabilityClass, RoleManifest, SpawnSource,
 };
