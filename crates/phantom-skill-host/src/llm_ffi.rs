@@ -14,8 +14,8 @@
 //!   - `1` — `NotConfigured`
 //!   - `2` — `Transport`
 //!   - `3` — `Other`
-//!   The caller must free the buffer with `free_buf` in all cases (success and
-//!   error).
+//!     The caller must free the buffer with `free_buf` in all cases (success and
+//!     error).
 //!
 //! ## Lifetime
 //!

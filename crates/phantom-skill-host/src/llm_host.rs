@@ -308,6 +308,7 @@ impl LlmSkillAdapter {
     }
 
     /// Borrow the inner skill.
+    #[must_use]
     pub fn inner(&self) -> &Arc<dyn LlmSkill> {
         &self.0
     }

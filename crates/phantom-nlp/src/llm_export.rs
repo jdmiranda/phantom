@@ -99,7 +99,7 @@ unsafe impl Sync for LlmSkillVtable {}
 
 /// `name` FFI shim — returns a pointer to a null-terminated static C string.
 unsafe extern "C" fn name_ffi() -> *const u8 {
-    b"phantom-nlp\0".as_ptr()
+    c"phantom-nlp".as_ptr().cast::<u8>()
 }
 
 /// `complete` FFI shim.
@@ -359,7 +359,7 @@ mod tests {
         // Check that it forms a valid C string with at least one byte.
         // SAFETY: ptr is a static string literal.
         let first = unsafe { *ptr };
-        assert!(first != 0 || true); // just check it doesn't crash
+        assert_ne!(first, 0); // string is non-empty (not NUL-terminated at offset 0)
     }
 
     #[test]
