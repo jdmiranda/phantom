@@ -36,6 +36,8 @@ members = [
     "crates/phantom-relay",
     # Network identity bootstrap, relay client, and signed message envelope (issue #5).
     "crates/phantom-net",
+    # Railway-hosted MCP fleet control hub (issue #394).
+    "crates/phantom-hub",
 ]
 resolver = "2"
 

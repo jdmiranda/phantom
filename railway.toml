@@ -1,0 +1,21 @@
+# railway.toml — phantom-hub Railway service configuration.
+#
+# Railway reads this file from the repo root. Adjust `build.dockerfilePath`
+# if the Docker context root moves.
+#
+# Reference: https://docs.railway.app/reference/config-as-code
+
+[build]
+builder      = "DOCKERFILE"
+dockerfilePath = "crates/phantom-hub/Dockerfile"
+
+[deploy]
+startCommand = "/app/phantom-hub"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 10          # seconds
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# Railway environment variables.
+# Set PORT in the Railway dashboard (or leave unset — Railway injects it).
+# For staging, no additional env vars are needed for Phase 1.
