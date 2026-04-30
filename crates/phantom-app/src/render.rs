@@ -376,10 +376,7 @@ impl App {
                         }
                     }
 
-                    // Selection highlight overlay.
-                    if let Some(ref sel) = ro.selection {
-                        self.push_selection_quads(sel, margin, margin, grid.cols, quads);
-                    }
+                    // Selection is rendered via per-cell inversion in extract_grid_themed.
                 }
                 self.render_overlay_text(
                     "ESC to exit fullscreen",
@@ -645,10 +642,7 @@ impl App {
                     }
                 }
 
-                // Selection highlight overlay.
-                if let Some(ref sel) = ro.selection {
-                    self.push_selection_quads(sel, grid.origin.0, grid.origin.1, grid.cols, quads);
-                }
+                // Selection is rendered via per-cell inversion in extract_grid_themed.
             }
         }
 
@@ -740,44 +734,6 @@ impl App {
         }
         let banner_texts = banner.render_text(&banner_rect);
         self.render_text_segments(&banner_texts, chrome_glyphs);
-    }
-
-    /// Push selection highlight quads for the given selection range.
-    fn push_selection_quads(
-        &self,
-        sel: &phantom_adapter::adapter::SelectionRange,
-        origin_x: f32,
-        origin_y: f32,
-        grid_cols: usize,
-        quads: &mut Vec<QI>,
-    ) {
-        for row in sel.start_row..=sel.end_row {
-            let start_col = if row == sel.start_row {
-                sel.start_col
-            } else {
-                0
-            };
-            let end_col = if row == sel.end_row {
-                sel.end_col
-            } else {
-                grid_cols.saturating_sub(1)
-            };
-            if end_col < start_col {
-                continue;
-            }
-
-            let x = origin_x + start_col as f32 * self.cell_size.0;
-            let y = origin_y + row as f32 * self.cell_size.1;
-            let w = (end_col - start_col + 1) as f32 * self.cell_size.0;
-            let h = self.cell_size.1;
-
-            quads.push(QI {
-                pos: [x, y],
-                size: [w, h],
-                color: [0.2, 0.5, 1.0, 0.3], // Blue highlight overlay
-                border_radius: 0.0,
-            });
-        }
     }
 
     /// Convert widget TextSegments into GlyphInstances via the text renderer.
