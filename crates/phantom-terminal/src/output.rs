@@ -216,6 +216,10 @@ pub fn extract_grid<T: EventListener>(
 ///
 /// The `theme` parameter provides foreground, background, cursor, and
 /// ANSI palette overrides. This is the primary path used by the GUI app.
+///
+/// When `display_offset > 0` (the user has scrolled into scrollback history),
+/// grid rows are shifted by `-display_offset` so that scrollback lines are
+/// rendered instead of the live screen region.
 pub fn extract_grid_themed<T: EventListener>(
     term: &Term<T>,
     theme: &TerminalThemeColors,
@@ -223,6 +227,7 @@ pub fn extract_grid_themed<T: EventListener>(
     let grid = term.grid();
     let cols = grid.columns();
     let rows = grid.screen_lines();
+    let display_offset = grid.display_offset() as i32;
     let mut table = ansi_color_table();
 
     // Override ANSI 0..16 with theme palette if provided.
@@ -238,15 +243,22 @@ pub fn extract_grid_themed<T: EventListener>(
     let mut cells = Vec::with_capacity(cols * rows);
 
     for row_idx in 0..rows {
-        let line = &grid[Line(row_idx as i32)];
+        // Shift by display_offset so scrollback rows are rendered when the
+        // user has scrolled up. Line(0) is the top of the live screen;
+        // Line(-1) is the first scrollback row above it. When display_offset
+        // is N, viewport row 0 should show Line(-N), row 1 shows Line(-N+1),
+        // etc., up to row (rows-1) which shows Line(rows-1-N).
+        let grid_line = Line(row_idx as i32 - display_offset);
+        let line = &grid[grid_line];
         for col_idx in 0..cols {
             let cell = &line[Column(col_idx)];
 
-            // Check if this cell is in the selection.
+            // Check if this cell is in the selection. Use the grid-space line
+            // (not the viewport row) so coordinates match alacritty's range.
             let is_selected = selection_range
                 .as_ref()
                 .is_some_and(|range| {
-                    range.contains(Point::new(Line(row_idx as i32), Column(col_idx)))
+                    range.contains(Point::new(grid_line, Column(col_idx)))
                 });
 
             // Skip wide-char spacer cells — emit a space placeholder instead.
@@ -316,11 +328,16 @@ pub fn extract_grid_themed<T: EventListener>(
 }
 
 /// Extract cursor position and shape from the terminal.
+///
+/// The cursor row is adjusted by `display_offset` to place it in viewport
+/// coordinates. When the user has scrolled away from the live region, the
+/// cursor is hidden so it doesn't appear to teleport into scrollback history.
 fn extract_cursor<T: EventListener>(term: &Term<T>) -> CursorState {
     let content = term.renderable_content();
     let rc = content.cursor;
+    let display_offset = term.grid().display_offset() as i32;
+    let screen_lines = term.grid().screen_lines() as i32;
 
-    let visible = rc.shape != AlacCursorShape::Hidden;
     let shape = match rc.shape {
         AlacCursorShape::Block | AlacCursorShape::HollowBlock => CursorShape::Block,
         AlacCursorShape::Underline => CursorShape::Underline,
@@ -328,9 +345,14 @@ fn extract_cursor<T: EventListener>(term: &Term<T>) -> CursorState {
         AlacCursorShape::Hidden => CursorShape::Block, // shape is irrelevant when hidden
     };
 
-    // The renderable cursor point uses Line(i32). Convert to usize row within
-    // the visible viewport.
-    let row = rc.point.line.0.max(0) as usize;
+    // The cursor's grid line (0 = top of live screen, negative = scrollback).
+    // Convert to viewport row: viewport_row = grid_line + display_offset.
+    // Hide the cursor if it falls outside the visible viewport [0, screen_lines).
+    let viewport_row = rc.point.line.0 + display_offset;
+    let in_viewport = viewport_row >= 0 && viewport_row < screen_lines;
+    let visible = rc.shape != AlacCursorShape::Hidden && in_viewport;
+
+    let row = if in_viewport { viewport_row as usize } else { 0 };
     let col = rc.point.column.0;
 
     CursorState {
@@ -659,5 +681,149 @@ mod tests {
         assert!((rgba[0] - 0xAA as f32 / 255.0).abs() < 1e-6);
         assert!((rgba[1] - 0xBB as f32 / 255.0).abs() < 1e-6);
         assert!((rgba[2] - 0xCC as f32 / 255.0).abs() < 1e-6);
+    }
+
+    // ===================================================================
+    // REGRESSION #361: display_offset respected in extract_grid_themed
+    // ===================================================================
+
+    /// Verify that when `display_offset > 0`, the first extracted row matches
+    /// the scrollback line at `Line(-display_offset)`, not the live row.
+    ///
+    /// Setup:
+    ///   - 3-row terminal with 5 columns.
+    ///   - Write a distinct character to row 0 of the live screen ('L').
+    ///   - Push two lines into scrollback by calling `newline` twice, then
+    ///     write a distinct character to what is now the first scrollback row.
+    ///   - Scroll up by 1 (display_offset = 1).
+    ///   - Extract the grid and assert viewport row 0 shows the scrollback
+    ///     character, NOT the live-screen character.
+    #[test]
+    fn display_offset_shifts_extracted_rows() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::{Dimensions, Scroll};
+        use alacritty_terminal::term::Config;
+        use alacritty_terminal::vte::ansi::Handler;
+        use alacritty_terminal::Term;
+
+        // Small terminal: 5 cols × 3 rows, with scrollback.
+        struct Sz;
+        impl Dimensions for Sz {
+            fn total_lines(&self) -> usize { self.screen_lines() }
+            fn screen_lines(&self) -> usize { 3 }
+            fn columns(&self) -> usize { 5 }
+        }
+
+        let cfg = Config { scrolling_history: 100, ..Config::default() };
+        let mut term = Term::new(cfg, &Sz, VoidListener);
+
+        // Write 'S' (scrollback) at col 0 of the current cursor row (Line 0).
+        term.input('S');
+
+        // Advance past the bottom of the 3-row screen so 'S' is pushed into
+        // scrollback. With screen_lines=3: newlines 1→2 move the cursor down
+        // inside the screen; newline 3 causes the grid to scroll, pushing
+        // Line(0) ('S') off the top into scrollback at Line(-1).
+        for _ in 0..3 {
+            term.newline();
+        }
+
+        // Write 'L' (live) at col 0 of the new bottom row.
+        term.input('L');
+
+        // Confirm scrollback was created.
+        let history = term.grid().history_size();
+        assert!(
+            history > 0,
+            "expected at least 1 scrollback line after overflowing a 3-row terminal; got {history}"
+        );
+
+        // Scroll the viewport up by exactly 1 line.
+        term.scroll_display(Scroll::Delta(1));
+        let display_offset = term.grid().display_offset();
+        assert_eq!(display_offset, 1, "display_offset must be 1 after one scroll step");
+
+        // Extract the grid and inspect viewport row 0.
+        let theme = TerminalThemeColors::default();
+        let (cells, cols, rows, _cursor) = extract_grid_themed(&term, &theme);
+
+        assert_eq!(rows, 3);
+        assert_eq!(cols, 5);
+
+        // Viewport row 0 maps to Line(-1) = the first scrollback line = 'S'.
+        // Before the fix, this would return a cell from the live region instead.
+        let first_cell_char = cells[0].ch;
+        assert_eq!(
+            first_cell_char, 'S',
+            "display_offset=1: viewport row 0 must show scrollback 'S', not live content; got '{first_cell_char}'"
+        );
+    }
+
+    /// When display_offset is 0 (no scroll), extracted row 0 is the live row.
+    #[test]
+    fn display_offset_zero_shows_live_screen() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::term::Config;
+        use alacritty_terminal::vte::ansi::Handler;
+        use alacritty_terminal::Term;
+
+        struct Sz;
+        impl Dimensions for Sz {
+            fn total_lines(&self) -> usize { self.screen_lines() }
+            fn screen_lines(&self) -> usize { 3 }
+            fn columns(&self) -> usize { 5 }
+        }
+
+        let mut term = Term::new(Config::default(), &Sz, VoidListener);
+        term.input('X');
+
+        assert_eq!(term.grid().display_offset(), 0);
+
+        let theme = TerminalThemeColors::default();
+        let (cells, _cols, _rows, _cursor) = extract_grid_themed(&term, &theme);
+
+        assert_eq!(
+            cells[0].ch, 'X',
+            "at display_offset=0 the first cell must be the live row's first character"
+        );
+    }
+
+    /// Cursor must be hidden when the user has scrolled away from the live region.
+    #[test]
+    fn cursor_hidden_when_scrolled_into_history() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::{Dimensions, Scroll};
+        use alacritty_terminal::term::Config;
+        use alacritty_terminal::vte::ansi::Handler;
+        use alacritty_terminal::Term;
+
+        struct Sz;
+        impl Dimensions for Sz {
+            fn total_lines(&self) -> usize { self.screen_lines() }
+            fn screen_lines(&self) -> usize { 5 }
+            fn columns(&self) -> usize { 5 }
+        }
+
+        let cfg = Config { scrolling_history: 100, ..Config::default() };
+        let mut term = Term::new(cfg, &Sz, VoidListener);
+
+        // Push enough newlines to create scrollback.
+        for _ in 0..10 {
+            term.newline();
+        }
+
+        // Scroll to top — cursor is now off-screen.
+        term.scroll_display(Scroll::Top);
+        assert!(term.grid().display_offset() > 0);
+
+        let theme = TerminalThemeColors::default();
+        let (_cells, _cols, _rows, cursor) = extract_grid_themed(&term, &theme);
+
+        assert!(
+            !cursor.visible,
+            "cursor must not be visible when scrolled fully into history (display_offset={})",
+            term.grid().display_offset()
+        );
     }
 }
