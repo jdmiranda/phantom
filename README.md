@@ -233,7 +233,6 @@ phantom-scene            # performance: retained scene graph, dirty tracking
 | `Cmd+W` | Close focused pane |
 | `Cmd+=` / `Cmd+-` | Zoom in/out |
 | `Cmd+C` / `Cmd+V` | Copy/paste |
-| `Cmd+T` | New tab |
 | `Cmd+Q` | Quit |
 
 ## Command Mode

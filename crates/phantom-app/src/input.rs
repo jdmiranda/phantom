@@ -157,16 +157,41 @@ impl App {
                 self.quit_requested = true;
             }
             Action::Copy => {
-                debug!("Action: Copy (not yet implemented)");
+                if let Some(focused) = self.coordinator.focused() {
+                    if let Ok(text) = self.coordinator.send_command(
+                        focused,
+                        "select_copy",
+                        &serde_json::json!({}),
+                    ) {
+                        if !text.is_empty() {
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let _ = clipboard.set_text(&text);
+                            }
+                            info!("Copied {} chars to clipboard", text.len());
+                        } else {
+                            debug!("Copy: no selection");
+                        }
+                    }
+                }
             }
             Action::Paste => {
-                debug!("Action: Paste (not yet implemented)");
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if let Ok(text) = clipboard.get_text() {
+                        self.coordinator.route_bytes(text.as_bytes());
+                        info!("Pasted {} bytes from clipboard", text.len());
+                    }
+                }
             }
+            // Phantom is panes-first; tabs are not a shipped concept.
+            // Redirect tab actions to their pane equivalents so the keybind
+            // is never a silent no-op (Cmd+T → new split, Cmd+W → close pane).
             Action::NewTab => {
-                debug!("Action: NewTab (not yet implemented)");
+                debug!("NewTab redirected to SplitHorizontal (panes-first model)");
+                self.split_focused_pane(true);
             }
             Action::CloseTab => {
-                debug!("Action: CloseTab (not yet implemented)");
+                debug!("CloseTab redirected to CloseFocused (panes-first model)");
+                self.close_focused_pane();
             }
             Action::SplitHorizontal => {
                 self.split_focused_pane(true);
@@ -241,6 +266,14 @@ impl App {
                 let _ = self
                     .coordinator
                     .send_command_to_focused("scroll", &serde_json::json!({"direction": "bottom"}));
+            }
+            Action::NextTab => {
+                debug!("NextTab redirected to FocusNext (panes-first model)");
+                self.dispatch_action(Action::FocusNext);
+            }
+            Action::PrevTab => {
+                debug!("PrevTab redirected to FocusPrev (panes-first model)");
+                self.dispatch_action(Action::FocusPrev);
             }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
@@ -540,28 +573,6 @@ impl App {
                 shift: state.shift_key(),
                 logo: state.super_key(),
             };
-
-            // Copy selection to clipboard: Cmd+C (macOS) or Ctrl+Shift+C.
-            if terminal_event.key == PhantomKey::Char('c')
-                && (terminal_event.mods.logo
-                    || (terminal_event.mods.ctrl && terminal_event.mods.shift))
-            {
-                if let Some(focused) = self.coordinator.focused() {
-                    if let Ok(text) = self.coordinator.send_command(
-                        focused,
-                        "select_copy",
-                        &serde_json::json!({}),
-                    ) {
-                        if !text.is_empty() {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                let _ = clipboard.set_text(&text);
-                            }
-                            info!("Copied {} chars to clipboard", text.len());
-                            return;
-                        }
-                    }
-                }
-            }
 
             // Clear selection on any other keypress.
             if let Some(focused) = self.coordinator.focused() {
