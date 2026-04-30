@@ -21,10 +21,13 @@ notify     = { workspace = true, optional = true }
 
 # Always depend on phantom-semantic so callers get the concrete types.
 phantom-semantic = { path = "../phantom-semantic" }
+# Always depend on phantom-nlp so callers get the concrete LlmBackend types.
+phantom-nlp = { path = "../phantom-nlp" }
 
 [dev-dependencies]
 tempfile   = { workspace = true }
 libloading = { workspace = true }
+phantom-nlp = { path = "../phantom-nlp", features = ["testing"] }
 
 [lints]
 workspace = true
