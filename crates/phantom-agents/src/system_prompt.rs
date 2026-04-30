@@ -58,6 +58,27 @@ Protocol:
 
 You CANNOT use Act-class tools (write_file, run_command, send_key, etc.). If a step requires acting on the user's world, the user must spawn an Actor agent and grant explicit consent.";
 
+/// Cartographer navigation protocol. Pinned verbatim — the DAG viewer surface
+/// parses the tool names listed here. Paraphrasing would silently break the
+/// Cartographer's tool contract with the substrate.
+const CARTOGRAPHER_PROTOCOL: &str = "\
+You are a CARTOGRAPHER. Your job is to READ and NAVIGATE the execution DAG, \
+then explain what you find conversationally to the user.
+
+Protocol:
+1. Use dag_list_nodes to survey the full graph.
+2. Use dag_find_blocking to answer \"what is blocking X?\" questions.
+3. Use dag_critical_path to identify the longest dependency chain.
+4. Use dag_annotate to highlight nodes relevant to the user's query.
+5. Use dag_mark_complete / dag_mark_failed / dag_mark_skipped only when the user \
+   explicitly confirms that a node's status should change.
+6. Use dag_add_child when the user asks to refine or extend the plan.
+7. Use dag_clear_annotations to reset highlights after answering a query.
+8. Narrate your findings in plain language after each tool call.
+
+You CANNOT use Act-class tools (write_file, run_command, edit_file, etc.). \
+You observe and steer the DAG viewer surface — nothing else.";
+
 /// A single skill module that has been injected into a system prompt.
 ///
 /// Produced by [`SystemPromptBuilder::inject_skills`] and stored on the
@@ -242,6 +263,11 @@ impl SystemPromptBuilder {
             sections.push(COMPOSER_PROTOCOL.to_string());
         }
 
+        // 2b'. Cartographer-only DAG navigation protocol.
+        if self.agent.role == AgentRole::Cartographer {
+            sections.push(CARTOGRAPHER_PROTOCOL.to_string());
+        }
+
         // 2c. Other-agents paragraph. Surfaces the peer manifest and points
         // the model at the inter-agent chat tools (`send_to_agent`,
         // `read_from_agent`, `broadcast_to_role`). Skipped entirely when
@@ -424,6 +450,7 @@ mod tests {
             (AgentRole::Indexer, "idx", 6, "Sense"),
             (AgentRole::Actor, "act", 7, "Act"),
             (AgentRole::Composer, "comp", 8, "Coordinate"),
+            (AgentRole::Cartographer, "nav", 9, "Sense"),
         ];
         for (role, label, id, cap) in cases {
             let prompt = SystemPromptBuilder::new(agent(role, label, id)).build();
@@ -540,6 +567,7 @@ mod tests {
             AgentRole::Indexer,
             AgentRole::Actor,
             AgentRole::Fixer,
+            AgentRole::Cartographer,
         ] {
             let prompt = SystemPromptBuilder::new(agent(role, "x", 1)).build();
             assert!(
@@ -656,5 +684,59 @@ mod tests {
             via_build, via_store,
             "build_and_store must return the same text as build",
         );
+    }
+
+    // --- Cartographer-specific protocol assertions (issue #67) ---------------
+
+    /// Cartographer-only navigation protocol must surface verbatim. We assert
+    /// on the load-bearing tool names the DAG viewer surface parses; a typo
+    /// would break the contract silently.
+    #[test]
+    fn cartographer_prompt_includes_navigation_protocol() {
+        let prompt =
+            SystemPromptBuilder::new(agent(AgentRole::Cartographer, "nav", 1)).build();
+        assert!(
+            prompt.contains("dag_list_nodes"),
+            "Cartographer prompt must mention dag_list_nodes; got:\n{prompt}",
+        );
+        assert!(
+            prompt.contains("dag_find_blocking"),
+            "Cartographer prompt must mention dag_find_blocking; got:\n{prompt}",
+        );
+        assert!(
+            prompt.contains("dag_annotate"),
+            "Cartographer prompt must mention dag_annotate; got:\n{prompt}",
+        );
+        assert!(
+            prompt.contains("CARTOGRAPHER"),
+            "Cartographer prompt must identify the role as CARTOGRAPHER; got:\n{prompt}",
+        );
+    }
+
+    /// Non-Cartographer roles must NOT receive the navigation protocol
+    /// addendum — it references DAG tools those roles cannot call.
+    #[test]
+    fn non_cartographer_prompts_omit_navigation_protocol() {
+        for role in [
+            AgentRole::Conversational,
+            AgentRole::Watcher,
+            AgentRole::Capturer,
+            AgentRole::Transcriber,
+            AgentRole::Reflector,
+            AgentRole::Indexer,
+            AgentRole::Actor,
+            AgentRole::Fixer,
+            AgentRole::Composer,
+        ] {
+            let prompt = SystemPromptBuilder::new(agent(role, "x", 1)).build();
+            assert!(
+                !prompt.contains("dag_list_nodes"),
+                "{role:?} must NOT carry the Cartographer addendum; got:\n{prompt}",
+            );
+            assert!(
+                !prompt.contains("dag_find_blocking"),
+                "{role:?} must NOT mention dag_find_blocking; got:\n{prompt}",
+            );
+        }
     }
 }

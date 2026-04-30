@@ -71,6 +71,7 @@ fn build_ctx<'a>(
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     }
 }
 
@@ -122,6 +123,7 @@ async fn dispatch_routes_send_to_agent_to_chat_tools() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let result = dispatch_tool(
@@ -258,6 +260,7 @@ fn dispatch_capability_denied_for_chat_tool() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let result = dispatch_tool(
@@ -430,6 +433,7 @@ fn dispatch_clean_source_chain_taint_is_clean() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     // Act.
@@ -483,6 +487,7 @@ fn dispatch_capability_denied_upstream_taint_is_suspect() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     // Act.
@@ -547,6 +552,7 @@ fn dispatch_quarantined_source_agent_taint_is_tainted() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     // Act.
@@ -613,6 +619,7 @@ fn dispatch_self_referential_chain_does_not_loop() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     // This call must return — any infinite loop would cause the test to hang
@@ -674,6 +681,7 @@ fn dispatch_denied_for_quarantined_agent() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     // A normal file-read that would otherwise succeed must be denied.
@@ -757,6 +765,7 @@ fn dispatch_succeeds_after_quarantine_release() {
             correlation_id: None,
             ticket_dispatcher: None,
             runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,
         };
         let blocked = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
         assert!(
@@ -803,6 +812,7 @@ fn dispatch_succeeds_after_quarantine_release() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
@@ -851,6 +861,7 @@ fn dispatch_allowed_for_clean_agent_with_quarantine_registry() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -888,6 +899,7 @@ fn dispatch_with_correlation_id_routes_normally() {
         correlation_id: Some(cid),
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
@@ -929,6 +941,7 @@ fn dispatch_with_shared_correlation_id_routes_independently() {
         correlation_id: Some(cid),
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let ctx_b = DispatchContext {
@@ -943,6 +956,7 @@ fn dispatch_with_shared_correlation_id_routes_independently() {
         correlation_id: Some(cid),
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
@@ -1006,6 +1020,7 @@ fn capability_denied_source_chain_propagates_taint() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
@@ -1058,6 +1073,7 @@ fn watcher_role_blocked_from_run_command() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     // Attempt to invoke run_command — Act-class tool.
@@ -1133,6 +1149,7 @@ fn dispatch_with_correlation_id_writes_correlation_id_to_event_log() {
         correlation_id: Some(cid),
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     // Act — dispatch a normal read_file tool.
@@ -1187,6 +1204,7 @@ fn dispatch_with_correlation_id_writes_correlation_id_to_event_log() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
     let res2 = dispatch_tool("read_file", &json!({"path": "probe2.txt"}), &ctx_no_corr);
     assert!(res2.success, "no-corr dispatch must succeed: {}", res2.output);
@@ -1426,6 +1444,7 @@ fn spawn_only_blocks_non_spawn_tools() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::SpawnOnly,
+        dag_explorer: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1457,6 +1476,7 @@ fn spawn_only_permits_spawn_subagent() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::SpawnOnly,
+        dag_explorer: None,
     };
 
     // Empty args — handler may fail on validation but must not be
@@ -1493,6 +1513,7 @@ fn spawn_only_denial_is_logged_to_event_log() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::SpawnOnly,
+        dag_explorer: None,
     };
 
     let res = dispatch_tool("write_file", &json!({"path": "x.txt", "content": "boom"}), &ctx);
@@ -1524,6 +1545,7 @@ fn normal_mode_is_transparent() {
         correlation_id: None,
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
+        dag_explorer: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "visible.txt"}), &ctx);
