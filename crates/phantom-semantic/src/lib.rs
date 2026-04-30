@@ -1,9 +1,13 @@
 pub mod errors;
 pub mod parser;
+/// C-ABI export for `phantom-skill-host` hot-module loading.
+/// The `phantom_skill_register` symbol is exported from the cdylib artifact.
+pub mod skill_export;
 pub mod types;
 
 pub use errors::*;
 pub use parser::*;
+pub use skill_export::phantom_skill_register;
 pub use types::*;
 
 #[cfg(test)]

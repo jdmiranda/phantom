@@ -64,6 +64,7 @@ impl ErrorHighlighter {
     /// For each error the raw_line is highlighted with a red background.
     /// For each warning the raw_line is highlighted with a yellow background.
     /// File:line references are highlighted with a cyan underline.
+    #[must_use]
     pub fn highlight(parsed: &ParsedOutput) -> Vec<HighlightRegion> {
         let output_lines: Vec<&str> = parsed.raw_output.lines().collect();
         let mut regions = Vec::new();
@@ -81,16 +82,16 @@ impl ErrorHighlighter {
         // Source reference highlights (cyan underline).
         let refs = Self::extract_references(parsed);
         for src_ref in &refs {
-            if let Some(line_text) = output_lines.get(src_ref.output_line) {
-                if let Some(start) = line_text.find(&src_ref.display_text) {
-                    regions.push(HighlightRegion {
-                        line: src_ref.output_line,
-                        start_col: start,
-                        end_col: start + src_ref.display_text.len(),
-                        color: COLOR_SOURCE_REF,
-                        style: HighlightStyle::Underline,
-                    });
-                }
+            if let Some(line_text) = output_lines.get(src_ref.output_line)
+                && let Some(start) = line_text.find(&src_ref.display_text)
+            {
+                regions.push(HighlightRegion {
+                    line: src_ref.output_line,
+                    start_col: start,
+                    end_col: start + src_ref.display_text.len(),
+                    color: COLOR_SOURCE_REF,
+                    style: HighlightStyle::Underline,
+                });
             }
         }
 
@@ -101,24 +102,25 @@ impl ErrorHighlighter {
     ///
     /// Pulls from the structured [`DetectedError`] fields first, then scans the
     /// raw output for additional file:line:col patterns.
+    #[must_use]
     pub fn extract_references(parsed: &ParsedOutput) -> Vec<SourceReference> {
         let mut refs = Vec::new();
         let output_lines: Vec<&str> = parsed.raw_output.lines().collect();
 
         // From structured errors/warnings.
         for err in parsed.errors.iter().chain(parsed.warnings.iter()) {
-            if let Some(file) = &err.file {
-                if let Some(line) = err.line {
-                    let display = Self::format_display(file, line, err.column);
-                    let output_line = Self::find_output_line(&output_lines, &display);
-                    refs.push(SourceReference {
-                        file: file.clone(),
-                        line,
-                        column: err.column,
-                        display_text: display,
-                        output_line,
-                    });
-                }
+            if let Some(file) = &err.file
+                && let Some(line) = err.line
+            {
+                let display = Self::format_display(file, line, err.column);
+                let output_line = Self::find_output_line(&output_lines, &display);
+                refs.push(SourceReference {
+                    file: file.clone(),
+                    line,
+                    column: err.column,
+                    display_text: display,
+                    output_line,
+                });
             }
         }
 
@@ -145,6 +147,7 @@ impl ErrorHighlighter {
     /// - `file.ext:42`          (Python, Java, general)
     /// - `at file.ext:42:9`     (TypeScript/Node stack traces)
     /// - `File "file.py", line 42`  (Python tracebacks)
+    #[must_use]
     pub fn scan_for_references(text: &str) -> Vec<SourceReference> {
         let mut refs = Vec::new();
 
@@ -213,6 +216,7 @@ impl ErrorHighlighter {
     /// Generate a one-line summary of errors for the agent system.
     ///
     /// Returns `None` when there are no errors or warnings.
+    #[must_use]
     pub fn error_summary(parsed: &ParsedOutput) -> Option<String> {
         let n_errors = parsed.errors.len();
         let n_warnings = parsed.warnings.len();
@@ -232,10 +236,10 @@ impl ErrorHighlighter {
         }
 
         // HTTP error summaries.
-        if let ContentType::HttpResponse(ref data) = parsed.content_type {
-            if data.status >= 400 {
-                return Some(format!("HTTP {} {}", data.status, data.status_text));
-            }
+        if let ContentType::HttpResponse(ref data) = parsed.content_type
+            && data.status >= 400
+        {
+            return Some(format!("HTTP {} {}", data.status, data.status_text));
         }
 
         if n_errors == 0 && n_warnings == 0 {
@@ -273,6 +277,7 @@ impl ErrorHighlighter {
     ///
     /// Returns `true` for compiler errors, test failures, or runtime errors.
     /// Returns `false` for warnings only, success, or unknown output.
+    #[must_use]
     pub fn should_suggest_fix(parsed: &ParsedOutput) -> bool {
         // Compiler errors.
         if parsed
@@ -284,10 +289,10 @@ impl ErrorHighlighter {
         }
 
         // Test failures.
-        if let ContentType::TestResults(ref summary) = parsed.content_type {
-            if summary.failed > 0 {
-                return true;
-            }
+        if let ContentType::TestResults(ref summary) = parsed.content_type
+            && summary.failed > 0
+        {
+            return true;
         }
 
         // Runtime errors.
@@ -300,10 +305,10 @@ impl ErrorHighlighter {
         }
 
         // Non-zero exit code with detected errors of any kind.
-        if let Some(code) = parsed.exit_code {
-            if code != 0 && !parsed.errors.is_empty() {
-                return true;
-            }
+        if let Some(code) = parsed.exit_code
+            && code != 0 && !parsed.errors.is_empty()
+        {
+            return true;
         }
 
         false
