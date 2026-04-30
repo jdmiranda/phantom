@@ -5986,6 +5986,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-skill-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "libloading",
+ "log",
+ "notify",
+ "phantom-semantic",
+ "tempfile",
+]
+
+[[package]]
 name = "phantom-stt"
 version = "0.1.0"
 dependencies = [
