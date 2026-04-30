@@ -29,10 +29,9 @@ If any one of those is false, the finding blocks the merge. Send to fix.
 
 ### Examples — merge-with-issue
 
-- A `// TODO: optimize` in a slow path that the PR didn't touch.
+- A `// TODO: optimize` in a slow path that the PR didn't touch (distinct from the new code path).
 - A misleading log message in a sibling module.
 - A doc comment on an existing public function that's slightly stale after this PR.
-- A clippy hint on a pre-existing line that just got renumbered by the diff.
 
 ### Examples — send to fix
 
@@ -54,7 +53,7 @@ A PR is `pass` when **every** check in [review-rubric.md](review-rubric.md) is P
 |---|---|
 | 1 | `cargo build --workspace` produces zero warnings |
 | 2 | `cargo test --workspace` produces zero failures and zero new ignored tests |
-| 3 | `cargo clippy --workspace --all-targets -- -D warnings` exits 0 |
+| 3 | `cargo clippy --workspace --all-targets -- -D warnings` exits 0 — no per-crate carve-outs; main is clippy-clean and must stay that way |
 | 4 | `./scripts/pre-pr-check.sh <crate>` exits 0 for every touched crate (or the script is missing — note in handoff) |
 | 5 | The closing issue's acceptance criteria are satisfied by code in this PR (not promised in a follow-up) |
 | 6 | The PR's "Files Touched" handoff field matches `git diff origin/main...HEAD --name-only` |
@@ -63,6 +62,8 @@ A PR is `pass` when **every** check in [review-rubric.md](review-rubric.md) is P
 | 9 | The handoff for this PR exists at `~/.wolf/handoffs/phantom/$(date +%Y-%m-%d)/...` and follows the schema |
 
 If 1–4 are red, that's a fix. If 5–9 are red, also fix.
+
+**Main branch invariant:** If `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`, or `cargo test --workspace` is red on `main` at any point, STOP all in-flight work and spawn a hotfix agent immediately. Do not paper over failures with per-crate allowlists or carve-outs — those are no longer permitted.
 
 ---
 
