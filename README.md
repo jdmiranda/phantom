@@ -222,6 +222,27 @@ phantom-protocol         # protocol: supervisor socket communication
 phantom-scene            # performance: retained scene graph, dirty tracking
 ```
 
+## Knowledge Graph
+
+Phantom keeps a repo-local Graphify build in `graphify-out/`, but the raw package rebuild path is not trustworthy enough for this repo because repeated filenames like `main.rs` and `openai.rs` collide.
+
+Use the repo wrapper instead:
+
+```bash
+python3 scripts/graphify_rebuild.py
+```
+
+What this does:
+- stages the build outside `graphify-out/`
+- rewrites duplicate Graphify IDs with path-scoped IDs before graph construction
+- exports a directed graph so `calls` edges preserve direction
+- validates the staged graph before publishing it over `graphify-out/`
+
+The wrapper publishes:
+- `graphify-out/graph.json`
+- `graphify-out/GRAPH_REPORT.md`
+- `graphify-out/graphify-metadata.json`
+
 ## Keybinds
 
 | Key | Action |
