@@ -19,6 +19,7 @@ mod inspector;
 pub mod jobs;
 #[allow(dead_code)]
 mod keystroke_fx;
+pub mod lineage;
 pub mod logging;
 mod mouse;
 pub mod notifications;

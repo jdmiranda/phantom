@@ -16,6 +16,8 @@ use phantom_scene::tree::SceneTree;
 use phantom_ui::arbiter::LayoutArbiter;
 use phantom_ui::layout::{LayoutEngine, PaneId};
 
+use crate::lineage::PaneLineage;
+
 /// A set of position allocations produced by the layout arbiter or Taffy.
 pub struct LayoutPlan {
     pub allocations: HashMap<AppId, Rect>,
@@ -45,6 +47,11 @@ pub struct AppCoordinator {
     floating: HashSet<AppId>,
     /// Pixel-space rects for floating panes.
     float_rects: HashMap<AppId, Rect>,
+    /// Parent/child relationships between panes (issue #365).
+    ///
+    /// Starts empty — all panes are roots.  The process-detach subsystem
+    /// (#367/#368/#369) populates this when a subprocess pane is created.
+    lineage: PaneLineage,
 }
 
 impl AppCoordinator {
@@ -67,6 +74,7 @@ impl AppCoordinator {
             dirty_adapters: HashSet::new(),
             floating: HashSet::new(),
             float_rects: HashMap::new(),
+            lineage: PaneLineage::new(),
         }
     }
 
@@ -253,6 +261,9 @@ impl AppCoordinator {
 
     /// Remove an adapter: kill it, strip layout pane and scene node,
     /// shift focus if the removed adapter was focused.
+    ///
+    /// Also removes the adapter from the pane lineage tree (issue #365):
+    /// its parent link is severed and any children are orphaned back to roots.
     pub fn remove_adapter(
         &mut self,
         app_id: AppId,
@@ -282,6 +293,10 @@ impl AppCoordinator {
         self.dirty_adapters.remove(&app_id);
         self.floating.remove(&app_id);
         self.float_rects.remove(&app_id);
+
+        // Clean up lineage references.  Children are orphaned (become roots);
+        // the parent's child list no longer includes this adapter.
+        self.lineage.remove(app_id);
     }
 
     /// Update all running adapters whose cadence fires this frame.
@@ -919,6 +934,53 @@ impl AppCoordinator {
     /// when a `CommandComplete` event fires (issue #226).
     pub fn terminal_output_buf(&self, app_id: AppId) -> Option<String> {
         self.registry.get_adapter(app_id)?.output_buf_snapshot()
+    }
+
+    // -----------------------------------------------------------------------
+    // Pane lineage API (issue #365)
+    // -----------------------------------------------------------------------
+
+    /// Record `child` as a subprocess child of `parent`.
+    ///
+    /// Used by the process-detach subsystem when a subprocess pane is spawned
+    /// from an existing terminal pane.  Panes that are never detached remain
+    /// roots and do not appear in the lineage tree.
+    pub fn lineage_attach(&mut self, parent: AppId, child: AppId) {
+        self.lineage.attach(parent, child);
+        log::debug!("Lineage: {child} attached under {parent}");
+    }
+
+    /// The parent pane of `pane`, if any.
+    ///
+    /// Returns `None` for root panes (those never attached to a parent).
+    pub fn lineage_parent_of(&self, pane: AppId) -> Option<AppId> {
+        self.lineage.parent_of(pane)
+    }
+
+    /// The ordered children of `pane` (insertion order).
+    ///
+    /// Returns an empty slice when `pane` has no children.
+    pub fn lineage_children_of(&self, pane: AppId) -> &[AppId] {
+        self.lineage.children_of(pane)
+    }
+
+    /// Whether `pane` is a root (has no parent).
+    pub fn lineage_is_root(&self, pane: AppId) -> bool {
+        self.lineage.is_root(pane)
+    }
+
+    /// Full ancestry chain from the tree root down to `pane` (inclusive).
+    ///
+    /// Returns `vec![pane]` for root panes.
+    pub fn lineage_chain(&self, pane: AppId) -> Vec<AppId> {
+        self.lineage.lineage(pane)
+    }
+
+    /// The subtree rooted at `pane` in depth-first pre-order.
+    ///
+    /// Includes `pane` itself as the first element.
+    pub fn lineage_subtree(&self, pane: AppId) -> Vec<AppId> {
+        self.lineage.subtree(pane)
     }
 
     /// Test-only constructor that skips layout/scene requirements.
