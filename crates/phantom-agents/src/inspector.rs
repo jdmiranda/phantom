@@ -43,7 +43,8 @@ use serde::ser::{SerializeStruct, Serializer};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::role::{AgentRef, SpawnSource};
+use crate::peer_grants::PeerId;
+use crate::role::{AgentRef, CapabilityClass, SpawnSource};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -200,6 +201,39 @@ pub struct DenialEntry {
 }
 
 // ---------------------------------------------------------------------------
+// PeerRow
+// ---------------------------------------------------------------------------
+
+/// One row in the "connected peers" table.
+///
+/// Represents a connected peer with its identity and the set of capabilities
+/// granted to it. Used in the Peers tab of the Inspector.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerRow {
+    /// The peer's unique identifier.
+    pub peer_id: PeerId,
+    /// Human-readable display name for the peer (e.g., "JeremyMBP").
+    pub display_name: String,
+    /// Allowed capability classes for this peer.
+    pub granted_capabilities: Vec<CapabilityClass>,
+}
+
+impl PeerRow {
+    /// Construct a peer row with the given id, name, and capabilities.
+    pub fn new(
+        peer_id: PeerId,
+        display_name: String,
+        granted_capabilities: Vec<CapabilityClass>,
+    ) -> Self {
+        Self {
+            peer_id,
+            display_name,
+            granted_capabilities,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // InspectorView
 // ---------------------------------------------------------------------------
 
@@ -226,6 +260,10 @@ pub struct InspectorView {
     /// Capped at [`MAX_RECENT_DENIALS`]. Empty when no agent has hit the
     /// dispatch gate.
     pub denials: Vec<DenialEntry>,
+    /// Connected peers with their granted capabilities. Used by the Peers tab.
+    pub peers: Vec<PeerRow>,
+    /// Local node identity for display in the Peers tab.
+    pub local_node_id: String,
 }
 
 impl InspectorView {
@@ -238,6 +276,8 @@ impl InspectorView {
             spawned_total: 0,
             running_count: 0,
             denials: Vec::new(),
+            peers: Vec::new(),
+            local_node_id: String::from("localhost"),
         }
     }
 }
@@ -262,8 +302,10 @@ pub struct InspectorBuilder {
     agents: Vec<AgentRow>,
     events: Vec<EventRow>,
     denials: Vec<DenialEntry>,
+    peers: Vec<PeerRow>,
     spawned_total_override: Option<u32>,
     running_count_override: Option<u32>,
+    local_node_id: String,
 }
 
 impl InspectorBuilder {
@@ -293,6 +335,18 @@ impl InspectorBuilder {
     /// **oldest** (front of the vec) are dropped at build time.
     pub fn with_denial(mut self, entry: DenialEntry) -> Self {
         self.denials.push(entry);
+        self
+    }
+
+    /// Append a peer row. Insertion order is preserved.
+    pub fn with_peer(mut self, row: PeerRow) -> Self {
+        self.peers.push(row);
+        self
+    }
+
+    /// Set the local node identity for display in the Peers tab.
+    pub fn with_local_node_id(mut self, id: String) -> Self {
+        self.local_node_id = id;
         self
     }
 
@@ -347,6 +401,8 @@ impl InspectorBuilder {
             spawned_total,
             running_count,
             denials: self.denials,
+            peers: self.peers,
+            local_node_id: self.local_node_id,
         }
     }
 }

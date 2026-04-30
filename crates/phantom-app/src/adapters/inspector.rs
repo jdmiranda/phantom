@@ -592,6 +592,66 @@ impl Renderable for InspectorAdapter {
             }
         }
 
+        // ── Peers section (connected peers + grants) ───────────────────────
+        cursor_y += cell_h * 0.5;
+        text_segments.push(TextData {
+            text: "PEERS".to_string(),
+            x: rect.x + pad_x,
+            y: cursor_y,
+            color: section_color,
+        });
+        cursor_y += cell_h * 1.2;
+
+        // Local node identity header.
+        text_segments.push(TextData {
+            text: format!("Local: {}", view.local_node_id),
+            x: rect.x + pad_x * 2.0,
+            y: cursor_y,
+            color: agent_color,
+        });
+        cursor_y += cell_h;
+
+        // Peer rows: peer_id + granted capabilities.
+        if view.peers.is_empty() {
+            text_segments.push(TextData {
+                text: "  (no connected peers)".to_string(),
+                x: rect.x + pad_x * 2.0,
+                y: cursor_y,
+                color: event_color,
+            });
+        } else {
+            for peer in &view.peers {
+                if cursor_y > rect.y + rect.height - cell_h {
+                    break;
+                }
+
+                // Format peer line: truncated peer_id, display name, and capability badges.
+                let truncated_peer_id = truncate_label(&peer.peer_id.to_string(), 12);
+                let caps_str = if peer.granted_capabilities.is_empty() {
+                    "(no caps)".to_string()
+                } else {
+                    peer.granted_capabilities
+                        .iter()
+                        .map(|cap| format!("{:?}", cap).chars().next().unwrap_or('?').to_string())
+                        .collect::<Vec<_>>()
+                        .join("")
+                };
+                let peer_line = format!(
+                    "{:<14} {:<20} [{}]",
+                    truncated_peer_id,
+                    truncate_label(&peer.display_name, 20),
+                    caps_str
+                );
+                text_segments.push(TextData {
+                    text: peer_line,
+                    x: rect.x + pad_x * 2.0,
+                    y: cursor_y,
+                    color: agent_color,
+                });
+                cursor_y += cell_h;
+            }
+        }
+
         RenderOutput {
             quads,
             text_segments,
