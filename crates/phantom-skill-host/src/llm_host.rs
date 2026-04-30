@@ -145,11 +145,9 @@ pub(crate) mod dylib_impl {
 
             // Free the buffer in all cases (success or error).
             // SAFETY: out_ptr came from the dylib's complete; free_buf is called exactly once.
-            if !out_ptr.is_null() && out_len > 0 {
+            // free_buf_ffi handles len == 0 correctly (uses len.max(1) layout to match alloc_buf).
+            if !out_ptr.is_null() {
                 unsafe { ((*self.vtable).free_buf)(out_ptr, out_len) };
-            } else if !out_ptr.is_null() {
-                // zero-length: 1-byte placeholder was allocated — free it.
-                unsafe { ((*self.vtable).free_buf)(out_ptr, 1) };
             }
 
             result

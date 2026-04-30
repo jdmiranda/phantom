@@ -210,10 +210,14 @@ unsafe extern "C" fn complete_ffi(
 /// `ptr` must be the exact pointer written by `complete_ffi` with the given
 /// `len`.  Must be called exactly once.
 unsafe extern "C" fn free_buf_ffi(ptr: *mut u8, len: usize) {
-    if ptr.is_null() || len == 0 {
+    if ptr.is_null() {
         return;
     }
-    let layout = match std::alloc::Layout::array::<u8>(len) {
+    // `alloc_buf` always allocates at least 1 byte — even for an empty Vec — to
+    // avoid zero-size layout UB.  Mirror that here: use `len.max(1)` so that the
+    // layout passed to `dealloc` matches the layout used at allocation time,
+    // including the `len == 0` (empty-string) case.
+    let layout = match std::alloc::Layout::array::<u8>(len.max(1)) {
         Ok(l) => l,
         Err(_) => return,
     };
