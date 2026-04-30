@@ -65,33 +65,40 @@ impl App {
         // Reuse pooled Vecs (clear + retain capacity instead of allocating).
         let mut all_quads = std::mem::take(&mut self.pool_quads);
         let mut all_glyphs = std::mem::take(&mut self.pool_glyphs);
+        // Color-emoji instances (Rgba8UnormSrgb atlas, no FG tint — fixes #356).
+        let mut all_color_glyphs = std::mem::take(&mut self.pool_color_glyphs);
         let mut chrome_quads = std::mem::take(&mut self.pool_chrome_quads);
         let mut chrome_glyphs = std::mem::take(&mut self.pool_chrome_glyphs);
         all_quads.clear();
         all_glyphs.clear();
+        all_color_glyphs.clear();
         chrome_quads.clear();
         chrome_glyphs.clear();
 
         match self.state {
             AppState::Boot => {
-                self.render_boot(screen_size, &mut all_quads, &mut all_glyphs);
+                self.render_boot(screen_size, &mut all_quads, &mut all_glyphs, &mut all_color_glyphs);
             }
             AppState::Terminal => {
                 self.render_terminal(
                     screen_size,
                     &mut all_quads,
                     &mut all_glyphs,
+                    &mut all_color_glyphs,
                     &mut chrome_quads,
                     &mut chrome_glyphs,
                 );
             }
         }
 
-        // Upload to GPU.
+        // Upload to GPU — monochrome pipeline.
         self.quad_renderer
             .prepare(&self.gpu.device, &self.gpu.queue, &all_quads, screen_size);
         self.grid_renderer
             .prepare(&self.gpu.device, &self.gpu.queue, &all_glyphs, screen_size);
+        // Upload color-emoji instances to the RGBA pipeline (fixes #356).
+        self.color_grid_renderer
+            .prepare(&self.gpu.device, &self.gpu.queue, &all_color_glyphs, screen_size);
 
         // -----------------------------------------------------------------
         // Scene pass: render into the PostFx offscreen texture
@@ -123,9 +130,13 @@ impl App {
             // Draw quads (backgrounds, cursor, UI chrome).
             self.quad_renderer.render(&mut pass);
 
-            // Draw glyphs (text).
+            // Draw monochrome glyphs (text, Nerd Font icons).
             self.grid_renderer
                 .render(&mut pass, self.atlas.bind_group());
+
+            // Draw full-color emoji glyphs (no FG tint — fixes #356).
+            self.color_grid_renderer
+                .render(&mut pass, self.color_atlas.bind_group());
 
             // Draw video frame (goes through CRT post-processing).
             if self.video_renderer.has_frame() {
@@ -259,6 +270,7 @@ impl App {
         // Return pooled Vecs for reuse next frame (retains capacity).
         self.pool_quads = all_quads;
         self.pool_glyphs = all_glyphs;
+        self.pool_color_glyphs = all_color_glyphs;
         self.pool_chrome_quads = chrome_quads;
         self.pool_chrome_glyphs = chrome_glyphs;
 
@@ -279,22 +291,19 @@ impl App {
         _screen_size: [f32; 2],
         _quads: &mut Vec<QI>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+        color_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
         let boot_lines = self.boot.visible_text();
         let opacity = self.boot.screen_opacity();
 
         // Convert boot text lines to grid cells and render them.
-        // Each BootTextLine has a row, text, color, and chars_visible.
-        // We render them as positioned text using the text renderer.
         for line in &boot_lines {
             if line.chars_visible == 0 {
                 continue;
             }
 
-            // Truncate text to chars_visible for the typewriter effect.
             let visible_text: String = line.text.chars().take(line.chars_visible).collect();
 
-            // Convert to TerminalCells for the text renderer.
             let cells: Vec<phantom_renderer::text::TerminalCell> = visible_text
                 .chars()
                 .map(|ch| phantom_renderer::text::TerminalCell {
@@ -314,19 +323,21 @@ impl App {
 
             let cols = cells.len();
             let origin = (
-                self.cell_size.0 * 2.0, // left margin
+                self.cell_size.0 * 2.0,
                 self.cell_size.1 * line.row as f32,
             );
 
-            let mut line_glyphs = self.text_renderer.prepare_glyphs(
+            let batch = self.text_renderer.prepare_glyphs(
                 &mut self.atlas,
+                &mut self.color_atlas,
                 &self.gpu.queue,
                 &cells,
                 cols,
                 origin,
             );
 
-            glyphs.append(&mut line_glyphs);
+            glyphs.extend(batch.mono);
+            color_glyphs.extend(batch.color);
         }
     }
 
@@ -340,6 +351,7 @@ impl App {
         screen_size: [f32; 2],
         quads: &mut Vec<QI>,
         glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+        color_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
         chrome_quads: &mut Vec<QI>,
         chrome_glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
     ) {
@@ -363,18 +375,20 @@ impl App {
                             bg: tc.bg,
                         }));
 
-                    let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
+                    let (mut bg_quads, batch) = GridRenderData::prepare(
                         &self.pool_grid_cells,
                         grid.cols,
                         grid.rows,
                         &mut self.text_renderer,
                         &mut self.atlas,
+                        &mut self.color_atlas,
                         &self.gpu.queue,
                         origin,
                         self.cell_size,
                     );
                     quads.append(&mut bg_quads);
-                    glyphs.append(&mut glyph_instances);
+                    glyphs.extend(batch.mono);
+                    color_glyphs.extend(batch.color);
 
                     if let Some(ref cursor) = grid.cursor {
                         let blink_visible = !cursor.blinking || self.cursor_blink.is_visible();
@@ -640,18 +654,20 @@ impl App {
                     }));
 
                 let origin = (grid.origin.0, grid.origin.1);
-                let (mut bg_quads, mut glyph_instances) = GridRenderData::prepare(
+                let (mut bg_quads, batch) = GridRenderData::prepare(
                     &self.pool_grid_cells,
                     grid.cols,
                     grid.rows,
                     &mut self.text_renderer,
                     &mut self.atlas,
+                    &mut self.color_atlas,
                     &self.gpu.queue,
                     origin,
                     self.cell_size,
                 );
                 quads.append(&mut bg_quads);
-                glyphs.append(&mut glyph_instances);
+                glyphs.extend(batch.mono);
+                color_glyphs.extend(batch.color);
 
                 // Render cursor.
                 // The cursor is drawn only when:
@@ -797,15 +813,17 @@ impl App {
             let cols = self.text_cell_buf.len();
             let origin = (seg.x, seg.y);
 
-            let mut seg_glyphs = self.text_renderer.prepare_glyphs(
+            let batch = self.text_renderer.prepare_glyphs(
                 &mut self.atlas,
+                &mut self.color_atlas,
                 &self.gpu.queue,
                 &self.text_cell_buf,
                 cols,
                 origin,
             );
 
-            glyphs.append(&mut seg_glyphs);
+            // Widget text segments are always monochrome; color batch is empty.
+            glyphs.extend(batch.mono);
         }
     }
 }

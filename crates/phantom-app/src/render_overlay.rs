@@ -227,14 +227,15 @@ impl App {
         if !cells.is_empty() {
             let cols = cells.len();
             let origin = (box_x + padding, box_y + padding);
-            let mut g = self.text_renderer.prepare_glyphs(
+            let batch = self.text_renderer.prepare_glyphs(
                 &mut self.atlas,
+                &mut self.color_atlas,
                 &self.gpu.queue,
                 &cells,
                 cols,
                 origin,
             );
-            glyphs.append(&mut g);
+            glyphs.extend(batch.mono);
         }
 
         // Option labels.
@@ -252,14 +253,15 @@ impl App {
                     box_x + padding,
                     box_y + padding + (i as f32 + 1.0) * line_height,
                 );
-                let mut g = self.text_renderer.prepare_glyphs(
+                let batch = self.text_renderer.prepare_glyphs(
                     &mut self.atlas,
+                    &mut self.color_atlas,
                     &self.gpu.queue,
                     &opt_cells,
                     cols,
                     origin,
                 );
-                glyphs.append(&mut g);
+                glyphs.extend(batch.mono);
             }
         }
     }
@@ -762,14 +764,15 @@ impl App {
             .collect();
         if !cells.is_empty() {
             let cols = cells.len();
-            let mut g = self.text_renderer.prepare_glyphs(
+            let batch = self.text_renderer.prepare_glyphs(
                 &mut self.atlas,
+                &mut self.color_atlas,
                 &self.gpu.queue,
                 &cells,
                 cols,
                 (x, y),
             );
-            glyphs.append(&mut g);
+            glyphs.extend(batch.mono);
         }
     }
 

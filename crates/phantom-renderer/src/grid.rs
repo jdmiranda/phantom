@@ -8,9 +8,9 @@
 // and uniform buffer. It renders textured glyph quads from the atlas using
 // instanced drawing with GlyphInstance data from the TextRenderer.
 
-use crate::atlas::GlyphAtlas;
+use crate::atlas::{ColorGlyphAtlas, GlyphAtlas};
 use crate::quads::QuadInstance;
-use crate::text::{GlyphInstance, TerminalCell, TextRenderer};
+use crate::text::{GlyphBatch, GlyphInstance, TerminalCell, TextRenderer};
 
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
@@ -26,12 +26,11 @@ use wgpu::{
 // WGSL shader for textured glyph quad rendering
 // ---------------------------------------------------------------------------
 
-/// WGSL source for the glyph atlas text pipeline, loaded from the shared
-/// `shaders/text.wgsl` file at compile time.
-///
-/// Extracting the shader to a standalone file enables syntax highlighting,
-/// offline naga validation, and cleaner diffs when the pipeline changes.
+/// WGSL source for the monochrome glyph atlas text pipeline.
 const GLYPH_SHADER_SRC: &str = include_str!("../../../shaders/text.wgsl");
+
+/// WGSL source for the full-color emoji glyph pipeline (no FG tint, fixes #356).
+const COLOR_GLYPH_SHADER_SRC: &str = include_str!("../../../shaders/text_color.wgsl");
 
 // ---------------------------------------------------------------------------
 // Uniform buffer
@@ -182,6 +181,110 @@ impl GridRenderer {
         }
     }
 
+    /// Create the full-color emoji glyph rendering pipeline (fixes #356).
+    ///
+    /// Uses `shaders/text_color.wgsl` which samples RGBA directly from the
+    /// `ColorGlyphAtlas` (Rgba8UnormSrgb) without applying the foreground tint
+    /// multiply. Bind group layout must come from `ColorGlyphAtlas::bind_group_layout()`.
+    pub fn new_color(
+        device: &Device,
+        format: TextureFormat,
+        color_atlas_bind_group_layout: &BindGroupLayout,
+    ) -> Self {
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("color-glyph-shader"),
+            source: wgpu::ShaderSource::Wgsl(COLOR_GLYPH_SHADER_SRC.into()),
+        });
+
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("color-grid-uniform-layout"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("color-grid-pipeline-layout"),
+            bind_group_layouts: &[&uniform_bind_group_layout, color_atlas_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("color-glyph-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[GlyphInstance::buffer_layout()],
+            },
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(BlendState::ALPHA_BLENDING),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let uniforms = Uniforms {
+            screen_size: [1.0, 1.0],
+            _pad: [0.0; 2],
+        };
+        let uniform_buf = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("color-grid-uniform-buf"),
+            contents: bytemuck::bytes_of(&uniforms),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+
+        let uniform_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("color-grid-uniform-bind-group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            }],
+        });
+
+        // Color emoji glyphs are fewer; start with a smaller buffer (256).
+        const COLOR_GLYPH_CAPACITY: u32 = 256;
+        let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("color-glyph-instance-buf"),
+            size: (COLOR_GLYPH_CAPACITY as u64) * (std::mem::size_of::<GlyphInstance>() as u64),
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            instance_buf,
+            uniform_buf,
+            uniform_bind_group,
+            uniform_bind_group_layout,
+            instance_count: 0,
+            instance_capacity: COLOR_GLYPH_CAPACITY,
+        }
+    }
+
     /// Upload glyph instances and screen-size uniform for the current frame.
     ///
     /// Call once per frame before `render`. If the instance buffer is too small
@@ -325,13 +428,14 @@ fn is_default_bg(bg: &[f32; 4]) -> bool {
 /// usage:
 ///
 /// ```ignore
-/// let (bg_quads, glyph_instances) = GridRenderData::prepare(
+/// let (bg_quads, glyph_batch) = GridRenderData::prepare(
 ///     &grid_cells, cols, rows,
-///     &mut text_renderer, &mut atlas, queue,
+///     &mut text_renderer, &mut atlas, &mut color_atlas, queue,
 ///     origin, cell_size,
 /// );
 /// quad_renderer.prepare(device, queue, &bg_quads, screen_size);
-/// grid_renderer.prepare(device, queue, &glyph_instances, screen_size);
+/// grid_renderer.prepare(device, queue, &glyph_batch.mono, screen_size);
+/// color_grid_renderer.prepare(device, queue, &glyph_batch.color, screen_size);
 /// ```
 pub struct GridRenderData;
 
@@ -343,27 +447,30 @@ impl GridRenderData {
     ///   - Delegates glyph rasterization/placement to `TextRenderer::prepare_glyphs`.
     ///
     /// # Arguments
-    /// * `cells` — row-major grid of `GridCell` (`rows * cols` elements).
-    /// * `cols` — number of columns per row.
-    /// * `rows` — number of rows.
+    /// * `cells`       — row-major grid of `GridCell` (`rows * cols` elements).
+    /// * `cols`        — number of columns per row.
+    /// * `rows`        — number of rows.
     /// * `text_renderer` — the text shaping/rasterization engine.
-    /// * `atlas` — the glyph atlas for caching rasterized glyphs on the GPU.
-    /// * `queue` — wgpu queue for atlas texture uploads.
-    /// * `origin` — top-left pixel coordinate of the grid: (x, y).
-    /// * `cell_size` — monospace cell dimensions: (width, height) in pixels.
+    /// * `atlas`       — the monochrome R8Unorm glyph atlas.
+    /// * `color_atlas` — the RGBA Rgba8UnormSrgb color emoji atlas.
+    /// * `queue`       — wgpu queue for atlas texture uploads.
+    /// * `origin`      — top-left pixel coordinate of the grid: (x, y).
+    /// * `cell_size`   — monospace cell dimensions: (width, height) in pixels.
     ///
     /// # Returns
-    /// `(background_quads, glyph_instances)` ready for `QuadRenderer` and `GridRenderer`.
+    /// `(background_quads, glyph_batch)`. Route `glyph_batch.mono` to the
+    /// monochrome pipeline and `glyph_batch.color` to the color pipeline.
     pub fn prepare(
         cells: &[GridCell],
         cols: usize,
         rows: usize,
         text_renderer: &mut TextRenderer,
         atlas: &mut GlyphAtlas,
+        color_atlas: &mut ColorGlyphAtlas,
         queue: &Queue,
         origin: (f32, f32),
         cell_size: (f32, f32),
-    ) -> (Vec<QuadInstance>, Vec<GlyphInstance>) {
+    ) -> (Vec<QuadInstance>, GlyphBatch) {
         let total = cols * rows;
         debug_assert!(
             cells.len() >= total,
@@ -402,10 +509,16 @@ impl GridRenderData {
         let terminal_cells: Vec<TerminalCell> =
             cells[..total].iter().map(|c| c.as_terminal_cell()).collect();
 
-        let glyph_instances =
-            text_renderer.prepare_glyphs(atlas, queue, &terminal_cells, cols, origin);
+        let glyph_batch = text_renderer.prepare_glyphs(
+            atlas,
+            color_atlas,
+            queue,
+            &terminal_cells,
+            cols,
+            origin,
+        );
 
-        (bg_quads, glyph_instances)
+        (bg_quads, glyph_batch)
     }
 
     /// Optimized variant that merges adjacent cells with the same background
@@ -418,10 +531,11 @@ impl GridRenderData {
         rows: usize,
         text_renderer: &mut TextRenderer,
         atlas: &mut GlyphAtlas,
+        color_atlas: &mut ColorGlyphAtlas,
         queue: &Queue,
         origin: (f32, f32),
         cell_size: (f32, f32),
-    ) -> (Vec<QuadInstance>, Vec<GlyphInstance>) {
+    ) -> (Vec<QuadInstance>, GlyphBatch) {
         let total = cols * rows;
         debug_assert!(
             cells.len() >= total,
@@ -475,10 +589,16 @@ impl GridRenderData {
         let terminal_cells: Vec<TerminalCell> =
             cells[..total].iter().map(|c| c.as_terminal_cell()).collect();
 
-        let glyph_instances =
-            text_renderer.prepare_glyphs(atlas, queue, &terminal_cells, cols, origin);
+        let glyph_batch = text_renderer.prepare_glyphs(
+            atlas,
+            color_atlas,
+            queue,
+            &terminal_cells,
+            cols,
+            origin,
+        );
 
-        (bg_quads, glyph_instances)
+        (bg_quads, glyph_batch)
     }
 }
 
