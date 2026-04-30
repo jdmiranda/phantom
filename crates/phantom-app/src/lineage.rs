@@ -21,7 +21,7 @@
 //!   different orphan policy can reparent children before removal.
 
 use phantom_adapter::AppId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // PaneLineage
@@ -54,10 +54,27 @@ impl PaneLineage {
     /// If `child` already has a parent, the old relationship is removed before
     /// the new one is established — a pane can only have one parent at a time.
     ///
-    /// No-op when `child == parent`.
+    /// No-op (and the existing tree is left unchanged) when either:
+    /// * `child == parent`, or
+    /// * attaching would create a cycle — i.e., `child` is already an ancestor
+    ///   of `parent` in the current tree.  The cycle check walks the parent
+    ///   chain of `parent` upward; if `child` is encountered, the attach is
+    ///   silently rejected.  This makes `PaneLineage` invariant-safe: callers
+    ///   that try `attach(b, a)` after `attach(a, b)` are quietly refused.
     pub fn attach(&mut self, parent: AppId, child: AppId) {
         if parent == child {
             return;
+        }
+
+        // Cycle guard: walk the ancestor chain of `parent`.  If `child`
+        // already appears, the requested edge would form a cycle — reject it.
+        let mut cursor = parent;
+        loop {
+            match self.parent.get(&cursor).copied() {
+                Some(p) if p == child => return, // cycle detected
+                Some(p) => cursor = p,
+                None => break,
+            }
         }
 
         // Remove any prior parent link for `child`.
@@ -110,14 +127,22 @@ impl PaneLineage {
 
     /// The full ancestry chain from the tree root down to `pane` (inclusive).
     ///
-    /// Returns `vec![pane]` when `pane` is a root.  The walk is bounded by the
-    /// number of registered panes; a cycle (which the `attach` logic prevents)
-    /// would terminate at the cycle-detection limit anyway.
+    /// Returns `vec![pane]` when `pane` is a root.
+    ///
+    /// The walk is guarded by a visited set so it terminates even if the
+    /// internal state is somehow corrupt.  Under normal operation the tree is
+    /// acyclic because [`attach`](Self::attach) rejects edges that would form
+    /// a cycle, so the visited set is never exercised.
     #[must_use]
     pub fn lineage(&self, pane: AppId) -> Vec<AppId> {
         let mut chain = Vec::new();
+        let mut visited = HashSet::new();
         let mut cursor = pane;
         loop {
+            if !visited.insert(cursor) {
+                // Cycle in internal state — stop rather than loop forever.
+                break;
+            }
             chain.push(cursor);
             match self.parent.get(&cursor).copied() {
                 Some(p) => cursor = p,
@@ -130,10 +155,15 @@ impl PaneLineage {
 
     /// The subtree rooted at `pane`: `pane` itself followed by all descendants
     /// in depth-first pre-order.
+    ///
+    /// The traversal uses a visited set so it terminates even on corrupt
+    /// internal state.  Under normal operation the children graph is acyclic
+    /// because [`attach`](Self::attach) rejects cycle-creating edges.
     #[must_use]
     pub fn subtree(&self, pane: AppId) -> Vec<AppId> {
         let mut out = Vec::new();
-        self.collect_subtree(pane, &mut out);
+        let mut visited = HashSet::new();
+        self.collect_subtree(pane, &mut out, &mut visited);
         out
     }
 
@@ -149,10 +179,14 @@ impl PaneLineage {
         }
     }
 
-    fn collect_subtree(&self, pane: AppId, out: &mut Vec<AppId>) {
+    fn collect_subtree(&self, pane: AppId, out: &mut Vec<AppId>, visited: &mut HashSet<AppId>) {
+        if !visited.insert(pane) {
+            // Already visited — cycle in internal state; stop here.
+            return;
+        }
         out.push(pane);
         for &child in self.children_of(pane) {
-            self.collect_subtree(child, out);
+            self.collect_subtree(child, out, visited);
         }
     }
 }
@@ -310,5 +344,48 @@ mod tests {
     fn children_of_unknown_returns_empty_slice() {
         let lin = PaneLineage::new();
         assert!(lin.children_of(id(42)).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cycle prevention — regression tests for DoD §4 safety fix
+    // -----------------------------------------------------------------------
+
+    /// Calling attach(1, 2) then attach(2, 1) must not create a cycle.
+    /// The second attach is rejected: the original relationship (parent[2]=1)
+    /// is preserved and lineage/subtree queries must terminate.
+    #[test]
+    fn attach_refuses_to_create_cycle() {
+        let mut lin = PaneLineage::new();
+
+        lin.attach(id(1), id(2)); // parent[2] = 1
+        lin.attach(id(2), id(1)); // would make parent[1] = 2 — cycle; must be rejected
+
+        // Original relationship untouched.
+        assert_eq!(lin.parent_of(id(2)), Some(id(1)));
+        // Reverse edge was NOT inserted.
+        assert_eq!(lin.parent_of(id(1)), None, "cycle edge must be rejected");
+        assert!(lin.is_root(id(1)));
+
+        // lineage() and subtree() must terminate and return correct results.
+        assert_eq!(lin.lineage(id(2)), vec![id(1), id(2)]);
+        assert_eq!(lin.subtree(id(1)), vec![id(1), id(2)]);
+    }
+
+    /// Three-node transitive cycle: 1→2→3, then attach(3, 1) would close the
+    /// cycle.  The third attach must be rejected.
+    #[test]
+    fn attach_refuses_transitive_cycle() {
+        let mut lin = PaneLineage::new();
+
+        lin.attach(id(1), id(2)); // parent[2] = 1
+        lin.attach(id(2), id(3)); // parent[3] = 2
+        lin.attach(id(3), id(1)); // would close 1→2→3→1; must be rejected
+
+        assert_eq!(lin.parent_of(id(1)), None, "1 must remain a root");
+        assert_eq!(lin.parent_of(id(2)), Some(id(1)));
+        assert_eq!(lin.parent_of(id(3)), Some(id(2)));
+
+        assert_eq!(lin.lineage(id(3)), vec![id(1), id(2), id(3)]);
+        assert_eq!(lin.subtree(id(1)), vec![id(1), id(2), id(3)]);
     }
 }
