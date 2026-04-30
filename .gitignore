@@ -19,7 +19,3 @@
 
 # Reference material (copyrighted / bulky)
 docs/references/*.pdf
-
-# Knowledge graph output
-graphify-out/
-**/graphify-out/
