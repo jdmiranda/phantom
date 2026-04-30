@@ -45,6 +45,10 @@ subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 
+# LRU cache for nonce replay protection (issues #398, #499).
+# Evicts oldest entries at capacity — no full-clear, bounded memory.
+lru = "0.12"
+
 [dev-dependencies]
 axum-test = "15"
 tokio = { version = "1", features = ["full", "test-util"] }

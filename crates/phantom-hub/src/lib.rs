@@ -39,19 +39,30 @@ use tracing::info;
 
 /// Shared hub state injected into every Axum handler.
 ///
-/// Cloning this is cheap — the expensive fields are behind [`Arc`].
+/// Cloning this is cheap — all expensive fields are behind [`Arc`].
+///
+/// The `nonce_cache` field enforces single-use semantics on registration
+/// nonces (replay protection, issue #398).  It is wrapped in `Arc` so that
+/// cloned `AppState` values — including those shared across unit-test calls —
+/// all operate on the same underlying cache.
 #[derive(Clone)]
 pub struct AppState {
     /// JWT authority — issues and verifies Phantom device tokens.
     pub jwt: Arc<auth::JwtAuthority>,
     /// API key store — validates Claude session API keys.
     pub api_keys: Arc<auth::ApiKeyStore>,
+    /// Nonce replay-protection cache.  Every nonce presented at registration
+    /// is recorded here; a second presentation of the same nonce within the
+    /// TTL window is rejected with `409 Conflict`.
+    pub nonce_cache: Arc<auth::NonceCache>,
 }
 
 impl AppState {
     /// Construct [`AppState`] from environment variables.
     ///
     /// Reads `HUB_JWT_SECRET` (required) and `HUB_API_KEYS` (optional).
+    /// The [`auth::NonceCache`] is always initialised with production defaults
+    /// (capacity [`auth::NONCE_CACHE_CAPACITY`], TTL [`auth::NONCE_CACHE_TTL`]).
     ///
     /// # Errors
     ///
@@ -63,6 +74,7 @@ impl AppState {
         Ok(Self {
             jwt: Arc::new(jwt),
             api_keys: Arc::new(api_keys),
+            nonce_cache: Arc::new(auth::NonceCache::new()),
         })
     }
 }
