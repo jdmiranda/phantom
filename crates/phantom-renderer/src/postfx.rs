@@ -71,6 +71,27 @@ fn crt_wgsl_source() -> std::borrow::Cow<'static, str> {
 // Uniform data — must match the WGSL struct layout exactly
 // ---------------------------------------------------------------------------
 
+/// Theme-driven scalar inputs for the CRT post-processing pipeline.
+///
+/// Collects the 10 per-frame CRT parameters that vary by theme and runtime
+/// state (time, screen size). Pass a reference to
+/// [`PostFxParams::from_theme`] to construct the GPU-ready uniform buffer.
+///
+/// All fields are plain `f32` / `[f32; 3]` / `u32` — the struct is `Copy`.
+#[derive(Clone, Copy, Debug)]
+pub struct PostFxThemeParams {
+    pub scanline_intensity: f32,
+    pub bloom_intensity: f32,
+    pub chromatic_aberration: f32,
+    pub curvature: f32,
+    pub vignette_intensity: f32,
+    pub noise_intensity: f32,
+    pub glow_color: [f32; 3],
+    pub time: f32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// CRT post-processing parameters uploaded to the GPU each frame.
 ///
 /// Layout matches the WGSL `PostFxParams` struct exactly. Padded to satisfy
@@ -113,33 +134,21 @@ pub struct PostFxParams {
 const _: () = assert!(size_of::<PostFxParams>() == 64);
 
 impl PostFxParams {
-    /// Create params from theme shader params, elapsed time, and screen dimensions.
+    /// Create GPU-ready params from a [`PostFxThemeParams`] bundle.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_theme(
-        scanline_intensity: f32,
-        bloom_intensity: f32,
-        chromatic_aberration: f32,
-        curvature: f32,
-        vignette_intensity: f32,
-        noise_intensity: f32,
-        glow_color: [f32; 3],
-        time: f32,
-        width: u32,
-        height: u32,
-    ) -> Self {
+    pub fn from_theme(p: &PostFxThemeParams) -> Self {
         Self {
-            scanline_intensity,
-            bloom_intensity,
-            chromatic_aberration,
-            curvature,
-            vignette_intensity,
-            noise_intensity,
-            time,
+            scanline_intensity: p.scanline_intensity,
+            bloom_intensity: p.bloom_intensity,
+            chromatic_aberration: p.chromatic_aberration,
+            curvature: p.curvature,
+            vignette_intensity: p.vignette_intensity,
+            noise_intensity: p.noise_intensity,
+            time: p.time,
             _pad0: 0.0,
-            glow_color,
+            glow_color: p.glow_color,
             _pad1: 0.0,
-            resolution: [width as f32, height as f32],
+            resolution: [p.width as f32, p.height as f32],
             _pad2: [0.0; 2],
         }
     }

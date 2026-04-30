@@ -5,7 +5,7 @@ use anyhow::Result;
 use wgpu::CommandEncoderDescriptor;
 
 use phantom_renderer::grid::{GridCell, GridRenderData};
-use phantom_renderer::postfx::PostFxParams;
+use phantom_renderer::postfx::{PostFxParams, PostFxThemeParams};
 use phantom_renderer::quads::QuadInstance as QI;
 use phantom_ui::widgets::Widget;
 
@@ -170,18 +170,18 @@ impl App {
                 1.0
             };
 
-            let params = PostFxParams::from_theme(
-                sp.scanline_intensity * crt_scale,
-                sp.bloom_intensity * crt_scale,
-                sp.chromatic_aberration * crt_scale,
-                sp.curvature * crt_scale,
-                sp.vignette_intensity * crt_scale,
-                sp.noise_intensity * crt_scale,
-                sp.glow_color,
-                elapsed,
+            let params = PostFxParams::from_theme(&PostFxThemeParams {
+                scanline_intensity: sp.scanline_intensity * crt_scale,
+                bloom_intensity: sp.bloom_intensity * crt_scale,
+                chromatic_aberration: sp.chromatic_aberration * crt_scale,
+                curvature: sp.curvature * crt_scale,
+                vignette_intensity: sp.vignette_intensity * crt_scale,
+                noise_intensity: sp.noise_intensity * crt_scale,
+                glow_color: sp.glow_color,
+                time: elapsed,
                 width,
                 height,
-            );
+            });
 
             self.postfx
                 .render(&mut encoder, &surface_view, &self.gpu.queue, &params);

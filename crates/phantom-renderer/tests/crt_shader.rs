@@ -103,6 +103,9 @@ fn crt_wgsl_is_not_empty() {
 
 /// Helper: parse CRT_WGSL and return a map from variable name → ResourceBinding.
 ///
+/// `ResourceBinding` is `Copy`, so the binding is copied with `*b` rather than
+/// cloned. `var.name` is a `String` (not `Copy`) and is cloned intentionally.
+///
 /// Panics if parsing fails — the calling test immediately fails with a clear message.
 fn crt_global_bindings() -> std::collections::HashMap<String, ResourceBinding> {
     let module = naga::front::wgsl::parse_str(CRT_WGSL)
