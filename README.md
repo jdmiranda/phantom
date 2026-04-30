@@ -167,6 +167,34 @@ cargo run --bin phantom -- --help
 - Live config: `` ` set curvature 0.1 `` — changes apply instantly
 - Theme hot-swap: `` ` theme amber ``
 
+### Offline Modes
+
+Phantom distinguishes three operating modes. Not all AI features work without a
+network connection — the table below is the ground truth.
+
+| What you want | What you need |
+|---|---|
+| Terminal emulation, panes, CRT shaders, session restore | Nothing — works offline unconditionally |
+| Heuristic NLP (100+ built-in command mappings) | Nothing — purely local |
+| Semantic output parsing (git, cargo, JSON) | Nothing — purely local |
+| Ambient AI scoring for trivial/simple tasks | Ollama running locally (`ollama run phi3.5`) |
+| Complex agent tasks, code generation, tool use | `ANTHROPIC_API_KEY` + network |
+| Privacy mode (hard block on all cloud calls) | `privacy_mode = true` in config; Ollama recommended for AI features |
+
+**Privacy mode** (`privacy_mode = true`) blocks every cloud API call at two
+enforcement layers (`PrivacyGuard` in `phantom-agents` + `BrainRouter` in
+`phantom-brain`). Local backends — Ollama and the built-in heuristic engine —
+continue to work. The status bar shows `[P]` when privacy mode is active.
+Privacy mode alone does not make complex AI features work offline; you also
+need Ollama for that.
+
+When the network drops mid-task, the brain router marks the failing backend
+unavailable and cascades to the next cheapest backend (heuristic → Ollama →
+Claude). The terminal itself keeps running; only the AI features that needed
+network access degrade gracefully.
+
+Full details: [`docs/offline-modes.md`](docs/offline-modes.md)
+
 ## Architecture
 
 ```
