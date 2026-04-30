@@ -22,6 +22,7 @@
 /// assert_eq!(extract_section(text, "Implementation Plan"), Some("Step 1.".to_string()));
 /// assert_eq!(extract_section(text, "Missing"), None);
 /// ```
+#[must_use] 
 pub fn extract_section(text: &str, heading: &str) -> Option<String> {
     let marker = format!("## {heading}");
     let start = text.find(&marker)? + marker.len();

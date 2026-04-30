@@ -73,32 +73,38 @@ impl FailureRecord {
     }
 
     /// The id of the agent that failed.
+    #[must_use] 
     pub fn agent_id(&self) -> AgentId {
         self.agent_id
     }
 
     /// The task the agent was executing when it failed.
+    #[must_use] 
     pub fn task(&self) -> &AgentTask {
         &self.task
     }
 
     /// The tool call that triggered the failure, if the failure originated
     /// from a tool dispatch.
+    #[must_use] 
     pub fn tool_call(&self) -> Option<&ToolCall> {
         self.tool_call.as_ref()
     }
 
     /// Human-readable error string.
+    #[must_use] 
     pub fn error(&self) -> &str {
         &self.error
     }
 
     /// Wall-clock time of the failure.
+    #[must_use] 
     pub fn timestamp(&self) -> SystemTime {
         self.timestamp
     }
 
     /// How many times this agent has attempted the task (including this failure).
+    #[must_use] 
     pub fn attempt_count(&self) -> u32 {
         self.attempt_count
     }
@@ -120,6 +126,7 @@ pub struct FailureStore {
 
 impl FailureStore {
     /// Create an empty store.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             records: VecDeque::new(),
@@ -137,12 +144,14 @@ impl FailureStore {
     /// Return references to the last `n` failure records, most-recent-last.
     ///
     /// If there are fewer than `n` records, all records are returned.
+    #[must_use] 
     pub fn recent(&self, n: usize) -> Vec<&FailureRecord> {
         let skip = self.records.len().saturating_sub(n);
         self.records.iter().skip(skip).collect()
     }
 
     /// Return all failure records for `agent_id`, in insertion order.
+    #[must_use] 
     pub fn by_agent(&self, agent_id: AgentId) -> Vec<&FailureRecord> {
         self.records
             .iter()
@@ -158,11 +167,13 @@ impl FailureStore {
     }
 
     /// Total number of records currently stored.
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.records.len()
     }
 
     /// Returns `true` when the store contains no records.
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }

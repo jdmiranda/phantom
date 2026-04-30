@@ -95,6 +95,7 @@ impl WorldState {
     /// * `chattiness` — accumulated brain chattiness (0.0–1.0).
     /// * `suggestions_since_input` — suggestions emitted since last input.
     #[allow(clippy::too_many_arguments)]
+    #[must_use] 
     pub fn new(
         idle_secs: f32,
         has_errors: bool,
@@ -142,6 +143,7 @@ impl OodaConfig {
     ///
     /// * `budget_ms` — frame-budget cap in milliseconds.
     /// * `action_threshold` — minimum BDS score required to emit an action.
+    #[must_use] 
     pub fn new(budget_ms: f32, action_threshold: f32) -> Self {
         Self {
             budget_ms,
@@ -150,11 +152,13 @@ impl OodaConfig {
     }
 
     /// Frame-budget cap in milliseconds.
+    #[must_use] 
     pub fn budget_ms(&self) -> f32 {
         self.budget_ms
     }
 
     /// Minimum BDS score required to emit an action.
+    #[must_use] 
     pub fn action_threshold(&self) -> f32 {
         self.action_threshold
     }
@@ -192,31 +196,37 @@ pub struct TickMetrics {
 
 impl TickMetrics {
     /// Total number of ticks executed.
+    #[must_use] 
     pub fn ticks(&self) -> u64 {
         self.ticks
     }
 
     /// Number of ticks where the winning score exceeded `action_threshold`.
+    #[must_use] 
     pub fn actions_emitted(&self) -> u64 {
         self.actions_emitted
     }
 
     /// Number of ticks skipped because the frame budget was exceeded.
+    #[must_use] 
     pub fn budget_overruns(&self) -> u64 {
         self.budget_overruns
     }
 
     /// Duration (ms) of the most recent tick.
+    #[must_use] 
     pub fn last_tick_ms(&self) -> f32 {
         self.last_tick_ms
     }
 
     /// The BDS winner ID from the most recent tick.
+    #[must_use] 
     pub fn last_winner(&self) -> &str {
         &self.last_winner
     }
 
     /// The BDS winner score from the most recent tick.
+    #[must_use] 
     pub fn last_winner_score(&self) -> f32 {
         self.last_winner_score
     }
@@ -241,6 +251,7 @@ pub struct OodaLoop {
 
 impl OodaLoop {
     /// Create a new OODA loop with the default DA:I behaviors registered.
+    #[must_use] 
     pub fn new(config: OodaConfig) -> Self {
         let mut bds = BehaviorDecisionSystem::new();
         for behavior in build_default_behaviors() {
@@ -255,6 +266,7 @@ impl OodaLoop {
     }
 
     /// Read the current telemetry snapshot (non-blocking, cheap clone).
+    #[must_use] 
     pub fn metrics(&self) -> &TickMetrics {
         &self.metrics
     }
@@ -263,6 +275,7 @@ impl OodaLoop {
     ///
     /// Used by tests to assert ordering. In release builds this Vec stays
     /// small (at most 4 entries) and is cleared at the start of every tick.
+    #[must_use] 
     pub fn last_phases(&self) -> &[&'static str] {
         &self.last_phases
     }

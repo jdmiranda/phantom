@@ -73,6 +73,7 @@ pub struct FocusRing {
 
 impl FocusRing {
     /// Create a [`FocusRing`] with no pane focused (fully invisible).
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             focused: None,
@@ -94,11 +95,13 @@ impl FocusRing {
     }
 
     /// The pane that currently has focus, or `None` when no pane is focused.
+    #[must_use] 
     pub fn focused(&self) -> Option<AppId> {
         self.focused
     }
 
     /// Return the current animated opacity in `[0.0, 1.0]`.
+    #[must_use] 
     pub fn opacity(&self) -> f32 {
         self.opacity
     }

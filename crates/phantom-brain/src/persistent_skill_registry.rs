@@ -68,6 +68,7 @@ impl SkillId {
     }
 
     /// View the underlying string.
+    #[must_use] 
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -104,6 +105,7 @@ impl AgentRef {
     }
 
     /// View the underlying string.
+    #[must_use] 
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -138,6 +140,7 @@ impl SkillHandler {
     }
 
     /// View the underlying string.
+    #[must_use] 
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -174,6 +177,7 @@ pub struct SkillProvenance {
 
 impl SkillProvenance {
     /// Create a fresh provenance record (zero outcomes).
+    #[must_use] 
     pub fn new(authored_by: AgentRef) -> Self {
         let created_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -188,26 +192,31 @@ impl SkillProvenance {
     }
 
     /// The agent that authored this skill.
+    #[must_use] 
     pub fn authored_by(&self) -> &AgentRef {
         &self.authored_by
     }
 
     /// Creation timestamp (Unix ms).
+    #[must_use] 
     pub fn created_at_ms(&self) -> u64 {
         self.created_at_ms
     }
 
     /// Number of successful outcomes recorded.
+    #[must_use] 
     pub fn success_count(&self) -> u64 {
         self.success_count
     }
 
     /// Number of failed outcomes recorded.
+    #[must_use] 
     pub fn failure_count(&self) -> u64 {
         self.failure_count
     }
 
     /// Success ratio `[0.0, 1.0]`, or `None` if no outcomes have been recorded.
+    #[must_use] 
     pub fn success_rate(&self) -> Option<f64> {
         let total = self.success_count + self.failure_count;
         if total == 0 {
@@ -244,6 +253,7 @@ pub struct Skill {
 
 impl Skill {
     /// Create a new skill (zero outcome counts, `created_at_ms` = now).
+    #[must_use] 
     pub fn new(
         id: SkillId,
         description: String,
@@ -261,26 +271,31 @@ impl Skill {
     }
 
     /// Unique skill identifier.
+    #[must_use] 
     pub fn id(&self) -> &SkillId {
         &self.id
     }
 
     /// Human-readable description of what this skill does.
+    #[must_use] 
     pub fn description(&self) -> &str {
         &self.description
     }
 
     /// The capability class this skill requires.
+    #[must_use] 
     pub fn capability(&self) -> CapabilityClass {
         self.capability
     }
 
     /// Handler reference string (resolved at invocation time).
+    #[must_use] 
     pub fn handler(&self) -> &SkillHandler {
         &self.handler
     }
 
     /// Provenance and quality metadata.
+    #[must_use] 
     pub fn provenance(&self) -> &SkillProvenance {
         &self.provenance
     }

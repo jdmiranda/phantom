@@ -127,16 +127,19 @@ impl InputBar {
     }
 
     /// Current text content of the input field.
+    #[must_use] 
     pub fn buffer(&self) -> &str {
         &self.buffer
     }
 
     /// Cursor position as a char index into the buffer (not byte offset).
+    #[must_use] 
     pub fn cursor_pos(&self) -> usize {
         self.cursor_pos
     }
 
     /// Optional prompt string rendered before the user input.
+    #[must_use] 
     pub fn prompt(&self) -> Option<&str> {
         self.prompt.as_deref()
     }
@@ -692,6 +695,11 @@ mod tests {
 
     #[test]
     fn height_constant_defined() {
-        assert!(INPUT_BAR_HEIGHT > 0.0);
+        // Verify the constant is positive — this is a compile-time invariant
+        // documented here for visibility.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(INPUT_BAR_HEIGHT > 0.0);
+        }
     }
 }

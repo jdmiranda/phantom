@@ -1,7 +1,7 @@
-/// Theme system for Phantom terminal.
-///
-/// Defines color palettes, CRT shader parameters, and UI chrome colors.
-/// Each built-in theme is a curated, production-ready visual identity.
+//! Theme system for Phantom terminal.
+//!
+//! Defines color palettes, CRT shader parameters, and UI chrome colors.
+//! Each built-in theme is a curated, production-ready visual identity.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -97,6 +97,7 @@ impl Default for Theme {
 ///
 /// Deep void background, bright green text, heavy scanlines, warm bloom.
 /// The definitive Phantom look.
+#[must_use] 
 pub fn phosphor() -> Theme {
     // Greens
     let green = hex(0x33, 0xFF, 0x00);
@@ -155,6 +156,7 @@ pub fn phosphor() -> Theme {
 ///
 /// The look of a Zenith or Wyse terminal from the 1980s.
 /// Amber (#FFB000) on near-black, classic and warm.
+#[must_use] 
 pub fn amber() -> Theme {
     let amber = hex(0xFF, 0xB0, 0x00);
     let dim_amber = hex(0xB3, 0x7A, 0x00);
@@ -212,6 +214,7 @@ pub fn amber() -> Theme {
 ///
 /// Deep dark background, bright cyan text, neon blue glow.
 /// Minimal scanlines, clean digital look with subtle bloom.
+#[must_use] 
 pub fn ice() -> Theme {
     let cyan = hex(0x00, 0xD4, 0xFF);
     let dim_cyan = hex(0x00, 0x88, 0xAA);
@@ -269,6 +272,7 @@ pub fn ice() -> Theme {
 ///
 /// Very dark background, searing red text, high contrast.
 /// Maximum menace. Heavy vignette, moderate scanlines.
+#[must_use] 
 pub fn blood() -> Theme {
     let red = hex(0xFF, 0x00, 0x33);
     let dim_red = hex(0xAA, 0x00, 0x22);
@@ -326,6 +330,7 @@ pub fn blood() -> Theme {
 ///
 /// Purple-pink palette, dual accent colors (#FF71CE pink, #01CDFE cyan).
 /// Moderate CRT effects, dreamy bloom. Maximum A E S T H E T I C.
+#[must_use] 
 pub fn vapor() -> Theme {
     let pink = hex(0xFF, 0x71, 0xCE);
     let cyan = hex(0x01, 0xCD, 0xFE);
@@ -387,6 +392,7 @@ pub fn vapor() -> Theme {
 /// The Fallout Pip-Boy 3000 aesthetic: bright green (#20C20E) on near-black,
 /// heavy scanlines, aggressive bloom, slight curvature. Chunky, utilitarian,
 /// radiation-proof. War never changes, but your terminal can.
+#[must_use] 
 pub fn pipboy() -> Theme {
     let green = hex(0x20, 0xC2, 0x0E);
     let dim_green = hex(0x14, 0x7A, 0x0A);
@@ -444,6 +450,7 @@ pub fn pipboy() -> Theme {
 /// Look up a built-in theme by name (case-insensitive).
 ///
 /// Returns `None` if the name doesn't match any built-in theme.
+#[must_use] 
 pub fn builtin_by_name(name: &str) -> Option<Theme> {
     match name.to_ascii_lowercase().as_str() {
         "phosphor" => Some(phosphor()),

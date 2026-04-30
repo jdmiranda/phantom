@@ -317,20 +317,18 @@ fn execute_action(action: &TestAction, app: &mut App) {
             }
         }
         TestAction::DetachToFloat => {
-            if let Some(focused) = app.coordinator.focused() {
-                if !app.coordinator.is_floating(focused) {
+            if let Some(focused) = app.coordinator.focused()
+                && !app.coordinator.is_floating(focused) {
                     app.coordinator
                         .detach_to_float(focused, &mut app.layout, &mut app.scene);
                 }
-            }
         }
         TestAction::DockToGrid => {
-            if let Some(focused) = app.coordinator.focused() {
-                if app.coordinator.is_floating(focused) {
+            if let Some(focused) = app.coordinator.focused()
+                && app.coordinator.is_floating(focused) {
                     app.coordinator
                         .dock_to_grid(focused, &mut app.layout, &mut app.scene);
                 }
-            }
         }
         TestAction::MoveFloat(x, y) => {
             if let Some(focused) = app.coordinator.focused() {

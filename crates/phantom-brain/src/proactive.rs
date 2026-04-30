@@ -211,6 +211,7 @@ pub struct InterventionEngine {
 
 impl InterventionEngine {
     /// Create a new engine with default parameters.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             signals: VecDeque::with_capacity(50),
@@ -339,6 +340,7 @@ impl InterventionEngine {
     /// - Consecutive dismissals (back-off)
     /// - Actions since last user input (saturation)
     /// - Time since last action (cooldown)
+    #[must_use] 
     pub fn should_act(&self) -> InterventionDecision {
         // Phase 1: Detect explicit user request (always reactive).
         if self.has_recent_question() {
@@ -411,32 +413,28 @@ impl InterventionEngine {
         };
 
         // Signal 1: Fresh errors (highest priority proactive trigger).
-        if let Some(est) = self.need_from_errors() {
-            if est.score > best.score {
+        if let Some(est) = self.need_from_errors()
+            && est.score > best.score {
                 best = est;
             }
-        }
 
         // Signal 2: User appears stuck (idle after error).
-        if let Some(est) = self.need_from_stuck() {
-            if est.score > best.score {
+        if let Some(est) = self.need_from_stuck()
+            && est.score > best.score {
                 best = est;
             }
-        }
 
         // Signal 3: Agent completion (always worth reporting).
-        if let Some(est) = self.need_from_agent_completion() {
-            if est.score > best.score {
+        if let Some(est) = self.need_from_agent_completion()
+            && est.score > best.score {
                 best = est;
             }
-        }
 
         // Signal 4: Environment changes worth noting.
-        if let Some(est) = self.need_from_env_changes() {
-            if est.score > best.score {
+        if let Some(est) = self.need_from_env_changes()
+            && est.score > best.score {
                 best = est;
             }
-        }
 
         // Gate: user is actively typing -- suppress all proactive signals.
         // From the paper: user activities A_t modulate the prediction.
@@ -662,6 +660,7 @@ impl InterventionEngine {
     }
 
     /// Get a diagnostic summary of the engine's state (for logging).
+    #[must_use] 
     pub fn diagnostic(&self) -> String {
         format!(
             "InterventionEngine {{ accept_rate={:.2}, offered={}, accepted={}, \
@@ -800,6 +799,7 @@ impl ProactiveSuggester {
     /// `cooldown_ms` is the minimum number of milliseconds that must elapse
     /// between two suggestions of the same [`TriggerKind`].  The default
     /// recommended value is `60_000` (60 seconds).
+    #[must_use] 
     pub fn new(triggers: Vec<Trigger>, cooldown_ms: u64) -> Self {
         Self {
             triggers,
@@ -811,6 +811,7 @@ impl ProactiveSuggester {
 
     /// Build a [`ProactiveSuggester`] with the canonical set of triggers for
     /// Phantom (issue #37 defaults).
+    #[must_use] 
     pub fn default_triggers() -> Self {
         Self::new(
             vec![
@@ -858,7 +859,7 @@ impl ProactiveSuggester {
         match event {
             AiEvent::CommandComplete(parsed) => {
                 let has_errors = !parsed.errors.is_empty();
-                let exit_failed = parsed.exit_code.map_or(false, |c| c != 0);
+                let exit_failed = parsed.exit_code.is_some_and(|c| c != 0);
 
                 if !has_errors && !exit_failed {
                     return None;
@@ -936,6 +937,7 @@ impl ProactiveSuggester {
 
     /// Return the elapsed time since `kind` last fired, or `None` if it
     /// has never fired.  Useful for testing and diagnostics.
+    #[must_use] 
     pub fn elapsed_since_fired(&self, kind: TriggerKind) -> Option<std::time::Duration> {
         self.last_fired.get(&kind).map(|t| t.elapsed())
     }

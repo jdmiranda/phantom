@@ -96,6 +96,7 @@ pub enum AgentRole {
 
 impl AgentRole {
     /// Human-readable role name, used in UI badges and the system prompt.
+    #[must_use] 
     pub fn label(&self) -> &'static str {
         match self {
             Self::Conversational => "Conversational",
@@ -114,6 +115,7 @@ impl AgentRole {
     }
 
     /// The static manifest declaring this role's capability classes.
+    #[must_use] 
     pub fn manifest(&self) -> RoleManifest {
         match self {
             Self::Conversational => RoleManifest {
@@ -232,6 +234,7 @@ impl AgentRole {
     }
 
     /// Whether this role declares the given capability class.
+    #[must_use] 
     pub fn has(&self, class: CapabilityClass) -> bool {
         self.manifest().classes.contains(&class)
     }
@@ -256,6 +259,7 @@ impl RoleManifest {
     /// Format the manifest as a paragraph injectable into the agent's
     /// system prompt. Communicates the role's identity and capability
     /// scope so the model doesn't hallucinate ("I don't have access to…").
+    #[must_use] 
     pub fn system_prompt_paragraph(&self, label: &str, id: AgentId) -> String {
         let classes: Vec<&'static str> = self
             .classes

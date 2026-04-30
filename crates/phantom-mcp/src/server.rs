@@ -46,6 +46,7 @@ struct ServerInfo {
 impl PhantomMcpServer {
     /// Create a new server pre-populated with Phantom's built-in tools and
     /// resources.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             tools: builtin_tools(),
@@ -56,6 +57,7 @@ impl PhantomMcpServer {
     // -- public API --------------------------------------------------------
 
     /// Dispatch an incoming JSON-RPC request to the appropriate handler.
+    #[must_use] 
     pub fn handle_request(&self, request: &JsonRpcRequest) -> JsonRpcResponse {
         let id = request.id.clone().unwrap_or(serde_json::Value::Null);
 
@@ -106,11 +108,13 @@ impl PhantomMcpServer {
     }
 
     /// Return the tools registered on this server.
+    #[must_use] 
     pub fn tools(&self) -> &[McpTool] {
         &self.tools
     }
 
     /// Return the resources registered on this server.
+    #[must_use] 
     pub fn resources(&self) -> &[McpResource] {
         &self.resources
     }

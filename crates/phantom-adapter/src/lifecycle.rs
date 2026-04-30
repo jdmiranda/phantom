@@ -30,6 +30,7 @@ impl AppState {
     /// - Running -> Exiting
     /// - Exiting -> Dead
     /// - ANY -> Dead  (crash / kill / timeout)
+    #[must_use] 
     pub fn can_transition_to(&self, next: AppState) -> bool {
         // Any state can transition to Dead (force-kill).
         if next == AppState::Dead {
@@ -47,16 +48,19 @@ impl AppState {
     }
 
     /// An app is "active" if it is Running or Suspended.
+    #[must_use] 
     pub fn is_active(&self) -> bool {
         matches!(self, AppState::Running | AppState::Suspended)
     }
 
     /// Only Running apps receive input events.
+    #[must_use] 
     pub fn receives_input(&self) -> bool {
         matches!(self, AppState::Running)
     }
 
     /// Running or Suspended apps may publish to the event bus.
+    #[must_use] 
     pub fn can_publish(&self) -> bool {
         matches!(self, AppState::Running | AppState::Suspended)
     }

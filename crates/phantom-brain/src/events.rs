@@ -20,6 +20,7 @@ use phantom_semantic::ParsedOutput;
 /// timers, and agents. The brain blocks on a channel receiver until one of
 /// these arrives.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AiEvent {
     // -- Terminal I/O --------------------------------------------------------
     /// A command finished executing and its output has been semantically parsed.

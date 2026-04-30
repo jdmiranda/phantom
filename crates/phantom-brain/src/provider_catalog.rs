@@ -81,26 +81,31 @@ impl ProviderProfile {
     }
 
     /// Stable identifier for this profile.
+    #[must_use] 
     pub fn id(&self) -> &str {
         &self.id
     }
 
     /// Shell command prefix used to invoke this provider.
+    #[must_use] 
     pub fn runtime_command(&self) -> &str {
         &self.runtime_command
     }
 
     /// Default model name.
+    #[must_use] 
     pub fn default_model(&self) -> &str {
         &self.default_model
     }
 
     /// Full list of model names this provider supports.
+    #[must_use] 
     pub fn available_models(&self) -> &[String] {
         &self.available_models
     }
 
     /// Returns `true` if `model` is in the available-models list.
+    #[must_use] 
     pub fn supports_model(&self, model: &str) -> bool {
         self.available_models.iter().any(|m| m == model)
     }
@@ -133,6 +138,7 @@ pub struct ProviderCatalog {
 
 impl ProviderCatalog {
     /// Create an empty catalog with no profiles.
+    #[must_use] 
     pub fn empty() -> Self {
         Self {
             profiles: HashMap::new(),
@@ -147,6 +153,7 @@ impl ProviderCatalog {
     /// - `"claude-fast"`    — `claude-haiku-4-5` via the `claude` CLI
     /// - `"ollama-phi3.5"` — `phi3.5:latest` via Ollama (local)
     /// - `"ollama-llama3"`  — `llama3:latest` via Ollama (local)
+    #[must_use] 
     pub fn with_builtins() -> Self {
         let mut catalog = Self::empty();
 
@@ -203,6 +210,7 @@ impl ProviderCatalog {
     /// Unlike [`resolve`][ProviderCatalog::resolve], `get` does **not** fall
     /// back to `"claude-default"` on a miss — it returns `None` directly.
     /// This makes it suitable for presence checks and optional overrides.
+    #[must_use] 
     pub fn get(&self, name: &str) -> Option<&ProviderProfile> {
         self.profiles.get(name)
     }
@@ -211,6 +219,7 @@ impl ProviderCatalog {
     ///
     /// Constructs the profile on demand; callers that need a stable owned copy
     /// can call `.clone()` on the result.
+    #[must_use] 
     pub fn default_profile() -> ProviderProfile {
         ProviderProfile::new(
             "claude-default",
@@ -235,6 +244,7 @@ impl ProviderCatalog {
     /// If `id` is not found, falls back to `FALLBACK_ID` (`"claude-default"`).
     /// Returns `None` only when the fallback itself is absent (i.e. the catalog
     /// was created via [`empty`][ProviderCatalog::empty] and has no profiles).
+    #[must_use] 
     pub fn resolve(&self, id: &str) -> Option<&ProviderProfile> {
         self.profiles
             .get(id)
@@ -245,6 +255,7 @@ impl ProviderCatalog {
     ///
     /// Convenience wrapper around [`resolve`][ProviderCatalog::resolve] for
     /// callers that need an owned copy.
+    #[must_use] 
     pub fn resolve_cloned(&self, id: &str) -> Option<ProviderProfile> {
         self.resolve(id).cloned()
     }
@@ -267,6 +278,7 @@ impl ProviderCatalog {
     ///     let _ = backend.chat("Hello");
     /// }
     /// ```
+    #[must_use] 
     pub fn build_ollama_backend(&self, id: &str) -> Option<crate::ollama::OllamaBackend> {
         let profile = self.profiles.get(id)?;
         if !profile.runtime_command.starts_with("ollama") {
@@ -279,6 +291,7 @@ impl ProviderCatalog {
     }
 
     /// Returns `true` if the catalog contains a profile with `id`.
+    #[must_use] 
     pub fn contains(&self, id: &str) -> bool {
         self.profiles.contains_key(id)
     }
@@ -289,11 +302,13 @@ impl ProviderCatalog {
     }
 
     /// Number of profiles in the catalog.
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.profiles.len()
     }
 
     /// Returns `true` if the catalog has no profiles.
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.profiles.is_empty()
     }

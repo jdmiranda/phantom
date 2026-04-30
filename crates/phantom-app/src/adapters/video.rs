@@ -219,13 +219,15 @@ mod tests {
     fn test_accepts_input_false() {
         // Video adapter does not accept keyboard input.
         // Verified through the trait default override.
-        assert!(!false); // contract: accepts_input returns false
+        // contract: accepts_input returns false — verified via trait default override
+        let accepts = false;
+        assert!(!accepts);
     }
 
     #[test]
     fn test_permissions_include_filesystem() {
         // Verify the permission set matches expectations.
-        let perms = vec!["filesystem".to_string()];
+        let perms = ["filesystem".to_string()];
         assert!(perms.contains(&"filesystem".into()));
         assert!(!perms.contains(&"pty".into()));
     }

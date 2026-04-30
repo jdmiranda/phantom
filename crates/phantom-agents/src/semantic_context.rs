@@ -27,6 +27,7 @@ pub struct SemanticContext {
 
 impl SemanticContext {
     /// Create an empty context.
+    #[must_use] 
     pub fn new() -> Self {
         Self::default()
     }
@@ -60,21 +61,25 @@ impl SemanticContext {
     }
 
     /// Return all retained entries, oldest-first.
+    #[must_use] 
     pub fn entries(&self) -> &[ParsedOutput] {
         &self.entries
     }
 
     /// Return the most-recently pushed entry, if any.
+    #[must_use] 
     pub fn latest(&self) -> Option<&ParsedOutput> {
         self.entries.last()
     }
 
     /// Number of entries currently held.
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// True when no entries have been pushed yet.
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -85,19 +90,19 @@ impl SemanticContext {
     /// Returns `None` when the context is empty (no commands have been run).
     /// Otherwise returns a `String` suitable for inserting under a
     /// `## Recent command output` heading.
+    #[must_use] 
     pub fn as_prompt_section(&self) -> Option<String> {
         if self.entries.is_empty() {
             return None;
         }
 
-        let mut lines = Vec::new();
-        lines.push("## Recent command output".to_string());
-        lines.push(String::new());
-        lines.push(
+        let mut lines: Vec<String> = vec![
+            "## Recent command output".to_string(),
+            String::new(),
             "The following structured output from recent commands is available for your reasoning:"
                 .to_string(),
-        );
-        lines.push(String::new());
+            String::new(),
+        ];
 
         for entry in &self.entries {
             lines.push(format!("### `{}`", entry.command));

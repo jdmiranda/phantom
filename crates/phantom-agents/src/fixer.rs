@@ -59,6 +59,7 @@ pub const DEFAULT_FIXER_TTL_SECS: u64 = 5 * 60;
 /// The default deadline is [`DEFAULT_FIXER_TTL_SECS`]; callers wanting a
 /// different TTL should override the returned rule's `spawn.params` payload
 /// before registration.
+#[must_use] 
 pub fn fixer_spawn_rule() -> SpawnRule {
     SpawnRule::on_any(KindPattern::AnyAgentBlocked)
         .spawn_if_not_running(AgentRole::Fixer, "fixer-on-blockage")
@@ -70,6 +71,7 @@ pub fn fixer_spawn_rule() -> SpawnRule {
 /// `now_unix_ms + ttl_secs * 1000`. Consumers (the agent manager, the Fixer's
 /// own watchdog) should self-terminate when wall-clock time exceeds that
 /// instant.
+#[must_use] 
 pub fn fixer_deadline_payload(now_unix_ms: u64, ttl_secs: u64) -> serde_json::Value {
     let expires_at_unix_ms = now_unix_ms.saturating_add(ttl_secs.saturating_mul(1_000));
     serde_json::json!({

@@ -126,8 +126,7 @@ impl Console {
 
         if self
             .command_history
-            .last()
-            .map_or(true, |last| last != &cmd)
+            .last() != Some(&cmd)
         {
             self.command_history.push(cmd.clone());
         }
@@ -182,18 +181,15 @@ impl Console {
     /// Navigate command history downward (newer).
     pub fn history_down(&mut self) {
         self.clear_tab();
-        match self.history_index {
-            Some(idx) => {
-                if idx + 1 < self.command_history.len() {
-                    let new_idx = idx + 1;
-                    self.history_index = Some(new_idx);
-                    self.input = self.command_history[new_idx].clone();
-                } else {
-                    self.history_index = None;
-                    self.input = self.saved_input.clone();
-                }
+        if let Some(idx) = self.history_index {
+            if idx + 1 < self.command_history.len() {
+                let new_idx = idx + 1;
+                self.history_index = Some(new_idx);
+                self.input = self.command_history[new_idx].clone();
+            } else {
+                self.history_index = None;
+                self.input = self.saved_input.clone();
             }
-            None => {}
         }
     }
 

@@ -214,12 +214,14 @@ impl PlanStep {
     /// let step = PlanStep::new("deploy to production", task)
     ///     .with_checkpoint();
     /// ```
+    #[must_use] 
     pub fn with_checkpoint(mut self) -> Self {
         self.requires_checkpoint = true;
         self
     }
 
     /// Returns `true` if this step requires human approval before execution.
+    #[must_use] 
     pub fn requires_checkpoint(&self) -> bool {
         self.requires_checkpoint
     }
@@ -240,6 +242,7 @@ impl PlanStep {
     ///
     /// A step is not eligible for dispatch until every index in this slice
     /// has reached [`StepStatus::Done`].
+    #[must_use] 
     pub fn depends_on(&self) -> &[usize] {
         &self.depends_on
     }
@@ -248,6 +251,7 @@ impl PlanStep {
     ///
     /// When `Some`, the dispatch layer resolves the ID in the `ProviderCatalog`.
     /// Unknown IDs fall back to `"claude-default"`.
+    #[must_use] 
     pub fn preferred_provider(&self) -> Option<&str> {
         self.preferred_provider.as_deref()
     }
@@ -390,6 +394,7 @@ impl TaskLedger {
     }
 
     /// Get all facts at a given confidence level.
+    #[must_use] 
     pub fn facts_at(&self, confidence: FactConfidence) -> Vec<&Fact> {
         self.facts
             .iter()
@@ -450,6 +455,7 @@ impl TaskLedger {
     ///
     /// O(n × d) where n = number of plan steps and d = average dependency
     /// fan-in. For typical plans (n < 20, d < 5) this is negligible.
+    #[must_use] 
     pub fn eligible_next(&self) -> Vec<(usize, &PlanStep)> {
         // Collect the index set of all completed steps.
         let done: HashSet<usize> = self
@@ -532,6 +538,7 @@ impl TaskLedger {
     ///
     /// O(n + e) where n = number of steps and e = total edges (sum of all
     /// `depends_on` lengths).
+    #[must_use] 
     pub fn has_cycle(&self) -> bool {
         let n = self.plan.len();
         // 0 = white (unvisited), 1 = grey (in stack), 2 = black (finished)
@@ -598,6 +605,7 @@ impl TaskLedger {
     }
 
     /// Get the next pending step (if any).
+    #[must_use] 
     pub fn next_pending_step(&self) -> Option<(usize, &PlanStep)> {
         self.plan
             .iter()
@@ -606,6 +614,7 @@ impl TaskLedger {
     }
 
     /// Get the currently active step (if any).
+    #[must_use] 
     pub fn active_step(&self) -> Option<(usize, &PlanStep)> {
         self.plan
             .iter()
@@ -614,6 +623,7 @@ impl TaskLedger {
     }
 
     /// Count steps by status.
+    #[must_use] 
     pub fn step_counts(&self) -> StepCounts {
         let mut counts = StepCounts::default();
         for step in &self.plan {
@@ -633,6 +643,7 @@ impl TaskLedger {
     ///
     /// Steps with [`StepStatus::NeedsApproval`] are **not** resolved —
     /// they count as unfinished work until approved or explicitly failed.
+    #[must_use] 
     pub fn is_plan_resolved(&self) -> bool {
         self.plan.iter().all(|s| {
             matches!(
@@ -714,6 +725,7 @@ impl TaskLedger {
     /// exceeds the threshold, the Orchestrator breaks from the inner loop."
     ///
     /// Returns `ReplanDecision` indicating what the brain should do.
+    #[must_use] 
     pub fn should_replan(&self) -> ReplanDecision {
         // Terminal: exhausted all re-plan attempts.
         if self.replan_count >= self.max_replans {
@@ -757,14 +769,13 @@ impl TaskLedger {
         }
 
         // Loop detection from last assessment.
-        if let Some(ref assessment) = self.last_assessment {
-            if assessment.is_looping {
+        if let Some(ref assessment) = self.last_assessment
+            && assessment.is_looping {
                 return ReplanDecision::Replan {
                     reason: "agents are repeating the same outputs".into(),
                     failed_steps: vec![],
                 };
             }
-        }
 
         ReplanDecision::Continue
     }
@@ -831,6 +842,7 @@ impl TaskLedger {
     /// - Lessons from previous plans
     ///
     /// This is what gets sent to Claude when the outer loop triggers a re-plan.
+    #[must_use] 
     pub fn replan_context(&self) -> String {
         let mut ctx = String::with_capacity(2048);
 
@@ -943,31 +955,37 @@ pub struct WorldState {
 
 impl WorldState {
     /// Create a builder for constructing a [`WorldState`].
+    #[must_use] 
     pub fn builder() -> WorldStateBuilder {
         WorldStateBuilder::default()
     }
 
     /// `true` when new errors appeared in the terminal output.
+    #[must_use] 
     pub fn errors_detected(&self) -> bool {
         self.errors_detected
     }
 
     /// `true` when an agent flatlined (exhausted retries or stalled).
+    #[must_use] 
     pub fn agent_flatlined(&self) -> bool {
         self.agent_flatlined
     }
 
     /// `true` when the user sent input (command, interrupt, goal change).
+    #[must_use] 
     pub fn user_input_arrived(&self) -> bool {
         self.user_input_arrived
     }
 
     /// `true` when the external goal was updated and the plan no longer targets it.
+    #[must_use] 
     pub fn goal_changed(&self) -> bool {
         self.goal_changed
     }
 
     /// `true` when the wall-clock budget for the current plan iteration is up.
+    #[must_use] 
     pub fn time_budget_exhausted(&self) -> bool {
         self.time_budget_exhausted
     }
@@ -975,6 +993,7 @@ impl WorldState {
     /// Returns `true` if any trigger that requires replanning is active.
     ///
     /// This is the central predicate consumed by [`Orchestrator::should_replan`].
+    #[must_use] 
     pub fn any_replan_trigger(&self) -> bool {
         self.errors_detected
             || self.agent_flatlined
@@ -996,36 +1015,42 @@ pub struct WorldStateBuilder {
 
 impl WorldStateBuilder {
     /// Signal that new errors were detected in the latest output.
+    #[must_use] 
     pub fn errors_detected(mut self, v: bool) -> Self {
         self.inner.errors_detected = v;
         self
     }
 
     /// Signal that an agent flatlined.
+    #[must_use] 
     pub fn agent_flatlined(mut self, v: bool) -> Self {
         self.inner.agent_flatlined = v;
         self
     }
 
     /// Signal that user input arrived.
+    #[must_use] 
     pub fn user_input_arrived(mut self, v: bool) -> Self {
         self.inner.user_input_arrived = v;
         self
     }
 
     /// Signal that the goal was changed externally.
+    #[must_use] 
     pub fn goal_changed(mut self, v: bool) -> Self {
         self.inner.goal_changed = v;
         self
     }
 
     /// Signal that the time budget for the current plan iteration has expired.
+    #[must_use] 
     pub fn time_budget_exhausted(mut self, v: bool) -> Self {
         self.inner.time_budget_exhausted = v;
         self
     }
 
     /// Consume the builder and produce a [`WorldState`].
+    #[must_use] 
     pub fn build(self) -> WorldState {
         self.inner
     }
@@ -1076,6 +1101,7 @@ impl Orchestrator {
     }
 
     /// Read-only access to the task ledger for inspection / context building.
+    #[must_use] 
     pub fn ledger(&self) -> &TaskLedger {
         &self.ledger
     }
@@ -1110,6 +1136,7 @@ impl Orchestrator {
     /// - The ledger reports [`ReplanDecision::Continue`], AND
     /// - The ledger reports [`ReplanDecision::Complete`] (goal already done —
     ///   no point generating a new plan).
+    #[must_use] 
     pub fn should_replan(&self, world: &WorldState) -> bool {
         // World-state triggers: any single trigger forces a replan.
         if world.any_replan_trigger() {
@@ -1133,6 +1160,7 @@ impl Orchestrator {
     /// The returned [`PlanStep`] is a **clone** of the ledger entry — the
     /// caller is responsible for advancing the step's status to `Active` via
     /// [`TaskLedger::plan`] after successfully dispatching the returned step.
+    #[must_use] 
     pub fn dispatch_next_step(&self) -> Option<PlanStep> {
         self.ledger
             .next_pending_step()

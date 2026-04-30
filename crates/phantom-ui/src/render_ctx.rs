@@ -20,6 +20,7 @@ pub struct RenderCtx {
 
 impl RenderCtx {
     /// Construct a `RenderCtx` from cell metrics and DPI scale.
+    #[must_use] 
     pub fn new(cell_size: (f32, f32), dpi_scale: f32) -> Self {
         Self {
             cell_size,
@@ -28,11 +29,13 @@ impl RenderCtx {
     }
 
     /// Advance width of one monospace cell, in pixels.
+    #[must_use] 
     pub fn cell_w(&self) -> f32 {
         self.cell_size.0
     }
 
     /// Height of one text line (cell height), in pixels.
+    #[must_use] 
     pub fn cell_h(&self) -> f32 {
         self.cell_size.1
     }
@@ -41,18 +44,21 @@ impl RenderCtx {
     ///
     /// Assumes monospace shaping (one advance per char). For non-monospace
     /// content, prefer `phantom_renderer::text_metrics::measure`.
+    #[must_use] 
     pub fn measure_mono(&self, s: &str) -> f32 {
         s.chars().count() as f32 * self.cell_size.0
     }
 
     /// `4 * unit` spacing primitive — base for the spacing scale used by
     /// every widget that wants tokenized padding/margins.
+    #[must_use] 
     pub fn space(&self, n: f32) -> f32 {
         n * 4.0
     }
 
     /// A safe fallback for tests and code paths that don't yet thread metrics.
     /// Real values flow from the live renderer.
+    #[must_use] 
     pub fn fallback() -> Self {
         Self {
             cell_size: (8.0, 16.0),

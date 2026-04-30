@@ -28,6 +28,7 @@ pub struct AppRegistry {
 }
 
 impl AppRegistry {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -106,11 +107,13 @@ impl AppRegistry {
     }
 
     /// Look up an app's metadata.
+    #[must_use] 
     pub fn get(&self, id: AppId) -> Option<&RegisteredApp> {
         self.entries.iter().find(|e| e.id == id)
     }
 
     /// Borrow the adapter for `id`.
+    #[must_use] 
     pub fn get_adapter(&self, id: AppId) -> Option<&dyn AppAdapter> {
         self.index_of(id).and_then(|i| self.adapters[i].as_deref())
     }
@@ -125,6 +128,7 @@ impl AppRegistry {
     }
 
     /// All app IDs in the given state.
+    #[must_use] 
     pub fn by_state(&self, state: AppState) -> Vec<AppId> {
         self.entries
             .iter()
@@ -134,11 +138,13 @@ impl AppRegistry {
     }
 
     /// All running app IDs.
+    #[must_use] 
     pub fn all_running(&self) -> Vec<AppId> {
         self.by_state(AppState::Running)
     }
 
     /// All visual app IDs (any state except Dead).
+    #[must_use] 
     pub fn all_visual(&self) -> Vec<AppId> {
         self.entries
             .iter()
@@ -148,6 +154,7 @@ impl AppRegistry {
     }
 
     /// Total number of registered (non-GC'd) apps.
+    #[must_use] 
     pub fn count(&self) -> usize {
         self.entries.len()
     }

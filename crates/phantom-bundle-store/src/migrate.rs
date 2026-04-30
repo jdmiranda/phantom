@@ -63,6 +63,7 @@ struct MigrationFile {
 /// Uses `$XDG_DATA_HOME/phantom/vector-index-migration.json` on Linux/macOS
 /// (falling back to `~/.local/share` when the env-var is absent), or the
 /// appropriate platform equivalent via [`dirs::data_dir`].
+#[must_use] 
 pub fn migration_file_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("phantom").join("vector-index-migration.json"))
 }

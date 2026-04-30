@@ -114,17 +114,17 @@ pub struct McpListener {
 
 impl McpListener {
     /// The socket path this listener is bound to.
+    #[must_use] 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
     /// Remove the socket file. Called on drop.
     fn cleanup(path: &Path) {
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(path) {
+        if path.exists()
+            && let Err(e) = std::fs::remove_file(path) {
                 warn!("Failed to remove MCP socket {}: {}", path.display(), e);
             }
-        }
     }
 }
 

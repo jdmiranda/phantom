@@ -189,15 +189,14 @@ impl AgentRuntime {
             // Best-effort log append. We log, but we don't drop the event
             // from rule evaluation if the file write fails — observability
             // beats consistency here.
-            if let Ok(mut log) = self.event_log.lock() {
-                if let Err(e) = log.append(
+            if let Ok(mut log) = self.event_log.lock()
+                && let Err(e) = log.append(
                     log_source_for(&ev.source),
                     kind_dotted_name(&ev.kind),
                     ev.payload.clone(),
                 ) {
                     log::warn!("event_log append failed: {e}");
                 }
-            }
 
             for action in self.rules.evaluate(ev) {
                 self.last_actions.push(QueuedAction {

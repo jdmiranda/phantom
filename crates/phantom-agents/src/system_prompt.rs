@@ -133,6 +133,7 @@ pub struct SystemPromptBuilder {
 impl SystemPromptBuilder {
     /// Start a new builder for the given agent. All optional sections start
     /// `None` and must be attached explicitly with the `with_*` methods.
+    #[must_use] 
     pub fn new(agent: AgentRef) -> Self {
         Self {
             agent,
@@ -147,6 +148,7 @@ impl SystemPromptBuilder {
     }
 
     /// Attach the task description shown under `## Task`.
+    #[must_use] 
     pub fn with_task(mut self, task: String) -> Self {
         self.task = Some(task);
         self
@@ -154,6 +156,7 @@ impl SystemPromptBuilder {
 
     /// Attach project context (git branch, recent diffs, etc.) shown under
     /// `## Project context`.
+    #[must_use] 
     pub fn with_project_context(mut self, ctx: String) -> Self {
         self.project_context = Some(ctx);
         self
@@ -161,12 +164,14 @@ impl SystemPromptBuilder {
 
     /// Attach the workspace pane inventory shown under
     /// `## Workspace inventory`.
+    #[must_use] 
     pub fn with_apps_list(mut self, list: String) -> Self {
         self.apps_list = Some(list);
         self
     }
 
     /// Attach the tool catalog summary shown under `## Tools you can call`.
+    #[must_use] 
     pub fn with_tool_summary(mut self, tools: String) -> Self {
         self.tool_summary = Some(tools);
         self
@@ -178,6 +183,7 @@ impl SystemPromptBuilder {
     ///
     /// Pass an empty vector or never call this when no peers are running —
     /// the resulting prompt then contains no co-agent paragraph at all.
+    #[must_use] 
     pub fn with_other_agents(
         mut self,
         peers: Vec<(crate::role::AgentRole, String)>,
@@ -193,6 +199,7 @@ impl SystemPromptBuilder {
     /// inclusion in [`build`]. When the context is empty, no section is emitted.
     ///
     /// [`build`]: SystemPromptBuilder::build
+    #[must_use] 
     pub fn with_semantic_context(mut self, ctx: &SemanticContext) -> Self {
         self.semantic_context = ctx.as_prompt_section();
         self
@@ -247,6 +254,7 @@ impl SystemPromptBuilder {
     ///
     /// The output is deterministic: building the same builder twice yields
     /// the same `String`.
+    #[must_use] 
     pub fn build(&self) -> String {
         use crate::role::AgentRole;
         let mut sections: Vec<String> = Vec::new();

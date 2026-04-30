@@ -334,6 +334,7 @@ impl OllamaLlmBackend {
     /// |---------------|--------------------------------|
     /// | `OLLAMA_HOST` | `http://localhost:11434`       |
     /// | `OLLAMA_MODEL`| `phi3.5:latest`                |
+    #[must_use]
     pub fn from_env() -> Self {
         let base_url =
             std::env::var("OLLAMA_HOST").unwrap_or_else(|_| OLLAMA_DEFAULT_URL.to_owned());
@@ -342,6 +343,7 @@ impl OllamaLlmBackend {
     }
 
     /// Returns `true` when Ollama is running and reachable at the configured URL.
+    #[must_use]
     pub fn is_available(&self) -> bool {
         let url = format!("{}/api/tags", self.base_url);
         let agent = ureq::Agent::config_builder()
@@ -355,6 +357,7 @@ impl OllamaLlmBackend {
     }
 
     /// Return the model name in use.
+    #[must_use]
     pub fn model(&self) -> &str {
         &self.model
     }

@@ -139,32 +139,29 @@ impl CapabilityReport {
     /// This function is **synchronous** and may block briefly (up to 2 s) on
     /// the Ollama TCP ping. It must not be called on the GPU/render thread.
     /// Call it on the brain thread or from a dedicated startup task.
+    #[must_use] 
     pub fn compute(config: &AuditConfig) -> Self {
-        let mut entries = Vec::with_capacity(6);
-
-        // 1. Core terminal — always available; the VT emulator requires no
-        //    external resources.
-        entries.push(CapabilityAuditEntry::available("core-terminal"));
-
-        // 2. Heuristic (rule-based) brain — always available; no network.
-        entries.push(CapabilityAuditEntry::available("heuristic-brain"));
-
-        // 3. Ollama local backend.
-        entries.push(audit_ollama());
-
-        // 4. Claude cloud backend.
-        entries.push(audit_claude(config.privacy_mode));
-
-        // 5. OpenAI-compatible endpoint (generic cloud).
-        entries.push(audit_openai_compat(config.privacy_mode));
-
-        // 6. Plugin runtime (WASM host).
-        entries.push(audit_plugin_runtime());
+        let entries = vec![
+            // 1. Core terminal — always available; the VT emulator requires no
+            //    external resources.
+            CapabilityAuditEntry::available("core-terminal"),
+            // 2. Heuristic (rule-based) brain — always available; no network.
+            CapabilityAuditEntry::available("heuristic-brain"),
+            // 3. Ollama local backend.
+            audit_ollama(),
+            // 4. Claude cloud backend.
+            audit_claude(config.privacy_mode),
+            // 5. OpenAI-compatible endpoint (generic cloud).
+            audit_openai_compat(config.privacy_mode),
+            // 6. Plugin runtime (WASM host).
+            audit_plugin_runtime(),
+        ];
 
         Self { entries }
     }
 
     /// Iterate over all audit entries.
+    #[must_use] 
     pub fn entries(&self) -> &[CapabilityAuditEntry] {
         &self.entries
     }
@@ -174,6 +171,7 @@ impl CapabilityReport {
     /// Note: `BlockedByPolicy` entries count as **not** fully available —
     /// use [`Self::all_online_or_blocked`] if you want to treat policy-blocked
     /// entries as acceptable.
+    #[must_use] 
     pub fn all_available(&self) -> bool {
         self.entries
             .iter()
@@ -183,6 +181,7 @@ impl CapabilityReport {
     /// Returns `true` if no entry is [`CapabilityStatus::Unavailable`].
     ///
     /// Treats `BlockedByPolicy` as an acceptable state (the user asked for it).
+    #[must_use] 
     pub fn all_online_or_blocked(&self) -> bool {
         self.entries
             .iter()
@@ -190,6 +189,7 @@ impl CapabilityReport {
     }
 
     /// Collect all entries whose status is [`CapabilityStatus::Unavailable`].
+    #[must_use] 
     pub fn unavailable_entries(&self) -> Vec<&CapabilityAuditEntry> {
         self.entries
             .iter()

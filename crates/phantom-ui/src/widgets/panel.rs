@@ -73,6 +73,7 @@ impl Panel {
     /// let with_title = Panel::new(Some("Inspector".to_owned()));
     /// let bare       = Panel::new(None);
     /// ```
+    #[must_use] 
     pub fn new(title: Option<String>) -> Self {
         Self {
             title,
@@ -81,6 +82,7 @@ impl Panel {
     }
 
     /// Convenience constructor for a panel without a title bar.
+    #[must_use] 
     pub fn untitled() -> Self {
         Self::new(None)
     }
@@ -97,11 +99,13 @@ impl Panel {
     }
 
     /// `true` when a title bar is present.
+    #[must_use] 
     pub fn has_title(&self) -> bool {
         self.title.is_some()
     }
 
     /// Height (px) consumed by the title bar. Returns `0.0` when untitled.
+    #[must_use] 
     pub fn title_bar_height(&self) -> f32 {
         if self.has_title() {
             TITLE_BAR_HEIGHT
@@ -115,6 +119,7 @@ impl Panel {
     ///
     /// Returns [`Rect::ZERO`] for degenerate rects where the borders consume
     /// all available space.
+    #[must_use] 
     pub fn body_rect(&self, outer: &Rect) -> Rect {
         let t = Tokens::phosphor(self.ctx);
         let border = t.frame(); // 2.0 px

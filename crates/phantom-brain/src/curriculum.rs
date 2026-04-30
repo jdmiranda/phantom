@@ -96,6 +96,7 @@ pub struct CurriculumGenerator {
 }
 
 impl CurriculumGenerator {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             completed_tasks: Vec::new(),
@@ -125,11 +126,13 @@ impl CurriculumGenerator {
     }
 
     /// Number of completed tasks (drives warm-up gating).
+    #[must_use] 
     pub fn progress(&self) -> u32 {
         self.completed_tasks.len() as u32
     }
 
     /// Whether the cooldown has elapsed since the last proposal.
+    #[must_use] 
     pub fn ready_to_propose(&self) -> bool {
         self.last_proposal_time
             .map(|t| t.elapsed().as_secs_f32() >= self.proposal_cooldown_secs)
@@ -145,6 +148,7 @@ impl CurriculumGenerator {
     /// This is the core Voyager-inspired mechanism: we build a rich context
     /// string describing the current project state, then ask the LLM to
     /// propose a single proactive task.
+    #[must_use] 
     pub fn build_prompt(
         &self,
         context: &ProjectContext,
@@ -161,8 +165,8 @@ impl CurriculumGenerator {
         ));
 
         // -- Git state (gated) --
-        if progress >= self.warm_up.git_context {
-            if let Some(ref git) = context.git {
+        if progress >= self.warm_up.git_context
+            && let Some(ref git) = context.git {
                 sections.push(format!(
                     "Git: branch={}, dirty={}, ahead={}, behind={}{}",
                     git.branch,
@@ -175,7 +179,6 @@ impl CurriculumGenerator {
                         .unwrap_or_default(),
                 ));
             }
-        }
 
         // -- Project commands --
         let cmds = &context.commands;
@@ -575,6 +578,7 @@ pub struct ProgressiveCurriculum {
 
 impl ProgressiveCurriculum {
     /// Create a new `ProgressiveCurriculum` with explicit parameters.
+    #[must_use] 
     pub fn new(threshold: f64, window: usize) -> Self {
         Self { threshold, window }
     }

@@ -79,6 +79,7 @@ impl SelectionRect {
     /// Coordinates are normalized: `start` is always the logically earlier
     /// position (top-left in [`SelectionMode::Rectangular`]; earlier in
     /// reading order in [`SelectionMode::FlowingText`]).
+    #[must_use] 
     pub fn new(a: (usize, usize), b: (usize, usize), mode: SelectionMode) -> Self {
         let (start, end) = normalize(a, b);
         Self { start, end, mode }
@@ -86,11 +87,13 @@ impl SelectionRect {
 
     /// `true` when the selection covers exactly one cell (zero-width is
     /// treated as an insertion point, not a selection).
+    #[must_use] 
     pub fn is_collapsed(&self) -> bool {
         self.start == self.end
     }
 
     /// Number of rows spanned by the selection (inclusive, ≥ 1).
+    #[must_use] 
     pub fn row_span(&self) -> usize {
         self.end.1 - self.start.1 + 1
     }
@@ -109,6 +112,7 @@ impl SelectionRect {
     ///   compute "full row" widths).
     /// - `alpha` — fill alpha (callers should source this from the
     ///   `selection_bg` token; `0.5` is a reasonable default).
+    #[must_use] 
     pub fn pixel_rects(
         &self,
         ctx: RenderCtx,
@@ -498,7 +502,7 @@ mod tests {
             alpha: 0.5,
         };
         let pr2 = pr; // Copy
-        let pr3 = pr.clone(); // Clone
+        let pr3 = pr; // Clone
         assert_eq!(pr, pr2);
         assert_eq!(pr, pr3);
     }

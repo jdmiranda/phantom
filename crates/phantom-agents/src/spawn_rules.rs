@@ -24,7 +24,7 @@
 //!        (`SubstrateEvent::payload`), not captured in the predicate.
 //!     4. **Cheap `Clone` and `Debug`.** Function pointers are `Copy`, so the
 //!        whole [`EventMatcher`] is trivially cloneable.
-//!   The trade-off is no captured state in predicates — which is by design.
+//!        The trade-off is no captured state in predicates — which is by design.
 
 use serde::{Deserialize, Serialize};
 
@@ -203,6 +203,7 @@ pub struct SpawnRule {
 
 impl SpawnRule {
     /// Begin building a rule that fires on an exact `EventKind`.
+    #[must_use] 
     pub fn on(kind: EventKind) -> SpawnRuleBuilder {
         SpawnRuleBuilder {
             matcher_seed: MatcherSeed::Exact(kind),
@@ -211,6 +212,7 @@ impl SpawnRule {
     }
 
     /// Begin building a rule that fires on any event matching the pattern.
+    #[must_use] 
     pub fn on_any(pattern: KindPattern) -> SpawnRuleBuilder {
         SpawnRuleBuilder {
             matcher_seed: MatcherSeed::Pattern(pattern),
@@ -293,11 +295,14 @@ pub struct SpawnRuleRegistry {
 
 impl SpawnRuleRegistry {
     /// Empty registry. No rules, no spawns.
+    #[must_use] 
     pub fn new() -> Self {
         Self { rules: Vec::new() }
     }
 
     /// Append a rule, returning `self` for fluent composition.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, rule: SpawnRule) -> Self {
         self.rules.push(rule);
         self
@@ -306,6 +311,7 @@ impl SpawnRuleRegistry {
     /// Evaluate `ev` against every registered rule, returning references to
     /// every matching action in declaration order. Pure — never mutates the
     /// registry.
+    #[must_use] 
     pub fn evaluate(&self, ev: &SubstrateEvent) -> Vec<&SpawnAction> {
         let mut out = Vec::new();
         for rule in &self.rules {
@@ -317,6 +323,7 @@ impl SpawnRuleRegistry {
     }
 
     /// Number of registered rules. Mostly useful for tests and diagnostics.
+    #[must_use] 
     pub fn rule_count(&self) -> usize {
         self.rules.len()
     }

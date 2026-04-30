@@ -149,7 +149,7 @@ fn truncated_blob_file_returns_crypto_error() {
     // Overwrite with only 10 bytes — well below the 28-byte minimum for a
     // valid PBE1 envelope (4 magic + 24 nonce).
     let abs = tmp.path().join(&relpath);
-    std::fs::write(&abs, &[0u8; 10]).expect("write truncated blob");
+    std::fs::write(&abs, [0u8; 10]).expect("write truncated blob");
 
     let err = store.read_blob(b.id, &relpath).expect_err("must fail");
     assert!(

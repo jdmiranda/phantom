@@ -54,7 +54,14 @@ pub struct TaskQueue {
     next_id: TaskId,
 }
 
+impl Default for TaskQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskQueue {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             tasks: VecDeque::new(),
@@ -78,10 +85,12 @@ impl TaskQueue {
         self.tasks.pop_front()
     }
 
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
 
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.tasks.len()
     }
@@ -91,6 +100,7 @@ impl TaskQueue {
         self.tasks = VecDeque::from(tasks);
     }
 
+    #[must_use] 
     pub fn task_names(&self) -> Vec<&str> {
         self.tasks.iter().map(|t| t.name.as_str()).collect()
     }
@@ -113,7 +123,14 @@ pub struct GoalPursuit {
     pub current_cycle: u32,
 }
 
+impl Default for GoalPursuit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GoalPursuit {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             objective: None,
@@ -134,15 +151,18 @@ impl GoalPursuit {
     }
 
     /// Returns true if the brain should run a goal-directed cycle.
+    #[must_use] 
     pub fn is_active(&self) -> bool {
         self.objective.is_some() && !self.queue.is_empty()
     }
 
+    #[must_use] 
     pub fn should_stop(&self) -> bool {
         self.queue.is_empty() || self.current_cycle >= self.max_cycles
     }
 
     /// Build the execution prompt (BabyAGI's execution_agent).
+    #[must_use] 
     pub fn build_execution_prompt(&self, task: &BrainTask) -> String {
         let objective = self.objective.as_deref().unwrap_or("(none)");
 
@@ -174,6 +194,7 @@ impl GoalPursuit {
     }
 
     /// Get a summary of completed work for display.
+    #[must_use] 
     pub fn summary(&self) -> String {
         let obj = self.objective.as_deref().unwrap_or("(none)");
         let done = self.completed.len();
@@ -191,6 +212,7 @@ impl GoalPursuit {
 // ---------------------------------------------------------------------------
 
 /// Build the task-creation prompt for the LLM.
+#[must_use] 
 pub fn build_task_creation_prompt(
     objective: &str,
     completed_task: &str,
@@ -217,6 +239,7 @@ pub fn build_task_creation_prompt(
 }
 
 /// Build the prioritization prompt for the LLM.
+#[must_use] 
 pub fn build_prioritization_prompt(objective: &str, task_names: &[&str]) -> String {
     let list = task_names
         .iter()
@@ -233,6 +256,7 @@ pub fn build_prioritization_prompt(objective: &str, task_names: &[&str]) -> Stri
 }
 
 /// Parse a numbered-list LLM response into task names.
+#[must_use] 
 pub fn parse_task_list(response: &str) -> Vec<String> {
     let mut tasks = Vec::new();
     for line in response.lines() {
@@ -280,6 +304,7 @@ pub struct ReflexionMemory {
 }
 
 impl ReflexionMemory {
+    #[must_use] 
     pub fn new(task_signature: String, objective: String) -> Self {
         Self {
             task_signature,
@@ -311,6 +336,7 @@ impl ReflexionMemory {
         }
     }
 
+    #[must_use] 
     pub fn get_reflection_texts(&self) -> Vec<&str> {
         self.reflections.iter().map(|r| r.text.as_str()).collect()
     }
@@ -321,6 +347,7 @@ impl ReflexionMemory {
 }
 
 /// Build the self-reflection prompt (Reflexion paper, exact pattern).
+#[must_use] 
 pub fn build_reflection_prompt(failed_trajectory: &str, prior_reflections: &[&str]) -> String {
     let mut prompt = String::from(
         "You will be given the history of a failed task attempt in a terminal environment. \
@@ -342,6 +369,7 @@ pub fn build_reflection_prompt(failed_trajectory: &str, prior_reflections: &[&st
 }
 
 /// Inject reflections into an execution prompt.
+#[must_use] 
 pub fn inject_reflections(base_prompt: &str, task_info: &str, memory: &ReflexionMemory) -> String {
     let mut prompt = base_prompt.to_string();
     let reflections = memory.get_reflection_texts();
@@ -372,6 +400,7 @@ pub fn save_reflexion(
 }
 
 /// Load a ReflexionMemory from the project MemoryStore.
+#[must_use] 
 pub fn load_reflexion(
     store: &phantom_memory::MemoryStore,
     task_signature: &str,

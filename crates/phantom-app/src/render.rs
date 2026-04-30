@@ -279,8 +279,6 @@ impl App {
         Ok(())
     }
 
-    /// Build the command input overlay (post-CRT, crisp).
-
     // -----------------------------------------------------------------------
     // Boot rendering
     // -----------------------------------------------------------------------
@@ -413,7 +411,6 @@ impl App {
                                 border_radius: 0.0,
                             });
                         }
-                    }
 
                     // Selection is rendered via per-cell inversion in extract_grid_themed.
                 }
@@ -458,9 +455,9 @@ impl App {
             if tiled_count <= 1 {
                 // Single pane — skip container chrome (border/title), but still
                 // render the scrollbar so history is never inaccessible.
-                if let Some(ref scroll) = ro.scroll {
-                    if scroll.history_size > 0 {
-                        if let Some(layout_rect) = layout_rect {
+                if let Some(ref scroll) = ro.scroll
+                    && scroll.history_size > 0
+                        && let Some(layout_rect) = layout_rect {
                             let track = scrollbar_track_rect(phantom_ui::layout::Rect {
                                 x: layout_rect.x,
                                 y: layout_rect.y,
@@ -494,8 +491,6 @@ impl App {
                                 });
                             }
                         }
-                    }
-                }
             } else if let Some(layout_rect) = layout_rect {
                 let pane_rect = container_rect(layout_rect, self.cell_size);
                 let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
@@ -610,8 +605,8 @@ impl App {
                 coord_titles.push((title_text, title_x, title_y, dot_color));
 
                 // -- Scrollbar (overlay pass — crisp, post-CRT) --
-                if let Some(ref scroll) = ro.scroll {
-                    if scroll.history_size > 0 {
+                if let Some(ref scroll) = ro.scroll
+                    && scroll.history_size > 0 {
                         let track = scrollbar_track_rect(inner_rect);
                         // Track background.
                         chrome_quads.push(QI {
@@ -640,7 +635,6 @@ impl App {
                             });
                         }
                     }
-                }
             }
 
             // Render terminal grid data (the critical path for terminal adapters).
@@ -696,7 +690,6 @@ impl App {
                             border_radius: 0.0,
                         });
                     }
-                }
 
                 // Selection is rendered via per-cell inversion in extract_grid_themed.
             }

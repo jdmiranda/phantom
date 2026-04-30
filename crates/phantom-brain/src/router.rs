@@ -49,6 +49,7 @@ impl BackendKind {
     /// Returns `true` for [`BackendKind::Claude`] and
     /// [`BackendKind::OpenAICompat`]; `false` for [`BackendKind::Heuristic`]
     /// and [`BackendKind::Ollama`] (which run locally).
+    #[must_use] 
     pub fn is_cloud_provider(&self) -> bool {
         matches!(self, Self::Claude { .. } | Self::OpenAICompat { .. })
     }
@@ -79,6 +80,7 @@ pub struct ModelBackend {
 
 impl ModelBackend {
     /// Built-in heuristic backend (always available, zero cost).
+    #[must_use] 
     pub fn heuristic() -> Self {
         Self {
             name: "heuristic".into(),
@@ -92,6 +94,7 @@ impl ModelBackend {
     }
 
     /// Default Ollama backend (phi3.5, local, handles Trivial + Simple).
+    #[must_use] 
     pub fn ollama_default() -> Self {
         Self {
             name: "ollama-phi3.5".into(),
@@ -107,6 +110,7 @@ impl ModelBackend {
     }
 
     /// Default Claude backend (sonnet, handles all tiers).
+    #[must_use] 
     pub fn claude_default() -> Self {
         Self {
             name: "claude-sonnet".into(),
@@ -129,6 +133,7 @@ impl ModelBackend {
     ///
     /// Local backends (heuristic, Ollama) return `false`.
     /// Cloud backends (Claude, OpenAI-compat) return `true`.
+    #[must_use] 
     pub fn is_cloud_provider(&self) -> bool {
         matches!(
             self.kind,
@@ -137,6 +142,7 @@ impl ModelBackend {
     }
 
     /// Returns a human-readable provider name for logging and error messages.
+    #[must_use] 
     pub fn provider_name(&self) -> &'static str {
         match &self.kind {
             BackendKind::Heuristic => "heuristic",
@@ -223,6 +229,7 @@ pub struct TaskClassifier;
 
 impl TaskClassifier {
     /// Classify an event into a task complexity level.
+    #[must_use] 
     pub fn classify(event: &AiEvent) -> TaskComplexity {
         match event {
             // Error detection / triage — heuristics can handle this.
@@ -265,6 +272,7 @@ pub struct BrainRouter {
 
 impl BrainRouter {
     /// Create a new router with the given configuration.
+    #[must_use] 
     pub fn new(config: RouterConfig) -> Self {
         Self {
             config,
@@ -277,6 +285,7 @@ impl BrainRouter {
     ///
     /// When privacy mode is active, cloud backends are excluded from the
     /// candidate set — only local backends (heuristic, Ollama) are returned.
+    #[must_use] 
     pub fn route(&self, complexity: TaskComplexity) -> Vec<&ModelBackend> {
         let mut candidates: Vec<&ModelBackend> = self
             .config
@@ -378,11 +387,13 @@ impl BrainRouter {
     }
 
     /// Get the confidence threshold for cascade escalation.
+    #[must_use] 
     pub fn confidence_threshold(&self) -> f32 {
         self.config.confidence_threshold
     }
 
     /// Whether cascade mode is enabled.
+    #[must_use] 
     pub fn cascade_enabled(&self) -> bool {
         self.config.cascade
     }
@@ -396,6 +407,7 @@ impl BrainRouter {
     }
 
     /// Returns `true` if privacy mode is currently active.
+    #[must_use] 
     pub fn privacy_mode(&self) -> bool {
         self.config.privacy_mode
     }
@@ -409,6 +421,7 @@ impl BrainRouter {
     }
 
     /// Returns `true` if offline mode is currently active.
+    #[must_use] 
     pub fn offline_mode(&self) -> bool {
         self.config.offline_mode
     }

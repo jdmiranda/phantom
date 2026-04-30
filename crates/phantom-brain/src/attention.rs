@@ -110,6 +110,7 @@ impl Attention {
     /// Create an [`Attention`] head with the default tuning constants.
     ///
     /// Weights: error=0.4, focus=0.3, activity=0.2, distress=0.1.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             error_weight: 0.4,
@@ -128,6 +129,7 @@ impl Attention {
     ///
     /// Empty input returns an empty vec. A single pane always scores whatever
     /// its signals dictate (not necessarily 1.0).
+    #[must_use] 
     pub fn rank(&self, panes: &[PaneSnapshot]) -> Vec<(AdapterId, f32)> {
         let mut scores: Vec<(AdapterId, f32)> =
             panes.iter().map(|p| (p.id, self.score(p))).collect();

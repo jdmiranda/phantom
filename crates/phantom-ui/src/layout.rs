@@ -40,6 +40,7 @@ pub struct PaneId(NodeId);
 
 impl PaneId {
     /// Returns the underlying taffy `NodeId`.
+    #[must_use] 
     pub fn node_id(self) -> NodeId {
         self.0
     }
@@ -266,6 +267,7 @@ impl LayoutEngine {
     }
 
     /// Return the number of direct children of the content area.
+    #[must_use] 
     pub fn pane_count(&self) -> usize {
         self.tree.child_count(self.content)
     }
@@ -322,11 +324,13 @@ impl LayoutEngine {
     /// status bar) as well as all live pane nodes. Use this to assert that
     /// spawn-close cycles do not permanently grow the tree.
     #[cfg(any(test, feature = "test-utils"))]
+    #[must_use] 
     pub fn total_node_count(&self) -> usize {
         self.tree.total_node_count()
     }
 
     /// Return the root `NodeId` (useful for debugging / printing).
+    #[must_use] 
     pub fn root(&self) -> NodeId {
         self.root
     }
@@ -700,6 +704,7 @@ mod tests {
     ///   1. `add_pane` → 1 leaf (A)
     ///   2. `split_horizontal(A)` → container A promoted, leaves L and R
     ///   3. `split_vertical(L)` → L promoted to container, leaves T and B
+    ///
     ///   Result: 3 leaves (T, B, R) and 2 container nodes (A, L)
     ///
     /// Act: close all three leaves (T, B, R).

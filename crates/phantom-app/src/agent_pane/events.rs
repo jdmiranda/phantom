@@ -122,7 +122,7 @@ impl AgentPane {
             .unwrap_or("Sense");
 
         let payload = build_blocked_payload(
-            self.agent.id() as u64,
+            self.agent.id(),
             role_label,
             &reason,
             now_unix_ms(),

@@ -24,16 +24,19 @@ bitflags::bitflags! {
 
 impl DirtyFlags {
     /// Returns `true` when no flags are set — node is fully up-to-date.
+    #[must_use] 
     pub fn is_clean(self) -> bool {
         self.is_empty()
     }
 
     /// Returns `true` when the node's render data needs re-upload.
+    #[must_use] 
     pub fn needs_upload(self) -> bool {
         self.contains(Self::CONTENT)
     }
 
     /// Returns `true` when the node's layout / world transform is stale.
+    #[must_use] 
     pub fn needs_layout(self) -> bool {
         self.contains(Self::TRANSFORM)
     }

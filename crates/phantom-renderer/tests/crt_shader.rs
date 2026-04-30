@@ -114,7 +114,7 @@ fn crt_global_bindings() -> std::collections::HashMap<String, ResourceBinding> {
         .filter_map(|(_, var)| {
             var.binding
                 .as_ref()
-                .map(|b| (var.name.clone().unwrap_or_default(), b.clone()))
+                .map(|b| (var.name.clone().unwrap_or_default(), *b))
         })
         .collect()
 }

@@ -187,6 +187,7 @@ pub const READ_FROM_AGENT_CAP: usize = 20;
 ///
 /// [`read_from_agent`] reads `payload.from.label` to filter, so the
 /// `from.label` field must always be present and a string.
+#[must_use] 
 pub fn encode_speak_event(ev: &SpeakEvent) -> serde_json::Value {
     let body = match &ev.body {
         SpeakBody::Text(s) => serde_json::json!({"kind": "text", "text": s}),

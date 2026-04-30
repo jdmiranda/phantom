@@ -128,11 +128,10 @@ async fn handle_connection(
                 b"PONG".to_vec(),
                 0,
             );
-            if let Ok(wire) = pong.to_wire() {
-                if let Some(tx) = peers_clone.lock().await.get(&env.from) {
+            if let Ok(wire) = pong.to_wire()
+                && let Some(tx) = peers_clone.lock().await.get(&env.from) {
                     let _ = tx.send(wire);
                 }
-            }
             continue;
         }
 

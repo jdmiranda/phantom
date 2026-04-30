@@ -649,8 +649,7 @@ fn find_swift_runtime_path() -> Option<String> {
     if let Ok(output) = std::process::Command::new("xcrun")
         .args(["--show-sdk-path"])
         .output()
-    {
-        if output.status.success() {
+        && output.status.success() {
             let sdk = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !sdk.is_empty() {
                 let candidate = format!("{sdk}/usr/lib/swift");
@@ -659,7 +658,6 @@ fn find_swift_runtime_path() -> Option<String> {
                 }
             }
         }
-    }
 
     // --- Strategy 2: well-known system path ------------------------------------
     let fallback = "/usr/lib/swift";

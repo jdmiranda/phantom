@@ -125,6 +125,7 @@ impl AgentStatus {
     /// | Paused            | Working           | (backend restored / user resumed)
     /// | Failed            | Queued            | (retry)
     /// | Flatline          | Queued            | (manual retry)
+    #[must_use] 
     pub fn can_transition_to(&self, next: &AgentStatus) -> bool {
         use AgentStatus::*;
         matches!(
@@ -296,6 +297,7 @@ impl Agent {
     ///
     /// Use [`Agent::with_correlation`] when spawning inside a tracked pipeline
     /// run to propagate the causality token.
+    #[must_use] 
     pub fn new(id: AgentId, task: AgentTask) -> Self {
         Self {
             id,
@@ -366,7 +368,7 @@ impl Agent {
     /// This escape hatch exists only for internal infrastructure code
     /// (manager promotion, render-loop bookkeeping) that needs to force a
     /// specific state without going through the full FSM.
-    pub(crate) fn set_status(&mut self, status: AgentStatus) {
+    pub fn set_status(&mut self, status: AgentStatus) {
         self.status = status;
     }
 
@@ -448,11 +450,13 @@ impl Agent {
     ///
     /// Returns `None` when no `RunCommand` results have been pushed yet
     /// (i.e. the ring-buffer is empty), so callers can skip injection.
+    #[must_use] 
     pub fn semantic_prompt_section(&self) -> Option<String> {
         self.semantic_ctx.as_prompt_section()
     }
 
     /// Immutable access to the agent's semantic context.
+    #[must_use] 
     pub fn semantic_ctx(&self) -> &SemanticContext {
         &self.semantic_ctx
     }
@@ -501,11 +505,10 @@ impl Agent {
             if chain.len() >= depth {
                 break;
             }
-            if let AgentMessage::ToolResult(tr) = msg {
-                if let Some(id) = tr.source_event_id {
+            if let AgentMessage::ToolResult(tr) = msg
+                && let Some(id) = tr.source_event_id {
                     chain.push(id);
                 }
-            }
         }
         chain
     }
@@ -651,6 +654,7 @@ impl Agent {
     }
 
     /// Duration since creation.
+    #[must_use] 
     pub fn elapsed(&self) -> Duration {
         self.created_at.elapsed()
     }
@@ -659,6 +663,7 @@ impl Agent {
     ///
     /// This prompt is sent as the first message when the agent begins work.
     /// It establishes the agent's role, constraints, and expected output format.
+    #[must_use] 
     pub fn system_prompt(&self) -> String {
         let skill_hint = "\n\nCheck project memory for relevant skills before starting.";
 
@@ -732,6 +737,7 @@ impl Agent {
     ///
     /// Used by the agent pane to save completed conversations to disk for
     /// debugging and replay.
+    #[must_use] 
     pub fn to_json(&self) -> serde_json::Value {
         let messages: Vec<serde_json::Value> = self
             .messages
@@ -773,6 +779,7 @@ impl Agent {
     }
 
     /// Get a one-line status description for display in the UI.
+    #[must_use] 
     pub fn status_line(&self) -> String {
         let task_summary = match &self.task {
             AgentTask::FixError { error_summary, .. } => {
@@ -943,11 +950,10 @@ impl AgentSpawnOpts {
         if let Some(ref m) = self.chat_model {
             return m.clone();
         }
-        if let Ok(s) = std::env::var("PHANTOM_AGENT_MODEL") {
-            if let Some(m) = crate::chat::ChatModel::from_env_str(&s) {
+        if let Ok(s) = std::env::var("PHANTOM_AGENT_MODEL")
+            && let Some(m) = crate::chat::ChatModel::from_env_str(&s) {
                 return m;
             }
-        }
         crate::chat::ChatModel::default()
     }
 }

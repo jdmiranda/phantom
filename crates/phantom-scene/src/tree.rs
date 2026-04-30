@@ -16,6 +16,7 @@ pub struct SceneTree {
 
 impl SceneTree {
     /// Create a new tree with a single `Root` node at index 0.
+    #[must_use] 
     pub fn new() -> Self {
         let root_node = SceneNode::new(0, NodeKind::Root);
         Self {
@@ -28,11 +29,13 @@ impl SceneTree {
     // ── Accessors ───────────────────────────────────────────────────────
 
     /// Root node ID (always 0).
+    #[must_use] 
     pub fn root(&self) -> NodeId {
         self.root
     }
 
     /// Get a node by ID. Returns `None` for out-of-range or tombstoned slots.
+    #[must_use] 
     pub fn get(&self, id: NodeId) -> Option<&SceneNode> {
         self.nodes.get(id as usize).filter(|n| n.alive)
     }
@@ -43,6 +46,7 @@ impl SceneTree {
     }
 
     /// Total number of *alive* nodes (excludes tombstones).
+    #[must_use] 
     pub fn node_count(&self) -> usize {
         self.nodes.iter().filter(|n| n.alive).count()
     }
@@ -70,11 +74,10 @@ impl SceneTree {
         self.nodes[id as usize] = node;
 
         // Register as child of parent.
-        if let Some(parent_node) = self.nodes.get_mut(parent as usize) {
-            if parent_node.alive {
+        if let Some(parent_node) = self.nodes.get_mut(parent as usize)
+            && parent_node.alive {
                 parent_node.children.push(id);
             }
-        }
 
         // Propagate CHILDREN dirty flag up.
         self.propagate_children_dirty(parent);
@@ -92,14 +95,13 @@ impl SceneTree {
         let descendants = self.walk_descendants(id);
 
         // Detach from parent.
-        if let Some(node) = self.nodes.get(id as usize) {
-            if let Some(parent_id) = node.parent {
+        if let Some(node) = self.nodes.get(id as usize)
+            && let Some(parent_id) = node.parent {
                 if let Some(parent) = self.nodes.get_mut(parent_id as usize) {
                     parent.children.retain(|&c| c != id);
                 }
                 self.propagate_children_dirty(parent_id);
             }
-        }
 
         // Tombstone self + all descendants.
         for &desc_id in &descendants {
@@ -225,6 +227,7 @@ impl SceneTree {
     // ── Queries ─────────────────────────────────────────────────────────
 
     /// Return IDs of all nodes that need content re-upload, sorted by z-order.
+    #[must_use] 
     pub fn dirty_nodes(&self) -> Vec<NodeId> {
         let mut result: Vec<_> = self
             .nodes
@@ -238,6 +241,7 @@ impl SceneTree {
 
     /// Return IDs of all visible nodes in a specific render layer,
     /// sorted by z-order (ascending — lower draws first).
+    #[must_use] 
     pub fn visible_nodes(&self, layer: RenderLayer) -> Vec<NodeId> {
         let mut result: Vec<_> = self
             .nodes
@@ -251,6 +255,7 @@ impl SceneTree {
 
     /// Walk all descendants of `root_id` in depth-first order.
     /// Does **not** include `root_id` itself.
+    #[must_use] 
     pub fn walk_descendants(&self, root_id: NodeId) -> Vec<NodeId> {
         let mut result = Vec::new();
         let mut stack = Vec::new();

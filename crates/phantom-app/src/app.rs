@@ -1185,7 +1185,7 @@ impl App {
     /// survives SIGKILL mid-frame).
     pub fn watchdog_trace(&mut self, interval: u64) -> Option<String> {
         self.watchdog_frame += 1;
-        if self.watchdog_frame % interval != 0 {
+        if !self.watchdog_frame.is_multiple_of(interval) {
             return None;
         }
         let state = match self.state {
@@ -1476,8 +1476,8 @@ impl App {
 
         // Resize coordinator-managed adapters to match new layout dimensions.
         for app_id in self.coordinator.all_app_ids() {
-            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
-                if let Ok(rect) = self.layout.get_pane_rect(pane_id) {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id)
+                && let Ok(rect) = self.layout.get_pane_rect(pane_id) {
                     let (cols, rows) = pane_cols_rows(self.cell_size, rect);
                     let _ = self.coordinator.send_command(
                         app_id,
@@ -1486,7 +1486,6 @@ impl App {
                     );
                     trace!("Adapter {app_id} resized to {cols}x{rows}");
                 }
-            }
         }
 
         // Update scene graph root transform.

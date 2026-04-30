@@ -240,16 +240,19 @@ impl McpClient {
     }
 
     /// Tools discovered during the last `list_tools` call (cached locally).
+    #[must_use] 
     pub fn available_tools(&self) -> &[McpToolDef] {
         &self.cached_tools
     }
 
     /// Resources discovered during the last `list_resources` call (cached locally).
+    #[must_use] 
     pub fn available_resources(&self) -> &[McpResourceDef] {
         &self.cached_resources
     }
 
     /// Server capabilities returned during `initialize`.
+    #[must_use] 
     pub fn server_capabilities(&self) -> &serde_json::Value {
         &self.server_capabilities
     }

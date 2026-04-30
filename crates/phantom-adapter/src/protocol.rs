@@ -44,12 +44,14 @@ impl AdapterId {
     /// Prefer [`AdapterIdGen::next`] in production code; this constructor
     /// is provided for testing and deserialization.
     #[inline]
+    #[must_use] 
     pub const fn new(raw: u64) -> Self {
         Self(raw)
     }
 
     /// Return the underlying `u64`.
     #[inline]
+    #[must_use] 
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -67,6 +69,7 @@ impl AdapterId {
     /// Real ids start at `1` (see [`AdapterIdGen::new`]). `0` is permanently
     /// reserved as the sentinel and is never emitted by the generator.
     #[inline]
+    #[must_use] 
     pub const fn is_sentinel(self) -> bool {
         self.0 == 0
     }
@@ -101,6 +104,7 @@ pub struct AdapterIdGen {
 
 impl AdapterIdGen {
     /// Create a new generator starting at 1.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             counter: AtomicU64::new(1),
@@ -181,6 +185,7 @@ pub enum AdapterEvent {
 impl AdapterEvent {
     /// Return the [`AdapterId`] that this event concerns.
     #[inline]
+    #[must_use] 
     pub fn adapter_id(&self) -> AdapterId {
         match self {
             AdapterEvent::Spawned { id }
@@ -230,6 +235,7 @@ pub struct EventStream {
 
 impl EventStream {
     /// Create an empty stream.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             buf: VecDeque::with_capacity(32),
@@ -251,11 +257,13 @@ impl EventStream {
     }
 
     /// Number of buffered events.
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
     /// Whether the stream has no buffered events.
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }

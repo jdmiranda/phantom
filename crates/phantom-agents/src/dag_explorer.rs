@@ -67,6 +67,7 @@ pub enum NodeStatus {
 
 impl NodeStatus {
     /// Whether this status is terminal (no further state transitions possible).
+    #[must_use] 
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Complete | Self::Failed | Self::Skipped)
     }
@@ -129,6 +130,7 @@ pub struct DagStore {
 
 impl DagStore {
     /// Create a new, empty store.
+    #[must_use] 
     pub fn new() -> Self {
         Self { nodes: HashMap::new(), next_id: 1 }
     }
@@ -155,6 +157,7 @@ impl DagStore {
     }
 
     /// Get an immutable reference to a node by id.
+    #[must_use] 
     pub fn get(&self, id: u64) -> Option<&DagNode> {
         self.nodes.get(&id)
     }
@@ -165,6 +168,7 @@ impl DagStore {
     }
 
     /// Collect all nodes, sorted by id.
+    #[must_use] 
     pub fn all_nodes(&self) -> Vec<&DagNode> {
         let mut nodes: Vec<&DagNode> = self.nodes.values().collect();
         nodes.sort_by_key(|n| n.id);
@@ -172,6 +176,7 @@ impl DagStore {
     }
 
     /// All edges as `(parent_id, child_id)` pairs where `child` depends on `parent`.
+    #[must_use] 
     pub fn all_edges(&self) -> Vec<(u64, u64)> {
         let mut edges: Vec<(u64, u64)> = self
             .nodes
@@ -188,6 +193,7 @@ impl DagStore {
     /// on `B` AND `B` has not yet reached a terminal status.
     ///
     /// Returns ids in BFS order (closest blockers first).
+    #[must_use] 
     pub fn find_blocking(&self, target_id: u64) -> Vec<u64> {
         let mut blockers: Vec<u64> = Vec::new();
         let mut visited: HashSet<u64> = HashSet::new();
@@ -229,6 +235,7 @@ impl DagStore {
     /// Uses a simple BFS-based longest-path search; valid because DAGs are
     /// acyclic. A cycle (invalid input) causes the walk to terminate early via
     /// the visited guard.
+    #[must_use] 
     pub fn critical_path(&self, target_id: u64) -> Vec<u64> {
         // dist[id] = (max depth from target, predecessor id)
         let mut dist: HashMap<u64, (usize, Option<u64>)> = HashMap::new();

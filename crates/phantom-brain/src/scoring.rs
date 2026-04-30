@@ -75,6 +75,7 @@ pub struct UtilityScorer {
 
 impl UtilityScorer {
     /// Create a scorer with default (silent) initial state.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             idle_time: 0.0,
@@ -192,6 +193,7 @@ impl UtilityScorer {
     /// - **0.7** if idle > 10s after an error (user might be stuck).
     /// - **0.3** if idle > 30s without an error (user might want context).
     /// - **0.0** if user is actively typing (idle < 5s).
+    #[must_use] 
     pub fn explain_score(&self, parsed: &ParsedOutput, idle_time: f32) -> ScoredAction {
         // Suppress "user stuck" heuristic when inside a REPL session.
         const REPL_COMMANDS: &[&str] = &[
@@ -278,6 +280,7 @@ impl UtilityScorer {
     ///
     /// - **0.6** if a new pattern is detected (key not already in memory).
     /// - **0.1** otherwise (pattern already known).
+    #[must_use] 
     pub fn memory_score(&self, event: &AiEvent, memory: &MemoryStore) -> ScoredAction {
         match event {
             AiEvent::CommandComplete(parsed) => {
@@ -320,6 +323,7 @@ impl UtilityScorer {
     ///
     /// - **0.5** if a long-running process is *actively running*.
     /// - **0.0** otherwise (just having build commands isn't enough).
+    #[must_use] 
     pub fn watcher_score(&self, _context: &ProjectContext) -> ScoredAction {
         // Disabled: watcher was the source of "Want me to watch this build?" spam.
         // The WatcherTick event path that sets has_active_process is never triggered
@@ -337,6 +341,7 @@ impl UtilityScorer {
     /// - **0.8** for agent completion events.
     /// - **0.4** for file/git changes.
     /// - **0.0** for everything else.
+    #[must_use] 
     pub fn notification_score(&self, event: &AiEvent) -> ScoredAction {
         match event {
             AiEvent::AgentComplete { summary, .. } => ScoredAction {
@@ -366,6 +371,7 @@ impl UtilityScorer {
     ///
     /// Starts at 0.5 and increases with the chattiness dampener. The more
     /// we've suggested recently, the higher the bar to suggest again.
+    #[must_use] 
     pub fn quiet_score(&self) -> ScoredAction {
         // Baseline score the brain must beat to act. 0.3 prevents noise while
         // still allowing real errors (0.9) and explanations (0.7) through.
@@ -393,19 +399,16 @@ impl UtilityScorer {
         }
 
         // Collect all candidate scores.
-        let mut candidates: Vec<ScoredAction> = Vec::new();
-
-        // Always include the quiet baseline.
-        candidates.push(self.quiet_score());
-
-        // Notification scorer — applicable to many event types.
-        candidates.push(self.notification_score(event));
-
-        // Memory scorer.
-        candidates.push(self.memory_score(event, memory));
-
-        // Watcher scorer.
-        candidates.push(self.watcher_score(context));
+        let mut candidates: Vec<ScoredAction> = vec![
+            // Always include the quiet baseline.
+            self.quiet_score(),
+            // Notification scorer — applicable to many event types.
+            self.notification_score(event),
+            // Memory scorer.
+            self.memory_score(event, memory),
+            // Watcher scorer.
+            self.watcher_score(context),
+        ];
 
         // Scorers that need a ParsedOutput.
         if let AiEvent::CommandComplete(parsed) = event {
@@ -415,8 +418,8 @@ impl UtilityScorer {
         }
 
         // If idle event, try explain with a synthetic parsed output state.
-        if let AiEvent::UserIdle { seconds } = event {
-            if self.last_had_errors {
+        if let AiEvent::UserIdle { seconds } = event
+            && self.last_had_errors {
                 // Create a minimal "has errors" marker for explain_score.
                 let synthetic = ParsedOutput {
                     command: String::new(),
@@ -440,7 +443,6 @@ impl UtilityScorer {
                 };
                 candidates.push(self.explain_score(&synthetic, *seconds));
             }
-        }
 
         // Pick the highest-scoring action.
         let mut best = candidates
@@ -469,15 +471,14 @@ impl UtilityScorer {
         }
 
         // Gate 2: Dedup — suppress if we recently showed the same suggestion text.
-        if let AiAction::ShowSuggestion { ref text, .. } = best.action {
-            if self.is_duplicate(text) {
+        if let AiAction::ShowSuggestion { ref text, .. } = best.action
+            && self.is_duplicate(text) {
                 return ScoredAction {
                     action: AiAction::DoNothing,
                     score: 0.0,
                     reason: format!("suppressed duplicate: {}", text),
                 };
             }
-        }
 
         // Gate 3: Cooldown — enforce minimum gap between actions.
         if !matches!(best.action, AiAction::DoNothing) && self.on_cooldown() {
@@ -574,6 +575,7 @@ impl Default for UtilityScorer {
 #[cfg(test)]
 impl UtilityScorer {
     /// Create a scorer with a pre-set last_action_time for testing.
+    #[must_use] 
     pub fn new_with_expired_cooldown() -> Self {
         let mut s = Self::new();
         // Set last_action_time far enough in the past that cooldown is expired.

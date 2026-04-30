@@ -60,6 +60,7 @@ impl AppCoordinator {
     /// The arbiter is initialized with zero size; call
     /// `set_arbiter_size()` once the window content area and cell size
     /// are known (typically right after window creation).
+    #[must_use] 
     pub fn new(bus: EventBus) -> Self {
         Self {
             registry: AppRegistry::new(),
@@ -378,6 +379,7 @@ impl AppCoordinator {
     ///
     /// `cell_size` is required because chrome insets are expressed in
     /// multiples of cell metrics (see [`crate::pane::pane_inner_rect`]).
+    #[must_use] 
     pub fn render_all(
         &self,
         layout: &LayoutEngine,
@@ -445,8 +447,8 @@ impl AppCoordinator {
     /// Sync positions into the scene graph from a layout plan.
     pub fn sync_arbiter_to_scene(&self, plan: &LayoutPlan, scene: &mut SceneTree) {
         for (&app_id, rect) in &plan.allocations {
-            if let Some(&node_id) = self.scene_map.get(&app_id) {
-                if let Some(node) = scene.get_mut(node_id) {
+            if let Some(&node_id) = self.scene_map.get(&app_id)
+                && let Some(node) = scene.get_mut(node_id) {
                     node.transform.x = rect.x;
                     node.transform.y = rect.y;
                     node.transform.width = rect.width;
@@ -460,16 +462,16 @@ impl AppCoordinator {
                         rect.height,
                     );
                 }
-            }
         }
     }
 
     /// Build a `LayoutPlan` from the current Taffy layout.
+    #[must_use] 
     pub fn build_layout_plan(&self, layout: &LayoutEngine) -> LayoutPlan {
         let mut allocations = HashMap::new();
         for id in self.registry.all_running() {
-            if let Some(pane_id) = self.app_pane_map.get(&id) {
-                if let Ok(r) = layout.get_pane_rect(*pane_id) {
+            if let Some(pane_id) = self.app_pane_map.get(&id)
+                && let Ok(r) = layout.get_pane_rect(*pane_id) {
                     allocations.insert(
                         id,
                         Rect {
@@ -481,7 +483,6 @@ impl AppCoordinator {
                         },
                     );
                 }
-            }
         }
         LayoutPlan { allocations }
     }
@@ -489,6 +490,7 @@ impl AppCoordinator {
     /// Scene-graph-aware render: reads positions from world_transform,
     /// sorted by z_order (lowest first = drawn first = behind).
     /// Focused adapter gets +1 z_order bonus.
+    #[must_use] 
     pub fn render_all_with_scene(&self, scene: &SceneTree) -> Vec<(AppId, Rect, RenderOutput)> {
         let mut outputs = Vec::new();
         for id in self.registry.all_running() {
@@ -538,6 +540,7 @@ impl AppCoordinator {
     }
 
     /// Query which render layer an adapter's scene node belongs to.
+    #[must_use] 
     pub fn render_layer_for(&self, app_id: AppId, scene: &SceneTree) -> RenderLayer {
         self.scene_map
             .get(&app_id)
@@ -548,6 +551,7 @@ impl AppCoordinator {
 
     /// Collect render outputs partitioned by RenderLayer.
     #[allow(dead_code)]
+    #[must_use] 
     pub fn render_all_layered(
         &self,
         layout: &LayoutEngine,
@@ -603,8 +607,8 @@ impl AppCoordinator {
         self.floating.insert(app_id);
         self.float_rects.insert(app_id, rect.clone());
 
-        if let Some(&node_id) = self.scene_map.get(&app_id) {
-            if let Some(node) = scene.get_mut(node_id) {
+        if let Some(&node_id) = self.scene_map.get(&app_id)
+            && let Some(node) = scene.get_mut(node_id) {
                 node.z_order = 50;
                 node.render_layer = RenderLayer::Overlay;
                 node.transform.x = rect.x;
@@ -613,7 +617,6 @@ impl AppCoordinator {
                 node.transform.height = rect.height;
                 node.dirty |= DirtyFlags::TRANSFORM;
             }
-        }
 
         self.run_arbiter_negotiation(layout);
         log::info!(
@@ -626,13 +629,16 @@ impl AppCoordinator {
     }
 
     /// Get the scene node ID for an adapter, if it exists.
+    #[must_use] 
     pub fn scene_node_for(&self, app_id: AppId) -> Option<phantom_scene::node::NodeId> {
         self.scene_map.get(&app_id).copied()
     }
 
+    #[must_use] 
     pub fn is_floating(&self, app_id: AppId) -> bool {
         self.floating.contains(&app_id)
     }
+    #[must_use] 
     pub fn float_rect(&self, app_id: AppId) -> Option<&Rect> {
         self.float_rects.get(&app_id)
     }
@@ -677,13 +683,12 @@ impl AppCoordinator {
             }
         }
 
-        if let Some(&node_id) = self.scene_map.get(&app_id) {
-            if let Some(node) = scene.get_mut(node_id) {
+        if let Some(&node_id) = self.scene_map.get(&app_id)
+            && let Some(node) = scene.get_mut(node_id) {
                 node.z_order = 0;
                 node.render_layer = RenderLayer::Scene;
                 node.dirty |= DirtyFlags::TRANSFORM;
             }
-        }
 
         self.run_arbiter_negotiation(layout);
         log::info!("Docked adapter {app_id} back to grid");
@@ -692,12 +697,11 @@ impl AppCoordinator {
     /// Switch an adapter's scene node to a different render layer.
     #[allow(dead_code)]
     pub fn set_render_layer(&self, app_id: AppId, layer: RenderLayer, scene: &mut SceneTree) {
-        if let Some(&node_id) = self.scene_map.get(&app_id) {
-            if let Some(node) = scene.get_mut(node_id) {
+        if let Some(&node_id) = self.scene_map.get(&app_id)
+            && let Some(node) = scene.get_mut(node_id) {
                 node.render_layer = layer;
                 node.dirty |= DirtyFlags::VISIBILITY;
             }
-        }
     }
 
     /// Mark all adapter scene nodes as dirty (call on window resize).
@@ -782,6 +786,7 @@ impl AppCoordinator {
     /// Checks the adapter's state JSON for a `mouse_mode` field that is
     /// not `"none"`. Terminal adapters report this based on DEC mode
     /// tracking (modes 1000/1002/1003).
+    #[must_use] 
     pub fn adapter_wants_mouse(&self, app_id: AppId) -> bool {
         self.registry
             .get_adapter(app_id)
@@ -814,11 +819,13 @@ impl AppCoordinator {
     }
 
     /// The currently focused adapter, if any.
+    #[must_use] 
     pub fn focused(&self) -> Option<AppId> {
         self.focused
     }
 
     /// Get the current state JSON from an adapter.
+    #[must_use] 
     pub fn get_state(&self, app_id: AppId) -> Option<serde_json::Value> {
         let adapter = self.registry.get_adapter(app_id)?;
         Some(adapter.get_state())
@@ -857,6 +864,7 @@ impl AppCoordinator {
     }
 
     /// Number of adapters currently registered (including dead, pre-GC).
+    #[must_use] 
     pub fn adapter_count(&self) -> usize {
         self.registry.count()
     }
@@ -876,21 +884,25 @@ impl AppCoordinator {
     }
 
     /// All app IDs that are currently running.
+    #[must_use] 
     pub fn all_app_ids(&self) -> Vec<AppId> {
         self.registry.all_running()
     }
 
     /// The layout pane associated with an adapter.
+    #[must_use] 
     pub fn pane_id_for(&self, app_id: AppId) -> Option<PaneId> {
         self.app_pane_map.get(&app_id).copied()
     }
 
     /// Look up which adapter owns a given layout pane.
+    #[must_use] 
     pub fn app_id_for_pane(&self, pane_id: PaneId) -> Option<AppId> {
         self.pane_map.get(&pane_id).copied()
     }
 
     /// Immutable access to the event bus.
+    #[must_use] 
     pub fn bus(&self) -> &EventBus {
         &self.bus
     }
@@ -901,6 +913,7 @@ impl AppCoordinator {
     }
 
     /// Immutable access to the app registry.
+    #[must_use] 
     pub fn registry(&self) -> &AppRegistry {
         &self.registry
     }
@@ -932,6 +945,7 @@ impl AppCoordinator {
     ///
     /// Used by the bus-drain loop to populate `ParsedOutput::raw_output`
     /// when a `CommandComplete` event fires (issue #226).
+    #[must_use] 
     pub fn terminal_output_buf(&self, app_id: AppId) -> Option<String> {
         self.registry.get_adapter(app_id)?.output_buf_snapshot()
     }

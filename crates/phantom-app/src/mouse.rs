@@ -25,6 +25,7 @@ use crate::pane::{
 // ---------------------------------------------------------------------------
 
 /// Convert pixel coordinates to terminal cell (col, row).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pixel_to_cell(
     px: f64,
     py: f64,
@@ -129,8 +130,8 @@ impl App {
         let fx = x as f32;
         let fy = y as f32;
         for fid in self.coordinator.floating_ids() {
-            if let Some(rect) = self.coordinator.float_rect(fid) {
-                if fx >= rect.x
+            if let Some(rect) = self.coordinator.float_rect(fid)
+                && fx >= rect.x
                     && fx <= rect.x + rect.width
                     && fy >= rect.y
                     && fy <= rect.y + rect.height
@@ -138,13 +139,12 @@ impl App {
                     self.cursor_over_pane = Some(fid);
                     return;
                 }
-            }
         }
 
         // Hit-test tiled coordinator-managed adapters.
         for app_id in self.coordinator.all_app_ids() {
-            if let Some(pane_id) = self.coordinator.pane_id_for(app_id) {
-                if let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) {
+            if let Some(pane_id) = self.coordinator.pane_id_for(app_id)
+                && let Ok(layout_rect) = self.layout.get_pane_rect(pane_id) {
                     let cr = container_rect(layout_rect, self.cell_size);
                     let inner = pane_inner_rect(self.cell_size, cr);
                     if x as f32 >= inner.x
@@ -157,15 +157,14 @@ impl App {
                         break;
                     }
                 }
-            }
         }
 
         // SGR 1006 motion forwarding: if the focused adapter has mouse tracking
         // enabled, encode cursor movement as an SGR motion sequence and forward
         // to the PTY. Motion mode (1003) sends all moves; Drag mode (1002)
         // only sends while a button is held.
-        if let Some(focused) = self.coordinator.focused() {
-            if self.coordinator.adapter_wants_mouse(focused) {
+        if let Some(focused) = self.coordinator.focused()
+            && self.coordinator.adapter_wants_mouse(focused) {
                 let state = self.coordinator.get_state(focused);
                 let mouse_mode = state
                     .as_ref()
@@ -177,15 +176,13 @@ impl App {
                     "drag" => self.mouse_button_held.is_some(),
                     _ => false,
                 };
-                if forward {
-                    if let Some((col, row)) = self.cursor_to_cell(focused) {
+                if forward
+                    && let Some((col, row)) = self.cursor_to_cell(focused) {
                         let btn = self.mouse_button_held.unwrap_or(TermMouseButton::Left);
                         let sgr = encode_mouse_motion_sgr(btn, col, row);
                         let _ = self.coordinator.route_bytes_to(focused, &sgr);
                     }
-                }
             }
-        }
 
         // If left button is held, update selection (drag-to-select).
         // Skip when SGR mouse tracking is active — the PTY handles its own selection.
@@ -193,18 +190,16 @@ impl App {
             let sgr_active = self
                 .coordinator
                 .focused()
-                .map_or(false, |id| self.coordinator.adapter_wants_mouse(id));
-            if !sgr_active {
-                if let Some(focused) = self.coordinator.focused() {
-                    if let Some((col, row)) = self.cursor_to_cell(focused) {
+                .is_some_and(|id| self.coordinator.adapter_wants_mouse(id));
+            if !sgr_active
+                && let Some(focused) = self.coordinator.focused()
+                    && let Some((col, row)) = self.cursor_to_cell(focused) {
                         let _ = self.coordinator.send_command(
                             focused,
                             "select_update",
                             &serde_json::json!({"col": col, "row": row}),
                         );
                     }
-                }
-            }
         }
     }
 
@@ -266,9 +261,9 @@ impl App {
 
         // SGR mouse forwarding: if the focused adapter has mouse tracking
         // enabled, encode the click/release as SGR 1006 and send to the PTY.
-        if let Some(term_btn) = winit_to_term_button(button) {
-            if let Some(focused) = self.coordinator.focused() {
-                if self.coordinator.adapter_wants_mouse(focused) {
+        if let Some(term_btn) = winit_to_term_button(button)
+            && let Some(focused) = self.coordinator.focused()
+                && self.coordinator.adapter_wants_mouse(focused) {
                     let pressed = state == ElementState::Pressed;
                     if let Some((col, row)) = self.cursor_to_cell(focused) {
                         let sgr = encode_mouse_sgr(term_btn, col, row, pressed);
@@ -276,8 +271,6 @@ impl App {
                         return;
                     }
                 }
-            }
-        }
 
         // End float interaction on release.
         if state == ElementState::Released && self.float_interaction.is_some() {
@@ -322,8 +315,8 @@ impl App {
             let float_ids: Vec<_> = self.coordinator.floating_ids().collect();
             let mut float_focus = None;
             for fid in &float_ids {
-                if let Some(rect) = self.coordinator.float_rect(*fid) {
-                    if fmx >= rect.x
+                if let Some(rect) = self.coordinator.float_rect(*fid)
+                    && fmx >= rect.x
                         && fmx <= rect.x + rect.width
                         && fmy >= rect.y
                         && fmy <= rect.y + rect.height
@@ -331,7 +324,6 @@ impl App {
                         float_focus = Some(*fid);
                         break;
                     }
-                }
             }
             if let Some(fid) = float_focus {
                 if self.coordinator.focused() != Some(fid) {
@@ -385,7 +377,7 @@ impl App {
                 (dx * dx + dy * dy).sqrt() < max_dist
             };
 
-            let rapid = self.last_click_time.map_or(false, |t| {
+            let rapid = self.last_click_time.is_some_and(|t| {
                 now.duration_since(t) < Duration::from_millis(400)
             });
 
@@ -398,15 +390,14 @@ impl App {
             self.last_click_pos = (px, py);
 
             // Clear any existing selection first (single click resets).
-            if self.click_count == 1 {
-                if let Some(focused) = self.coordinator.focused() {
+            if self.click_count == 1
+                && let Some(focused) = self.coordinator.focused() {
                     let _ = self.coordinator.send_command(
                         focused,
                         "select_clear",
                         &serde_json::json!({}),
                     );
                 }
-            }
 
             let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
 
@@ -458,16 +449,15 @@ impl App {
             }
 
             // Click-to-focus: set coordinator focus to the pane under cursor.
-            if let Some(app_id) = self.cursor_over_pane {
-                if self.coordinator.focused() != Some(app_id) {
+            if let Some(app_id) = self.cursor_over_pane
+                && self.coordinator.focused() != Some(app_id) {
                     debug!("Mouse focus: adapter {app_id}");
                     self.coordinator.set_focus(app_id);
                 }
-            }
 
             // Dispatch selection based on click count.
-            if let Some(focused) = self.coordinator.focused() {
-                if let Some((col, row)) = self.cursor_to_cell(focused) {
+            if let Some(focused) = self.coordinator.focused()
+                && let Some((col, row)) = self.cursor_to_cell(focused) {
                     match self.click_count {
                         2 => {
                             // Double-click: select word.
@@ -497,7 +487,6 @@ impl App {
                         }
                     }
                 }
-            }
         }
     }
 
@@ -532,8 +521,8 @@ impl App {
 
         // SGR mouse forwarding: if the focused adapter has mouse tracking
         // enabled, encode scroll as SGR 1006 wheel events.
-        if let Some(focused) = self.coordinator.focused() {
-            if self.coordinator.adapter_wants_mouse(focused) {
+        if let Some(focused) = self.coordinator.focused()
+            && self.coordinator.adapter_wants_mouse(focused) {
                 let btn = if lines > 0.0 {
                     TermMouseButton::ScrollUp
                 } else {
@@ -545,7 +534,6 @@ impl App {
                     return;
                 }
             }
-        }
 
         // Route scroll to focused adapter via command.
         let int_lines = lines.round().abs().max(1.0) as u64;
@@ -593,28 +581,25 @@ impl App {
     fn execute_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::Copy => {
-                if let Some(focused) = self.coordinator.focused() {
-                    if let Ok(text) = self.coordinator.send_command(
+                if let Some(focused) = self.coordinator.focused()
+                    && let Ok(text) = self.coordinator.send_command(
                         focused,
                         "select_copy",
                         &serde_json::json!({}),
-                    ) {
-                        if !text.is_empty() {
+                    )
+                        && !text.is_empty() {
                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                 let _ = clipboard.set_text(&text);
                             }
                             debug!("Context menu: copied {} chars", text.len());
                         }
-                    }
-                }
             }
             MenuAction::Paste => {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    if let Ok(text) = clipboard.get_text() {
+                if let Ok(mut clipboard) = arboard::Clipboard::new()
+                    && let Ok(text) = clipboard.get_text() {
                         self.coordinator.route_bytes(text.as_bytes());
                         debug!("Context menu: pasted {} bytes", text.len());
                     }
-                }
             }
             MenuAction::SelectAll => {
                 if let Some(focused) = self.coordinator.focused() {

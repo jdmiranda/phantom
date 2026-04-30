@@ -518,7 +518,7 @@ mod tests {
     fn base64_encode(data: &[u8]) -> String {
         const TABLE: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut output = String::with_capacity((data.len() + 2) / 3 * 4);
+        let mut output = String::with_capacity(data.len().div_ceil(3) * 4);
         let mut i = 0;
 
         while i + 2 < data.len() {

@@ -148,6 +148,7 @@ impl ClaudeBackend {
     }
 
     /// Create a backend using `claude-sonnet-4-20250514`.
+    #[must_use] 
     pub fn default_model() -> Self {
         Self::new("claude-sonnet-4-20250514")
     }
@@ -210,6 +211,7 @@ impl OllamaBackend {
     }
 
     /// Create a backend using `phi3.5:latest`.
+    #[must_use] 
     pub fn default_model() -> Self {
         Self::new("phi3.5:latest")
     }
@@ -270,6 +272,7 @@ impl OpenAiBackend {
     }
 
     /// Create a backend using the canonical OpenAI API.
+    #[must_use] 
     pub fn openai_default() -> Self {
         Self::new("gpt-4o", "https://api.openai.com/v1")
     }
@@ -402,6 +405,7 @@ pub struct RoutingCatalog {
 
 impl RoutingCatalog {
     /// Create a catalog with only a primary backend.
+    #[must_use] 
     pub fn primary_only(primary: Box<dyn ChatBackend>) -> Self {
         Self {
             primary,
@@ -410,6 +414,7 @@ impl RoutingCatalog {
     }
 
     /// Create a catalog with a primary and a fallback backend.
+    #[must_use] 
     pub fn with_fallback(primary: Box<dyn ChatBackend>, fallback: Box<dyn ChatBackend>) -> Self {
         Self {
             primary,
@@ -420,6 +425,7 @@ impl RoutingCatalog {
     /// Create the default production catalog: Claude primary, Ollama fallback.
     ///
     /// If neither is available the caller gets an `Err` from `chat()`.
+    #[must_use] 
     pub fn default_production() -> Self {
         Self::with_fallback(
             Box::new(ClaudeBackend::default_model()),
@@ -430,12 +436,13 @@ impl RoutingCatalog {
     /// Return a reference to the best available backend.
     ///
     /// This method never blocks for more than a few milliseconds.
+    #[must_use] 
     pub fn route(&self) -> &dyn ChatBackend {
         if self.primary.is_available() {
             return self.primary.as_ref();
         }
-        if let Some(fb) = &self.fallback {
-            if fb.is_available() {
+        if let Some(fb) = &self.fallback
+            && fb.is_available() {
                 log::warn!(
                     "primary backend '{}' unavailable, using fallback '{}'",
                     self.primary.provider_name(),
@@ -443,18 +450,19 @@ impl RoutingCatalog {
                 );
                 return fb.as_ref();
             }
-        }
         // Neither is available — return primary so the caller gets a
         // descriptive error from chat() rather than a silent failure.
         self.primary.as_ref()
     }
 
     /// The primary backend.
+    #[must_use] 
     pub fn primary(&self) -> &dyn ChatBackend {
         self.primary.as_ref()
     }
 
     /// The fallback backend, if any.
+    #[must_use] 
     pub fn fallback(&self) -> Option<&dyn ChatBackend> {
         self.fallback.as_deref()
     }

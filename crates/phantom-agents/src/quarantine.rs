@@ -256,12 +256,11 @@ impl QuarantineRegistry {
             // Already-quarantined agents stay quarantined — Clean resets the
             // *counter* but cannot release a quarantine.
             TaintLevel::Clean => {
-                if let Some(slot) = self.slots.get_mut(&id) {
-                    if !slot.state.is_quarantined() {
+                if let Some(slot) = self.slots.get_mut(&id)
+                    && !slot.state.is_quarantined() {
                         slot.consecutive_tainted = 0;
                         slot.state = QuarantineState::Clean;
                     }
-                }
                 // If no slot yet: agent is already Clean by default — no-op.
                 false
             }

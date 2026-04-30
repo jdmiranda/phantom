@@ -720,7 +720,7 @@ mod tests {
                 let emb = BundleEmbeddings {
                     modality: "text".into(),
                     embedding: Embedding {
-                        vec: vec![f32::from(i16::from(n as i16)) / 8.0, 0.5, 0.25],
+                        vec: vec![f32::from(n as i16) / 8.0, 0.5, 0.25],
                         dim: 3,
                         model: "test".into(),
                     },

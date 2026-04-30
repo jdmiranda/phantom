@@ -220,6 +220,7 @@ pub struct PeerRow {
 
 impl PeerRow {
     /// Construct a peer row with the given id, name, and capabilities.
+    #[must_use] 
     pub fn new(
         peer_id: PeerId,
         display_name: String,
@@ -269,6 +270,7 @@ pub struct InspectorView {
 impl InspectorView {
     /// The view rendered before anything has happened: no agents, no events,
     /// counters at zero. Useful as the renderer's initial state.
+    #[must_use] 
     pub fn empty() -> Self {
         Self {
             agents: Vec::new(),
@@ -309,12 +311,14 @@ pub struct InspectorBuilder {
 }
 
 impl InspectorBuilder {
+    #[must_use] 
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Append an agent row. Insertion order is not preserved — rows are
     /// sorted alphabetically by `agent_ref.label` at [`Self::build`] time.
+    #[must_use] 
     pub fn with_agent(mut self, row: AgentRow) -> Self {
         self.agents.push(row);
         self
@@ -324,6 +328,7 @@ impl InspectorBuilder {
     /// should push most-recent-first if they want the renderer to display
     /// newest-on-top. When more than [`MAX_RECENT_EVENTS`] are pushed the
     /// **oldest** (front of the vec) are dropped at build time.
+    #[must_use] 
     pub fn with_event(mut self, row: EventRow) -> Self {
         self.events.push(row);
         self
@@ -333,18 +338,21 @@ impl InspectorBuilder {
     /// should push most-recent-first if they want the renderer to display
     /// newest-on-top. When more than [`MAX_RECENT_DENIALS`] are pushed the
     /// **oldest** (front of the vec) are dropped at build time.
+    #[must_use] 
     pub fn with_denial(mut self, entry: DenialEntry) -> Self {
         self.denials.push(entry);
         self
     }
 
     /// Append a peer row. Insertion order is preserved.
+    #[must_use] 
     pub fn with_peer(mut self, row: PeerRow) -> Self {
         self.peers.push(row);
         self
     }
 
     /// Set the local node identity for display in the Peers tab.
+    #[must_use] 
     pub fn with_local_node_id(mut self, id: String) -> Self {
         self.local_node_id = id;
         self
@@ -352,6 +360,7 @@ impl InspectorBuilder {
 
     /// Override the derived `spawned_total` counter. Use when the producer
     /// has counted agents that aren't (or no longer are) in the snapshot.
+    #[must_use] 
     pub fn spawned_total(mut self, n: u32) -> Self {
         self.spawned_total_override = Some(n);
         self
@@ -359,11 +368,13 @@ impl InspectorBuilder {
 
     /// Override the derived `running_count` counter. Same rationale as
     /// [`Self::spawned_total`].
+    #[must_use] 
     pub fn running_count(mut self, n: u32) -> Self {
         self.running_count_override = Some(n);
         self
     }
 
+    #[must_use] 
     pub fn build(mut self) -> InspectorView {
         // Sort agents alphabetically by label for stable rendering. We use
         // `sort_by` (not `sort_by_key`) to avoid cloning the label.
@@ -436,6 +447,7 @@ impl InspectorBuilder {
 /// Missing fields in the payload are rendered as `"?"`. The function never
 /// panics, never allocates an unbounded string, and never reaches into the
 /// network or filesystem.
+#[must_use] 
 pub fn summarize_event(kind: &str, payload: &Value) -> String {
     match kind {
         "agent.spawn" => {

@@ -49,6 +49,12 @@ use uuid::Uuid;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CorrelationId(Uuid);
 
+impl Default for CorrelationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CorrelationId {
     /// Generate a fresh, random correlation id.
     #[must_use]
@@ -107,7 +113,7 @@ mod tests {
     #[test]
     fn clone_produces_equal_id() {
         let original = CorrelationId::new();
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned, "cloned id must equal original");
     }
 

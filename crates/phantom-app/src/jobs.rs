@@ -28,6 +28,7 @@ pub struct JobContext {
 }
 
 impl JobContext {
+    #[must_use] 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
@@ -82,6 +83,7 @@ struct JobEnvelope {
 
 impl JobPool {
     /// Create and start a pool with `worker_count` threads.
+    #[must_use] 
     pub fn start_up(worker_count: usize) -> Self {
         let (job_tx, job_rx) = mpsc::channel::<JobEnvelope>();
         let (result_tx, result_rx) = mpsc::channel::<(JobId, JobResult)>();

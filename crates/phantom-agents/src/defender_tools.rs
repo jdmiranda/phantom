@@ -304,7 +304,8 @@ mod tests {
 
     #[test]
     fn defender_tool_api_name_round_trip() {
-        for t in [DefenderTool::ChallengeAgent] {
+        {
+            let t = DefenderTool::ChallengeAgent;
             let parsed = DefenderTool::from_api_name(t.api_name());
             assert_eq!(parsed, Some(t));
         }

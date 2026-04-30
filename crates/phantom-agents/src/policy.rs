@@ -80,11 +80,12 @@ mod tests {
 
     #[test]
     fn policy_fields_are_independently_mutable() {
-        let mut p = AgentPolicy::default();
-        p.max_attempts = 5;
-        p.timeout_seconds = 600;
-        p.auto_approve = true;
-        p.skip_planning = true;
+        let p = AgentPolicy {
+            max_attempts: 5,
+            timeout_seconds: 600,
+            auto_approve: true,
+            skip_planning: true,
+        };
 
         assert_eq!(p.max_attempts, 5);
         assert_eq!(p.timeout_seconds, 600);

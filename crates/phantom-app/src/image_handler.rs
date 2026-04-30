@@ -23,6 +23,7 @@ pub struct ImageHandler {
 
 impl ImageHandler {
     /// Create a new image handler.
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             pending_chunks: HashMap::new(),

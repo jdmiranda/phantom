@@ -68,6 +68,7 @@ pub struct EventBus {
 }
 
 impl EventBus {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             topics: Vec::new(),
@@ -130,6 +131,7 @@ impl EventBus {
     }
 
     /// Number of messages currently queued.
+    #[must_use] 
     pub fn queue_len(&self) -> usize {
         self.queue.len()
     }
@@ -175,11 +177,13 @@ impl EventBus {
     }
 
     /// All registered topics.
+    #[must_use] 
     pub fn topics(&self) -> &[Topic] {
         &self.topics
     }
 
     /// Topics filtered by data type.
+    #[must_use] 
     pub fn topics_by_type(&self, data_type: &DataType) -> Vec<&Topic> {
         self.topics
             .iter()
@@ -188,6 +192,7 @@ impl EventBus {
     }
 
     /// Subscribers for a given topic.
+    #[must_use] 
     pub fn subscribers(&self, topic_id: TopicId) -> Vec<AppId> {
         self.subscriptions
             .get(&topic_id)
@@ -196,11 +201,13 @@ impl EventBus {
     }
 
     /// Number of registered topics.
+    #[must_use] 
     pub fn topic_count(&self) -> usize {
         self.topics.len()
     }
 
     /// Find a topic ID by name.
+    #[must_use] 
     pub fn topic_id_by_name(&self, name: &str) -> Option<TopicId> {
         self.topics.iter().find(|t| t.name == name).map(|t| t.id)
     }

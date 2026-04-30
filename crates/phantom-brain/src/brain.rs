@@ -49,18 +49,20 @@ impl BrainHandle {
     /// Send an event to the brain (non-blocking).
     ///
     /// Returns `Err` if the brain thread has shut down.
-    pub fn send_event(&self, event: AiEvent) -> Result<(), mpsc::SendError<AiEvent>> {
-        self.event_tx.send(event)
+    pub fn send_event(&self, event: AiEvent) -> Result<(), Box<mpsc::SendError<AiEvent>>> {
+        self.event_tx.send(event).map_err(Box::new)
     }
 
     /// Poll for an action from the brain (non-blocking).
     ///
     /// Returns `None` if no action is available yet.
+    #[must_use] 
     pub fn try_recv_action(&self) -> Option<AiAction> {
         self.action_rx.try_recv().ok()
     }
 
     /// Get a clone of the event sender (for fan-in from multiple threads).
+    #[must_use] 
     pub fn event_sender(&self) -> mpsc::Sender<AiEvent> {
         self.event_tx.clone()
     }
@@ -139,6 +141,7 @@ impl Default for BrainConfig {
 /// a lightweight bridge thread forwards events from the external `BrainHandle`
 /// sender into the current iteration's receiver, and forwards actions back,
 /// so the caller observes no interruption.
+#[must_use] 
 pub fn spawn_brain(config: BrainConfig) -> BrainHandle {
     let (event_tx, event_rx) = mpsc::channel::<AiEvent>();
     let (action_tx, action_rx) = mpsc::channel::<AiAction>();
@@ -211,11 +214,7 @@ fn brain_supervised(
     std::thread::Builder::new()
         .name("phantom-brain-bridge".into())
         .spawn(move || {
-            loop {
-                let event = match event_rx.recv() {
-                    Ok(e) => e,
-                    Err(_) => break, // External handle dropped.
-                };
+            while let Ok(event) = event_rx.recv() {
                 let is_shutdown = matches!(event, AiEvent::Shutdown);
                 // Forward to current iteration's channel.
                 let sent = {
@@ -265,13 +264,8 @@ fn brain_supervised(
         }));
 
         // Drain any actions the iteration emitted before it exited / panicked.
-        loop {
-            match iter_action_rx.try_recv() {
-                Ok(action) => {
-                    let _ = action_tx.send(action);
-                }
-                Err(_) => break,
-            }
+        while let Ok(action) = iter_action_rx.try_recv() {
+            let _ = action_tx.send(action);
         }
 
         // Uninstall the stale sender (the Receiver was consumed by the loop).
@@ -396,11 +390,10 @@ fn brain_loop(
                 if !output_buffer.is_empty() && last_output_time.elapsed().as_secs() >= 2 {
                     let batch = std::mem::take(&mut output_buffer);
                     let reply = observe_terminal_output(&batch, &context, &mut router);
-                    if let Some(action) = reply {
-                        if action_tx.send(action).is_err() {
+                    if let Some(action) = reply
+                        && action_tx.send(action).is_err() {
                             break;
                         }
-                    }
                 }
                 // Drive the autonomous task ledger forward on every tick.
                 let mut terminal = false;
@@ -554,12 +547,10 @@ fn brain_loop(
             ref summary,
             spawn_tag,
         } = event
-        {
-            if let Some(ref mut l) = active_ledger {
+            && let Some(ref mut l) = active_ledger {
                 reconciler.on_agent_complete(l, id, success, summary, spawn_tag);
             }
             // Fall through to OODA scoring — notification_score handles this event.
-        }
 
         // Sec.7: consecutive CapabilityDenied → QuarantineAgent.
         //
@@ -620,8 +611,8 @@ fn brain_loop(
         // DIRECT RESPONSE: Interrupt events are explicit user queries from the
         // console. Bypass the utility scorer — the user asked directly, so we
         // always respond. Try Claude first, fall back to heuristic acknowledgement.
-        if let AiEvent::Interrupt(ref query) = event {
-            if !query.is_empty() {
+        if let AiEvent::Interrupt(ref query) = event
+            && !query.is_empty() {
                 let reply = handle_console_query(query, &context, &mut router);
                 if action_tx.send(reply).is_err() {
                     break;
@@ -629,7 +620,6 @@ fn brain_loop(
                 scorer.user_acted();
                 continue;
             }
-        }
 
         // ORIENT: update world model.
         orient(&event, &mut scorer);
@@ -639,8 +629,8 @@ fn brain_loop(
         // per-kind cooldown has elapsed. Short-circuits the utility loop so
         // the proactive and utility-AI signals don't double-fire on the same
         // event.
-        if config.enable_suggestions {
-            if let Some(proactive_action) = proactive.observe(&event) {
+        if config.enable_suggestions
+            && let Some(proactive_action) = proactive.observe(&event) {
                 log::debug!(
                     "AI brain: proactive trigger fired — {}",
                     action_name(&proactive_action)
@@ -650,7 +640,6 @@ fn brain_loop(
                 }
                 continue;
             }
-        }
 
         // CLASSIFY: determine task complexity and select backend cascade.
         let complexity = TaskClassifier::classify(&event);
@@ -1076,6 +1065,7 @@ fn observe_terminal_output(
         trimmed
     };
 
+    let project_type = format!("{:?}", context.project_type);
     let prompt = format!(
         "You are Phantom, an AI brain embedded in a terminal emulator. \
          You are observing a developer working in a {} project ({}).\n\n\
@@ -1084,7 +1074,7 @@ fn observe_terminal_output(
          a potential issue), comment briefly (1 sentence). \
          If the output is routine (successful build, normal ls, etc.), respond with \
          exactly the word QUIET and nothing else.",
-        format!("{:?}", context.project_type),
+        project_type,
         context.name,
         obs,
     );
@@ -1136,12 +1126,13 @@ fn handle_console_query(
             _ => unreachable!(),
         };
 
+        let project_type = format!("{:?}", context.project_type);
         let prompt = format!(
             "You are Phantom, an AI-native terminal emulator's brain. \
              The user is working in a {} project ({}) and typed this in the console:\n\n\
              \"{}\"\n\n\
              Respond concisely (1-3 sentences). Be helpful and direct.",
-            format!("{:?}", context.project_type),
+            project_type,
             context.name,
             query,
         );
@@ -1642,13 +1633,8 @@ mod tests {
                     }));
 
                     // Drain actions.
-                    loop {
-                        match iter_action_rx.try_recv() {
-                            Ok(a) => {
-                                let _ = action_tx.send(a);
-                            }
-                            Err(_) => break,
-                        }
+                    while let Ok(a) = iter_action_rx.try_recv() {
+                        let _ = action_tx.send(a);
                     }
 
                     match result {

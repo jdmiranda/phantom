@@ -32,6 +32,7 @@ pub struct AgentManager {
 
 impl AgentManager {
     /// Create a new manager with the given concurrency limit.
+    #[must_use] 
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             agents: Vec::new(),
@@ -80,6 +81,7 @@ impl AgentManager {
     }
 
     /// Get an agent by ID (immutable).
+    #[must_use] 
     pub fn get(&self, id: AgentId) -> Option<&Agent> {
         self.agents.iter().find(|a| a.id() == id)
     }
@@ -90,11 +92,13 @@ impl AgentManager {
     }
 
     /// Get all agents.
+    #[must_use] 
     pub fn agents(&self) -> &[Agent] {
         &self.agents
     }
 
     /// Get agents with a specific status.
+    #[must_use] 
     pub fn by_status(&self, status: AgentStatus) -> Vec<&Agent> {
         self.agents
             .iter()
@@ -120,6 +124,7 @@ impl AgentManager {
     }
 
     /// How many agents are currently working (Working or WaitingForTool).
+    #[must_use] 
     pub fn active_count(&self) -> usize {
         self.agents
             .iter()
@@ -133,6 +138,7 @@ impl AgentManager {
     }
 
     /// Is there capacity for another agent?
+    #[must_use] 
     pub fn has_capacity(&self) -> bool {
         self.active_count() < self.max_concurrent
     }
@@ -142,14 +148,13 @@ impl AgentManager {
     /// Killable states include all non-terminal states: `Queued`, `Planning`,
     /// `AwaitingApproval`, `Working`, and `WaitingForTool`.
     pub fn kill(&mut self, id: AgentId) -> bool {
-        if let Some(agent) = self.agents.iter_mut().find(|a| a.id() == id) {
-            if !agent.status().is_terminal() {
+        if let Some(agent) = self.agents.iter_mut().find(|a| a.id() == id)
+            && !agent.status().is_terminal() {
                 agent.complete(false);
                 agent.log("[killed by user]");
                 self.promote_queued();
                 return true;
             }
-        }
         false
     }
 

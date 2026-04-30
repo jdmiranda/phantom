@@ -91,6 +91,7 @@ impl SpeakEvent {
 
     /// Construct a heartbeat ping. Carries no payload and is never
     /// individually salient.
+    #[must_use] 
     pub fn status_ping(from: AgentRef) -> Self {
         Self {
             from,
@@ -106,6 +107,7 @@ impl SpeakEvent {
     /// - `User` → always [`SpeechAudience::UserVisible`].
     /// - `Agent(_)` → always [`SpeechAudience::InternalOnly`].
     /// - `Broadcast` → user-visible iff `importance >= 0.5`.
+    #[must_use] 
     pub fn audience(&self) -> SpeechAudience {
         match self.to {
             SpeakTarget::User => SpeechAudience::UserVisible,

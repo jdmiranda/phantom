@@ -258,25 +258,21 @@ impl SttStream {
                     silence_audio_ms = 0;
                     since_interim_ms = 0;
 
-                    if seg_ms >= MIN_SEGMENT_MS {
-                        if let Some(p) =
+                    if seg_ms >= MIN_SEGMENT_MS
+                        && let Some(p) =
                             transcribe_segment(&*self.backend, segment_chunks).await
-                        {
-                            if partial_tx.send(p).await.is_err() {
+                            && partial_tx.send(p).await.is_err() {
                                 return;
                             }
-                        }
-                    }
                 }
             }
         }
 
         // Audio channel closed — flush any remaining segment.
-        if !segment.is_empty() {
-            if let Some(p) = transcribe_segment(&*self.backend, segment).await {
+        if !segment.is_empty()
+            && let Some(p) = transcribe_segment(&*self.backend, segment).await {
                 let _ = partial_tx.send(p).await;
             }
-        }
     }
 }
 

@@ -79,11 +79,13 @@ impl Tab {
     }
 
     /// The display label of this tab.
+    #[must_use] 
     pub fn label(&self) -> &str {
         &self.label
     }
 
     /// The optional badge count for this tab.
+    #[must_use] 
     pub fn badge(&self) -> Option<u32> {
         self.badge
     }
@@ -152,11 +154,13 @@ impl TabStrip {
     }
 
     /// Index of the currently active tab.
+    #[must_use] 
     pub fn active(&self) -> usize {
         self.active
     }
 
     /// Number of tabs in the strip.
+    #[must_use] 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
     }
@@ -175,6 +179,7 @@ impl TabStrip {
     }
 
     /// Advance to the next tab (wraps around). Returns the new active index.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> usize {
         if self.tabs.is_empty() {
             return 0;

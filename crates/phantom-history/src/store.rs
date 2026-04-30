@@ -84,13 +84,12 @@ impl HistoryStore {
         let path = path.into();
 
         // Create the JSONL file's parent directory if it doesn't exist yet.
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).with_context(|| {
                     format!("cannot create history dir: {}", parent.display())
                 })?;
             }
-        }
 
         // Acquire an exclusive advisory lock via a companion `.lock` sidecar.
         // Using a separate sidecar avoids locking the JSONL file itself, which

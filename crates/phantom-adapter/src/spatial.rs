@@ -74,6 +74,7 @@ pub enum NegotiationResult {
 impl SpatialPreference {
     /// Create a minimal preference with just a minimum size.
     /// Preferred size defaults to the minimum, single-pane layout, priority 1.0.
+    #[must_use] 
     pub fn simple(min_cols: u32, min_rows: u32) -> Self {
         Self {
             min_size: (min_cols, min_rows),
@@ -87,6 +88,7 @@ impl SpatialPreference {
     }
 
     /// Set the internal pane count and layout (builder pattern).
+    #[must_use] 
     pub fn with_internal(mut self, panes: u32, layout: InternalLayout) -> Self {
         self.internal_panes = panes;
         self.internal_layout = layout;
@@ -94,12 +96,14 @@ impl SpatialPreference {
     }
 
     /// Set the priority weight (builder pattern).
+    #[must_use] 
     pub fn with_priority(mut self, priority: f32) -> Self {
         self.priority = priority;
         self
     }
 
     /// Returns `true` if the minimum size fits within the given dimensions.
+    #[must_use] 
     pub fn fits_in(&self, width: u32, height: u32) -> bool {
         self.min_size.0 <= width && self.min_size.1 <= height
     }

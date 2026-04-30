@@ -95,6 +95,7 @@ pub struct ReconcilerState {
 }
 
 impl ReconcilerState {
+    #[must_use] 
     pub fn new() -> Self {
         Self {
             active_dispatches: HashMap::new(),
@@ -282,6 +283,7 @@ impl ReconcilerState {
     }
 
     /// Number of agents currently paused waiting for backend recovery.
+    #[must_use] 
     pub fn paused_agent_count(&self) -> usize {
         self.paused_agents.len()
     }
@@ -642,7 +644,7 @@ mod tests {
             AiAction::AgentFlatlined { id, reason } => {
                 // id must match the synthetic agent id so consumers can correlate.
                 assert_eq!(
-                    id as u64, spawn_tag,
+                    id, spawn_tag,
                     "flatlined id must match the spawn_tag"
                 );
                 // reason must be descriptive — not empty, not a placeholder.
