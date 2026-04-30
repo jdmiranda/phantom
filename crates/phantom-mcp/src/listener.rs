@@ -10,6 +10,17 @@
 //!
 //! One thread binds the socket and accepts; each accepted connection gets its
 //! own worker thread. This handles multiple concurrent clients without async.
+//!
+//! # Phase 2: `phantom.spawn_agent` (issue #399)
+//!
+//! [`AppCommand::SpawnAgent`] is the parallel path to `phantom.command "agent …"`.
+//! Unlike the fire-and-forget `PhantomCommand` path, `SpawnAgent` returns the
+//! [`u64`] `AgentId` synchronously, enabling downstream polling via
+//! `phantom.get_agent_status` (issue #400).
+//!
+//! The reply payload is `{ agent_id: <string>, started_at: <iso8601> }`.
+//! `agent_id` is serialised as a decimal string so that JavaScript callers
+//! are not at risk of 53-bit integer truncation.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -88,6 +99,24 @@ pub enum AppCommand {
         value: String,
         reply: SyncSender<Result<String, String>>,
     },
+    /// Spawn an AI agent with the given prompt.
+    ///
+    /// The App thread calls [`phantom_agents::AgentManager::spawn`] with an
+    /// `AgentTask::FreeForm { prompt }` and returns the resulting [`u64`]
+    /// `AgentId` over the reply channel.  The role is validated against
+    /// `["default", "defender", "inspector"]`; any unknown value is coerced to
+    /// `"default"`.
+    ///
+    /// Spawning is fire-and-forget at the agent level: the command returns
+    /// immediately with the id before any tool runs.  Status polling is handled
+    /// by `phantom.get_agent_status` (issue #400).
+    SpawnAgent {
+        /// Free-form prompt describing the task.
+        prompt: String,
+        /// Optional role override (`"default"`, `"defender"`, or `"inspector"`).
+        role: Option<String>,
+        reply: SyncSender<Result<SpawnAgentReply, String>>,
+    },
 }
 
 /// Payload returned for a successful screenshot.
@@ -96,6 +125,19 @@ pub struct ScreenshotReply {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
+}
+
+/// Payload returned for a successful `phantom.spawn_agent` call.
+///
+/// `agent_id` is the canonical `u64` assigned by [`phantom_agents::AgentManager`].
+/// It is exposed as a plain [`u64`] here; the MCP layer serialises it as a
+/// decimal string to avoid JavaScript 53-bit integer truncation.
+#[derive(Debug, Clone)]
+pub struct SpawnAgentReply {
+    /// Stable agent identifier within this Phantom session.
+    pub agent_id: u64,
+    /// ISO-8601 UTC timestamp at the moment the agent was registered.
+    pub started_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +357,8 @@ fn dispatch(
         "phantom.split_pane" => dispatch_split_pane(id, &args, cmd_tx),
         "phantom.get_memory" => dispatch_get_memory(id, &args, cmd_tx),
         "phantom.set_memory" => dispatch_set_memory(id, &args, cmd_tx),
+        // Phase 2 (issue #399): direct agent-spawn returning a stable AgentId.
+        "phantom.spawn_agent" => dispatch_spawn_agent(id, &args, cmd_tx),
         // For every other tool, defer to the stub implementation in `server`.
         _ => server.handle_request(request),
     }
@@ -674,6 +718,88 @@ fn dispatch_set_memory(
 }
 
 // ---------------------------------------------------------------------------
+// phantom.spawn_agent (issue #399)
+// ---------------------------------------------------------------------------
+
+/// Dispatch `phantom.spawn_agent` — spawn an agent and return its stable AgentId.
+///
+/// This is a **parallel path** to `phantom.command "agent …"`.  Unlike that
+/// fire-and-forget path, this dispatcher returns the [`u64`] AgentId so that
+/// Claude can poll for status via `phantom.get_agent_status` (issue #400).
+///
+/// Allowed roles: `"default"` (default), `"defender"`, `"inspector"`.  Any
+/// unrecognised role string is silently coerced to `"default"`.
+///
+/// The reply payload contains:
+/// - `agent_id`   — decimal string (avoids JS 53-bit truncation for large ids).
+/// - `started_at` — ISO-8601 UTC timestamp at spawn time.
+fn dispatch_spawn_agent(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if prompt.is_empty() {
+        return protocol::create_error(id, INVALID_PARAMS, "missing 'prompt' argument");
+    }
+
+    // Validate role against the allowlist; coerce unknown values to "default".
+    let raw_role = args.get("role").and_then(|v| v.as_str()).unwrap_or("default");
+    let role = match raw_role {
+        "defender" | "inspector" | "default" => Some(raw_role.to_owned()),
+        _ => {
+            warn!(
+                "spawn_agent: unknown role '{}', coercing to 'default'",
+                raw_role
+            );
+            Some("default".to_owned())
+        }
+    };
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::SpawnAgent {
+            prompt: prompt.clone(),
+            role,
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(reply)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "agent spawned: id={} started_at={}",
+                        reply.agent_id, reply.started_at
+                    )
+                }],
+                "agent_id": reply.agent_id.to_string(),
+                "started_at": reply.started_at,
+            }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("spawn_agent failed: {e}")}],
+                "isError": true,
+            }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -839,6 +965,50 @@ mod tests {
         let req = r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"phantom.set_memory","arguments":{"key":"","value":"v"}}}"#;
         let resp = send_and_recv(&mut stream, req);
         assert!(resp.contains("missing"), "should reject empty key: {resp}");
+    }
+
+    // ── phantom.spawn_agent ──────────────────────────────────────────────────
+
+    #[test]
+    fn spawn_agent_forwards_to_app_thread_and_returns_agent_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-spawn-agent.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Fake app thread: fulfil SpawnAgent with a deterministic reply.
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::SpawnAgent { prompt, role, reply } = cmd {
+                    let _ = (prompt, role); // consumed
+                    let _ = reply.send(Ok(SpawnAgentReply {
+                        agent_id: 42,
+                        started_at: "2026-04-30T00:00:00Z".to_owned(),
+                    }));
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"phantom.spawn_agent","arguments":{"prompt":"list modified files","role":"default"}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("42"), "expected agent_id 42 in: {resp}");
+        assert!(resp.contains("2026-04-30"), "expected started_at in: {resp}");
+    }
+
+    #[test]
+    fn spawn_agent_rejects_empty_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-spawn-agent-empty.sock");
+        let (cmd_tx, _cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"phantom.spawn_agent","arguments":{"prompt":""}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("missing"), "should reject empty prompt: {resp}");
     }
 
     #[test]

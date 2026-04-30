@@ -192,7 +192,7 @@ impl App {
                             self.console
                                 .output(format!("  model: {}", m.backend_name()));
                         }
-                        if self.spawn_agent_pane_with_opts(opts) {
+                        if self.spawn_agent_pane_with_opts(opts).is_some() {
                             self.console.system("Agent pane opened.");
                             self.console.open = false;
                         } else {

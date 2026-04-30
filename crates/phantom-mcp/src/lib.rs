@@ -22,7 +22,7 @@ pub mod server;
 pub use client::{McpClient, McpResourceDef, McpToolDef};
 pub use error::McpError;
 pub use hub_listener::{HubListener, spawn_hub};
-pub use listener::{spawn as spawn_listener, AppCommand, McpListener, ScreenshotReply};
+pub use listener::{spawn as spawn_listener, AppCommand, McpListener, ScreenshotReply, SpawnAgentReply};
 pub use protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpResource, McpTool,
     create_error, create_request, create_response,

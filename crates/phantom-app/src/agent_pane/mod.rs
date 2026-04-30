@@ -698,6 +698,15 @@ impl AgentPane {
         &self.task
     }
 
+    /// Return the stable [`phantom_agents::AgentId`] assigned at spawn time.
+    ///
+    /// Used by `phantom.spawn_agent` (issue #399) to return a stable id to
+    /// the MCP caller without coupling the hub or listener to the full pane
+    /// lifecycle.
+    pub(crate) fn agent_id(&self) -> u64 {
+        self.agent.id()
+    }
+
     /// Return the current execution status.
     pub(crate) fn status(&self) -> AgentPaneStatus {
         self.status
