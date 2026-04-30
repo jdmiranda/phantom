@@ -517,12 +517,17 @@ fn brain_loop(
         // CLASSIFY: determine task complexity and select backend cascade.
         let complexity = TaskClassifier::classify(&event);
         // Clone the first Ollama backend info so we can release the router borrow.
-        let ollama_backend: Option<ModelBackend> = router
-            .route(complexity)
-            .iter()
-            .find(|b| matches!(b.kind, BackendKind::Ollama { .. }))
-            .cloned()
-            .cloned();
+        let ollama_backend: Option<ModelBackend> = match router.route_checked(complexity) {
+            Ok(backends) => backends
+                .iter()
+                .find(|b| matches!(b.kind, BackendKind::Ollama { .. }))
+                .cloned()
+                .cloned(),
+            Err(e) => {
+                log::warn!("Brain: privacy mode blocked Ollama selection: {e}");
+                None
+            }
+        };
 
         // DECIDE: score all actions via heuristics, pick the best.
         let best = scorer.evaluate(&event, &context, &memory);
@@ -552,12 +557,17 @@ fn brain_loop(
 
         // ESCALATE: for Complex tasks, if Ollama didn't enhance (still heuristic)
         // and Claude is available, escalate to the frontier model.
-        let claude_backend: Option<ModelBackend> = router
-            .route(complexity)
-            .iter()
-            .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
-            .cloned()
-            .cloned();
+        let claude_backend: Option<ModelBackend> = match router.route_checked(complexity) {
+            Ok(backends) => backends
+                .iter()
+                .find(|b| matches!(b.kind, BackendKind::Claude { .. }))
+                .cloned()
+                .cloned(),
+            Err(e) => {
+                log::warn!("Brain: privacy mode blocked Claude selection: {e}");
+                None
+            }
+        };
         let action = enhance_with_claude(
             action,
             &event,
