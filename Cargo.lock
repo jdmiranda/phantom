@@ -5870,6 +5870,7 @@ dependencies = [
  "anyhow",
  "log",
  "phantom-context",
+ "phantom-skill-host",
  "regex",
  "serde",
  "serde_json",
@@ -5994,6 +5995,7 @@ dependencies = [
  "libloading",
  "log",
  "notify",
+ "phantom-nlp",
  "phantom-semantic",
  "tempfile",
 ]

@@ -805,7 +805,10 @@ impl App {
                             &detected
                         }
                     };
-                    match translate(&input_owned, ctx_ref, backend_arc.as_ref()) {
+                    // Wrap the LlmSkill in a LlmSkillAdapter so it satisfies
+                    // the `&dyn LlmBackend` parameter expected by `translate`.
+                    let adapter = phantom_skill_host::LlmSkillAdapter::new(backend_arc);
+                    match translate(&input_owned, ctx_ref, &adapter) {
                         Ok(intent) => {
                             let res = intent_to_translate_result(intent);
                             // `try_send` — if the channel is full (8 queued calls)
