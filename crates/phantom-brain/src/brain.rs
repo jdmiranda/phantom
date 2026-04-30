@@ -486,14 +486,9 @@ fn brain_loop(
                         .build()
                         .expect("brain-relay-bridge rt");
                     rt.block_on(async move {
-                        loop {
-                            match mapped_rx.recv().await {
-                                Some((peer_id, json)) => {
-                                    if fwd_tx.send((peer_id.0, json)).await.is_err() {
-                                        break; // outbound channel closed
-                                    }
-                                }
-                                None => break, // sender dropped (brain shutting down)
+                        while let Some((peer_id, json)) = mapped_rx.recv().await {
+                            if fwd_tx.send((peer_id.0, json)).await.is_err() {
+                                break; // outbound channel closed
                             }
                         }
                     });

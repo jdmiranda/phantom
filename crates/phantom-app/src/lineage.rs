@@ -41,6 +41,7 @@ pub struct PaneLineage {
 
 impl PaneLineage {
     /// Create an empty lineage registry.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -172,10 +173,10 @@ impl PaneLineage {
     // -----------------------------------------------------------------------
 
     fn detach_from_parent(&mut self, pane: AppId) {
-        if let Some(old_parent) = self.parent.remove(&pane) {
-            if let Some(siblings) = self.children.get_mut(&old_parent) {
-                siblings.retain(|&c| c != pane);
-            }
+        if let Some(old_parent) = self.parent.remove(&pane)
+            && let Some(siblings) = self.children.get_mut(&old_parent)
+        {
+            siblings.retain(|&c| c != pane);
         }
     }
 

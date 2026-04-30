@@ -60,6 +60,7 @@ impl AgentManager {
     /// The list is populated by the brain's relay-listener task as peers
     /// advertise their agent rosters. Returns an empty slice when no relay is
     /// connected.
+    #[must_use]
     pub fn remote_agents(&self) -> Vec<&RemoteAgentInfo> {
         self.router.remote_agents()
     }

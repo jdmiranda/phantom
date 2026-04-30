@@ -923,6 +923,7 @@ impl AppCoordinator {
     /// Returns `None` when no matching adapter is registered. Useful for
     /// routing commands to a specific adapter type without knowing its `AppId`
     /// at call time (e.g. the inspector adapter for `dag.*` commands).
+    #[must_use]
     pub fn find_adapter_by_type(&self, ty: &str) -> Option<AppId> {
         self.registry
             .all_running()
@@ -967,6 +968,7 @@ impl AppCoordinator {
     /// The parent pane of `pane`, if any.
     ///
     /// Returns `None` for root panes (those never attached to a parent).
+    #[must_use]
     pub fn lineage_parent_of(&self, pane: AppId) -> Option<AppId> {
         self.lineage.parent_of(pane)
     }
@@ -974,11 +976,13 @@ impl AppCoordinator {
     /// The ordered children of `pane` (insertion order).
     ///
     /// Returns an empty slice when `pane` has no children.
+    #[must_use]
     pub fn lineage_children_of(&self, pane: AppId) -> &[AppId] {
         self.lineage.children_of(pane)
     }
 
     /// Whether `pane` is a root (has no parent).
+    #[must_use]
     pub fn lineage_is_root(&self, pane: AppId) -> bool {
         self.lineage.is_root(pane)
     }
@@ -986,6 +990,7 @@ impl AppCoordinator {
     /// Full ancestry chain from the tree root down to `pane` (inclusive).
     ///
     /// Returns `vec![pane]` for root panes.
+    #[must_use]
     pub fn lineage_chain(&self, pane: AppId) -> Vec<AppId> {
         self.lineage.lineage(pane)
     }
@@ -993,6 +998,7 @@ impl AppCoordinator {
     /// The subtree rooted at `pane` in depth-first pre-order.
     ///
     /// Includes `pane` itself as the first element.
+    #[must_use]
     pub fn lineage_subtree(&self, pane: AppId) -> Vec<AppId> {
         self.lineage.subtree(pane)
     }

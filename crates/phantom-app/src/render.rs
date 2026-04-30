@@ -411,6 +411,7 @@ impl App {
                                 border_radius: 0.0,
                             });
                         }
+                    }
 
                     // Selection is rendered via per-cell inversion in extract_grid_themed.
                 }
@@ -690,6 +691,7 @@ impl App {
                             border_radius: 0.0,
                         });
                     }
+                }
 
                 // Selection is rendered via per-cell inversion in extract_grid_themed.
             }

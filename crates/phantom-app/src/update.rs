@@ -1506,7 +1506,7 @@ mod tests {
         let last_input_time = base + Duration::from_secs(1);
 
         // Build three dummy instants: one before input, two after.
-        let instants = vec![
+        let instants = [
             base,                               // before input — must not count
             last_input_time + Duration::from_millis(100), // after input
             last_input_time + Duration::from_millis(200), // after input
