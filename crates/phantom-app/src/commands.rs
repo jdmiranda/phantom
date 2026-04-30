@@ -437,6 +437,43 @@ impl App {
                     }
                 }
             }
+            cmd if cmd.starts_with("dag.") => {
+                // Route `dag.<op> <json-args>` to the Inspector adapter via
+                // the coordinator command bus.
+                //
+                // Usage examples (from the `` ` `` console):
+                //   dag.focus_node {"id":"phantom_agents::dispatch"}
+                //   dag.zoom {"factor":2.0}
+                //   dag.highlight {"ids":["a","b"]}
+                //   dag.clear_focus
+                //   dag.reset_view
+                //
+                // The coordinator returns a JSON DagCommandResult blob which
+                // we pretty-print to the console.
+                let op = cmd; // e.g. "dag.focus_node"
+                // Everything after the first space is the JSON args (optional).
+                let args_str = input.trim().splitn(2, ' ').nth(1).unwrap_or("{}");
+                let args: serde_json::Value = serde_json::from_str(args_str)
+                    .unwrap_or(serde_json::json!({}));
+
+                // Look for the first inspector adapter registered with the
+                // coordinator and send the command there.
+                let inspector_id = self.coordinator.find_adapter_by_type("inspector");
+                match inspector_id {
+                    None => {
+                        self.console
+                            .error("dag command: no inspector adapter registered");
+                    }
+                    Some(id) => match self.coordinator.send_command(id, op, &args) {
+                        Ok(json_response) => {
+                            self.console.output(json_response);
+                        }
+                        Err(e) => {
+                            self.console.error(format!("dag command error: {e}"));
+                        }
+                    },
+                }
+            }
             "selftest" => {
                 self.console
                     .system("SELFTEST: brain exercising its own features...");
@@ -510,6 +547,8 @@ impl App {
                 self.console
                     .output("  clear               Clear console history");
                 self.console.output("  quit                Exit Phantom");
+                self.console.output("  dag.<op> [json]     DAG viewer commands: focus_node, clear_focus, scroll_to,");
+                self.console.output("                        zoom, highlight, clear_highlight, reset_view");
             }
             _other => {
                 // NLP fallback: try interpreting as natural language.
