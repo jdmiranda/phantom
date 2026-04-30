@@ -84,7 +84,7 @@ fn skill_is_send_sync() {
 /// ```
 #[test]
 #[cfg(all(debug_assertions, feature = "hot-modules"))]
-#[ignore = "requires `cargo build -p phantom-semantic` and PHANTOM_HOT_MODULES=1"]
+#[ignore = "requires cdylib build step and PHANTOM_HOT_MODULES=1; CI harness tracked in #450"]
 fn dylib_load_and_classify() {
     std::env::set_var("PHANTOM_HOT_MODULES", "1");
     let skill = SkillHost::build();
@@ -96,7 +96,7 @@ fn dylib_load_and_classify() {
 /// Verify the vtable `parse` path round-trips through JSON correctly.
 #[test]
 #[cfg(all(debug_assertions, feature = "hot-modules"))]
-#[ignore = "requires `cargo build -p phantom-semantic` and PHANTOM_HOT_MODULES=1"]
+#[ignore = "requires cdylib build step and PHANTOM_HOT_MODULES=1; CI harness tracked in #450"]
 fn dylib_parse_round_trips() {
     std::env::set_var("PHANTOM_HOT_MODULES", "1");
     let skill = SkillHost::build();
