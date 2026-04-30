@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Build as both a normal rlib (for direct linking) AND a cdylib (for
+# phantom-skill-host hot-module loading).  The cdylib artifact lands at
+# `target/debug/libphantom_nlp.{dylib,so,dll}` and exports the
+# `phantom_llm_register` C symbol (see `src/llm_export.rs`).
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 phantom-context = { path = "../phantom-context" }
 log.workspace = true
@@ -26,6 +33,12 @@ test-utils = ["testing"]
 [dev-dependencies]
 # Derive `Default` for test fixtures without touching production code.
 tempfile = "3"
+# Integration tests: verify swap_with_state via LlmHost + LlmSkillAdapter.
+phantom-skill-host = { path = "../phantom-skill-host" }
+phantom-context = { path = "../phantom-context" }
+
+# `swap_with_state` integration test requires `MockLlmBackend`.
+# Run via: cargo test -p phantom-nlp --features testing --test swap_with_state
 
 [lints]
 workspace = true

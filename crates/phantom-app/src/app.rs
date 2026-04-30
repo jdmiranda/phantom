@@ -38,7 +38,7 @@ use phantom_context::ProjectContext;
 use phantom_history::{AgentOutputCapture, HistoryStore};
 use phantom_mcp::{AppCommand, McpListener, spawn_listener};
 use phantom_memory::MemoryStore;
-use phantom_nlp::{ClaudeLlmBackend, LlmBackend, OllamaLlmBackend};
+use phantom_skill_host::{LlmHost, LlmSkill};
 use phantom_plugins::PluginRegistry;
 use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
@@ -224,8 +224,12 @@ pub struct App {
     //    network calls when the user is typing fast.
     pub(crate) nlp_translate_rx: std::sync::mpsc::Receiver<NlpTranslateResult>,
     pub(crate) nlp_translate_tx: std::sync::mpsc::SyncSender<NlpTranslateResult>,
-    /// `None` when `nlp_llm_enabled = false` in config or ANTHROPIC_API_KEY is absent.
-    pub(crate) nlp_backend: Option<std::sync::Arc<dyn LlmBackend + Send + Sync>>,
+    /// `None` when `nlp_llm_enabled = false` in config or no LLM backend is reachable.
+    ///
+    /// The backend is routed through [`phantom_skill_host::LlmHost`] so that
+    /// hot-module reload can swap the `phantom-nlp` dylib at runtime when
+    /// `PHANTOM_HOT_MODULES=1` is set (closes #383).
+    pub(crate) nlp_backend: Option<std::sync::Arc<dyn LlmSkill>>,
 
     // -- Pending sub-agent spawn requests from a Composer's `spawn_subagent`
     //    tool. The Composer pushes onto this queue from its tool handler
@@ -725,31 +729,24 @@ impl App {
         let (nlp_translate_tx, nlp_translate_rx) =
             std::sync::mpsc::sync_channel::<NlpTranslateResult>(8);
 
-        // Build the LLM backend only when the feature is enabled and the key is present.
-        // Priority: ClaudeLlmBackend (cloud) → OllamaLlmBackend (local, if daemon reachable).
-        let nlp_backend: Option<std::sync::Arc<dyn LlmBackend + Send + Sync>> =
-            if config.nlp_llm_enabled {
-                match ClaudeLlmBackend::from_env() {
-                    Ok(backend) => {
-                        info!("NLP LLM backend: ClaudeLlmBackend (key present)");
-                        Some(std::sync::Arc::new(backend))
-                    }
-                    Err(e) => {
-                        debug!("NLP LLM backend: Claude unavailable ({e}), probing Ollama");
-                        let ollama = OllamaLlmBackend::from_env();
-                        if ollama.is_available() {
-                            info!("NLP LLM backend: OllamaLlmBackend ({})", ollama.model());
-                            Some(std::sync::Arc::new(ollama))
-                        } else {
-                            debug!("NLP LLM backend: disabled (Ollama daemon not reachable)");
-                            None
-                        }
-                    }
+        // Build the LLM backend via LlmHost (phantom-skill-host), which routes
+        // through the phantom-nlp dylib when PHANTOM_HOT_MODULES=1 (hot-reload,
+        // closes #383) or falls back to the static Claude → Ollama path.
+        let nlp_backend: Option<std::sync::Arc<dyn LlmSkill>> = if config.nlp_llm_enabled {
+            match LlmHost::build() {
+                Some(skill) => {
+                    info!("NLP LLM backend: {} (via LlmHost)", skill.name());
+                    Some(skill)
                 }
-            } else {
-                debug!("NLP LLM backend: disabled by config (nlp_llm = false)");
-                None
-            };
+                None => {
+                    debug!("NLP LLM backend: disabled (no backend reachable)");
+                    None
+                }
+            }
+        } else {
+            debug!("NLP LLM backend: disabled by config (nlp_llm = false)");
+            None
+        };
 
         // -- Substrate runtime (supervisor, event log, agent registry, memory
         //    blocks, spawn rules). The seed rule list is empty; the runtime
