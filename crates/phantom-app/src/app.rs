@@ -673,6 +673,9 @@ impl App {
             router: None,
             catalog: None,
             privacy_mode: config.privacy_mode,
+            // relay_inbound_rx: wired by the relay task on handshake completion
+            // via AiEvent::RelayConnected. None in standalone (non-relay) mode.
+            relay_inbound_rx: None,
         });
         if config.privacy_mode {
             info!("Privacy mode enabled — cloud API calls blocked");

@@ -6,6 +6,7 @@
 
 use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
+use phantom_agents::peer_routing::RemoteMessageContent;
 use phantom_agents::{AgentId, AgentTask};
 use phantom_semantic::ParsedOutput;
 
@@ -91,6 +92,21 @@ pub enum AiEvent {
     /// When `true`, the brain router must stop routing tasks to cloud backends
     /// until the next `SetPrivacyMode(false)` event is received.
     SetPrivacyMode(bool),
+
+    /// The relay handshake completed. Carries the outbound sender channel and
+    /// this instance's peer id so the brain can wire `AgentManager::router`.
+    ///
+    /// The brain spawns a relay-listener task on the matching inbound receiver
+    /// via [`crate::brain::BrainConfig::relay_inbound_rx`]; this event only
+    /// delivers the outbound half to keep `AiEvent: Clone`.
+    RelayConnected {
+        /// Outbound channel: `(destination_peer_id_string, json_payload)`.
+        /// Cloned into `AgentRouter::set_relay` so the router can forward
+        /// messages to the relay WebSocket task.
+        outbound_tx: tokio::sync::mpsc::Sender<(String, String)>,
+        /// This instance's peer id string (e.g. a UUIDv4).
+        local_peer_id: String,
+    },
 
     /// Graceful shutdown request.
     Shutdown,
@@ -225,6 +241,19 @@ pub enum AiAction {
     /// Used to toggle offline mode at runtime. When `true`, only local
     /// backends (Ollama, heuristic) are used; cloud backends are filtered.
     SetOfflineMode { enabled: bool },
+
+    /// Deliver an inbound cross-peer relay message to a local agent.
+    ///
+    /// Emitted by the brain's relay-listener path after calling
+    /// [`phantom_agents::peer_routing::decode_inbound`] on a raw relay JSON
+    /// frame. The app layer handles this action by routing it to the local
+    /// [`phantom_agents::inbox::AgentRegistry`] via `AgentRegistry::route`.
+    DeliverInboundRelay {
+        /// The local agent id to deliver the message to.
+        agent_id: AgentId,
+        /// The serializable message content decoded from the relay frame.
+        content: RemoteMessageContent,
+    },
 
     /// Do nothing. The brain decided silence is the best action.
     DoNothing,

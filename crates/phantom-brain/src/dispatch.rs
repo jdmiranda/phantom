@@ -15,6 +15,7 @@
 //! compiler enforces exhaustiveness in exactly one place; call sites just
 //! implement `ActionHandler`.
 
+use phantom_agents::peer_routing::RemoteMessageContent;
 use phantom_agents::{AgentId, AgentTask};
 use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
@@ -91,6 +92,16 @@ pub trait ActionHandler {
     fn set_offline_mode(&mut self, enabled: bool) {
         let _ = enabled;
     }
+
+    /// Deliver an inbound cross-peer relay message to a local agent.
+    ///
+    /// Called when the brain's relay-listener path decodes a raw relay frame
+    /// via [`phantom_agents::peer_routing::decode_inbound`]. The handler
+    /// implementation routes the message to the addressed agent via
+    /// `AgentRegistry::route(agent_id, InboxMessage::…)`.
+    fn deliver_inbound_relay(&mut self, agent_id: AgentId, content: RemoteMessageContent) {
+        let _ = (agent_id, content);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +164,9 @@ impl AiAction {
             }
             AiAction::SetOfflineMode { enabled } => {
                 handler.set_offline_mode(enabled);
+            }
+            AiAction::DeliverInboundRelay { agent_id, content } => {
+                handler.deliver_inbound_relay(agent_id, content);
             }
             AiAction::DoNothing => {}
         }

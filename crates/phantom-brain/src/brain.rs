@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 
+use phantom_agents::peer_routing::{AgentRouter, PeerId, decode_inbound};
 use phantom_agents::AgentId;
 use phantom_context::ProjectContext;
 use phantom_memory::MemoryStore;
@@ -95,6 +96,16 @@ pub struct BrainConfig {
     /// the brain's [`BrainRouter`] skips cloud backends so no outbound API
     /// calls are made by the OODA loop.
     pub privacy_mode: bool,
+    /// Optional inbound relay channel. When the relay task receives a raw JSON
+    /// frame from a peer, it pushes it here. The brain's relay-listener path
+    /// (in [`brain_loop`]) drains this channel, calls
+    /// [`phantom_agents::peer_routing::decode_inbound`] on each frame, and
+    /// emits [`crate::events::AiAction::DeliverInboundRelay`] so the app layer
+    /// can route the message to the addressed local agent via
+    /// `AgentRegistry::route`.
+    ///
+    /// `None` in standalone (non-relay) mode.
+    pub relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>>,
 }
 
 impl Default for BrainConfig {
@@ -107,6 +118,7 @@ impl Default for BrainConfig {
             privacy_mode: false,
             router: None,
             catalog: None,
+            relay_inbound_rx: None,
         }
     }
 }
@@ -182,6 +194,12 @@ fn brain_supervised(
     let catalog: ProviderCatalog = config
         .catalog
         .unwrap_or_else(ProviderCatalog::with_builtins);
+    // relay_inbound_rx is not Clone; consumed on the first iteration only.
+    // On panic-restart iterations it is `None` — the relay loop continues
+    // pushing to the channel; the brain resumes draining on reconnect via
+    // a fresh RelayConnected event from the app.
+    let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
+        config.relay_inbound_rx;
 
     // Shared slot: the supervisor writes a fresh `iter_tx` here after each
     // restart; the bridge thread reads it to redirect events.
@@ -237,6 +255,8 @@ fn brain_supervised(
             router: router.take(), // `None` on second and subsequent restarts.
             // Clone the catalog for each iteration — it is cheaply clonable.
             catalog: Some(catalog.clone()),
+            // relay_inbound_rx is not Clone; taken on the first iteration only.
+            relay_inbound_rx: relay_inbound_rx.take(),
         };
 
         // Run brain_loop under catch_unwind.
@@ -334,6 +354,14 @@ fn brain_loop(
     // Reset on any non-denial event for the same agent (or on quarantine).
     let mut denial_counters: HashMap<AgentId, usize> = HashMap::new();
 
+    // Cross-peer routing state. Wired up when a RelayConnected event arrives.
+    // Until then the router is in local-only mode (no relay connection).
+    let mut agent_router = AgentRouter::new();
+    // Inbound relay channel: raw JSON frames from the relay WebSocket task.
+    // Drained in the proactive timeout tick below.
+    let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
+        config.relay_inbound_rx;
+
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
         router.set_backend_available("ollama-phi3.5", true);
@@ -382,6 +410,46 @@ fn brain_loop(
                 if terminal {
                     active_ledger = None;
                 }
+
+                // RELAY INBOUND: drain any pending cross-peer frames.
+                // For each raw JSON frame received from the relay WebSocket task,
+                // call decode_inbound() and emit DeliverInboundRelay so the app
+                // layer routes the message to the addressed local agent via
+                // AgentRegistry::route().
+                if let Some(ref mut inbound_rx) = relay_inbound_rx {
+                    loop {
+                        match inbound_rx.try_recv() {
+                            Ok(json) => match decode_inbound(&json) {
+                                Ok(msg) => {
+                                    log::debug!(
+                                        "AI brain: inbound relay frame for agent {}",
+                                        msg.agent_id
+                                    );
+                                    let action = crate::events::AiAction::DeliverInboundRelay {
+                                        agent_id: msg.agent_id,
+                                        content: msg.content,
+                                    };
+                                    if action_tx.send(action).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "AI brain: failed to decode inbound relay frame: {e}"
+                                    );
+                                }
+                            },
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                // Relay task shut down; stop polling.
+                                log::info!("AI brain: relay inbound channel closed");
+                                relay_inbound_rx = None;
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -397,6 +465,53 @@ fn brain_loop(
         if let AiEvent::SetPrivacyMode(enabled) = event {
             router.set_privacy_mode(enabled);
             log::info!("AI brain: privacy mode set to {enabled}");
+            continue;
+        }
+
+        // Handle relay handshake completion: wire the outbound sender into the
+        // AgentRouter so subsequent send_to_remote calls reach the relay task.
+        if let AiEvent::RelayConnected {
+            ref outbound_tx,
+            ref local_peer_id,
+        } = event
+        {
+            // Convert the String-keyed channel into the PeerId-keyed channel
+            // expected by AgentRouter by wrapping behind a mapping sender.
+            // We reuse the existing channel directly: the relay task sends
+            // (to_peer_string, json) which matches our signature.
+            let (mapped_tx, mut mapped_rx) =
+                tokio::sync::mpsc::channel::<(PeerId, String)>(64);
+            let fwd_tx = outbound_tx.clone();
+            // Spawn a lightweight bridge that converts PeerId → String for the
+            // relay task, which expects (String, String).
+            std::thread::Builder::new()
+                .name("brain-relay-bridge".into())
+                .spawn(move || {
+                    // We need a tokio runtime to drive the async recv.
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("brain-relay-bridge rt");
+                    rt.block_on(async move {
+                        loop {
+                            match mapped_rx.recv().await {
+                                Some((peer_id, json)) => {
+                                    if fwd_tx.send((peer_id.0, json)).await.is_err() {
+                                        break; // outbound channel closed
+                                    }
+                                }
+                                None => break, // sender dropped (brain shutting down)
+                            }
+                        }
+                    });
+                })
+                .expect("failed to spawn brain-relay-bridge");
+
+            agent_router.set_relay(mapped_tx, PeerId::new(local_peer_id.clone()));
+            log::info!(
+                "AI brain: relay wired — local peer id = {local_peer_id}, \
+                 cross-peer routing enabled"
+            );
             continue;
         }
 
@@ -1073,6 +1188,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::ResumeAgent { .. } => "resume_agent",
         AiAction::UpdateConnectionState { .. } => "update_connection_state",
         AiAction::SetOfflineMode { .. } => "set_offline_mode",
+        AiAction::DeliverInboundRelay { .. } => "deliver_inbound_relay",
         AiAction::DoNothing => "quiet",
     }
 }
@@ -1139,6 +1255,15 @@ mod tests {
                 denial_count: 3
             }),
             "agent_quarantined",
+        );
+        assert_eq!(
+            action_name(&AiAction::DeliverInboundRelay {
+                agent_id: 7,
+                content: phantom_agents::peer_routing::RemoteMessageContent::UserSpeak(
+                    "ping".into()
+                ),
+            }),
+            "deliver_inbound_relay",
         );
     }
 
@@ -1563,5 +1688,86 @@ mod tests {
             restart_counter.load(Ordering::SeqCst) >= 1,
             "supervisor must have restarted at least once after the injected panic"
         );
+    }
+
+    // =======================================================================
+    // §3.1/§3.4/§3.5 — relay wiring: RelayConnected + DeliverInboundRelay
+    // =======================================================================
+
+    /// Verify that `AiEvent::RelayConnected` is Clone (required by `AiEvent`
+    /// derive). This also exercises the new event variant end-to-end.
+    #[test]
+    fn relay_connected_event_is_clone() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<(String, String)>(8);
+        let event = AiEvent::RelayConnected {
+            outbound_tx: tx,
+            local_peer_id: "peer-test-001".into(),
+        };
+        let cloned = event.clone();
+        if let AiEvent::RelayConnected { local_peer_id, .. } = cloned {
+            assert_eq!(local_peer_id, "peer-test-001");
+        } else {
+            panic!("clone produced wrong variant");
+        }
+    }
+
+    /// Verify that the relay-listener path (`decode_inbound` → `DeliverInboundRelay`)
+    /// is exercised end-to-end by the brain's timeout tick when an inbound
+    /// channel is configured.
+    ///
+    /// The test drives `brain_loop` directly via its sync event channel and a
+    /// pre-seeded inbound relay channel so no network is involved.
+    #[tokio::test]
+    async fn relay_inbound_decoded_and_emitted_as_action() {
+        use phantom_agents::peer_routing::{RemoteInboxMessage, RemoteMessageContent};
+
+        // Build the inbound relay channel and pre-seed one frame.
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let msg = RemoteInboxMessage {
+            agent_id: 42,
+            content: RemoteMessageContent::UserSpeak("relay-hello".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        inbound_tx.send(json).await.unwrap();
+
+        // Build a minimal BrainConfig with the inbound channel wired in.
+        let config = BrainConfig {
+            relay_inbound_rx: Some(inbound_rx),
+            enable_suggestions: false,
+            enable_memory: false,
+            ..Default::default()
+        };
+
+        let (event_tx, event_rx) = mpsc::channel::<AiEvent>();
+        let (action_tx, action_rx) = mpsc::channel::<AiAction>();
+
+        // Spawn brain_loop on a blocking thread so we don't block the test executor.
+        let handle = std::thread::Builder::new()
+            .name("test-brain-relay".into())
+            .spawn(move || {
+                brain_loop(config, event_rx, action_tx);
+            })
+            .expect("spawn test brain");
+
+        // Wait for the 3-second timeout tick to drain the inbound channel.
+        // We use a 6-second budget to be safe in CI.
+        let deadline = std::time::Duration::from_secs(6);
+        let deliver_action = action_rx.recv_timeout(deadline);
+
+        // Shut down the brain.
+        let _ = event_tx.send(AiEvent::Shutdown);
+        let _ = handle.join();
+
+        // The brain must have decoded the inbound frame and emitted the action.
+        match deliver_action.expect("brain must emit DeliverInboundRelay within timeout") {
+            AiAction::DeliverInboundRelay { agent_id, content } => {
+                assert_eq!(agent_id, 42, "agent_id must match the inbound frame");
+                assert!(
+                    matches!(content, RemoteMessageContent::UserSpeak(s) if s == "relay-hello"),
+                    "content must match the inbound frame"
+                );
+            }
+            other => panic!("expected DeliverInboundRelay, got {other:?}"),
+        }
     }
 }

@@ -57,6 +57,8 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         router: None,
         catalog: None,
         privacy_mode: false,
+        // Headless mode has no relay connection by default.
+        relay_inbound_rx: None,
     });
 
     // Agent manager (max 5 concurrent agents).
