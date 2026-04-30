@@ -368,7 +368,7 @@ impl Agent {
     /// This escape hatch exists only for internal infrastructure code
     /// (manager promotion, render-loop bookkeeping) that needs to force a
     /// specific state without going through the full FSM.
-    pub fn set_status(&mut self, status: AgentStatus) {
+    pub(crate) fn set_status(&mut self, status: AgentStatus) {
         self.status = status;
     }
 
