@@ -9,7 +9,7 @@ description = "Runtime dylib loader and hot-module host for Phantom skill crates
 # Enable hot-module reload via libloading + notify.
 # Mirrored from phantom-renderer's `live-reload` feature.
 # Only active in debug builds; release builds are always the static path.
-hot-modules = ["dep:libloading", "dep:notify", "dep:arc-swap"]
+hot-modules = ["dep:libloading", "dep:notify"]
 
 [dependencies]
 log.workspace = true
@@ -17,7 +17,6 @@ anyhow.workspace = true
 
 # Optional: only pulled in when the `hot-modules` feature is enabled.
 libloading = { workspace = true, optional = true }
-arc-swap   = { workspace = true, optional = true }
 notify     = { workspace = true, optional = true }
 
 # Always depend on phantom-semantic so callers get the concrete types.
