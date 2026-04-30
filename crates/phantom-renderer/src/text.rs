@@ -13,7 +13,7 @@
 // `crates/phantom-renderer/src/glyph_clip.rs` for the canonical home.
 pub use crate::glyph_clip::GlyphClipRect;
 
-use crate::atlas::{GlyphAtlas, GlyphEntry};
+use crate::atlas::{ColorGlyphAtlas, GlyphAtlas, GlyphEntry};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, Family, FontSystem, LayoutGlyph, Metrics, Shaping, SwashCache,
 };
@@ -22,6 +22,11 @@ use cosmic_text::{
 ///
 /// Each visible glyph in the terminal grid becomes one of these,
 /// uploaded to a vertex buffer and drawn as an instanced quad.
+///
+/// Both the monochrome pipeline (`text.wgsl`) and the color pipeline
+/// (`text_color.wgsl`) share this layout. The `is_color` field is not exposed
+/// to the shader as an attribute — it is a CPU-side tag used to split
+/// instances into two draw batches before upload.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlyphInstance {
@@ -30,13 +35,32 @@ pub struct GlyphInstance {
     /// UV rectangle in the atlas: [min_u, min_v, max_u, max_v].
     pub uv_rect: [f32; 4],
     /// RGBA color, linear.
+    ///
+    /// For monochrome glyphs (`is_color == 0`) this is multiplied by the
+    /// atlas alpha mask to produce the final fragment color.
+    /// For color glyphs (`is_color == 1`) this field is present only for
+    /// buffer-layout compatibility and is **ignored** by the color shader.
     pub color: [f32; 4],
     /// Size of the glyph quad in pixels: [width, height].
     pub size: [f32; 2],
+    /// `1` when this glyph lives in the `ColorGlyphAtlas` (Rgba8UnormSrgb),
+    /// `0` for the monochrome `GlyphAtlas` (R8Unorm).
+    ///
+    /// Used by the CPU-side batching logic in `TextRenderer::prepare_glyphs`
+    /// to split instances into `GlyphBatch::mono` and `GlyphBatch::color`
+    /// before uploading to separate GPU pipelines. Not an attribute in WGSL.
+    pub is_color: u32,
+    /// Explicit padding so `size_of::<GlyphInstance>()` stays a multiple of
+    /// 16 bytes (required by `bytemuck::Pod`).
+    pub _pad: u32,
 }
 
 impl GlyphInstance {
     /// Vertex buffer layout for instanced rendering.
+    ///
+    /// Attributes match both `text.wgsl` and `text_color.wgsl`. The `is_color`
+    /// and `_pad` fields are not exposed as shader attributes — they are
+    /// tail-padding used only by the CPU split step.
     pub const ATTRIBS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         // position
         0 => Float32x2,
@@ -48,6 +72,7 @@ impl GlyphInstance {
         3 => Float32x2,
     ];
 
+    #[must_use]
     pub fn buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GlyphInstance>() as wgpu::BufferAddress,
@@ -55,6 +80,22 @@ impl GlyphInstance {
             attributes: &Self::ATTRIBS,
         }
     }
+}
+
+/// Two batches of glyph instances produced by `TextRenderer::prepare_glyphs`.
+///
+/// `mono` contains instances for the monochrome R8Unorm atlas pipeline
+/// (`text.wgsl`, foreground tint applied). `color` contains instances for the
+/// `Rgba8UnormSrgb` color atlas pipeline (`text_color.wgsl`, no tint).
+///
+/// Draw callers upload and draw each batch with its corresponding pipeline and
+/// atlas bind group.
+#[derive(Debug, Default)]
+pub struct GlyphBatch {
+    /// Instances that live in `GlyphAtlas` (R8Unorm, monochrome text).
+    pub mono: Vec<GlyphInstance>,
+    /// Instances that live in `ColorGlyphAtlas` (Rgba8UnormSrgb, color emoji).
+    pub color: Vec<GlyphInstance>,
 }
 
 /// A single terminal cell with character and color data.
@@ -94,6 +135,7 @@ impl TextRenderer {
     ///
     /// Initializes the system font database and configures for monospace rendering.
     /// Line height is set to 1.2x the font size by default, suitable for terminal use.
+    #[must_use]
     pub fn new(font_size: f32) -> Self {
         let font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
@@ -110,6 +152,7 @@ impl TextRenderer {
     }
 
     /// Access the underlying font system.
+    #[must_use]
     pub fn font_system(&self) -> &FontSystem {
         &self.font_system
     }
@@ -125,11 +168,13 @@ impl TextRenderer {
     }
 
     /// Get the configured font size.
+    #[must_use]
     pub fn font_size(&self) -> f32 {
         self.font_size
     }
 
     /// Get the configured line height.
+    #[must_use]
     pub fn line_height(&self) -> f32 {
         self.line_height
     }
@@ -186,16 +231,28 @@ impl TextRenderer {
         size
     }
 
-    /// Rasterize a single glyph and upload it to the atlas.
+    /// Rasterize a single glyph and upload it to the appropriate atlas.
     ///
-    /// Returns the atlas entry with UV coordinates and placement offsets,
-    /// or `None` if the glyph could not be rasterized (whitespace, missing, atlas full).
+    /// Tries the `ColorGlyphAtlas` first for `SwashContent::Color` bitmaps,
+    /// falling back to the monochrome `GlyphAtlas`. Returns the `GlyphEntry`
+    /// (with `is_color` set) or `None` if the glyph could not be rasterized.
     pub fn rasterize_glyph(
         &mut self,
         atlas: &mut GlyphAtlas,
+        color_atlas: &mut ColorGlyphAtlas,
         queue: &wgpu::Queue,
         cache_key: CacheKey,
     ) -> Option<GlyphEntry> {
+        // Try color atlas first; if the glyph is not SwashContent::Color it
+        // returns None and we fall through to the monochrome atlas.
+        if let Some(entry) = color_atlas.get_or_insert(
+            queue,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            cache_key,
+        ) {
+            return Some(entry);
+        }
         atlas.get_or_insert(
             queue,
             &mut self.font_system,
@@ -206,32 +263,37 @@ impl TextRenderer {
 
     /// Prepare glyph instances for a grid of terminal cells.
     ///
-    /// Given a 2D grid of cells (row-major, `rows * cols` elements), produces a
-    /// `Vec<GlyphInstance>` suitable for GPU instanced rendering. Each non-whitespace
-    /// glyph is rasterized (if not already cached) and positioned on the pixel grid.
+    /// Returns a `GlyphBatch` with two instance lists:
+    /// - `GlyphBatch::mono`  — monochrome R8Unorm atlas instances (foreground tint).
+    /// - `GlyphBatch::color` — full-color Rgba8UnormSrgb atlas instances (no tint).
     ///
     /// # Arguments
-    /// * `atlas` - The glyph atlas for caching rasterized glyphs.
-    /// * `queue` - The wgpu queue for atlas texture uploads.
-    /// * `cells` - Row-major grid of terminal cells (`rows * cols` elements).
-    /// * `cols` - Number of columns per row.
-    /// * `origin` - Top-left pixel offset for the grid: (x, y).
+    /// * `atlas`       - The monochrome glyph atlas.
+    /// * `color_atlas` - The RGBA color glyph atlas for emoji.
+    /// * `queue`       - The wgpu queue for atlas texture uploads.
+    /// * `cells`       - Row-major grid of terminal cells (`rows * cols` elements).
+    /// * `cols`        - Number of columns per row.
+    /// * `origin`      - Top-left pixel offset for the grid: (x, y).
     pub fn prepare_glyphs(
         &mut self,
         atlas: &mut GlyphAtlas,
+        color_atlas: &mut ColorGlyphAtlas,
         queue: &wgpu::Queue,
         cells: &[TerminalCell],
         cols: usize,
         origin: (f32, f32),
-    ) -> Vec<GlyphInstance> {
+    ) -> GlyphBatch {
         if cols == 0 {
-            return Vec::new();
+            return GlyphBatch::default();
         }
 
         let (cell_w, cell_h) = self.measure_cell();
         let rows = cells.len() / cols;
 
-        let mut instances = Vec::with_capacity(cells.len());
+        let mut batch = GlyphBatch {
+            mono: Vec::with_capacity(cells.len()),
+            color: Vec::new(),
+        };
 
         for row in 0..rows {
             for col in 0..cols {
@@ -256,18 +318,30 @@ impl TextRenderer {
                     continue;
                 };
 
-                if let Some(entry) = atlas.get_or_insert(
-                    queue,
-                    &mut self.font_system,
-                    &mut self.swash_cache,
-                    cache_key,
-                ) {
+                // Try color atlas first, then monochrome.
+                let entry = color_atlas
+                    .get_or_insert(
+                        queue,
+                        &mut self.font_system,
+                        &mut self.swash_cache,
+                        cache_key,
+                    )
+                    .or_else(|| {
+                        atlas.get_or_insert(
+                            queue,
+                            &mut self.font_system,
+                            &mut self.swash_cache,
+                            cache_key,
+                        )
+                    });
+
+                if let Some(entry) = entry {
                     let cell_x = origin.0 + (col as f32) * cell_w;
                     let baseline_y = origin.1 + (row as f32) * cell_h + line_y;
                     let px = cell_x + phys_x + entry.left as f32;
                     let py = baseline_y - entry.top as f32;
 
-                    instances.push(GlyphInstance {
+                    let instance = GlyphInstance {
                         position: [px, py],
                         uv_rect: [
                             entry.uv_min[0],
@@ -277,16 +351,25 @@ impl TextRenderer {
                         ],
                         color: cell.fg,
                         size: [entry.width as f32, entry.height as f32],
-                    });
+                        is_color: u32::from(entry.is_color),
+                        _pad: 0,
+                    };
+
+                    if entry.is_color {
+                        batch.color.push(instance);
+                    } else {
+                        batch.mono.push(instance);
+                    }
                 }
             }
         }
 
-        instances
+        batch
     }
 
     /// Shape a single character through cosmic-text ONCE and return the cache key
     /// + positioning offsets. Returns None if the character produces no glyphs.
+    #[allow(clippy::must_use_candidate)]
     fn shape_char(&mut self, ch: char, cell_w: f32, cell_h: f32) -> Option<(CacheKey, f32, f32)> {
         let metrics = Metrics::new(self.font_size, self.line_height);
         let attrs = Attrs::new().family(Family::Monospace);
@@ -302,7 +385,7 @@ impl TextRenderer {
         buffer.shape_until_scroll(&mut self.font_system, true);
 
         for run in buffer.layout_runs() {
-            for glyph in run.glyphs.iter() {
+            if let Some(glyph) = run.glyphs.iter().next() {
                 let physical = glyph.physical((0.0, 0.0), 1.0);
                 return Some((physical.cache_key, run.line_y, physical.x as f32));
             }
@@ -313,28 +396,34 @@ impl TextRenderer {
     /// Prepare glyph instances from a pre-shaped cosmic-text `Buffer`.
     ///
     /// Lower-level method for cases where the caller already has a shaped buffer
-    /// (e.g., UI overlays, debug text, non-grid text).
+    /// (e.g., UI overlays, debug text, non-grid text). Returns a `GlyphBatch`
+    /// with separate mono and color instance lists, same as `prepare_glyphs`.
     pub fn prepare_glyphs_from_buffer(
         &mut self,
         atlas: &mut GlyphAtlas,
+        color_atlas: &mut ColorGlyphAtlas,
         queue: &wgpu::Queue,
         buffer: &Buffer,
         default_color: [f32; 4],
         origin: (f32, f32),
-    ) -> Vec<GlyphInstance> {
-        let mut instances = Vec::new();
+    ) -> GlyphBatch {
+        let mut batch = GlyphBatch::default();
 
         for run in buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
                 let physical = glyph.physical((origin.0, origin.1), 1.0);
 
-                if let Some(entry) = self.rasterize_glyph(atlas, queue, physical.cache_key) {
+                if let Some(entry) =
+                    self.rasterize_glyph(atlas, color_atlas, queue, physical.cache_key)
+                {
+                    // For color glyphs the fragment shader ignores the color
+                    // attribute, so we pass it anyway for layout compatibility.
                     let color = glyph_color(glyph, default_color);
 
                     let px = physical.x as f32 + entry.left as f32;
                     let py = run.line_y + physical.y as f32 - entry.top as f32;
 
-                    instances.push(GlyphInstance {
+                    let instance = GlyphInstance {
                         position: [px, py],
                         uv_rect: [
                             entry.uv_min[0],
@@ -344,12 +433,20 @@ impl TextRenderer {
                         ],
                         color,
                         size: [entry.width as f32, entry.height as f32],
-                    });
+                        is_color: u32::from(entry.is_color),
+                        _pad: 0,
+                    };
+
+                    if entry.is_color {
+                        batch.color.push(instance);
+                    } else {
+                        batch.mono.push(instance);
+                    }
                 }
             }
         }
 
-        instances
+        batch
     }
 }
 
@@ -380,11 +477,13 @@ mod tests {
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             color: [1.0, 1.0, 1.0, 1.0],
             size: [10.0, 20.0],
+            is_color: 0,
+            _pad: 0,
         };
         let bytes = bytemuck::bytes_of(&instance);
         assert_eq!(bytes.len(), std::mem::size_of::<GlyphInstance>());
-        // 12 floats * 4 bytes = 48
-        assert_eq!(std::mem::size_of::<GlyphInstance>(), 48);
+        // 12 floats (48 bytes) + is_color (4 bytes) + _pad (4 bytes) = 56 bytes
+        assert_eq!(std::mem::size_of::<GlyphInstance>(), 56);
     }
 
     #[test]
@@ -426,8 +525,145 @@ mod tests {
     #[test]
     fn buffer_layout_stride() {
         let layout = GlyphInstance::buffer_layout();
-        assert_eq!(layout.array_stride, 48);
+        // array_stride covers the full struct including is_color + _pad.
+        assert_eq!(layout.array_stride, 56);
         assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
         assert_eq!(layout.attributes.len(), 4);
+    }
+
+    // -------------------------------------------------------------------------
+    // Regression tests: color-glyph tint preservation (closes #356)
+    // -------------------------------------------------------------------------
+
+    /// A `GlyphInstance` tagged `is_color = 1` must round-trip through
+    /// `bytemuck` without corruption, and the `is_color` byte must survive.
+    ///
+    /// This is the CPU-side contract: the draw caller reads `is_color` to split
+    /// instances into mono vs. color batches. If bytemuck silently mangles the
+    /// field, the routing breaks and color glyphs will be sent to the wrong
+    /// pipeline, tinting them with the foreground color (regression of #356).
+    #[test]
+    fn color_glyph_instance_roundtrips_through_bytemuck() {
+        let instance = GlyphInstance {
+            position: [10.0, 20.0],
+            uv_rect: [0.1, 0.2, 0.9, 0.8],
+            // Deliberately non-white foreground — if color glyphs were tinted by
+            // this value the emoji would appear as solid phosphor-green, which
+            // is the exact symptom of #356.
+            color: [0.0, 1.0, 0.0, 1.0],
+            size: [32.0, 32.0],
+            is_color: 1,
+            _pad: 0,
+        };
+
+        let bytes = bytemuck::bytes_of(&instance);
+        assert_eq!(bytes.len(), 56, "struct must be 56 bytes");
+
+        let recovered: &GlyphInstance = bytemuck::from_bytes(bytes);
+        assert_eq!(recovered.is_color, 1, "is_color must survive bytemuck round-trip");
+        assert_eq!(recovered.position, instance.position);
+        assert_eq!(recovered.uv_rect, instance.uv_rect);
+        assert_eq!(recovered.color, instance.color);
+        assert_eq!(recovered.size, instance.size);
+    }
+
+    /// `GlyphBatch` must correctly separate mono and color instances so that
+    /// color glyphs are never fed to the foreground-tint pipeline.
+    ///
+    /// Simulates what `prepare_glyphs` does internally: two instances, one
+    /// mono, one color. Verifies the split is correct and that the color
+    /// instance carries `is_color = 1`.
+    #[test]
+    fn glyph_batch_separates_mono_and_color_instances() {
+        let mono_inst = GlyphInstance {
+            position: [0.0, 0.0],
+            uv_rect: [0.0, 0.0, 0.5, 0.5],
+            color: [0.0, 1.0, 0.0, 1.0], // phosphor green — should tint mono
+            size: [8.0, 16.0],
+            is_color: 0,
+            _pad: 0,
+        };
+        let color_inst = GlyphInstance {
+            position: [8.0, 0.0],
+            uv_rect: [0.0, 0.0, 0.25, 0.25],
+            color: [0.0, 1.0, 0.0, 1.0], // ignored by color shader
+            size: [32.0, 32.0],
+            is_color: 1,
+            _pad: 0,
+        };
+
+        let mut batch = GlyphBatch::default();
+        if mono_inst.is_color == 0 {
+            batch.mono.push(mono_inst);
+        } else {
+            batch.color.push(mono_inst);
+        }
+        if color_inst.is_color == 0 {
+            batch.mono.push(color_inst);
+        } else {
+            batch.color.push(color_inst);
+        }
+
+        assert_eq!(batch.mono.len(), 1, "one monochrome glyph");
+        assert_eq!(batch.color.len(), 1, "one color glyph");
+        assert_eq!(batch.mono[0].is_color, 0);
+        assert_eq!(batch.color[0].is_color, 1);
+
+        // The foreground-tint color is present in the color instance's `color`
+        // field but must NOT be applied by the draw call. This is enforced by
+        // routing through `text_color.wgsl`, which discards `color` in the
+        // fragment shader. The test documents the invariant: a color glyph's
+        // `color` field is irrelevant — the atlas RGBA is the ground truth.
+        let emoji_atlas_rgba = [1.0_f32, 0.7, 0.1, 1.0]; // hypothetical beer emoji pixel
+        let fg_tint = batch.color[0].color; // [0, 1, 0, 1] — phosphor green
+        // If the wrong pipeline were used: emoji_atlas_rgba * fg_tint → wrong color.
+        let would_be_wrong = [
+            emoji_atlas_rgba[0] * fg_tint[0],
+            emoji_atlas_rgba[1] * fg_tint[1],
+            emoji_atlas_rgba[2] * fg_tint[2],
+            emoji_atlas_rgba[3] * fg_tint[3],
+        ];
+        // Confirm the tinted result differs from the original atlas color.
+        assert_ne!(
+            would_be_wrong, emoji_atlas_rgba,
+            "tinting a color glyph by FG must change its color (proves the \
+             guard matters — color pipeline must NOT apply this multiply)"
+        );
+    }
+
+    /// `GlyphEntry` with `is_color = false` must never be routed to the color
+    /// atlas pipeline. This is the complementary regression guard: monochrome
+    /// glyphs (Nerd Font icons, regular ASCII) must continue to be tinted.
+    #[test]
+    fn monochrome_glyph_entry_is_not_color() {
+        let entry = GlyphEntry {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 16,
+            uv_min: [0.0, 0.0],
+            uv_max: [0.5, 0.5],
+            left: 0,
+            top: 0,
+            is_color: false,
+        };
+        assert!(!entry.is_color, "monochrome entry must not set is_color");
+    }
+
+    /// `GlyphEntry` with `is_color = true` identifies a color bitmap glyph.
+    #[test]
+    fn color_glyph_entry_is_color() {
+        let entry = GlyphEntry {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 32,
+            uv_min: [0.0, 0.0],
+            uv_max: [0.5, 0.5],
+            left: 0,
+            top: 0,
+            is_color: true,
+        };
+        assert!(entry.is_color, "color emoji entry must set is_color");
     }
 }

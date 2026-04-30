@@ -14,7 +14,7 @@ use anyhow::Result;
 use log::{debug, info, trace, warn};
 
 use phantom_protocol::AppMessage;
-use phantom_renderer::atlas::GlyphAtlas;
+use phantom_renderer::atlas::{ColorGlyphAtlas, GlyphAtlas};
 use phantom_renderer::gpu::GpuContext;
 use phantom_renderer::grid::GridRenderer;
 use phantom_renderer::postfx::PostFxPipeline;
@@ -108,9 +108,15 @@ pub struct App {
     // -- GPU subsystems --
     pub gpu: GpuContext,
     pub(crate) atlas: GlyphAtlas,
+    /// Color emoji atlas (Rgba8UnormSrgb). Stores SwashContent::Color bitmaps
+    /// un-tinted so emoji render in full color across all themes (fixes #356).
+    pub(crate) color_atlas: ColorGlyphAtlas,
     pub(crate) text_renderer: TextRenderer,
     pub(crate) quad_renderer: QuadRenderer,
     pub(crate) grid_renderer: GridRenderer,
+    /// Grid renderer for full-color emoji glyphs (text_color.wgsl pipeline).
+    /// Draws instances from the Rgba8UnormSrgb color atlas without FG tinting.
+    pub(crate) color_grid_renderer: GridRenderer,
     pub(crate) postfx: PostFxPipeline,
 
     // -- UI --
@@ -246,6 +252,8 @@ pub struct App {
     // -- Render pools (reused each frame via clear() to avoid per-frame allocs) --
     pub(crate) pool_quads: Vec<QuadInstance>,
     pub(crate) pool_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
+    /// Color-glyph instances (Rgba8UnormSrgb atlas, no FG tint). Fixes #356.
+    pub(crate) pool_color_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
     pub(crate) pool_chrome_quads: Vec<QuadInstance>,
     pub(crate) pool_chrome_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
 
@@ -541,10 +549,13 @@ impl App {
 
         // -- Atlas --
         let atlas = GlyphAtlas::new(&gpu.device, &gpu.queue);
+        let color_atlas = ColorGlyphAtlas::new(&gpu.device, &gpu.queue);
 
         // -- Renderers --
         let quad_renderer = QuadRenderer::new(&gpu.device, format);
         let grid_renderer = GridRenderer::new(&gpu.device, format, atlas.bind_group_layout());
+        let color_grid_renderer =
+            GridRenderer::new_color(&gpu.device, format, color_atlas.bind_group_layout());
         let postfx = PostFxPipeline::new(&gpu.device, format, width, height);
         let video_renderer = VideoRenderer::new(&gpu.device, format);
 
@@ -1032,9 +1043,11 @@ impl App {
         Ok(Self {
             gpu,
             atlas,
+            color_atlas,
             text_renderer,
             quad_renderer,
             grid_renderer,
+            color_grid_renderer,
             postfx,
             layout,
             keybinds,
@@ -1081,6 +1094,7 @@ impl App {
             _mcp_listener: mcp_listener,
             pool_quads: Vec::with_capacity(256),
             pool_glyphs: Vec::with_capacity(4096),
+            pool_color_glyphs: Vec::with_capacity(64),
             pool_chrome_quads: Vec::with_capacity(32),
             pool_chrome_glyphs: Vec::with_capacity(256),
             fullscreen_pane: None,

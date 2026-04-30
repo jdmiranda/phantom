@@ -12,6 +12,7 @@ pub struct Vec2 {
 }
 
 impl Vec2 {
+    #[must_use]
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
@@ -51,16 +52,19 @@ impl Default for DrawOptions {
 }
 
 impl DrawOptions {
+    #[must_use]
     pub fn color(mut self, color: [f32; 4]) -> Self {
         self.color = color;
         self
     }
 
+    #[must_use]
     pub fn line_width(mut self, width: f32) -> Self {
         self.line_width = width;
         self
     }
 
+    #[must_use]
     pub fn red() -> Self {
         Self {
             color: [1.0, 0.0, 0.0, 1.0],
@@ -68,10 +72,12 @@ impl DrawOptions {
         }
     }
 
+    #[must_use]
     pub fn green() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn blue() -> Self {
         Self {
             color: [0.0, 0.0, 1.0, 1.0],
@@ -79,6 +85,7 @@ impl DrawOptions {
         }
     }
 
+    #[must_use]
     pub fn yellow() -> Self {
         Self {
             color: [1.0, 1.0, 0.0, 1.0],
@@ -86,6 +93,7 @@ impl DrawOptions {
         }
     }
 
+    #[must_use]
     pub fn white() -> Self {
         Self {
             color: [1.0, 1.0, 1.0, 1.0],
@@ -93,6 +101,7 @@ impl DrawOptions {
         }
     }
 
+    #[must_use]
     pub fn cyan() -> Self {
         Self {
             color: [0.0, 1.0, 1.0, 1.0],
@@ -116,6 +125,7 @@ pub struct DebugDrawManager {
 }
 
 impl DebugDrawManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             queue: Vec::new(),
@@ -127,6 +137,7 @@ impl DebugDrawManager {
         self.enabled = enabled;
     }
 
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -214,6 +225,7 @@ impl DebugDrawManager {
     }
 
     /// Number of primitives currently in the queue.
+    #[must_use]
     pub fn primitive_count(&self) -> usize {
         self.queue.len()
     }

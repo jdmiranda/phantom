@@ -33,11 +33,13 @@ impl GlyphClipRect {
     pub const NONE: GlyphClipRect = GlyphClipRect { xywh: [0.0; 4] };
 
     /// Construct a glyph clip rect from explicit pixel dimensions.
+    #[must_use]
     pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { xywh: [x, y, w, h] }
     }
 
     /// Convenience constructor returning the "no clip" sentinel.
+    #[must_use]
     pub const fn none() -> Self {
         Self::NONE
     }
@@ -46,6 +48,7 @@ impl GlyphClipRect {
     ///
     /// Mirrors `ClipRect::is_none`: any non-positive width or height means
     /// "no clip", which matches the (future) fragment-shader test.
+    #[must_use]
     pub fn is_none(&self) -> bool {
         self.xywh[2] <= 0.0 || self.xywh[3] <= 0.0
     }
@@ -55,6 +58,7 @@ impl GlyphClipRect {
     /// `shader_location = 4` is reserved across both quad and glyph
     /// pipelines for the clip-rect attribute. Stride matches
     /// `size_of::<GlyphClipRect>() == 16`.
+    #[must_use]
     pub fn buffer_layout() -> VertexBufferLayout<'static> {
         const ATTRS: &[VertexAttribute] = &[VertexAttribute {
             format: VertexFormat::Float32x4,

@@ -73,6 +73,7 @@ pub struct VideoRenderer {
 }
 
 impl VideoRenderer {
+    #[must_use]
     pub fn new(device: &Device, format: TextureFormat) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("video-shader"),
@@ -294,6 +295,7 @@ impl VideoRenderer {
     }
 
     /// Whether a frame has been uploaded.
+    #[must_use]
     pub fn has_frame(&self) -> bool {
         self.texture.is_some()
     }

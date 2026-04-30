@@ -42,11 +42,13 @@ impl ClipRect {
     ///
     /// `(x, y)` is the top-left corner; `(w, h)` is the size. If either
     /// `w` or `h` is non-positive, this rect is the "no clip" sentinel.
+    #[must_use]
     pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { xywh: [x, y, w, h] }
     }
 
     /// Convenience constructor returning the "no clip" sentinel.
+    #[must_use]
     pub const fn none() -> Self {
         Self::NONE
     }
@@ -56,6 +58,7 @@ impl ClipRect {
     /// The contract: any non-positive width or height means "no clip".
     /// This matches the fragment shader test
     /// `clip.z > 0.0 && clip.w > 0.0`.
+    #[must_use]
     pub fn is_none(&self) -> bool {
         self.xywh[2] <= 0.0 || self.xywh[3] <= 0.0
     }
@@ -65,6 +68,7 @@ impl ClipRect {
     /// Uses `shader_location = 4`, reserved across both quad and glyph
     /// pipelines for the clip-rect attribute. The stride must equal
     /// `size_of::<ClipRect>() == 16`.
+    #[must_use]
     pub fn buffer_layout() -> VertexBufferLayout<'static> {
         const ATTRS: &[VertexAttribute] = &[VertexAttribute {
             format: VertexFormat::Float32x4,

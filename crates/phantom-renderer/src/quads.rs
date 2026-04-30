@@ -244,6 +244,7 @@ const INITIAL_CAPACITY: u32 = 1024;
 
 impl QuadRenderer {
     /// Create the quad renderer: compiles shaders, creates pipeline and buffers.
+    #[must_use]
     pub fn new(device: &Device, format: TextureFormat) -> Self {
         // -- Shader module --
         let shader = device.create_shader_module(ShaderModuleDescriptor {
