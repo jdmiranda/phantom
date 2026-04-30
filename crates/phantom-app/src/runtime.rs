@@ -32,7 +32,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use phantom_agents::inbox::AgentRegistry;
-use phantom_agents::inspector::{EventRow, InspectorBuilder, InspectorView, summarize_event};
+use phantom_agents::inspector::{
+    EventRow, InspectorBuilder, InspectorView, SwapRow, SwapRowStatus, summarize_event,
+};
 use phantom_agents::spawn_rules::{
     EventKind, EventSource as SubstrateEventSource, SpawnAction, SpawnRule, SpawnRuleRegistry,
     SubstrateEvent,
@@ -339,6 +341,26 @@ impl AgentRuntime {
             let row =
                 phantom_agents::inspector::AgentRow::new(agent_ref, "Idle", None, None, 0, now_ms);
             builder = builder.with_agent(row);
+        }
+
+        // Hot-swap telemetry (#385): query the global drain-reaper registry.
+        // Returns an empty Vec when PHANTOM_HOT_MODULES is unset — zero
+        // overhead in non-hot builds.  The conversion from SwapStatus to
+        // SwapRowStatus is manual to keep phantom-agents free of a dependency
+        // on phantom-skill-host.
+        for state in phantom_skill_host::all_swap_states() {
+            use phantom_skill_host::SwapStatus;
+            let row_status = match state.status {
+                SwapStatus::Idle => SwapRowStatus::Idle,
+                SwapStatus::Draining { age_ms, refcount } => {
+                    SwapRowStatus::Draining { age_ms, refcount }
+                }
+                SwapStatus::Forced { age_ms } => SwapRowStatus::Forced { age_ms },
+            };
+            builder = builder.with_swap_state(SwapRow {
+                name: state.name,
+                status: row_status,
+            });
         }
 
         builder.build()

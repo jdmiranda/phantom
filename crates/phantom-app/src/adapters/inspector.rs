@@ -315,6 +315,8 @@ impl AppCore for InspectorAdapter {
             "running_count": view.running_count,
             "recent_events": view.recent_events.len(),
             "denials": view.denials.len(),
+            "swap_pending": phantom_skill_host::pending_swaps(),
+            "swap_targets": view.swap_states.len(),
         })
     }
 }
@@ -596,6 +598,69 @@ impl Renderable for InspectorAdapter {
                     color: denial_chain,
                 });
                 cursor_y += cell_h;
+            }
+        }
+
+        // ── Hot swaps section (#385) ──────────────────────────────────────
+        // Surface the per-target drain state from phantom-skill-host's global
+        // registry.  When PHANTOM_HOT_MODULES is unset the snapshot's
+        // swap_states vec is empty and this section shows the idle hint.
+        if cursor_y < rect.y + rect.height - cell_h * 3.0 {
+            cursor_y += cell_h * 0.5;
+
+            // Section header color: accent when any target is Draining or
+            // Forced, otherwise the normal section color.
+            use phantom_agents::inspector::SwapRowStatus;
+            let any_active = view
+                .swap_states
+                .iter()
+                .any(|r| !matches!(r.status, SwapRowStatus::Idle));
+            let hotswap_header_color = if any_active {
+                colors.status_warn
+            } else {
+                section_color
+            };
+
+            text_segments.push(TextData {
+                text: format!(
+                    "HOT SWAPS: {} pending",
+                    phantom_skill_host::pending_swaps(),
+                ),
+                x: rect.x + pad_x,
+                y: cursor_y,
+                color: hotswap_header_color,
+            });
+            cursor_y += cell_h * 1.2;
+
+            if view.swap_states.is_empty() {
+                text_segments.push(TextData {
+                    text: "  (hot-modules disabled)".to_string(),
+                    x: rect.x + pad_x * 2.0,
+                    y: cursor_y,
+                    color: event_color,
+                });
+                cursor_y += cell_h;
+            } else {
+                for swap_row in &view.swap_states {
+                    if cursor_y > rect.y + rect.height - cell_h {
+                        break;
+                    }
+                    use phantom_agents::inspector::summarize_swap_state;
+                    let summary = summarize_swap_state(swap_row);
+                    // Force-drop rows are shown in the danger color.
+                    let row_color = match &swap_row.status {
+                        SwapRowStatus::Forced { .. } => colors.status_danger,
+                        SwapRowStatus::Draining { .. } => colors.status_warn,
+                        SwapRowStatus::Idle => event_color,
+                    };
+                    text_segments.push(TextData {
+                        text: summary,
+                        x: rect.x + pad_x * 2.0,
+                        y: cursor_y,
+                        color: row_color,
+                    });
+                    cursor_y += cell_h;
+                }
             }
         }
 
@@ -1448,5 +1513,86 @@ mod tests {
 
         let result = adapter.accept_command("inspector.kill_agent", &serde_json::json!({"id": 1}));
         assert!(result.is_err());
+    }
+
+    // ---- Hot-swap telemetry (#385) ----------------------------------------
+
+    #[test]
+    fn inspector_adapter_renders_hot_swaps_section_header() {
+        let view = InspectorView::empty();
+        let adapter = InspectorAdapter::with_view(view);
+        let output = adapter.render(&make_rect(8.0));
+        // HOT SWAPS section header must always render.
+        assert!(
+            output.text_segments.iter().any(|t| t.text.starts_with("HOT SWAPS:")),
+            "HOT SWAPS header must be present in Overview render",
+        );
+    }
+
+    #[test]
+    fn inspector_adapter_renders_disabled_hint_when_no_swap_states() {
+        let view = InspectorView::empty();
+        let adapter = InspectorAdapter::with_view(view);
+        let output = adapter.render(&make_rect(8.0));
+        assert!(
+            output.text_segments.iter().any(|t| t.text.contains("hot-modules disabled")),
+            "disabled hint must appear when swap_states is empty",
+        );
+    }
+
+    #[test]
+    fn inspector_adapter_renders_draining_swap_row() {
+        use phantom_agents::inspector::{SwapRow, SwapRowStatus};
+        let view = InspectorBuilder::new()
+            .with_swap_state(SwapRow {
+                name: "phantom-nlp".into(),
+                status: SwapRowStatus::Draining { age_ms: 5_000, refcount: 3 },
+            })
+            .build();
+        let adapter = InspectorAdapter::with_view(view);
+        let output = adapter.render(&make_rect(8.0));
+        let found = output
+            .text_segments
+            .iter()
+            .any(|t| t.text.contains("phantom-nlp") && t.text.contains("Draining"));
+        assert!(found, "Draining swap row must be visible in rendered output");
+    }
+
+    #[test]
+    fn inspector_adapter_renders_forced_swap_row_in_danger_color() {
+        use phantom_agents::inspector::{SwapRow, SwapRowStatus};
+        use phantom_ui::RenderCtx;
+        let tokens = phantom_ui::tokens::Tokens::phosphor(RenderCtx::fallback());
+        let expected_danger = tokens.colors.status_danger;
+
+        let view = InspectorBuilder::new()
+            .with_swap_state(SwapRow {
+                name: "phantom-semantic".into(),
+                status: SwapRowStatus::Forced { age_ms: 30_100 },
+            })
+            .build();
+        let adapter = InspectorAdapter::with_view_and_tokens(view, tokens);
+        let output = adapter.render(&make_rect(8.0));
+
+        let forced_seg = output
+            .text_segments
+            .iter()
+            .find(|t| t.text.contains("phantom-semantic") && t.text.contains("forced"))
+            .expect("forced swap row must be present");
+        assert_eq!(
+            forced_seg.color, expected_danger,
+            "forced swap row must render in status_danger color",
+        );
+    }
+
+    #[test]
+    fn inspector_adapter_get_state_includes_swap_pending() {
+        let view = InspectorView::empty();
+        let adapter = InspectorAdapter::with_view(view);
+        let state = adapter.get_state();
+        // swap_pending and swap_targets must be present (zero when hot-modules disabled).
+        assert!(state.get("swap_pending").is_some(), "state must include swap_pending");
+        assert!(state.get("swap_targets").is_some(), "state must include swap_targets");
+        assert_eq!(state["swap_targets"], 0);
     }
 }
