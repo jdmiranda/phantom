@@ -58,6 +58,7 @@ pub struct ProjectContext {
 
 impl ProjectContext {
     /// Scan a directory and build the full project context.
+    #[must_use]
     pub fn detect(dir: &Path) -> Self {
         let project_type = detect_project(dir);
         let package_manager = detect_package_manager(dir);
@@ -108,6 +109,7 @@ impl ProjectContext {
     }
 
     /// One-line summary suitable for a status bar.
+    #[must_use]
     pub fn status_line(&self) -> String {
         let icon = match self.project_type {
             ProjectType::Rust => "rs",
@@ -138,6 +140,7 @@ impl ProjectContext {
     }
 
     /// Multi-line context string for feeding into an agent or LLM.
+    #[must_use]
     pub fn agent_context(&self) -> String {
         let mut lines = Vec::new();
         lines.push(format!("Project: {}", self.name));
@@ -160,11 +163,7 @@ impl ProjectContext {
         }
 
         let cmd_line = |label: &str, val: &Option<String>| {
-            if let Some(v) = val {
-                Some(format!("  {label}: {v}"))
-            } else {
-                None
-            }
+            val.as_ref().map(|v| format!("  {label}: {v}"))
         };
 
         lines.push("Commands:".into());
@@ -224,12 +223,11 @@ fn extract_project_name(dir: &Path, project_type: &ProjectType) -> String {
             }
         }
         ProjectType::Node => {
-            if let Ok(contents) = std::fs::read_to_string(dir.join("package.json")) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) {
-                    if let Some(name) = json.get("name").and_then(|v| v.as_str()) {
-                        return name.to_string();
-                    }
-                }
+            if let Ok(contents) = std::fs::read_to_string(dir.join("package.json"))
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents)
+                && let Some(name) = json.get("name").and_then(|v| v.as_str())
+            {
+                return name.to_string();
             }
         }
         ProjectType::Python => {
@@ -238,12 +236,11 @@ fn extract_project_name(dir: &Path, project_type: &ProjectType) -> String {
             }
         }
         ProjectType::Go => {
-            if let Ok(contents) = std::fs::read_to_string(dir.join("go.mod")) {
-                if let Some(line) = contents.lines().next() {
-                    if let Some(module) = line.strip_prefix("module ") {
-                        return module.trim().to_string();
-                    }
-                }
+            if let Ok(contents) = std::fs::read_to_string(dir.join("go.mod"))
+                && let Some(line) = contents.lines().next()
+                && let Some(module) = line.strip_prefix("module ")
+            {
+                return module.trim().to_string();
             }
         }
         ProjectType::Elixir => {
