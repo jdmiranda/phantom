@@ -214,6 +214,16 @@ impl PhantomConfig {
         self.nlp_llm_enabled
     }
 
+    /// Returns whether privacy mode is enabled.
+    pub fn privacy_mode(&self) -> bool {
+        self.privacy_mode
+    }
+
+    /// Returns whether offline mode is enabled.
+    pub fn offline_mode(&self) -> bool {
+        self.offline_mode
+    }
+
     /// Write a default config file to the standard path.
     pub fn write_default() -> Result<PathBuf> {
         let path = config_path();

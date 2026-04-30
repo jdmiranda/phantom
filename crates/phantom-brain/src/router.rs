@@ -113,7 +113,52 @@ impl ModelBackend {
             cost_per_1k: 0.003,
         }
     }
+
+    /// Returns `true` if this backend makes outbound cloud API calls.
+    ///
+    /// Local backends (heuristic, Ollama) return `false`.
+    /// Cloud backends (Claude, OpenAI-compat) return `true`.
+    pub fn is_cloud_provider(&self) -> bool {
+        matches!(
+            self.kind,
+            BackendKind::Claude { .. } | BackendKind::OpenAICompat { .. }
+        )
+    }
+
+    /// Returns a human-readable provider name for logging and error messages.
+    pub fn provider_name(&self) -> &'static str {
+        match &self.kind {
+            BackendKind::Heuristic => "heuristic",
+            BackendKind::Ollama { .. } => "ollama",
+            BackendKind::Claude { .. } => "claude",
+            BackendKind::OpenAICompat { .. } => "openai-compat",
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// PrivacyModeViolation
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`BrainRouter::route_checked`] when privacy mode is
+/// active and a cloud provider would otherwise be selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacyModeViolation {
+    /// Name of the cloud provider that triggered the violation.
+    pub provider: String,
+}
+
+impl std::fmt::Display for PrivacyModeViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "privacy mode active: cloud provider '{}' blocked",
+            self.provider
+        )
+    }
+}
+
+impl std::error::Error for PrivacyModeViolation {}
 
 // ---------------------------------------------------------------------------
 // RouterConfig
