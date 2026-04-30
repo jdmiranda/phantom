@@ -20,6 +20,7 @@ phantom-agents = { path = "../phantom-agents" }
 phantom-history = { path = "../phantom-history" }
 phantom-scene = { path = "../phantom-scene" }
 phantom-mcp = { path = "../phantom-mcp" }
+phantom-net = { path = "../phantom-net" }
 phantom-adapter = { path = "../phantom-adapter" }
 phantom-plugins = { path = "../phantom-plugins" }
 phantom-vision = { path = "../phantom-vision" }

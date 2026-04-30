@@ -258,6 +258,8 @@ pub struct App {
     // -- MCP listener (Unix socket) and inbound command channel --
     pub(crate) mcp_cmd_rx: mpsc::Receiver<AppCommand>,
     pub(crate) _mcp_listener: Option<McpListener>,
+    // -- Hub registration listener (outbound WSS to phantom-hub, issue #395) --
+    pub(crate) _hub_listener: Option<phantom_mcp::HubListener>,
 
     // -- Render pools (reused each frame via clear() to avoid per-frame allocs) --
     pub(crate) pool_quads: Vec<QuadInstance>,
@@ -1035,6 +1037,9 @@ impl App {
                 PathBuf::from(format!("/tmp/phantom-mcp-{}.sock", std::process::id()))
             });
         let (mcp_cmd_tx, mcp_cmd_rx) = mpsc::channel::<AppCommand>();
+        // Clone sender before moving into spawn_listener; the hub listener
+        // shares the same mpsc channel so both transports funnel to one receiver.
+        let hub_cmd_tx = mcp_cmd_tx.clone();
         let mcp_listener = match spawn_listener(mcp_socket_path.clone(), mcp_cmd_tx) {
             Ok(l) => {
                 info!("MCP listener ready: {}", mcp_socket_path.display());
@@ -1046,6 +1051,39 @@ impl App {
                     mcp_socket_path.display()
                 );
                 None
+            }
+        };
+
+        // -- Hub registration listener (issue #395) --
+        // When PHANTOM_HUB_URL is set, dial out to phantom-hub and register
+        // this Phantom instance so Claude can reach it remotely.  If the env
+        // var is absent this is a graceful no-op.  The device_token is an
+        // opaque placeholder until issue #398 provides real JWT issuance.
+        let hub_listener = {
+            let hub_url = std::env::var("PHANTOM_HUB_URL").unwrap_or_default();
+            let device_token = std::env::var("PHANTOM_HUB_DEVICE_TOKEN")
+                .unwrap_or_default();
+            match phantom_net::Identity::load_or_generate("phantom") {
+                Ok(identity) => {
+                    match phantom_mcp::spawn_hub(&hub_url, identity, device_token, hub_cmd_tx) {
+                        Ok(Some(hl)) => {
+                            info!("Hub listener started: {}", hl.hub_url());
+                            Some(hl)
+                        }
+                        Ok(None) => {
+                            debug!("Hub URL not configured — hub registration skipped");
+                            None
+                        }
+                        Err(e) => {
+                            warn!("Failed to start hub listener: {e}");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load identity for hub registration: {e}");
+                    None
+                }
             }
         };
 
@@ -1114,6 +1152,7 @@ impl App {
             scene_content_node: content_node,
             mcp_cmd_rx,
             _mcp_listener: mcp_listener,
+            _hub_listener: hub_listener,
             pool_quads: Vec::with_capacity(256),
             pool_glyphs: Vec::with_capacity(4096),
             pool_color_glyphs: Vec::with_capacity(64),

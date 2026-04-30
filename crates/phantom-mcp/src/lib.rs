@@ -13,6 +13,7 @@
 
 pub mod client;
 pub mod error;
+pub mod hub_listener;
 pub mod listener;
 pub mod protocol;
 pub mod registry;
@@ -20,6 +21,7 @@ pub mod server;
 
 pub use client::{McpClient, McpResourceDef, McpToolDef};
 pub use error::McpError;
+pub use hub_listener::{HubListener, spawn_hub};
 pub use listener::{spawn as spawn_listener, AppCommand, McpListener, ScreenshotReply};
 pub use protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpResource, McpTool,

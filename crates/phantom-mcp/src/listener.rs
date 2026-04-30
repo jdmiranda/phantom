@@ -266,6 +266,20 @@ fn write_response(
 // Request dispatch
 // ---------------------------------------------------------------------------
 
+/// Public façade for [`dispatch`] shared by the Unix-socket listener and the
+/// hub listener (`hub_listener.rs`).
+///
+/// Both transport paths call this function so all 9 tools work uniformly over
+/// the local Unix socket and the outbound WSS hub connection.
+#[must_use]
+pub fn dispatch_public(
+    server: &PhantomMcpServer,
+    request: &JsonRpcRequest,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    dispatch(server, request, cmd_tx)
+}
+
 /// Dispatch a single JSON-RPC request. For tool calls that need live app
 /// state, forward to the app thread via `cmd_tx` and block on reply.
 fn dispatch(
