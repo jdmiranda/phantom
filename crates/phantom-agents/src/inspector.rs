@@ -201,6 +201,83 @@ pub struct DenialEntry {
 }
 
 // ---------------------------------------------------------------------------
+// SwapRow — hot-swap telemetry (#385)
+// ---------------------------------------------------------------------------
+
+/// Hard cap on [`InspectorView::swap_states`].
+///
+/// Swap targets are few (≤10 per the epic's crate triage); 32 is a safe
+/// upper bound that keeps the snapshot compact.
+pub const MAX_SWAP_ROWS: usize = 32;
+
+/// Coarse status of a single hot-reload swap target, mirroring
+/// `phantom_skill_host::SwapStatus` without taking a dependency on that
+/// crate from `phantom-agents`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status")]
+pub enum SwapRowStatus {
+    /// No previous generation is pending — the target is fully quiesced.
+    Idle,
+    /// A previous generation is alive and its refcount is draining toward 1.
+    Draining {
+        /// Milliseconds since the swap was requested.
+        age_ms: u64,
+        /// Current `Arc::strong_count` of the previous generation handle.
+        ///
+        /// When this reaches `1` the handle is dropped by the drain-reaper
+        /// thread.
+        refcount: usize,
+    },
+    /// A force-drop was executed because the previous generation did not
+    /// drain within the deadline.  This may indicate a leaked `Arc` clone.
+    Forced {
+        /// Milliseconds elapsed at the time of the force-drop.
+        age_ms: u64,
+    },
+}
+
+/// One row in the "HOT SWAPS" inspector section.
+///
+/// Produced by [`InspectorBuilder::with_swap_state`] from the
+/// `phantom_skill_host::SwapState` values returned by
+/// `phantom_skill_host::all_swap_states()`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SwapRow {
+    /// Registered name of the swap target (e.g. `"phantom-semantic"`).
+    pub name: String,
+    /// Current lifecycle status of this swap target.
+    pub status: SwapRowStatus,
+}
+
+/// Format a [`SwapRow`] into a one-line human summary for the inspector
+/// event feed or toast.
+///
+/// Examples:
+/// * `"phantom-semantic: Idle"`
+/// * `"phantom-nlp: Draining (refcount=2, age=12.3s)"`
+/// * `"phantom-nlp swap forced after 30.1s timeout"`
+///
+/// Pure and total: same input → same output, no side effects, no allocation
+/// beyond the returned `String`.
+#[must_use]
+pub fn summarize_swap_state(row: &SwapRow) -> String {
+    match &row.status {
+        SwapRowStatus::Idle => format!("{}: Idle", row.name),
+        SwapRowStatus::Draining { age_ms, refcount } => {
+            let age_s = *age_ms as f64 / 1000.0;
+            format!(
+                "{}: Draining (refcount={refcount}, age={age_s:.1}s)",
+                row.name,
+            )
+        }
+        SwapRowStatus::Forced { age_ms } => {
+            let age_s = *age_ms as f64 / 1000.0;
+            format!("{} swap forced after {age_s:.1}s timeout", row.name)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PeerRow
 // ---------------------------------------------------------------------------
 
@@ -265,6 +342,10 @@ pub struct InspectorView {
     pub peers: Vec<PeerRow>,
     /// Local node identity for display in the Peers tab.
     pub local_node_id: String,
+    /// Per-target hot-swap status rows.  Empty when `PHANTOM_HOT_MODULES` is
+    /// unset (zero overhead in non-hot builds).  Capped at [`MAX_SWAP_ROWS`]
+    /// by [`InspectorBuilder`].
+    pub swap_states: Vec<SwapRow>,
 }
 
 impl InspectorView {
@@ -280,6 +361,7 @@ impl InspectorView {
             denials: Vec::new(),
             peers: Vec::new(),
             local_node_id: String::from("localhost"),
+            swap_states: Vec::new(),
         }
     }
 }
@@ -305,6 +387,7 @@ pub struct InspectorBuilder {
     events: Vec<EventRow>,
     denials: Vec<DenialEntry>,
     peers: Vec<PeerRow>,
+    swap_states: Vec<SwapRow>,
     spawned_total_override: Option<u32>,
     running_count_override: Option<u32>,
     local_node_id: String,
@@ -352,9 +435,25 @@ impl InspectorBuilder {
     }
 
     /// Set the local node identity for display in the Peers tab.
-    #[must_use] 
+    #[must_use]
     pub fn with_local_node_id(mut self, id: String) -> Self {
         self.local_node_id = id;
+        self
+    }
+
+    /// Append a hot-swap state row.
+    ///
+    /// Mirrors the [`with_event`](Self::with_event) / [`with_agent`](Self::with_agent)
+    /// pattern.  Insertion order is preserved; when more than [`MAX_SWAP_ROWS`]
+    /// are pushed the **oldest** (front of the vec) are dropped at build time.
+    ///
+    /// Call once per [`phantom_skill_host::SwapState`] returned by
+    /// `phantom_skill_host::all_swap_states()`.  The caller converts the
+    /// `SwapState` into a [`SwapRow`] to avoid a dependency on
+    /// `phantom-skill-host` from `phantom-agents`.
+    #[must_use]
+    pub fn with_swap_state(mut self, row: SwapRow) -> Self {
+        self.swap_states.push(row);
         self
     }
 
@@ -396,6 +495,14 @@ impl InspectorBuilder {
             self.denials.drain(0..drop);
         }
 
+        // Cap swap_states at MAX_SWAP_ROWS — in practice there are ≤10 swap
+        // targets, so this cap is never hit, but we enforce it for symmetry
+        // with the events/denials cap policy.
+        if self.swap_states.len() > MAX_SWAP_ROWS {
+            let drop = self.swap_states.len() - MAX_SWAP_ROWS;
+            self.swap_states.drain(0..drop);
+        }
+
         let spawned_total = self
             .spawned_total_override
             .unwrap_or(self.agents.len() as u32);
@@ -414,6 +521,7 @@ impl InspectorBuilder {
             denials: self.denials,
             peers: self.peers,
             local_node_id: self.local_node_id,
+            swap_states: self.swap_states,
         }
     }
 }
@@ -890,5 +998,118 @@ mod tests {
         assert!(s.contains("\"recent_events\""));
         assert!(s.contains("\"spawned_total\""));
         assert!(s.contains("\"running_count\""));
+    }
+
+    // ---- Hot-swap telemetry (#385) ----------------------------------------
+
+    #[test]
+    fn swap_row_idle_serializes_with_status_tag() {
+        let row = SwapRow { name: "phantom-semantic".into(), status: SwapRowStatus::Idle };
+        let v = serde_json::to_value(&row).expect("SwapRow::Idle serializes");
+        assert_eq!(v["name"], "phantom-semantic");
+        // `#[serde(tag = "status")]` produces `{"status": "Idle"}` for unit variants.
+        assert_eq!(v["status"]["status"], "Idle");
+    }
+
+    #[test]
+    fn swap_row_draining_serializes_with_age_and_refcount() {
+        let row = SwapRow {
+            name: "phantom-nlp".into(),
+            status: SwapRowStatus::Draining { age_ms: 5_000, refcount: 3 },
+        };
+        let v = serde_json::to_value(&row).expect("SwapRow::Draining serializes");
+        assert_eq!(v["name"], "phantom-nlp");
+        // Internally tagged: status variant is an object with "status" key.
+        assert_eq!(v["status"]["status"], "Draining");
+        assert_eq!(v["status"]["age_ms"], 5_000);
+        assert_eq!(v["status"]["refcount"], 3);
+    }
+
+    #[test]
+    fn swap_row_forced_serializes_with_age() {
+        let row = SwapRow {
+            name: "phantom-nlp".into(),
+            status: SwapRowStatus::Forced { age_ms: 30_100 },
+        };
+        let v = serde_json::to_value(&row).expect("SwapRow::Forced serializes");
+        assert_eq!(v["status"]["status"], "Forced");
+        assert_eq!(v["status"]["age_ms"], 30_100);
+    }
+
+    #[test]
+    fn summarize_swap_state_idle_formats_correctly() {
+        let row = SwapRow { name: "phantom-semantic".into(), status: SwapRowStatus::Idle };
+        assert_eq!(summarize_swap_state(&row), "phantom-semantic: Idle");
+    }
+
+    #[test]
+    fn summarize_swap_state_draining_formats_correctly() {
+        let row = SwapRow {
+            name: "phantom-nlp".into(),
+            status: SwapRowStatus::Draining { age_ms: 12_300, refcount: 2 },
+        };
+        let s = summarize_swap_state(&row);
+        assert_eq!(s, "phantom-nlp: Draining (refcount=2, age=12.3s)");
+    }
+
+    #[test]
+    fn summarize_swap_state_forced_formats_correctly() {
+        let row = SwapRow {
+            name: "phantom-nlp".into(),
+            status: SwapRowStatus::Forced { age_ms: 30_100 },
+        };
+        let s = summarize_swap_state(&row);
+        assert_eq!(s, "phantom-nlp swap forced after 30.1s timeout");
+    }
+
+    #[test]
+    fn builder_with_swap_state_inserts_and_builds() {
+        let view = InspectorBuilder::new()
+            .with_swap_state(SwapRow {
+                name: "phantom-semantic".into(),
+                status: SwapRowStatus::Idle,
+            })
+            .with_swap_state(SwapRow {
+                name: "phantom-nlp".into(),
+                status: SwapRowStatus::Draining { age_ms: 1_000, refcount: 2 },
+            })
+            .build();
+        assert_eq!(view.swap_states.len(), 2);
+        assert_eq!(view.swap_states[0].name, "phantom-semantic");
+        assert_eq!(view.swap_states[1].name, "phantom-nlp");
+    }
+
+    #[test]
+    fn builder_caps_swap_states_at_max_dropping_oldest() {
+        let mut b = InspectorBuilder::new();
+        for i in 0..(MAX_SWAP_ROWS + 3) {
+            b = b.with_swap_state(SwapRow {
+                name: format!("target-{i}"),
+                status: SwapRowStatus::Idle,
+            });
+        }
+        let view = b.build();
+        assert_eq!(view.swap_states.len(), MAX_SWAP_ROWS);
+        // Oldest 3 dropped — first surviving entry is "target-3".
+        assert_eq!(view.swap_states.first().unwrap().name, "target-3");
+    }
+
+    #[test]
+    fn empty_view_has_empty_swap_states() {
+        let v = InspectorView::empty();
+        assert!(v.swap_states.is_empty());
+    }
+
+    #[test]
+    fn swap_row_status_equality_holds() {
+        assert_eq!(SwapRowStatus::Idle, SwapRowStatus::Idle);
+        assert_ne!(
+            SwapRowStatus::Idle,
+            SwapRowStatus::Draining { age_ms: 0, refcount: 1 },
+        );
+        assert_eq!(
+            SwapRowStatus::Forced { age_ms: 100 },
+            SwapRowStatus::Forced { age_ms: 100 },
+        );
     }
 }
