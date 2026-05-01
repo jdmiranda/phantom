@@ -162,6 +162,10 @@ impl AppCore for AgentAdapter {
             .saturating_sub(self.cached_output_max_lines.get());
         json!({
             "type": "agent",
+            // Stable AgentId returned by phantom.spawn_agent (issue #399).
+            // Used by phantom.get_agent_status (issue #400) to look up this
+            // pane without coupling the hub to phantom-app internals.
+            "agent_id": self.pane.agent_id(),
             "task": self.pane.task(),
             "status": format!("{:?}", self.pane.status()),
             "output_len": self.pane.output_len(),

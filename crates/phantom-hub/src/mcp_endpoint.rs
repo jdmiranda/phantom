@@ -186,6 +186,51 @@ fn fleet_tools() -> Vec<McpTool> {
                 "required": ["phantom_id", "prompt"]
             }),
         },
+        // Phase 2 (issue #400): pane listing.
+        McpTool {
+            name: "phantom.list_panes".into(),
+            description: "List all panes open in a specific Phantom instance. \
+                Returns id, type (terminal/agent/inspector), title, focused flag, and \
+                agent_id (only for agent-type panes). \
+                Use pane ids to target phantom.run_command at a specific pane. \
+                Use agent_id to poll status via phantom.get_agent_status. \
+                SECURITY: per-API-key capability scoping deferred to #511."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "phantom_id": {
+                        "type": "string",
+                        "description": "The stable peer ID of the target Phantom, \
+                            as returned by phantom.list_phantoms."
+                    }
+                },
+                "required": ["phantom_id"]
+            }),
+        },
+        // Phase 2 (issue #400): agent status polling.
+        McpTool {
+            name: "phantom.get_agent_status".into(),
+            description: "Return the current status of an agent spawned via phantom.spawn_agent. \
+                Poll every 5 s until state is 'done' or 'failed'. \
+                Returns state (running/done/failed), task, and last_output_excerpt (≤256 bytes). \
+                SECURITY: per-API-key capability scoping deferred to #511."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "phantom_id": {
+                        "type": "string",
+                        "description": "The stable peer ID of the target Phantom."
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The decimal string agent_id returned by phantom.spawn_agent."
+                    }
+                },
+                "required": ["phantom_id", "agent_id"]
+            }),
+        },
     ]
 }
 
@@ -363,6 +408,9 @@ async fn dispatch_tools_call(
         "phantom.read_output" => dispatch_read_output(state, id, &args).await,
         // Phase 2 (issue #399)
         "phantom.spawn_agent" => dispatch_spawn_agent(state, id, &args).await,
+        // Phase 2 (issue #400)
+        "phantom.list_panes" => dispatch_list_panes(state, id, &args).await,
+        "phantom.get_agent_status" => dispatch_get_agent_status(state, id, &args).await,
         other => {
             warn!("mcp: tools/call for unknown tool '{other}'");
             json_rpc_error(id, -32601, format!("Unknown tool: {other}"))
@@ -585,6 +633,113 @@ async fn dispatch_spawn_agent(
         method: "tools/call".into(),
         params: json!({
             "name": "phantom.spawn_agent",
+            "arguments": forward_args
+        }),
+    };
+
+    let pid = PhantomId::new(&phantom_id);
+
+    match router::forward(&state.registry, &pid, phantom_req, None, &()).await {
+        Ok(resp) => phantom_response_to_mcp(id, resp),
+        Err(e) => route_error_to_mcp(id, &phantom_id, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// phantom.list_panes (issue #400)
+// ---------------------------------------------------------------------------
+
+/// Route a `phantom.list_panes` JSON-RPC frame to the named Phantom.
+///
+/// The hub is a pure pass-through — it forwards the frame unchanged and
+/// relays the `{ panes: [...] }` payload back to Claude.
+///
+/// # Auth / capability gate
+///
+/// Auth: API key validated by the shared `require_api_key` guard.
+/// Capability gate v1: any valid API key may list panes.
+/// SECURITY: per-API-key capability scoping deferred to #511.
+async fn dispatch_list_panes(
+    state: &AppState,
+    id: serde_json::Value,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_owned(),
+        _ => {
+            return json_rpc_error(id, -32602, "missing or empty 'phantom_id' argument");
+        }
+    };
+
+    info!("mcp: list_panes phantom={phantom_id}");
+
+    // SECURITY: per-API-key capability scoping deferred to #511.
+    // v1: any valid API key may list panes.
+
+    let phantom_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(id.clone()),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "phantom.list_panes",
+            "arguments": {}
+        }),
+    };
+
+    let pid = PhantomId::new(&phantom_id);
+
+    match router::forward(&state.registry, &pid, phantom_req, None, &()).await {
+        Ok(resp) => phantom_response_to_mcp(id, resp),
+        Err(e) => route_error_to_mcp(id, &phantom_id, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// phantom.get_agent_status (issue #400)
+// ---------------------------------------------------------------------------
+
+/// Route a `phantom.get_agent_status` JSON-RPC frame to the named Phantom.
+///
+/// The hub is a pure pass-through — it validates `phantom_id` and `agent_id`,
+/// then forwards the frame unchanged and relays the status payload back to Claude.
+///
+/// # Auth / capability gate
+///
+/// Auth: API key validated by the shared `require_api_key` guard.
+/// Capability gate v1: any valid API key may poll agent status.
+/// SECURITY: per-API-key capability scoping deferred to #511.
+async fn dispatch_get_agent_status(
+    state: &AppState,
+    id: serde_json::Value,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_owned(),
+        _ => {
+            return json_rpc_error(id, -32602, "missing or empty 'phantom_id' argument");
+        }
+    };
+
+    let agent_id = match args.get("agent_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => {
+            return json_rpc_error(id, -32602, "missing or empty 'agent_id' argument");
+        }
+    };
+
+    info!("mcp: get_agent_status phantom={phantom_id} agent_id={agent_id}");
+
+    // SECURITY: per-API-key capability scoping deferred to #511.
+    // v1: any valid API key may poll agent status.
+
+    let forward_args = json!({ "agent_id": agent_id });
+
+    let phantom_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(id.clone()),
+        method: "tools/call".into(),
+        params: json!({
+            "name": "phantom.get_agent_status",
             "arguments": forward_args
         }),
     };
@@ -840,11 +995,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // tools/list → four tools (Phase 2 adds phantom.spawn_agent)
+    // tools/list → six tools (Phase 2 #400 adds list_panes + get_agent_status)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn mcp_tools_list_returns_four_tools() {
+    async fn mcp_tools_list_returns_six_tools() {
         let app = crate::build_router(test_state_with_key(TEST_API_KEY));
         let resp = app
             .oneshot(
@@ -875,7 +1030,10 @@ mod tests {
         assert!(names.contains(&"phantom.run_command"), "names: {names:?}");
         assert!(names.contains(&"phantom.read_output"), "names: {names:?}");
         assert!(names.contains(&"phantom.spawn_agent"), "names: {names:?}");
-        assert_eq!(names.len(), 4, "expected exactly 4 tools, got: {names:?}");
+        // Phase 2 (issue #400)
+        assert!(names.contains(&"phantom.list_panes"), "names: {names:?}");
+        assert!(names.contains(&"phantom.get_agent_status"), "names: {names:?}");
+        assert_eq!(names.len(), 6, "expected exactly 6 tools, got: {names:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -1467,5 +1625,284 @@ mod tests {
         let body_str = std::str::from_utf8(&body).unwrap();
         assert!(body_str.starts_with("data: "), "expected SSE data prefix: {body_str}");
         assert!(body_str.contains("phantom.list_phantoms"), "expected tool name: {body_str}");
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.list_panes: unknown peer → JSON-RPC NotFound error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_panes_unknown_peer_returns_rpc_error() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.list_panes",
+                            "arguments": { "phantom_id": "ghost-phantom" }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_some(), "expected error, got: {val}");
+        let code = val["error"]["code"].as_i64().unwrap();
+        assert_eq!(code, -32001, "expected NotFound -32001, got {code}");
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.list_panes: no API key → 401
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_panes_no_api_key_returns_401() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.list_panes",
+                            "arguments": { "phantom_id": "any-phantom" }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.list_panes: valid auth + connected peer → panes relayed back
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_panes_valid_auth_and_connected_peer_returns_pane_list() {
+        let state = test_state_with_key(TEST_API_KEY);
+        let mut rx = register_fake_phantom(&state, "pane-phantom", "localhost", "0.1.0").await;
+
+        // Fake Phantom: receives list_panes, returns a two-pane list.
+        let reg_clone = Arc::clone(&state.registry);
+        tokio::spawn(async move {
+            let req = rx.recv().await.expect("fake phantom should receive request");
+            // Verify the correct tool name was forwarded.
+            assert_eq!(
+                req.params["name"].as_str(),
+                Some("phantom.list_panes"),
+                "hub must forward phantom.list_panes"
+            );
+            let hub_id = req.id.clone().unwrap().as_u64().unwrap();
+            deliver_response(
+                &reg_clone,
+                &PhantomId::new("pane-phantom"),
+                crate::router::JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: Some(serde_json::Value::Number(hub_id.into())),
+                    result: Some(json!({
+                        "content": [{"type": "text", "text": "2 pane(s)"}],
+                        "panes": [
+                            {"id": "1", "type": "terminal", "title": "zsh", "focused": true,  "agent_id": null},
+                            {"id": "2", "type": "agent",    "title": "agent", "focused": false, "agent_id": "7"}
+                        ]
+                    })),
+                    error: None,
+                },
+            )
+            .await;
+        });
+
+        let app = crate::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.list_panes",
+                            "arguments": { "phantom_id": "pane-phantom" }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_none(), "unexpected error: {val}");
+        let panes = val["result"]["panes"].as_array().expect("panes must be array");
+        assert_eq!(panes.len(), 2, "expected 2 panes, got: {val}");
+        assert_eq!(panes[0]["type"].as_str(), Some("terminal"));
+        assert_eq!(panes[1]["agent_id"].as_str(), Some("7"));
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.get_agent_status: unknown peer → JSON-RPC NotFound error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_agent_status_unknown_peer_returns_rpc_error() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.get_agent_status",
+                            "arguments": {
+                                "phantom_id": "ghost-phantom",
+                                "agent_id": "42"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_some(), "expected error, got: {val}");
+        let code = val["error"]["code"].as_i64().unwrap();
+        assert_eq!(code, -32001, "expected NotFound -32001, got {code}");
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.get_agent_status: no API key → 401
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_agent_status_no_api_key_returns_401() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.get_agent_status",
+                            "arguments": {
+                                "phantom_id": "any-phantom",
+                                "agent_id": "7"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -----------------------------------------------------------------------
+    // phantom.get_agent_status: valid auth + connected peer → status relayed
+    // -----------------------------------------------------------------------
+    //
+    // The fake Phantom only replies when agent_id matches "99" — this verifies
+    // the hub forwards the real agent_id, not a hardcoded value.
+
+    #[tokio::test]
+    async fn get_agent_status_valid_auth_and_connected_peer_returns_status() {
+        let state = test_state_with_key(TEST_API_KEY);
+        let mut rx =
+            register_fake_phantom(&state, "status-phantom", "localhost", "0.1.0").await;
+
+        let reg_clone = Arc::clone(&state.registry);
+        tokio::spawn(async move {
+            let req = rx.recv().await.expect("fake phantom should receive request");
+            // Verify correct tool name and agent_id forwarded.
+            assert_eq!(
+                req.params["name"].as_str(),
+                Some("phantom.get_agent_status"),
+                "hub must forward phantom.get_agent_status"
+            );
+            let forwarded_agent_id = req.params["arguments"]["agent_id"].as_str().unwrap_or("");
+            assert_eq!(
+                forwarded_agent_id, "99",
+                "hub must forward the caller's agent_id unchanged"
+            );
+            let hub_id = req.id.clone().unwrap().as_u64().unwrap();
+            deliver_response(
+                &reg_clone,
+                &PhantomId::new("status-phantom"),
+                crate::router::JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: Some(serde_json::Value::Number(hub_id.into())),
+                    result: Some(json!({
+                        "content": [{"type": "text", "text": "agent 99 state=running task=build the project"}],
+                        "agent_id": "99",
+                        "state": "running",
+                        "task": "build the project",
+                        "last_output_excerpt": "cargo build…"
+                    })),
+                    error: None,
+                },
+            )
+            .await;
+        });
+
+        let app = crate::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.get_agent_status",
+                            "arguments": {
+                                "phantom_id": "status-phantom",
+                                "agent_id": "99"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_none(), "unexpected error: {val}");
+        assert_eq!(val["result"]["state"].as_str(), Some("running"), "got: {val}");
+        assert_eq!(val["result"]["agent_id"].as_str(), Some("99"), "got: {val}");
     }
 }
