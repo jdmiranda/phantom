@@ -63,6 +63,7 @@
 //! be used until its exp; rotation is via `phantom auth register --renew`
 //! (ticket 09).
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -100,6 +101,51 @@ pub const NONCE_CACHE_CAPACITY: usize = 10_000;
 pub const NONCE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 // ---------------------------------------------------------------------------
+// CapabilityClass — per-API-key operation scoping (issue #511)
+// ---------------------------------------------------------------------------
+
+/// The set of operations an API key is permitted to invoke on the hub.
+///
+/// Each MCP tool is tagged with one capability class.  When an API key presents
+/// its bearer token, the hub checks that the key's capability set includes the
+/// class required by the requested tool before forwarding the frame.
+///
+/// # Default for legacy keys
+///
+/// Keys loaded from the `HUB_API_KEYS` environment variable (comma-separated
+/// `phk_<…>` values) are assigned **all capabilities** (`ALL_CAPABILITIES`) for
+/// backwards compatibility — this preserves the v1 behaviour where any valid key
+/// could call any tool.
+///
+/// Operators who want fail-closed semantics for new keys should provision them
+/// via [`ApiKeyStore::from_entries`] with an explicit, narrow capability set.
+///
+/// # Migration path
+///
+/// To tighten an existing deployment:
+/// 1. Issue new keys via `from_entries` with only the capabilities needed.
+/// 2. Rotate out the old `HUB_API_KEYS` keys.
+/// 3. At that point every key in the store has an explicit, narrow grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CapabilityClass {
+    /// Read / observe: `phantom.list_phantoms`, `phantom.read_output`.
+    Sense,
+    /// Execute shell commands: `phantom.run_command`.
+    Compute,
+    /// Spawn or steer other agents: `phantom.spawn_agent`,
+    /// `phantom.list_panes`, `phantom.get_agent_status`.
+    Coordinate,
+}
+
+/// All capability classes — granted to API keys loaded from `HUB_API_KEYS` for
+/// backwards compatibility.
+pub const ALL_CAPABILITIES: &[CapabilityClass] = &[
+    CapabilityClass::Sense,
+    CapabilityClass::Compute,
+    CapabilityClass::Coordinate,
+];
+
+// ---------------------------------------------------------------------------
 // NonceCache — replay protection for POST /auth/register
 // ---------------------------------------------------------------------------
 
@@ -123,6 +169,9 @@ pub const NONCE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 pub struct NonceCache {
     inner: Mutex<LruCache<String, Instant>>,
     ttl: Duration,
+    /// Optional clock override used in tests to control what "now" means
+    /// without sleeping.  Production code always uses `None` (wall clock).
+    clock: Option<fn() -> Instant>,
 }
 
 impl NonceCache {
@@ -144,6 +193,47 @@ impl NonceCache {
         Self {
             inner: Mutex::new(LruCache::new(cap)),
             ttl,
+            clock: None,
+        }
+    }
+
+    /// Create a [`NonceCache`] with a custom clock function (issue #506).
+    ///
+    /// `clock_fn` is called instead of `Instant::now()` on every [`try_claim`]
+    /// invocation, enabling deterministic TTL-expiry tests without sleeping.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    /// use std::sync::Arc;
+    /// use std::time::{Duration, Instant};
+    ///
+    /// static OFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ///
+    /// fn fake_clock() -> Instant {
+    ///     *BASE.get_or_init(Instant::now)
+    ///         + Duration::from_nanos(OFFSET_NANOS.load(Ordering::Relaxed))
+    /// }
+    /// let cache = NonceCache::with_clock(16, Duration::from_secs(10), fake_clock);
+    /// ```
+    #[must_use]
+    pub fn with_clock(capacity: usize, ttl: Duration, clock_fn: fn() -> Instant) -> Self {
+        let cap = std::num::NonZeroUsize::new(capacity.max(1))
+            .expect("capacity is always ≥ 1 after max(1)");
+        Self {
+            inner: Mutex::new(LruCache::new(cap)),
+            ttl,
+            clock: Some(clock_fn),
+        }
+    }
+
+    /// Return the current instant from the injected clock or `Instant::now()`.
+    fn now(&self) -> Instant {
+        match self.clock {
+            Some(f) => f(),
+            None => Instant::now(),
         }
     }
 
@@ -161,7 +251,7 @@ impl NonceCache {
     /// unless a previous thread panicked while holding the lock.
     pub fn try_claim(&self, nonce: &str) -> bool {
         let mut cache = self.inner.lock().expect("NonceCache mutex poisoned");
-        let now = Instant::now();
+        let now = self.now();
 
         // peek without promoting to LRU-head so we don't disturb eviction order
         // for a stale entry we are about to replace.
@@ -317,59 +407,111 @@ impl DeviceIdentity {
 
 /// The authenticated identity of a Claude session (MCP caller).
 ///
-/// In v1 every valid API key has access to all registered Phantoms;
-/// per-key scoping is ticket #09.
+/// Carries both the stable key identifier and the capability set granted to
+/// this key.  Callers check [`SessionIdentity::has`] before forwarding an
+/// operation to a Phantom.
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
     /// The SHA-256 hash of the presented API key (used as a stable key-id).
     /// The raw key is discarded after hashing and never stored.
     pub key_hash: [u8; 32],
+    /// The set of operations this key is permitted to invoke.
+    pub capabilities: HashSet<CapabilityClass>,
+}
+
+impl SessionIdentity {
+    /// Return `true` iff this identity carries `class` in its capability set.
+    #[must_use]
+    pub fn has(&self, class: CapabilityClass) -> bool {
+        self.capabilities.contains(&class)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // ApiKeyStore
 // ---------------------------------------------------------------------------
 
+/// Internal entry stored per API key in [`ApiKeyStore`].
+///
+/// Pairs the SHA-256 hash of the raw key (used for constant-time comparison)
+/// with the set of [`CapabilityClass`] values the key is allowed to exercise.
+#[derive(Clone)]
+struct ApiKeyEntry {
+    hash: [u8; 32],
+    capabilities: HashSet<CapabilityClass>,
+}
+
 /// In-memory store of SHA-256-hashed API keys.
 ///
 /// Loaded at startup from `HUB_API_KEYS` (comma-separated `phk_<...>` values).
 /// The raw keys are hashed immediately and the originals discarded — only
 /// hashes live in memory past the constructor.
+///
+/// Keys loaded from the environment variable receive all capabilities
+/// ([`ALL_CAPABILITIES`]) for backwards compatibility.  Use
+/// [`ApiKeyStore::from_entries`] to provision keys with explicit, narrow grants.
 #[derive(Clone, Default)]
 pub struct ApiKeyStore {
-    hashes: Vec<[u8; 32]>,
+    entries: Vec<ApiKeyEntry>,
 }
 
 impl ApiKeyStore {
     /// Load from `HUB_API_KEYS` environment variable.
     ///
-    /// Returns an empty store (no keys accepted) if the variable is unset or
-    /// empty — callers must handle the 401 case.
+    /// All keys loaded this way receive [`ALL_CAPABILITIES`] (backwards
+    /// compatibility — same behaviour as v1 where any valid key could call
+    /// any tool).  Returns an empty store (no keys accepted) if the variable
+    /// is unset or empty.
     #[must_use]
     pub fn from_env() -> Self {
         let raw = std::env::var("HUB_API_KEYS").unwrap_or_default();
         Self::from_raw_keys(raw.split(',').map(str::trim).filter(|s| !s.is_empty()))
     }
 
-    /// Construct from an explicit iterator of raw key strings.  Used in tests.
+    /// Construct from an explicit iterator of raw key strings, granting all
+    /// capabilities to each key.  Used in tests and for compat loading.
     pub fn from_raw_keys<'a>(keys: impl Iterator<Item = &'a str>) -> Self {
-        let hashes: Vec<[u8; 32]> = keys
+        let all: HashSet<CapabilityClass> = ALL_CAPABILITIES.iter().copied().collect();
+        let entries = keys
             .map(|k| {
                 let mut h = Sha256::new();
                 h.update(k.as_bytes());
-                h.finalize().into()
+                ApiKeyEntry {
+                    hash: h.finalize().into(),
+                    capabilities: all.clone(),
+                }
             })
             .collect();
+        Self { entries }
+    }
 
-        Self { hashes }
+    /// Construct from explicit `(raw_key, capabilities)` pairs.
+    ///
+    /// Use this constructor when provisioning new keys with narrow capability
+    /// grants rather than the legacy all-capabilities default.
+    pub fn from_entries<'a>(
+        pairs: impl Iterator<Item = (&'a str, HashSet<CapabilityClass>)>,
+    ) -> Self {
+        let entries = pairs
+            .map(|(k, caps)| {
+                let mut h = Sha256::new();
+                h.update(k.as_bytes());
+                ApiKeyEntry {
+                    hash: h.finalize().into(),
+                    capabilities: caps,
+                }
+            })
+            .collect();
+        Self { entries }
     }
 
     /// Validate an API key.
     ///
     /// Hashes `key` and performs a constant-time comparison against every
-    /// stored hash.  Returns the [`SessionIdentity`] on success.
+    /// stored hash.  Returns the [`SessionIdentity`] (including capability set)
+    /// on success.
     pub fn validate(&self, key: &str) -> Result<SessionIdentity, AuthError> {
-        if self.hashes.is_empty() {
+        if self.entries.is_empty() {
             return Err(AuthError::UnknownKey);
         }
 
@@ -377,16 +519,22 @@ impl ApiKeyStore {
         candidate_hash.update(key.as_bytes());
         let candidate: [u8; 32] = candidate_hash.finalize().into();
 
-        // Walk ALL hashes regardless of an early match — constant-time.
+        // Walk ALL entries regardless of an early match — constant-time comparison.
+        let mut found_caps: Option<HashSet<CapabilityClass>> = None;
         let mut found = subtle::Choice::from(0u8);
-        for stored in &self.hashes {
-            let eq = stored.ct_eq(&candidate);
+        for entry in &self.entries {
+            let eq = entry.hash.ct_eq(&candidate);
+            if bool::from(eq) && found_caps.is_none() {
+                // Capture capabilities on first match; continue loop for constant time.
+                found_caps = Some(entry.capabilities.clone());
+            }
             found |= eq;
         }
 
         if bool::from(found) {
             Ok(SessionIdentity {
                 key_hash: candidate,
+                capabilities: found_caps.unwrap_or_default(),
             })
         } else {
             Err(AuthError::UnknownKey)
@@ -851,5 +999,100 @@ mod tests {
         let result = JwtAuthority::from_env();
         assert!(result.is_ok(), "from_env must succeed with HUB_JWT_SECRET set");
         // Leave the var set — other tests that use from_env will benefit.
+    }
+
+    // -----------------------------------------------------------------------
+    // NonceCache TTL expiry — clock-injection tests (issue #506)
+    // -----------------------------------------------------------------------
+
+    /// Verify the TTL boundary using an injected fake clock.
+    ///
+    /// Test plan (issue #506):
+    /// a. Insert at t=0 → claim at t=TTL/2 returns `false` (replay blocked).
+    /// b. Insert at t=0 → claim at t=TTL+1s returns `true` (expired, treated as fresh).
+    #[test]
+    fn nonce_cache_ttl_expiry_clock_injection() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::OnceLock;
+
+        static OFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
+        static BASE: OnceLock<Instant> = OnceLock::new();
+
+        fn fake_clock() -> Instant {
+            *BASE.get_or_init(Instant::now)
+                + Duration::from_nanos(OFFSET_NANOS.load(Ordering::Relaxed))
+        }
+
+        let ttl = Duration::from_secs(10);
+
+        // ── Part a: claim at t=TTL/2 → replay (false) ──────────────────────
+        OFFSET_NANOS.store(0, Ordering::Relaxed);
+        BASE.get_or_init(Instant::now); // pin the base
+
+        let cache = NonceCache::with_clock(16, ttl, fake_clock);
+        let first = cache.try_claim("ttl-nonce"); // t=0: claim succeeds
+
+        // Advance clock to TTL/2 (5 s).
+        OFFSET_NANOS.store(
+            (ttl.as_nanos() / 2) as u64,
+            Ordering::Relaxed,
+        );
+        let within_ttl = cache.try_claim("ttl-nonce"); // t=5s: still within TTL
+
+        assert!(first, "initial claim at t=0 must succeed");
+        assert!(!within_ttl, "re-claim at t=TTL/2 must be rejected (replay)");
+
+        // ── Part b: claim at t=TTL+1s → fresh (true) ───────────────────────
+        // Use a fresh cache so Part a's entry doesn't interfere.
+        OFFSET_NANOS.store(0, Ordering::Relaxed);
+        let cache2 = NonceCache::with_clock(16, ttl, fake_clock);
+        cache2.try_claim("ttl-nonce-b"); // t=0: insert
+
+        // Advance past TTL by 1 second.
+        OFFSET_NANOS.store(
+            (ttl + Duration::from_secs(1)).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        let after_ttl = cache2.try_claim("ttl-nonce-b"); // t=TTL+1s: expired
+
+        assert!(after_ttl, "re-claim after TTL expiry must succeed (treated as fresh nonce)");
+    }
+
+    // -----------------------------------------------------------------------
+    // CapabilityClass / ApiKeyStore::from_entries (issue #511)
+    // -----------------------------------------------------------------------
+
+    /// Keys loaded via `from_raw_keys` (env-var compat path) receive all
+    /// capabilities — SessionIdentity.has returns true for each class.
+    #[test]
+    fn api_key_from_raw_keys_receives_all_capabilities() {
+        let store = ApiKeyStore::from_raw_keys(std::iter::once("phk_compat-key"));
+        let session = store.validate("phk_compat-key").expect("known key must validate");
+        assert!(session.has(CapabilityClass::Sense), "Sense must be granted");
+        assert!(session.has(CapabilityClass::Compute), "Compute must be granted");
+        assert!(session.has(CapabilityClass::Coordinate), "Coordinate must be granted");
+    }
+
+    /// Keys provisioned via `from_entries` with a narrow capability set only
+    /// allow those specific capabilities.
+    #[test]
+    fn api_key_from_entries_with_narrow_caps_only_allows_granted_caps() {
+        let caps = HashSet::from([CapabilityClass::Sense]);
+        let store = ApiKeyStore::from_entries(std::iter::once(("phk_narrow-key", caps)));
+        let session = store.validate("phk_narrow-key").expect("known key must validate");
+        assert!(session.has(CapabilityClass::Sense), "Sense must be granted");
+        assert!(!session.has(CapabilityClass::Coordinate), "Coordinate must not be granted");
+        assert!(!session.has(CapabilityClass::Compute), "Compute must not be granted");
+    }
+
+    /// `SessionIdentity::has` returns true only for capabilities in the set.
+    #[test]
+    fn session_identity_has_matches_stored_capabilities() {
+        let caps = HashSet::from([CapabilityClass::Coordinate, CapabilityClass::Compute]);
+        let store = ApiKeyStore::from_entries(std::iter::once(("phk_coord-key", caps)));
+        let session = store.validate("phk_coord-key").expect("known key must validate");
+        assert!(session.has(CapabilityClass::Coordinate));
+        assert!(session.has(CapabilityClass::Compute));
+        assert!(!session.has(CapabilityClass::Sense));
     }
 }

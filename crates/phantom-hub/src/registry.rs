@@ -76,27 +76,31 @@ pub struct ConnState {
     /// `JsonRpcRequest` as a text frame. Capacity is bounded at
     /// [`OUTBOUND_CHANNEL_CAPACITY`] frames; a full channel is surfaced to the
     /// caller as [`crate::router::RouteError::Backpressure`].
-    pub tx: mpsc::Sender<JsonRpcRequest>,
+    pub(crate) tx: mpsc::Sender<JsonRpcRequest>,
 
     /// In-flight request table: `hub_id → reply sender`.
     ///
     /// The router inserts an entry before forwarding; the inbound task removes
     /// it when the matching response arrives and completes the oneshot.
     /// Dropped en-masse when the connection is removed from the registry.
-    pub pending: HashMap<HubId, oneshot::Sender<JsonRpcResponse>>,
+    ///
+    /// `pub(crate)` — callers outside `phantom-hub` must not write to this
+    /// map directly (issue #500).  Integration tests use
+    /// [`ConnState::insert_pending_for_test`].
+    pub(crate) pending: HashMap<HubId, oneshot::Sender<JsonRpcResponse>>,
 
     /// Hub-local nonce counter for this connection.
-    pub next_hub_id: u64,
+    pub(crate) next_hub_id: u64,
 
     /// Timestamp of the most recent inbound frame (used by `list_online` to
     /// filter stale entries).
-    pub last_seen: Instant,
+    pub(crate) last_seen: Instant,
 
     /// Remote host string (IP or hostname) for diagnostics.
-    pub host: String,
+    pub(crate) host: String,
 
     /// Phantom client version string from the registration frame.
-    pub version: String,
+    pub(crate) version: String,
 }
 
 impl ConnState {
@@ -105,6 +109,39 @@ impl ConnState {
         let id = HubId(self.next_hub_id);
         self.next_hub_id += 1;
         id
+    }
+
+    /// Public read-only accessor for the remote host string.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Public read-only accessor for the last-seen timestamp.
+    #[must_use]
+    pub fn last_seen(&self) -> Instant {
+        self.last_seen
+    }
+
+    /// Insert a oneshot sender into the in-flight table.
+    ///
+    /// This method exists so that integration tests (which compile as a
+    /// separate crate and cannot see `pub(crate)` fields) can exercise the
+    /// disconnect path without exposing the raw `HashMap` as `pub`.
+    ///
+    /// It MUST NOT be called from production code paths — use
+    /// [`crate::router::forward`] instead, which inserts into `pending` as
+    /// part of the request-correlation protocol.
+    ///
+    /// Gated behind the `"testing"` cargo feature so it is excluded from
+    /// release builds unless explicitly opted-in.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn insert_pending_for_test(
+        &mut self,
+        hub_id: HubId,
+        sender: oneshot::Sender<JsonRpcResponse>,
+    ) {
+        self.pending.insert(hub_id, sender);
     }
 }
 

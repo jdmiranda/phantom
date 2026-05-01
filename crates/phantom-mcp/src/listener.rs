@@ -133,7 +133,6 @@ pub enum AppCommand {
     /// [`AgentStatusInfo`] when found, or an error string when the id is
     /// unknown or has expired.
     ///
-    /// SECURITY: per-API-key capability scoping deferred to #511.
     GetAgentStatus {
         /// The canonical `u64` agent id returned by `phantom.spawn_agent`.
         agent_id: u64,
@@ -866,7 +865,8 @@ fn dispatch_spawn_agent(
 ///
 /// No arguments required.  Returns `{ panes: [...] }` on success.
 ///
-/// SECURITY: per-API-key capability scoping deferred to #511.
+/// Capability gate (Coordinate) is enforced at the hub layer before this
+/// Phantom-side handler is reached via the WebSocket relay.
 fn dispatch_list_panes(
     id: serde_json::Value,
     cmd_tx: &Sender<AppCommand>,
@@ -924,7 +924,8 @@ fn dispatch_list_panes(
 /// - `agent_id` argument is missing or non-numeric
 /// - No pane with that agent id exists (never spawned or already GC'd)
 ///
-/// SECURITY: per-API-key capability scoping deferred to #511.
+/// Capability gate (Coordinate) is enforced at the hub layer before this
+/// Phantom-side handler is reached via the WebSocket relay.
 fn dispatch_get_agent_status(
     id: serde_json::Value,
     args: &serde_json::Value,
