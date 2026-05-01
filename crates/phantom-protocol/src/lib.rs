@@ -134,6 +134,14 @@ pub enum AppMessage {
 }
 
 impl AppMessage {
+    /// Encodes this message as a single wire-format line, omitting the trailing
+    /// newline so callers control framing on the socket write.
+    ///
+    /// The encoding is intentionally allocation-light and panic-free: simple
+    /// variants resolve to interned literals, and only `Log` allocates because
+    /// its payload is dynamic. The `LOG:` prefix is the only variant that may
+    /// embed colons in its tail; `from_line` therefore matches it greedily so
+    /// log bodies survive round-trip without escaping.
     #[must_use]
     pub fn to_line(&self) -> String {
         match self {
@@ -145,6 +153,16 @@ impl AppMessage {
         }
     }
 
+    /// Decodes a wire-format line into an `AppMessage`, returning `None` for
+    /// any unrecognised or malformed input rather than panicking.
+    ///
+    /// Returning `Option` (not `Result`) is deliberate: the supervisor treats
+    /// unknown lines as forward-compatible noise from a newer app build and
+    /// keeps the connection open, so a missing variant must not surface as an
+    /// error. The `LOG:` prefix is checked first so colons inside log bodies
+    /// are preserved verbatim — exact-match tags are tested only after that
+    /// strip fails, preventing variants like `EXIT_CLEAN` from being shadowed
+    /// by a future tag that happens to share a prefix.
     #[must_use]
     pub fn from_line(s: &str) -> Option<Self> {
         if let Some(msg) = s.strip_prefix("LOG:") {
