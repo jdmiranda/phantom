@@ -5886,9 +5886,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
+ "dirs 5.0.1",
  "ed25519-dalek",
  "futures-util",
- "keyring",
  "log",
  "rand 0.8.6",
  "serde",

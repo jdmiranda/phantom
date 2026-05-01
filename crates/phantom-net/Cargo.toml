@@ -29,8 +29,9 @@ bs58 = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Keyring: OS-level credential store (Keychain / libsecret / wincred).
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+# Config-directory resolution for the on-disk identity / credentials store.
+# Replaces the prior `keyring` backend; see `identity.rs` for rationale.
+dirs = "5"
 
 thiserror = "2"
 
