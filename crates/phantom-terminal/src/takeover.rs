@@ -20,11 +20,11 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use phantom_terminal::takeover::{TakeoverCandidate, TakeoverDetector};
+//! use phantom_terminal::takeover::{TakeoverCandidate, TakeoverDetector, TakeoverEvent};
 //!
 //! let mut detector = TakeoverDetector::default();
 //! // Call once per frame after pty_read().
-//! if let Some(candidate) = detector.poll(term.term(), term.pty_fd()) {
+//! if let TakeoverEvent::Detected(candidate) = detector.tick(term.term(), term.pty_fd()) {
 //!     // candidate.signal tells you why it triggered
 //! }
 //! ```
@@ -76,7 +76,7 @@ pub enum TakeoverSignal {
 
 /// A structured description of a subprocess that has taken over the terminal.
 ///
-/// Produced by [`TakeoverDetector::poll`] on a rising edge (candidate appeared)
+/// Produced by [`TakeoverDetector::tick`] on a rising edge (candidate appeared)
 /// and consumed by `phantom-app` to emit bus events and, optionally, split panes.
 ///
 /// The payload is intentionally rich so that the pane lineage model (#365) can
@@ -159,7 +159,11 @@ impl TakeoverDetector {
         self.was_takeover = is_takeover;
 
         if rising {
-            // candidate is Some when is_takeover is true (see classify).
+            // SAFETY: `classify` returns `(true, Some(_))` together — every code
+            // path in `classify` that yields `is_takeover == true` (alt-screen
+            // branch and known-program fallback branch) constructs a
+            // `Some(TakeoverCandidate)` in the same tuple. The `(true, None)`
+            // shape is unreachable, so `expect` here is safe.
             TakeoverEvent::Detected(candidate.expect("classify guarantees Some on takeover"))
         } else if falling {
             TakeoverEvent::Cleared
