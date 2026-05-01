@@ -154,12 +154,42 @@ impl SttStreamConfig {
 /// # async fn example() {
 /// use std::sync::Arc;
 /// use tokio::sync::mpsc;
-/// use phantom_stt::{AudioChunk, MockBackend};
+/// use phantom_stt::{
+///     AudioChunk, BoxedTranscriptStream, SttError, TranscriptBackend, TranscriptStreamItem,
+/// };
 /// use phantom_stt::stream::{SttStream, SttStreamConfig};
+///
+/// /// Minimal backend for the doctest: drains audio, emits no events.
+/// struct NullBackend;
+///
+/// /// A [`futures_core::Stream`] that immediately returns `None`.
+/// struct EmptyStream;
+///
+/// impl futures_core::Stream for EmptyStream {
+///     type Item = TranscriptStreamItem;
+///     fn poll_next(
+///         self: std::pin::Pin<&mut Self>,
+///         _cx: &mut std::task::Context<'_>,
+///     ) -> std::task::Poll<Option<Self::Item>> {
+///         std::task::Poll::Ready(None)
+///     }
+/// }
+///
+/// #[async_trait::async_trait]
+/// impl TranscriptBackend for NullBackend {
+///     fn name(&self) -> &'static str { "null" }
+///     async fn transcribe(
+///         &self,
+///         mut audio_rx: mpsc::Receiver<AudioChunk>,
+///     ) -> Result<BoxedTranscriptStream, SttError> {
+///         while audio_rx.recv().await.is_some() {}
+///         Ok(Box::pin(EmptyStream))
+///     }
+/// }
 ///
 /// let (audio_tx, audio_rx) = mpsc::channel::<AudioChunk>(64);
 /// let (partial_tx, mut partial_rx) = mpsc::channel(64);
-/// let backend = Arc::new(MockBackend::new());
+/// let backend = Arc::new(NullBackend);
 /// let stream = SttStream::new(backend, SttStreamConfig::default());
 ///
 /// // Drive in a background task.
