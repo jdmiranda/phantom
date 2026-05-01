@@ -14,7 +14,11 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::Message,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{HeaderName, HeaderValue},
+        Message,
+    },
     MaybeTlsStream, WebSocketStream,
 };
 
@@ -34,9 +38,41 @@ pub struct WsTransport {
 impl WsTransport {
     /// Open a WebSocket connection to `url` (e.g. `"wss://relay.example.com"`).
     pub async fn connect(url: &str) -> Result<Self> {
-        let (ws, _response) = connect_async(url)
-            .await
-            .with_context(|| format!("WebSocket connect failed: {url}"))?;
+        Self::connect_with_headers(url, &[]).await
+    }
+
+    /// Open a WebSocket connection to `url` with extra HTTP headers attached
+    /// to the upgrade request.
+    ///
+    /// Each `(name, value)` pair is inserted into the upgrade request's
+    /// header map verbatim.  Use this to send `Authorization: Bearer <jwt>`
+    /// when dialing a hub that requires device-token auth.
+    ///
+    /// When `headers` is empty this is equivalent to [`Self::connect`].
+    pub async fn connect_with_headers(
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Self> {
+        let (ws, _response) = if headers.is_empty() {
+            connect_async(url)
+                .await
+                .with_context(|| format!("WebSocket connect failed: {url}"))?
+        } else {
+            let mut request = url
+                .into_client_request()
+                .with_context(|| format!("invalid WS URL: {url}"))?;
+            let header_map = request.headers_mut();
+            for (name, value) in headers {
+                let header_name = HeaderName::from_bytes(name.as_bytes())
+                    .with_context(|| format!("invalid header name: {name}"))?;
+                let header_value = HeaderValue::from_str(value)
+                    .with_context(|| format!("invalid header value for {name}"))?;
+                header_map.insert(header_name, header_value);
+            }
+            connect_async(request)
+                .await
+                .with_context(|| format!("WebSocket connect failed: {url}"))?
+        };
         Ok(Self {
             ws,
             connected: true,

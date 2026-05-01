@@ -75,8 +75,37 @@ impl RelayClient {
     /// Connect to the relay at `relay_url` and complete the handshake.
     ///
     /// Sends a `HELLO` control envelope and waits for a `HELLO_ACK` response.
+    ///
+    /// This variant performs the WebSocket upgrade with no `Authorization`
+    /// header.  Use [`RelayClient::connect_with_token`] when dialing a hub
+    /// that requires device-token auth.
     pub async fn connect(relay_url: &str, identity: Identity) -> Result<Self> {
-        let transport = WsTransport::connect(relay_url)
+        Self::connect_with_token(relay_url, identity, None).await
+    }
+
+    /// Connect to the relay at `relay_url` with an optional `Bearer` token
+    /// attached to the WebSocket upgrade request.
+    ///
+    /// When `device_token` is `Some(t)` and `t` is non-empty, the upgrade
+    /// request carries `Authorization: Bearer <t>`.  When the token is
+    /// `None` or `Some("")` no `Authorization` header is added — this
+    /// preserves the graceful-degradation path used before
+    /// `phantom auth register` has populated the credentials file.
+    pub async fn connect_with_token(
+        relay_url: &str,
+        identity: Identity,
+        device_token: Option<&str>,
+    ) -> Result<Self> {
+        let auth_value;
+        let headers: Vec<(&str, &str)> = match device_token {
+            Some(t) if !t.is_empty() => {
+                auth_value = format!("Bearer {t}");
+                vec![("Authorization", auth_value.as_str())]
+            }
+            _ => Vec::new(),
+        };
+
+        let transport = WsTransport::connect_with_headers(relay_url, &headers)
             .await
             .with_context(|| format!("failed to connect to relay: {relay_url}"))?;
 
