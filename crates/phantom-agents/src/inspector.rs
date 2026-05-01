@@ -213,8 +213,15 @@ pub const MAX_SWAP_ROWS: usize = 32;
 /// Coarse status of a single hot-reload swap target, mirroring
 /// `phantom_skill_host::SwapStatus` without taking a dependency on that
 /// crate from `phantom-agents`.
+///
+/// # JSON shape
+///
+/// Serialized with `#[serde(tag = "kind")]` so the JSON form of an
+/// enclosing [`SwapRow`] is `{"name": "...", "status": {"kind": "Idle"}}`
+/// rather than the previous shape `{"status": {"status": "Idle"}}` which
+/// collided with the parent field name (#497).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "status")]
+#[serde(tag = "kind")]
 pub enum SwapRowStatus {
     /// No previous generation is pending — the target is fully quiesced.
     Idle,
@@ -1003,12 +1010,16 @@ mod tests {
     // ---- Hot-swap telemetry (#385) ----------------------------------------
 
     #[test]
-    fn swap_row_idle_serializes_with_status_tag() {
+    fn swap_row_idle_serializes_with_kind_tag() {
         let row = SwapRow { name: "phantom-semantic".into(), status: SwapRowStatus::Idle };
         let v = serde_json::to_value(&row).expect("SwapRow::Idle serializes");
         assert_eq!(v["name"], "phantom-semantic");
-        // `#[serde(tag = "status")]` produces `{"status": "Idle"}` for unit variants.
-        assert_eq!(v["status"]["status"], "Idle");
+        // `#[serde(tag = "kind")]` produces `{"status": {"kind": "Idle"}}` —
+        // see #497 for the rationale (avoids the field/tag collision that
+        // produced the prior `{"status": {"status": "Idle"}}` shape).
+        assert_eq!(v["status"]["kind"], "Idle");
+        // The collision is gone: there is no nested `status.status`.
+        assert!(v["status"].get("status").is_none());
     }
 
     #[test]
@@ -1019,10 +1030,12 @@ mod tests {
         };
         let v = serde_json::to_value(&row).expect("SwapRow::Draining serializes");
         assert_eq!(v["name"], "phantom-nlp");
-        // Internally tagged: status variant is an object with "status" key.
-        assert_eq!(v["status"]["status"], "Draining");
+        // Internally tagged on `kind`: variant object exposes its name under
+        // `kind` and its struct fields alongside.
+        assert_eq!(v["status"]["kind"], "Draining");
         assert_eq!(v["status"]["age_ms"], 5_000);
         assert_eq!(v["status"]["refcount"], 3);
+        assert!(v["status"].get("status").is_none());
     }
 
     #[test]
@@ -1032,8 +1045,9 @@ mod tests {
             status: SwapRowStatus::Forced { age_ms: 30_100 },
         };
         let v = serde_json::to_value(&row).expect("SwapRow::Forced serializes");
-        assert_eq!(v["status"]["status"], "Forced");
+        assert_eq!(v["status"]["kind"], "Forced");
         assert_eq!(v["status"]["age_ms"], 30_100);
+        assert!(v["status"].get("status").is_none());
     }
 
     #[test]
