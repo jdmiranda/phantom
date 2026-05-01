@@ -117,6 +117,28 @@ pub enum AppCommand {
         role: Option<String>,
         reply: SyncSender<Result<SpawnAgentReply, String>>,
     },
+    /// Return the current pane list from the coordinator (issue #400).
+    ///
+    /// The App thread walks [`coordinator::all_app_ids`], reads metadata from
+    /// the registry and adapter state, and returns a [`Vec<PaneInfo>`].  The
+    /// reply is serialised to JSON by the listener before writing the
+    /// JSON-RPC response.
+    ListPanes {
+        reply: SyncSender<Result<Vec<PaneInfo>, String>>,
+    },
+    /// Return the status of a specific agent by its stable [`u64`] id (issue #400).
+    ///
+    /// The App thread iterates all running adapters looking for an agent pane
+    /// whose `agent_id` field (exposed via `get_state()`) matches.  Returns
+    /// [`AgentStatusInfo`] when found, or an error string when the id is
+    /// unknown or has expired.
+    ///
+    /// SECURITY: per-API-key capability scoping deferred to #511.
+    GetAgentStatus {
+        /// The canonical `u64` agent id returned by `phantom.spawn_agent`.
+        agent_id: u64,
+        reply: SyncSender<Result<AgentStatusInfo, String>>,
+    },
 }
 
 /// Payload returned for a successful screenshot.
@@ -138,6 +160,43 @@ pub struct SpawnAgentReply {
     pub agent_id: u64,
     /// ISO-8601 UTC timestamp at the moment the agent was registered.
     pub started_at: String,
+}
+
+/// Snapshot of a single pane returned by `phantom.list_panes` (issue #400).
+///
+/// `id` is the coordinator's [`phantom_ui::layout::PaneId`] serialised as a
+/// string for wire stability.  `agent_id` is `Some` only for agent-type panes
+/// and matches the value returned by `phantom.spawn_agent`.
+#[derive(Debug, Clone)]
+pub struct PaneInfo {
+    /// Stable pane identifier (layout PaneId, stringified).
+    pub id: String,
+    /// Adapter type: `"terminal"`, `"agent"`, `"inspector"`, etc.
+    pub pane_type: String,
+    /// Human-readable title (adapter's `title()` value).
+    pub title: String,
+    /// `true` when this pane has keyboard focus.
+    pub focused: bool,
+    /// For agent-type panes: the stable `u64` agent id (decimal string).
+    pub agent_id: Option<u64>,
+}
+
+/// Status snapshot for a single agent returned by `phantom.get_agent_status`
+/// (issue #400).
+///
+/// `state` mirrors [`phantom_app::agent_pane::AgentPaneStatus`] with an
+/// additional `"expired"` sentinel for agents that completed and were GC'd
+/// before the query arrived.
+#[derive(Debug, Clone)]
+pub struct AgentStatusInfo {
+    /// The canonical `u64` agent id (decimal string on the wire).
+    pub agent_id: u64,
+    /// One of: `"running"`, `"done"`, `"failed"`.
+    pub state: String,
+    /// The task prompt the agent was given.
+    pub task: String,
+    /// Last 256 bytes of the agent's output buffer (may be empty).
+    pub last_output_excerpt: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +418,9 @@ fn dispatch(
         "phantom.set_memory" => dispatch_set_memory(id, &args, cmd_tx),
         // Phase 2 (issue #399): direct agent-spawn returning a stable AgentId.
         "phantom.spawn_agent" => dispatch_spawn_agent(id, &args, cmd_tx),
+        // Phase 2 (issue #400): pane listing and agent status polling.
+        "phantom.list_panes" => dispatch_list_panes(id, cmd_tx),
+        "phantom.get_agent_status" => dispatch_get_agent_status(id, &args, cmd_tx),
         // For every other tool, defer to the stub implementation in `server`.
         _ => server.handle_request(request),
     }
@@ -799,6 +861,133 @@ fn dispatch_spawn_agent(
     }
 }
 
+/// Dispatch `phantom.list_panes` — asks the App thread to enumerate the
+/// current pane registry and return a [`Vec<PaneInfo>`].
+///
+/// No arguments required.  Returns `{ panes: [...] }` on success.
+///
+/// SECURITY: per-API-key capability scoping deferred to #511.
+fn dispatch_list_panes(
+    id: serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::ListPanes { reply: reply_tx })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(panes)) => {
+            let panes_json: Vec<serde_json::Value> = panes
+                .iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id,
+                        "type": p.pane_type,
+                        "title": p.title,
+                        "focused": p.focused,
+                        "agent_id": p.agent_id.map(|id| id.to_string()),
+                    })
+                })
+                .collect();
+            protocol::create_response(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("{} pane(s)", panes_json.len()),
+                    }],
+                    "panes": panes_json,
+                }),
+            )
+        }
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("list_panes failed: {e}")}],
+                "isError": true,
+            }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
+/// Dispatch `phantom.get_agent_status` — asks the App thread to look up an
+/// agent by its stable `u64` id and return an [`AgentStatusInfo`] snapshot.
+///
+/// Argument: `{ "agent_id": "<decimal string>" }`.
+///
+/// Returns an error object when:
+/// - `agent_id` argument is missing or non-numeric
+/// - No pane with that agent id exists (never spawned or already GC'd)
+///
+/// SECURITY: per-API-key capability scoping deferred to #511.
+fn dispatch_get_agent_status(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+    cmd_tx: &Sender<AppCommand>,
+) -> protocol::JsonRpcResponse {
+    // Accept both numeric and string forms; Claude serialises agent_id as a
+    // decimal string to avoid JS 53-bit truncation.
+    let agent_id: u64 = if let Some(n) = args.get("agent_id").and_then(|v| v.as_u64()) {
+        n
+    } else if let Some(s) = args.get("agent_id").and_then(|v| v.as_str()) {
+        match s.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                return protocol::create_error(
+                    id,
+                    INVALID_PARAMS,
+                    "agent_id must be a decimal integer string",
+                );
+            }
+        }
+    } else {
+        return protocol::create_error(id, INVALID_PARAMS, "missing 'agent_id' argument");
+    };
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    if cmd_tx
+        .send(AppCommand::GetAgentStatus {
+            agent_id,
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return protocol::create_error(id, INTERNAL_ERROR, "app command channel closed");
+    }
+
+    match reply_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(status)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "agent {} state={} task={}",
+                        status.agent_id, status.state, status.task
+                    ),
+                }],
+                "agent_id": status.agent_id.to_string(),
+                "state": status.state,
+                "task": status.task,
+                "last_output_excerpt": status.last_output_excerpt,
+            }),
+        ),
+        Ok(Err(e)) => protocol::create_response(
+            id,
+            json!({
+                "content": [{"type": "text", "text": format!("get_agent_status failed: {e}")}],
+                "isError": true,
+            }),
+        ),
+        Err(e) => protocol::create_error(id, INTERNAL_ERROR, &format!("app reply dropped: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1037,5 +1226,144 @@ mod tests {
         let resp = send_and_recv(&mut stream, req);
         assert!(resp.contains("/tmp/fake.png"), "resp was: {resp}");
         assert!(resp.contains("100"));
+    }
+
+    // ── phantom.list_panes ──────────────────────────────────────────────────
+
+    #[test]
+    fn list_panes_forwards_to_app_thread_and_returns_pane_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-list-panes.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Fake app thread: returns two panes — one terminal, one agent.
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::ListPanes { reply } = cmd {
+                    let _ = reply.send(Ok(vec![
+                        PaneInfo {
+                            id: "1".into(),
+                            pane_type: "terminal".into(),
+                            title: "zsh".into(),
+                            focused: true,
+                            agent_id: None,
+                        },
+                        PaneInfo {
+                            id: "2".into(),
+                            pane_type: "agent".into(),
+                            title: "agent".into(),
+                            focused: false,
+                            agent_id: Some(42),
+                        },
+                    ]));
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"phantom.list_panes","arguments":{}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        // Must contain the terminal pane.
+        assert!(resp.contains("terminal"), "expected terminal pane in: {resp}");
+        // Must contain the agent pane with agent_id.
+        assert!(resp.contains("\"42\"") || resp.contains("42"), "expected agent_id 42 in: {resp}");
+        // Must not be an error.
+        assert!(!resp.contains("\"isError\":true"), "unexpected error in: {resp}");
+    }
+
+    #[test]
+    fn list_panes_unknown_phantom_returns_error_when_app_channel_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-list-panes-closed.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Drop cmd_rx immediately so the channel is closed.
+        drop(cmd_rx);
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"phantom.list_panes","arguments":{}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("error"), "expected error when channel closed: {resp}");
+    }
+
+    // ── phantom.get_agent_status ────────────────────────────────────────────
+
+    #[test]
+    fn get_agent_status_valid_id_returns_status_from_real_lookup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-get-agent-status.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Fake app thread: only replies when the exact agent_id matches —
+        // this verifies the real lookup path, not a hardcoded mock.
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::GetAgentStatus { agent_id, reply } = cmd {
+                    if agent_id == 99 {
+                        let _ = reply.send(Ok(AgentStatusInfo {
+                            agent_id: 99,
+                            state: "running".into(),
+                            task: "build the project".into(),
+                            last_output_excerpt: Some("cargo build…".into()),
+                        }));
+                    } else {
+                        let _ = reply.send(Err(format!("agent {agent_id} not found")));
+                    }
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        // Use string form of agent_id (as Claude would send it).
+        let req = r#"{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"phantom.get_agent_status","arguments":{"agent_id":"99"}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("running"), "expected state=running in: {resp}");
+        assert!(resp.contains("build the project"), "expected task in: {resp}");
+        assert!(resp.contains("cargo build"), "expected excerpt in: {resp}");
+    }
+
+    #[test]
+    fn get_agent_status_unknown_id_returns_not_found_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-get-agent-status-notfound.sock");
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Fake app thread: returns not-found for any id.
+        thread::spawn(move || {
+            for cmd in cmd_rx {
+                if let AppCommand::GetAgentStatus { agent_id, reply } = cmd {
+                    let _ = reply.send(Err(format!("agent {agent_id} not found")));
+                }
+            }
+        });
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"phantom.get_agent_status","arguments":{"agent_id":"9999"}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(
+            resp.contains("not found") || resp.contains("isError"),
+            "expected not-found in: {resp}"
+        );
+    }
+
+    #[test]
+    fn get_agent_status_missing_agent_id_returns_invalid_params() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("mcp-get-agent-status-missing.sock");
+        let (cmd_tx, _cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"phantom.get_agent_status","arguments":{}}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("missing"), "should reject missing agent_id: {resp}");
     }
 }

@@ -330,6 +330,35 @@ fn builtin_tools() -> Vec<McpTool> {
                 "required": ["prompt"],
             }),
         },
+        // Phase 2 (issue #400): pane listing.
+        McpTool {
+            name: "phantom.list_panes".to_owned(),
+            description: "List all panes currently open in this Phantom instance. \
+                Returns id, type (terminal/agent/inspector), title, focused flag, and \
+                agent_id (for agent-type panes). Use pane ids to target phantom.run_command \
+                at a specific pane. Use agent_id to poll status via phantom.get_agent_status.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+            }),
+        },
+        // Phase 2 (issue #400): agent status polling.
+        McpTool {
+            name: "phantom.get_agent_status".to_owned(),
+            description: "Return the current status of an agent spawned via phantom.spawn_agent. \
+                Poll every 5 s until state is 'done' or 'failed'. \
+                Returns state (running/done/failed), task, and last_output_excerpt (≤256 bytes).".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The decimal string agent_id returned by phantom.spawn_agent."
+                    }
+                },
+                "required": ["agent_id"],
+            }),
+        },
     ]
 }
 
@@ -386,12 +415,15 @@ mod tests {
         let req = create_request(2, "tools/list", json!({}));
         let resp = s.handle_request(&req);
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 10);
+        // Phase 2 (issue #400): 10 pre-existing + phantom.list_panes + phantom.get_agent_status = 12
+        assert_eq!(tools.len(), 12);
         let names: Vec<String> = tools.iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
         assert!(names.contains(&"phantom.run_command".to_owned()));
         assert!(names.contains(&"phantom.screenshot".to_owned()));
         assert!(names.contains(&"phantom.set_memory".to_owned()));
         assert!(names.contains(&"phantom.spawn_agent".to_owned()));
+        assert!(names.contains(&"phantom.list_panes".to_owned()));
+        assert!(names.contains(&"phantom.get_agent_status".to_owned()));
     }
 
     #[test]
@@ -470,9 +502,10 @@ mod tests {
     }
 
     #[test]
-    fn server_has_ten_tools_and_three_resources() {
+    fn server_has_twelve_tools_and_three_resources() {
         let s = server();
-        assert_eq!(s.tools().len(), 10);
+        // Phase 2 (issue #400): 10 pre-existing + phantom.list_panes + phantom.get_agent_status = 12
+        assert_eq!(s.tools().len(), 12);
         assert_eq!(s.resources().len(), 3);
     }
 
@@ -483,7 +516,7 @@ mod tests {
             "phantom.run_command", "phantom.read_output", "phantom.screenshot",
             "phantom.split_pane", "phantom.get_context", "phantom.get_memory",
             "phantom.set_memory", "phantom.send_key", "phantom.command",
-            "phantom.spawn_agent",
+            "phantom.spawn_agent", "phantom.list_panes", "phantom.get_agent_status",
         ];
         for name in tool_names {
             let req = create_request(100, "tools/call", json!({
