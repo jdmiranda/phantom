@@ -144,7 +144,7 @@ pub fn build_error_analysis_prompt(
 /// Blocks until done — the brain thread is dedicated and doesn't share
 /// work with the render loop.
 pub fn investigate(prompt: &str, working_dir: &str, max_rounds: u32) -> Result<String, String> {
-    use phantom_agents::agent::{Agent, AgentMessage, AgentTask};
+    use phantom_agents::agent::{Agent, AgentMessage, AgentTask, allocate_agent_id};
     use phantom_agents::api::{ApiEvent, ClaudeConfig, send_message};
     use phantom_agents::role::AgentRole;
     use phantom_agents::tools::{available_tools, execute_tool};
@@ -154,7 +154,12 @@ pub fn investigate(prompt: &str, working_dir: &str, max_rounds: u32) -> Result<S
     let task = AgentTask::FreeForm {
         prompt: prompt.to_string(),
     };
-    let mut agent = Agent::new(0, task);
+    // Pull a fresh id from the process-global counter rather than the old
+    // sentinel `0`. The agent is transient (never registered with
+    // `AgentManager`), but allocating a real id keeps the invariant that no
+    // production path constructs an `Agent` with id 0 (issue #523, follow-up
+    // to PR #520's unification of `allocate_agent_id`).
+    let mut agent = Agent::new(allocate_agent_id(), task);
     let sys = agent.system_prompt();
     agent.push_message(AgentMessage::System(sys));
     agent.push_message(AgentMessage::User(prompt.to_string()));
