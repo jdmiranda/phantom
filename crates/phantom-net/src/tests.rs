@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -23,6 +24,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use crate::{
     envelope::Envelope,
     identity::Identity,
+    transport::WsTransport,
 };
 
 // ---------------------------------------------------------------------------
@@ -198,4 +200,170 @@ async fn two_clients_exchange_one_message() {
 
     assert_eq!(received.from, alice_peer.to_string());
     assert_eq!(received.payload, payload);
+}
+
+// ---------------------------------------------------------------------------
+// Authorization header tests (issue #566)
+// ---------------------------------------------------------------------------
+
+/// Spawn a one-shot raw-TCP listener that captures the first request line
+/// and headers, then replies with `401 Unauthorized` to terminate the
+/// connection before any WebSocket upgrade completes.
+///
+/// Returns the bound address and a handle that resolves once the request
+/// has been read and the captured headers are available.
+async fn spawn_capture_listener() -> (SocketAddr, Arc<Mutex<Option<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured_writer = Arc::clone(&captured);
+
+    tokio::spawn(async move {
+        let (mut stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut buf = [0u8; 4096];
+        let mut total = String::new();
+        // Read until we have a full HTTP request header block.
+        loop {
+            let n = match stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            if let Ok(s) = std::str::from_utf8(&buf[..n]) {
+                total.push_str(s);
+            }
+            if total.contains("\r\n\r\n") {
+                break;
+            }
+        }
+        *captured_writer.lock().await = Some(total);
+        // Reply with 401 to cleanly terminate the connection.
+        let _ = stream
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+            .await;
+        let _ = stream.shutdown().await;
+    });
+
+    (addr, captured)
+}
+
+#[tokio::test]
+async fn ws_transport_sends_authorization_header_when_provided() {
+    let (addr, captured) = spawn_capture_listener().await;
+    let url = format!("ws://{addr}");
+
+    // Connect with the Authorization header — the listener will reply 401
+    // so the connect call itself errors, but we only care about the
+    // captured request.
+    let _ = WsTransport::connect_with_headers(&url, &[("Authorization", "Bearer testjwt")])
+        .await;
+
+    // Give the listener a moment to record the request.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let req = captured
+        .lock()
+        .await
+        .clone()
+        .expect("listener must capture the upgrade request");
+    let lower = req.to_lowercase();
+    assert!(
+        lower.contains("authorization: bearer testjwt"),
+        "upgrade request must carry Authorization header — got:\n{req}"
+    );
+}
+
+#[tokio::test]
+async fn ws_transport_omits_authorization_header_when_no_headers() {
+    let (addr, captured) = spawn_capture_listener().await;
+    let url = format!("ws://{addr}");
+
+    let _ = WsTransport::connect(&url).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let req = captured
+        .lock()
+        .await
+        .clone()
+        .expect("listener must capture the upgrade request");
+    assert!(
+        !req.to_lowercase().contains("authorization:"),
+        "plain connect must not add Authorization header — got:\n{req}"
+    );
+}
+
+#[tokio::test]
+async fn relay_client_connect_with_token_attaches_bearer_header() {
+    let (addr, captured) = spawn_capture_listener().await;
+    let url = format!("ws://{addr}");
+
+    // Connect attempts will fail (handshake never completes — the listener
+    // returns 401), but the request line will be captured first.
+    let id = Identity::generate_ephemeral();
+    let _ = crate::client::RelayClient::connect_with_token(
+        &url,
+        id,
+        Some("token-abc"),
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let req = captured
+        .lock()
+        .await
+        .clone()
+        .expect("listener must capture the upgrade request");
+    let lower = req.to_lowercase();
+    assert!(
+        lower.contains("authorization: bearer token-abc"),
+        "RelayClient::connect_with_token must attach Bearer header — got:\n{req}"
+    );
+}
+
+#[tokio::test]
+async fn relay_client_connect_with_empty_token_omits_authorization() {
+    let (addr, captured) = spawn_capture_listener().await;
+    let url = format!("ws://{addr}");
+
+    let id = Identity::generate_ephemeral();
+    let _ =
+        crate::client::RelayClient::connect_with_token(&url, id, Some("")).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let req = captured
+        .lock()
+        .await
+        .clone()
+        .expect("listener must capture the upgrade request");
+    assert!(
+        !req.to_lowercase().contains("authorization:"),
+        "empty device_token must not produce an Authorization header — got:\n{req}"
+    );
+}
+
+#[tokio::test]
+async fn relay_client_connect_with_none_token_omits_authorization() {
+    let (addr, captured) = spawn_capture_listener().await;
+    let url = format!("ws://{addr}");
+
+    let id = Identity::generate_ephemeral();
+    let _ = crate::client::RelayClient::connect_with_token(&url, id, None).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let req = captured
+        .lock()
+        .await
+        .clone()
+        .expect("listener must capture the upgrade request");
+    assert!(
+        !req.to_lowercase().contains("authorization:"),
+        "None token must not produce an Authorization header — got:\n{req}"
+    );
 }

@@ -247,7 +247,17 @@ async fn connect_and_run(
 ) -> Result<()> {
     let peer_id_str = identity.peer_id.as_str().to_owned();
 
-    let mut client = RelayClient::connect(hub_url, identity).await?;
+    // Pass the device JWT through to the WS upgrade as
+    // `Authorization: Bearer <token>`.  An empty token means the credentials
+    // file has not been populated yet — connect without the header so the
+    // existing graceful-degradation path is preserved (the hub will reject
+    // with 4401 and the back-off loop will retry).
+    let token_opt = if device_token.is_empty() {
+        None
+    } else {
+        Some(device_token)
+    };
+    let mut client = RelayClient::connect_with_token(hub_url, identity, token_opt).await?;
     info!("hub_listener: connected — phantom_id={peer_id_str}");
 
     send_registration(&mut client, &peer_id_str, device_token).await?;
