@@ -249,3 +249,10 @@ cargo run --bin phantom -- --help
 [USER]: build                         # runs cargo build (NLP)
 [USER]: what changed                  # runs git log (NLP)
 ```
+
+---
+
+## Operator Docs
+
+- `phantom-hub` API key provisioning — see [crates/phantom-hub/docs/operator-key-provisioning.md](../crates/phantom-hub/docs/operator-key-provisioning.md) for narrow-capability key setup and the migration path off the `HUB_API_KEYS` all-capabilities default (issue [#529](https://github.com/jdmiranda/phantom/issues/529)).
+
