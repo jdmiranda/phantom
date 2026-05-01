@@ -655,4 +655,93 @@ mod tests {
             );
         }
     }
+
+    /// Positive coverage for the `deny_unsigned=true` policy: a properly
+    /// signed envelope must skip the signature gate and be delivered to the
+    /// destination peer (issue #550).
+    ///
+    /// PR #547's tests asserted the deny path for unsigned envelopes but
+    /// only verified by inspection that signed envelopes still flow when
+    /// `deny_unsigned=true`. This test makes that contract explicit.
+    #[tokio::test]
+    async fn signed_envelope_delivered_when_deny_unsigned_true() {
+        let mut router = Router::with_deny_unsigned(100, 10, true);
+        let (mut bob_session, hb) = make_session("bob");
+        let (_, ha) = make_session("alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
+
+        // Build an envelope and sign it with a fresh Ed25519 key. The router
+        // does not verify signatures (only checks for presence), but we use
+        // the real signing helper to mirror the production path.
+        let mut envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!("signed-hello"),
+            sig: String::new(),
+            nonce: Uuid::new_v4(),
+        };
+        let key = crate::signing::tests::make_signing_key();
+        crate::signing::sign_envelope(&mut envelope, &key);
+        assert!(
+            !envelope.sig.is_empty(),
+            "envelope must carry a non-empty sig before routing"
+        );
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "signed envelope must be delivered (not SignatureRequired) when \
+             deny_unsigned=true, got {reply:?}"
+        );
+
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("signed envelope must reach destination peer");
+        assert!(raw.contains("signed-hello"));
+    }
+
+    /// End-to-end default-path coverage: with `PHANTOM_RELAY_REQUIRE_SIGNATURES`
+    /// unset, `Router::new` must produce a router that accepts unsigned
+    /// envelopes with a WARN log rather than denying them (issue #551).
+    ///
+    /// PR #547's accept-test used `with_deny_unsigned(_, _, false)` directly,
+    /// which bypasses `deny_unsigned_from_env`. This test exercises the
+    /// production constructor.
+    #[tokio::test]
+    async fn router_new_default_accepts_unsigned_when_env_unset() {
+        let _g = EnvGuard::unset();
+        let mut router = Router::new(100, 10);
+        assert!(
+            !router.deny_unsigned(),
+            "Router::new with env var unset must default to deny_unsigned=false"
+        );
+
+        let (mut bob_session, hb) = make_session("bob");
+        let (_, ha) = make_session("alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
+
+        let envelope = unsigned_envelope("alice", "bob");
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "Router::new default path must accept unsigned envelopes when env \
+             var is unset, got {reply:?}"
+        );
+
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("unsigned envelope must reach destination under default policy");
+        assert!(raw.contains("hello"));
+    }
 }
