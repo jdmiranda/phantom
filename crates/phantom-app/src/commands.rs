@@ -576,7 +576,13 @@ impl App {
                 self.console.scroll_offset = 0;
             }
             cmd if cmd == "offline" || cmd.starts_with("offline ") => {
-                let subcommand = cmd.strip_prefix("offline").unwrap().trim();
+                // SAFETY: the match guard above guarantees `cmd` either equals
+                // "offline" or begins with "offline ", so `strip_prefix("offline")`
+                // can never return None here.
+                let subcommand = cmd
+                    .strip_prefix("offline")
+                    .expect("match guard ensures cmd starts with \"offline\"")
+                    .trim();
                 match subcommand {
                     "on" | "enable" => {
                         self.console.system("Offline mode: ON (using local backends only)");
