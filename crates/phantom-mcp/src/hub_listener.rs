@@ -115,9 +115,8 @@ impl HubListener {
 /// attempt.  The keychain is the source of truth — run `phantom auth register
 /// --hub <url>` before starting Phantom to populate the JWT entry.
 ///
-/// `identity_namespace` controls which keychain slot is used for the Ed25519
-/// keypair.  Pass `None` to use the default `"phantom"` namespace, or supply
-/// `PHANTOM_IDENTITY_NAMESPACE` to isolate QA / dev instances.
+/// The keychain namespace defaults to `"phantom"`.  Use [`spawn_hub_ns`] to
+/// override the namespace for QA or dev instances.
 pub fn spawn_hub(
     hub_url: &str,
     cmd_tx: Sender<AppCommand>,
@@ -571,8 +570,15 @@ mod tests {
 
     #[tokio::test]
     async fn hub_listener_reconnects_after_disconnect() {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
         let connect_count = Arc::new(tokio::sync::Mutex::new(0u32));
         let count_srv = Arc::clone(&connect_count);
+        // Notified by the mock hub once the second connection has been accepted
+        // and counted, allowing the test to assert without any fixed sleep.
+        let second_connect = Arc::new(Notify::new());
+        let second_connect_srv = Arc::clone(&second_connect);
 
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
@@ -584,6 +590,7 @@ mod tests {
                     break;
                 };
                 let count = Arc::clone(&count_srv);
+                let notify = Arc::clone(&second_connect_srv);
                 tokio::spawn(async move {
                     let mut ws = match accept_async(stream).await {
                         Ok(ws) => ws,
@@ -608,7 +615,14 @@ mod tests {
                     if let Ok(wire) = ack.to_wire() {
                         let _ = ws.send(Message::Binary(wire.into())).await;
                     }
-                    *count.lock().await += 1;
+                    let new_count = {
+                        let mut guard = count.lock().await;
+                        *guard += 1;
+                        *guard
+                    };
+                    if new_count >= 2 {
+                        notify.notify_one();
+                    }
                     // Drop ws → disconnect → listener retries.
                 });
             }
@@ -621,7 +635,10 @@ mod tests {
             .unwrap()
             .expect("must return Some");
 
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        // BACKOFF_MIN is 1 s, so two connections are guaranteed within 3 s.
+        tokio::time::timeout(Duration::from_secs(3), second_connect.notified())
+            .await
+            .expect("expected at least 2 reconnect attempts within 3 s");
 
         let count = *connect_count.lock().await;
         assert!(
