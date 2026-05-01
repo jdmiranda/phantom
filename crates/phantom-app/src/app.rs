@@ -1600,6 +1600,21 @@ fn build_ticket_dispatcher()
 fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStore>> {
     use phantom_bundle_store::{BundleStore, MasterKey, StoreConfig};
 
+    // Allow operators to fully skip bundle-store init (and its keychain
+    // touch) via env var. Used in dev / CI where capture/persistence is
+    // not needed and the keychain prompt is a friction point.
+    if std::env::var("PHANTOM_DISABLE_BUNDLE_STORE")
+        .ok()
+        .as_deref()
+        .map(|s| matches!(s, "1" | "true" | "TRUE"))
+        .unwrap_or(false)
+    {
+        info!(
+            "Bundle store disabled via PHANTOM_DISABLE_BUNDLE_STORE — capture pipeline will not initialize"
+        );
+        return None;
+    }
+
     // Resolve master key from the OS keychain. If the keyring isn't
     // available (CI, sandboxed test runs), we fall back to a deterministic
     // key derived from `$HOME`. The fallback isn't secure — bundles
@@ -1637,5 +1652,41 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
             warn!("Bundle store open failed at {}: {e}", root.display());
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_bundle_store;
+
+    /// Setting `PHANTOM_DISABLE_BUNDLE_STORE=1` must short-circuit
+    /// `open_bundle_store()` and return `None` WITHOUT touching the
+    /// OS keychain. Verifies the dev-friction hot-fix is wired.
+    #[test]
+    fn bundle_store_disabled_via_env_returns_none() {
+        // Snapshot prior value so concurrent tests in the same binary
+        // do not lose state. We restore on exit.
+        let prior = std::env::var("PHANTOM_DISABLE_BUNDLE_STORE").ok();
+        // SAFETY: tests in this crate are not currently parallel readers
+        // of this env var. The restore below puts the value back.
+        unsafe {
+            std::env::set_var("PHANTOM_DISABLE_BUNDLE_STORE", "1");
+        }
+
+        let result = open_bundle_store();
+
+        // Restore env var BEFORE asserting so a panic still leaves a
+        // clean environment for subsequent tests in the same process.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("PHANTOM_DISABLE_BUNDLE_STORE", v),
+                None => std::env::remove_var("PHANTOM_DISABLE_BUNDLE_STORE"),
+            }
+        }
+
+        assert!(
+            result.is_none(),
+            "open_bundle_store must return None when PHANTOM_DISABLE_BUNDLE_STORE=1"
+        );
     }
 }
