@@ -26,9 +26,12 @@
 //!
 //! For `phantom.spawn_agent`, `phantom.list_panes`, and `phantom.get_agent_status` the
 //! session must carry [`crate::auth::CapabilityClass::Coordinate`] (issue #511).
-//! Keys that lack this capability receive a JSON-RPC `-32003` error; the frame is not
+//! Keys that lack this capability receive a JSON-RPC `-32010` error; the frame is not
 //! forwarded.  Keys loaded from `HUB_API_KEYS` receive all capabilities for backwards
 //! compatibility — see [`crate::auth::ALL_CAPABILITIES`].
+//!
+//! Note: capability denial uses `-32010` (issue #528) — distinct from `-32003`
+//! (`RouteError::Disconnected`) so machine-parseable clients can switch on the code.
 //!
 //! # Transport
 //!
@@ -587,8 +590,9 @@ async fn dispatch_read_output(
 /// to the HTTP layer before this function is reached).
 ///
 /// Capability gate: the session must carry [`auth::CapabilityClass::Coordinate`].
-/// Keys without it receive a JSON-RPC `403`-equivalent error (-32003) and the
-/// frame is not forwarded.
+/// Keys without it receive a JSON-RPC `403`-equivalent error (-32010) and the
+/// frame is not forwarded.  `-32010` is distinct from `-32003`
+/// (`RouteError::Disconnected`) so machine-parseable clients can tell the two apart.
 ///
 /// The `phantom_id` existence check is enforced by `router::forward` which
 /// returns `RouteError::NotFound` when the peer is absent from the registry.
@@ -600,7 +604,11 @@ async fn dispatch_spawn_agent(
 ) -> serde_json::Value {
     if !session.has(auth::CapabilityClass::Coordinate) {
         warn!("mcp: spawn_agent denied — API key lacks Coordinate capability");
-        return json_rpc_error(id, -32003, "API key does not have Coordinate capability");
+        return json_rpc_error(
+            id,
+            JSON_RPC_CAPABILITY_DENIED,
+            "API key does not have Coordinate capability",
+        );
     }
 
     let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
@@ -666,8 +674,9 @@ async fn dispatch_spawn_agent(
 ///
 /// Auth: API key validated by the shared `require_api_key` guard.
 /// Capability gate: the session must carry [`auth::CapabilityClass::Coordinate`].
-/// Keys without it receive a JSON-RPC `403`-equivalent error (-32003) and the
-/// frame is not forwarded.
+/// Keys without it receive a JSON-RPC `403`-equivalent error (-32010) and the
+/// frame is not forwarded.  `-32010` is distinct from `-32003`
+/// (`RouteError::Disconnected`) so machine-parseable clients can tell the two apart.
 async fn dispatch_list_panes(
     state: &AppState,
     session: &auth::SessionIdentity,
@@ -676,7 +685,11 @@ async fn dispatch_list_panes(
 ) -> serde_json::Value {
     if !session.has(auth::CapabilityClass::Coordinate) {
         warn!("mcp: list_panes denied — API key lacks Coordinate capability");
-        return json_rpc_error(id, -32003, "API key does not have Coordinate capability");
+        return json_rpc_error(
+            id,
+            JSON_RPC_CAPABILITY_DENIED,
+            "API key does not have Coordinate capability",
+        );
     }
 
     let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
@@ -719,8 +732,9 @@ async fn dispatch_list_panes(
 ///
 /// Auth: API key validated by the shared `require_api_key` guard.
 /// Capability gate: the session must carry [`auth::CapabilityClass::Coordinate`].
-/// Keys without it receive a JSON-RPC `403`-equivalent error (-32003) and the
-/// frame is not forwarded.
+/// Keys without it receive a JSON-RPC `403`-equivalent error (-32010) and the
+/// frame is not forwarded.  `-32010` is distinct from `-32003`
+/// (`RouteError::Disconnected`) so machine-parseable clients can tell the two apart.
 async fn dispatch_get_agent_status(
     state: &AppState,
     session: &auth::SessionIdentity,
@@ -729,7 +743,11 @@ async fn dispatch_get_agent_status(
 ) -> serde_json::Value {
     if !session.has(auth::CapabilityClass::Coordinate) {
         warn!("mcp: get_agent_status denied — API key lacks Coordinate capability");
-        return json_rpc_error(id, -32003, "API key does not have Coordinate capability");
+        return json_rpc_error(
+            id,
+            JSON_RPC_CAPABILITY_DENIED,
+            "API key does not have Coordinate capability",
+        );
     }
 
     let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
@@ -771,6 +789,13 @@ async fn dispatch_get_agent_status(
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
+
+/// JSON-RPC error code returned when the session lacks a required capability
+/// (e.g. `Coordinate` for `phantom.spawn_agent`).
+///
+/// Distinct from `-32003` (`RouteError::Disconnected`) so machine-parseable
+/// clients can switch on the code without parsing message text (issue #528).
+const JSON_RPC_CAPABILITY_DENIED: i64 = -32010;
 
 /// Convert a [`JsonRpcResponse`] received from Phantom into a Claude-facing
 /// JSON-RPC 2.0 response, restoring the original Claude `id`.
@@ -2054,6 +2079,10 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(val.get("error").is_some(), "expected capability error, got: {val}");
         let code = val["error"]["code"].as_i64().unwrap_or(0);
-        assert_eq!(code, -32003, "expected -32003 capability-denied code, got {code}: {val}");
+        // -32010 is capability-denied (issue #528) — distinct from -32003 (Disconnected).
+        assert_eq!(
+            code, JSON_RPC_CAPABILITY_DENIED,
+            "expected -32010 capability-denied code, got {code}: {val}"
+        );
     }
 }
