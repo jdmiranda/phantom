@@ -505,14 +505,104 @@ mod tests {
 
     #[test]
     fn git_info_in_real_repo() {
-        // Run inside the workspace root which is a git repo.
-        let workspace = Path::new("/Users/jermiranda/Documents/GitHub/badass-cli");
-        if !workspace.join(".git").exists() {
-            return; // skip if not available
+        // Build a fresh repo in a tempdir so the test is hermetic and works in
+        // CI / agent worktrees where the host repo may have a detached HEAD.
+        let dir = tmp();
+        let path = dir.path();
+
+        // Skip cleanly if `git` isn't on PATH (e.g. minimal sandbox).
+        let Ok(init) = Command::new("git")
+            .args(["init", "-q", "-b", "phantom-test"])
+            .current_dir(path)
+            .status()
+        else {
+            return;
+        };
+        if !init.success() {
+            return;
         }
-        let info = collect_git_info(workspace);
-        assert!(info.is_some());
-        let info = info.unwrap();
-        assert!(!info.branch.is_empty());
+
+        // Configure a local identity so `git commit` works without global config.
+        for args in [
+            ["config", "user.email", "test@phantom.local"].as_slice(),
+            ["config", "user.name", "Phantom Test"].as_slice(),
+        ] {
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .expect("git config");
+        }
+
+        std::fs::write(path.join("README.md"), "hello").unwrap();
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .status()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(path)
+            .status()
+            .expect("git commit");
+
+        let info = collect_git_info(path).expect("collect_git_info on fresh repo");
+        assert_eq!(info.branch, "phantom-test");
+        assert!(!info.is_dirty);
+        assert_eq!(info.ahead, 0);
+        assert_eq!(info.behind, 0);
+    }
+
+    #[test]
+    fn git_info_returns_none_on_detached_head() {
+        // Detached HEAD has no current branch — `collect_git_info` should bail
+        // out cleanly rather than panicking or returning a bogus branch name.
+        let dir = tmp();
+        let path = dir.path();
+
+        let Ok(init) = Command::new("git")
+            .args(["init", "-q", "-b", "phantom-test"])
+            .current_dir(path)
+            .status()
+        else {
+            return;
+        };
+        if !init.success() {
+            return;
+        }
+
+        for args in [
+            ["config", "user.email", "test@phantom.local"].as_slice(),
+            ["config", "user.name", "Phantom Test"].as_slice(),
+        ] {
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .expect("git config");
+        }
+
+        std::fs::write(path.join("README.md"), "hello").unwrap();
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .status()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(path)
+            .status()
+            .expect("git commit");
+
+        // Detach HEAD at the current commit.
+        Command::new("git")
+            .args(["checkout", "-q", "--detach", "HEAD"])
+            .current_dir(path)
+            .status()
+            .expect("git checkout --detach");
+
+        // `git branch --show-current` is empty on detached HEAD, so we currently
+        // return None. The contract: don't panic, don't fabricate a branch.
+        assert!(collect_git_info(path).is_none());
     }
 }
