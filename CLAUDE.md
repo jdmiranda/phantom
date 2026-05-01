@@ -55,7 +55,7 @@ tokio = { version = "1", features = ["full"] }
 
 ## Architecture Overview
 
-Phantom is structured as a Rust workspace with **23 active crates** (4 additional crates exist on disk and compile independently but are not yet wired into the workspace — see "Future / not yet in workspace" below).
+Phantom is structured as a Rust workspace with **31 crates**, all wired into the top-level `Cargo.toml` workspace.
 
 Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issues noted)
 
@@ -80,6 +80,8 @@ Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issu
 - **phantom-nlp** 🔧 — Natural-language command interpreter; LLM call routing is a stub ([#55](https://github.com/jdmiranda/phantom/issues/55))
 - **phantom-context** ✅ — Project/git/environment detection and context assembly for agent prompts
 - **phantom-memory** 🔧 — Per-project knowledge store with event log and memory blocks; schema and event log pending ([#28](https://github.com/jdmiranda/phantom/issues/28), [#33](https://github.com/jdmiranda/phantom/issues/33), [#62](https://github.com/jdmiranda/phantom/issues/62), [#78](https://github.com/jdmiranda/phantom/issues/78))
+- **phantom-dag** 🔧 — Code dependency graph: DAG extraction and `.planning/dag.json` schema for agent navigation
+- **phantom-recall** 🔧 — Intent-anchored retrieval API: query rewriting, score fusion, ANN routing; backend wiring pending ([#72](https://github.com/jdmiranda/phantom/issues/72))
 
 ### Persistence & History
 - **phantom-history** 🔧 — Structured JSONL command history store; read/write and agent output capture pending ([#75](https://github.com/jdmiranda/phantom/issues/75))
@@ -89,20 +91,22 @@ Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issu
 - **phantom-plugins** 🔧 — Plugin lifecycle (manifest, host, registry, marketplace); WASM host is a mock, real wasmtime pending ([#48](https://github.com/jdmiranda/phantom/issues/48))
 - **phantom-mcp** 🔧 — Model Context Protocol server (exposes Phantom to external AI) and client (consumes external tools); client impl and registry pending ([#52](https://github.com/jdmiranda/phantom/issues/52), [#54](https://github.com/jdmiranda/phantom/issues/54))
 - **phantom-adapter** ✅ — `AppAdapter` trait, app registry, pub/sub event bus, spatial layout negotiation; the "everything is an app" abstraction layer ([#17](https://github.com/jdmiranda/phantom/issues/17))
+- **phantom-skill-host** 🔧 — Runtime dylib loader and hot-module host for Phantom skill crates; Phase 1 dylib loading ([#382](https://github.com/jdmiranda/phantom/issues/382))
 
 ### Capture Pipeline (Phase 2.G)
 - **phantom-vision** 🔧 — Perceptual-hash dedup (dHash + SAD gate) for frame deduplication; GPT-4V analysis pipeline pending ([#70](https://github.com/jdmiranda/phantom/issues/70), [#71](https://github.com/jdmiranda/phantom/issues/71), [#79](https://github.com/jdmiranda/phantom/issues/79))
 - **phantom-bundles** 🔧 — Schema-only types for capture bundles (frames, audio, transcript); serialization and capture pipeline integration pending ([#80](https://github.com/jdmiranda/phantom/issues/80), [#81](https://github.com/jdmiranda/phantom/issues/81), [#91](https://github.com/jdmiranda/phantom/issues/91))
-- **phantom-bundle-store** 🔧 — Unified persistence: SQLite/FTS5 metadata + LanceDB vectors + XChaCha20 encrypted blobs; recovery path tests pending ([#10](https://github.com/jdmiranda/phantom/issues/10), [#88](https://github.com/jdmiranda/phantom/issues/88))
+- **phantom-bundle-store** 🔧 — Unified persistence: SQLite (encrypted via SQLCipher) + LanceDB vectors with two-phase writes; recovery path tests pending ([#10](https://github.com/jdmiranda/phantom/issues/10), [#88](https://github.com/jdmiranda/phantom/issues/88))
 - **phantom-embeddings** 🔧 — Multi-modal embedding trait + OpenAI backend + mock; persistent storage and vector query pending ([#72](https://github.com/jdmiranda/phantom/issues/72), [#73](https://github.com/jdmiranda/phantom/issues/73))
 
-### Future / Not yet in workspace
-These crates have `Cargo.toml` and compile independently but are not yet members of the workspace `Cargo.toml`:
-
-- **phantom-audio** 🔧 — Audio capture backend abstraction (CoreAudio/ScreenCaptureKit traits + mock); real backends pending ([#9](https://github.com/jdmiranda/phantom/issues/9))
-- **phantom-recall** 🔧 — Intent-anchored retrieval API: query rewriting, score fusion, ANN routing; backend wiring pending ([#72](https://github.com/jdmiranda/phantom/issues/72))
+### Voice & Speech
 - **phantom-stt** 🔧 — Speech-to-text backend abstraction (Whisper/Deepgram traits + mock); streaming Whisper and OpenAI integration pending ([#56](https://github.com/jdmiranda/phantom/issues/56), [#68](https://github.com/jdmiranda/phantom/issues/68))
 - **phantom-voice** 🔧 — Text-to-speech backend abstraction (ElevenLabs/Piper/system TTS traits + mock); real TTS pending ([#69](https://github.com/jdmiranda/phantom/issues/69))
+
+### Federation & Networking (Phase 9)
+- **phantom-net** 🔧 — Identity bootstrap, relay handshake, opaque message envelope, and heartbeat keepalive for Phantom federation ([#5](https://github.com/jdmiranda/phantom/issues/5))
+- **phantom-relay** 🔧 — Stateless WebSocket message broker routing opaque envelopes by `PeerId` ([#4](https://github.com/jdmiranda/phantom/issues/4))
+- **phantom-hub** 🔧 — Railway-hosted MCP fleet control hub: connection broker, auth, and JSON-RPC router ([#394](https://github.com/jdmiranda/phantom/issues/394))
 
 ## Key Architectural Decisions
 
