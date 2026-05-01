@@ -1,11 +1,33 @@
 //! WebSocket server: accepts connections and drives per-peer tasks.
+//!
+//! # Handshake (proof-of-possession, issue #526)
+//!
+//! The relay rejects trust-on-first-use. On every new connection:
+//!
+//! 1. Server sends a [`Challenge`] frame containing 32 bytes of fresh entropy
+//!    (hex-encoded).
+//! 2. Client replies with an [`IdentityProof`] containing:
+//!    - `peer_id` — claimed identity string
+//!    - `public_key` — 32-byte Ed25519 verifying key (64 hex chars)
+//!    - `signature` — 64-byte Ed25519 signature (128 hex chars) over the
+//!      canonical proof-of-possession bytes (see [`pop_canonical_bytes`])
+//! 3. Server verifies the signature with the supplied public key. If it does
+//!    not bind `peer_id` to the challenge under the claimed key, the
+//!    connection is rejected with an `auth_failed` error.
+//!
+//! Only after a verified signature does the server register the peer and
+//! grant the [`CapabilityClass::Relay`] capability. This replaces the
+//! previous TOFU model where the client self-asserted its key.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info, warn};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -18,14 +40,38 @@ use crate::session::Session;
 
 // ── Handshake types ──────────────────────────────────────────────────────────
 
-/// First message a connecting client must send.
+/// Length of the proof-of-possession nonce in bytes.
+const POP_CHALLENGE_LEN: usize = 32;
+
+/// Domain-separation prefix for the proof-of-possession message.
+///
+/// Mixed into the canonical bytes so a signature minted for some other
+/// protocol can never be replayed against the relay handshake.
+const POP_DOMAIN_TAG: &[u8] = b"phantom-relay-pop-v1\0";
+
+/// Server-issued challenge sent before [`IdentityProof`].
+#[derive(Debug, Serialize)]
+struct Challenge<'a> {
+    /// Message tag for clients that dispatch on `type`.
+    #[serde(rename = "type")]
+    kind: &'static str,
+    /// 32 random bytes, hex-encoded (64 chars).
+    challenge: &'a str,
+}
+
+/// First message a connecting client must send after receiving the challenge.
+///
+/// All fields are required. The legacy `proof` field is no longer accepted —
+/// trust-on-first-use was removed in issue #526.
 #[derive(Debug, Deserialize)]
 struct IdentityProof {
     /// Requested peer identity string.
     peer_id: String,
-    /// Client-provided proof (e.g. JWT, bearer token, or Ed25519 sig).
-    /// Currently accepted as-is; real auth can be layered here.
-    proof: String,
+    /// 32-byte Ed25519 public key, lowercase hex (64 chars).
+    public_key: String,
+    /// 64-byte Ed25519 signature over [`pop_canonical_bytes`], lowercase hex
+    /// (128 chars).
+    signature: String,
 }
 
 /// Relay's response to a successful handshake.
@@ -33,6 +79,82 @@ struct IdentityProof {
 struct HandshakeAck {
     session_token: String,
     peer_id: String,
+}
+
+// ── Proof-of-possession helpers ──────────────────────────────────────────────
+
+/// Canonical bytes the client signs and the server verifies.
+///
+/// Layout:
+///
+/// ```text
+/// POP_DOMAIN_TAG || peer_id_utf8 || 0x00 || challenge_bytes
+/// ```
+///
+/// The domain tag prevents cross-protocol signature reuse; the trailing NUL
+/// byte separates the variable-length `peer_id` from the fixed-length
+/// challenge so two distinct (peer_id, challenge) pairs cannot produce the
+/// same byte string.
+pub(crate) fn pop_canonical_bytes(peer_id: &str, challenge: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(POP_DOMAIN_TAG.len() + peer_id.len() + 1 + challenge.len());
+    buf.extend_from_slice(POP_DOMAIN_TAG);
+    buf.extend_from_slice(peer_id.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(challenge);
+    buf
+}
+
+/// Decode a hex string of exactly `N` bytes (`2*N` hex chars).
+fn decode_hex<const N: usize>(s: &str) -> Result<[u8; N], &'static str> {
+    if s.len() != N * 2 {
+        return Err("unexpected hex length");
+    }
+    let mut out = [0u8; N];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let hi = from_hex_digit(chunk[0]).ok_or("invalid hex digit")?;
+        let lo = from_hex_digit(chunk[1]).ok_or("invalid hex digit")?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn from_hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Encode bytes as lowercase hex.
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Generate a fresh proof-of-possession challenge.
+fn fresh_challenge() -> [u8; POP_CHALLENGE_LEN] {
+    let mut buf = [0u8; POP_CHALLENGE_LEN];
+    OsRng.fill_bytes(&mut buf);
+    buf
+}
+
+/// Verify that `proof` cryptographically binds `peer_id` to `challenge`.
+///
+/// On success returns the verified [`VerifyingKey`]. On failure returns a
+/// short stable reason string suitable for an `auth_failed` error message.
+fn verify_pop(proof: &IdentityProof, challenge: &[u8]) -> Result<VerifyingKey, &'static str> {
+    let pk_bytes: [u8; 32] = decode_hex::<32>(&proof.public_key)
+        .map_err(|_| "public_key must be 64 lowercase hex chars")?;
+    let sig_bytes: [u8; 64] = decode_hex::<64>(&proof.signature)
+        .map_err(|_| "signature must be 128 lowercase hex chars")?;
+
+    let vk = VerifyingKey::from_bytes(&pk_bytes).map_err(|_| "public_key is not a valid Ed25519 point")?;
+    let sig = Signature::from_bytes(&sig_bytes);
+    let canonical = pop_canonical_bytes(&proof.peer_id, challenge);
+
+    vk.verify(&canonical, &sig).map_err(|_| "signature did not verify")?;
+    Ok(vk)
 }
 
 // ── Server ───────────────────────────────────────────────────────────────────
@@ -82,7 +204,26 @@ async fn handle_connection(
 
     info!("new connection from {}", peer_addr);
 
-    // ── 1. Handshake ──────────────────────────────────────────────────────────
+    // ── 1. Handshake (proof-of-possession, issue #526) ───────────────────────
+    //
+    // Server sends a fresh 32-byte challenge BEFORE expecting an
+    // IdentityProof. Client must sign the canonical bytes (see
+    // `pop_canonical_bytes`) with the private half of the public key it
+    // claims. This replaces the prior trust-on-first-use scheme.
+    let challenge_bytes = fresh_challenge();
+    let challenge_hex = encode_hex(&challenge_bytes);
+    let challenge_msg = Challenge {
+        kind: "challenge",
+        challenge: &challenge_hex,
+    };
+    if let Err(e) = ws_sink
+        .send(Message::from(serde_json::to_string(&challenge_msg)?))
+        .await
+    {
+        warn!("failed to send challenge to {}: {}", peer_addr, e);
+        return Ok(());
+    }
+
     let raw = match ws_source.next().await {
         Some(Ok(msg)) => msg,
         Some(Err(e)) => return Err(e.into()),
@@ -93,24 +234,53 @@ async fn handle_connection(
     };
 
     let proof: IdentityProof = match raw {
-        Message::Text(text) => serde_json::from_str(&text)?,
+        Message::Text(text) => match serde_json::from_str(&text) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("malformed IdentityProof from {}: {}", peer_addr, e);
+                let err = RelayMessage::Error {
+                    code: "auth_failed".into(),
+                    message: format!("malformed identity proof: {e}"),
+                };
+                let _ = ws_sink
+                    .send(Message::from(serde_json::to_string(&err)?))
+                    .await;
+                return Ok(());
+            }
+        },
         other => {
             warn!("unexpected handshake message type from {}: {:?}", peer_addr, other);
             return Ok(());
         }
     };
 
-    // Minimal proof validation placeholder — real implementations can verify
-    // an Ed25519 or JWT here.
-    if proof.proof.is_empty() {
-        warn!("empty proof from {}; rejecting", peer_addr);
+    if proof.peer_id.is_empty() {
+        warn!("empty peer_id from {}; rejecting", peer_addr);
         let err = RelayMessage::Error {
             code: "auth_failed".into(),
-            message: "empty identity proof".into(),
+            message: "peer_id must not be empty".into(),
         };
-        ws_sink
+        let _ = ws_sink
             .send(Message::from(serde_json::to_string(&err)?))
-            .await?;
+            .await;
+        return Ok(());
+    }
+
+    // Verify proof-of-possession: the supplied signature must bind the
+    // claimed peer_id to the server-issued challenge under the supplied
+    // public key. Reject the connection on any failure.
+    if let Err(reason) = verify_pop(&proof, &challenge_bytes) {
+        warn!(
+            "proof-of-possession failed for peer_id={} from {}: {}",
+            proof.peer_id, peer_addr, reason
+        );
+        let err = RelayMessage::Error {
+            code: "auth_failed".into(),
+            message: format!("proof-of-possession failed: {reason}"),
+        };
+        let _ = ws_sink
+            .send(Message::from(serde_json::to_string(&err)?))
+            .await;
         return Ok(());
     }
 
