@@ -1311,16 +1311,27 @@ mod tests {
         let state = test_state_with_key(TEST_API_KEY);
         let mut rx = register_fake_phantom(&state, "cursor-phantom", "localhost", "0.1.0").await;
 
-        // First call: no cursor → Phantom returns text + next_cursor.
+        // Concrete since value sent by the caller.  The fake Phantom asserts
+        // that this exact value arrives in the forwarded request (issue #509).
+        const CALLER_SINCE: &str = "cursor-abc-42";
+        const CALLER_LINES: u64 = 15;
+
         let reg_clone = Arc::clone(&state.registry);
         tokio::spawn(async move {
-            let req = rx.recv().await.expect("should receive first read_output");
+            let req = rx.recv().await.expect("should receive read_output request");
             let hub_id = req.id.clone().unwrap().as_u64().unwrap();
-            // Verify that `since` was forwarded.
-            let args = req.params["arguments"].clone();
-            let since = args.get("since");
-            // First call has no since.
-            let _ = since;
+
+            // Assert that since and lines were forwarded unchanged (issue #509).
+            let forwarded_since = req.params["arguments"]["since"].as_str().unwrap_or("");
+            let forwarded_lines = req.params["arguments"]["lines"].as_u64().unwrap_or(0);
+            assert_eq!(
+                forwarded_since, CALLER_SINCE,
+                "hub must forward the caller's since cursor unchanged"
+            );
+            assert_eq!(
+                forwarded_lines, CALLER_LINES,
+                "hub must forward the caller's lines cap unchanged"
+            );
 
             deliver_response(
                 &reg_clone,
@@ -1331,7 +1342,7 @@ mod tests {
                     result: Some(json!({
                         "content": [{"type": "text", "text": "line1\nline2\n"}],
                         "text": "line1\nline2\n",
-                        "next_cursor": "42",
+                        "next_cursor": "cursor-abc-99",
                         "complete": false
                     })),
                     error: None,
@@ -1354,7 +1365,8 @@ mod tests {
                             "name": "phantom.read_output",
                             "arguments": {
                                 "phantom_id": "cursor-phantom",
-                                "lines": 10
+                                "since": CALLER_SINCE,
+                                "lines": CALLER_LINES
                             }
                         }),
                     )))
@@ -1370,7 +1382,7 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(val.get("error").is_none(), "unexpected error: {val}");
         // The result passes through Phantom's fields directly.
-        assert_eq!(val["result"]["next_cursor"], "42");
+        assert_eq!(val["result"]["next_cursor"], "cursor-abc-99");
         assert_eq!(val["result"]["complete"], false);
     }
 
