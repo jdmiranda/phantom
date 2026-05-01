@@ -125,11 +125,17 @@ impl ConnState {
 
     /// Insert a oneshot sender into the in-flight table.
     ///
-    /// This method exists so that integration tests (which are external crates
-    /// and cannot see `pub(crate)` fields) can populate `pending` without
-    /// exposing the raw `HashMap` publicly.  It MUST NOT be called from
-    /// production code paths — use [`crate::router::forward`] instead.
-    #[cfg(test)]
+    /// This method exists so that integration tests (which compile as a
+    /// separate crate and cannot see `pub(crate)` fields) can exercise the
+    /// disconnect path without exposing the raw `HashMap` as `pub`.
+    ///
+    /// It MUST NOT be called from production code paths — use
+    /// [`crate::router::forward`] instead, which inserts into `pending` as
+    /// part of the request-correlation protocol.
+    ///
+    /// Gated behind the `"testing"` cargo feature so it is excluded from
+    /// release builds unless explicitly opted-in.
+    #[cfg(any(test, feature = "testing"))]
     pub fn insert_pending_for_test(
         &mut self,
         hub_id: HubId,

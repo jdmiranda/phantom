@@ -45,11 +45,27 @@ rand = "0.8"
 # Evicts oldest entries at capacity — no full-clear, bounded memory.
 lru = "0.12"
 
+[features]
+## Enable test-only helpers (e.g. `ConnState::insert_pending_for_test`).
+## Activated automatically for integration tests via [[test]] below.
+## Never enable in production builds.
+testing = []
+
 [dev-dependencies]
 axum-test = "15"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
+
+[[test]]
+name = "connection_registry"
+required-features = ["testing"]
+
+[[test]]
+name = "frame_routing"
+
+[[test]]
+name = "registration_handshake"
 
 [lints]
 workspace = true

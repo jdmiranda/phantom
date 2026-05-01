@@ -43,7 +43,7 @@ pub mod router;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::{Router, extract::State, response::IntoResponse, Json};
+use axum::{Router, extract::State, Json};
 use registry::SharedRegistry;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
