@@ -22,6 +22,23 @@ use phantom_ui::tokens::Tokens;
 use crate::adapters::inspector::InspectorAdapter;
 use crate::app::App;
 
+/// Load the local peer identity from the OS keyring and return its string
+/// representation.
+///
+/// Uses the `"phantom"` service namespace so the key is shared across all
+/// code paths that call `Identity::load_or_generate("phantom")`.  Falls back
+/// to `"unknown"` when the keyring is unavailable (e.g. in CI or sandboxed
+/// environments) so the Peers tab always renders something legible.
+fn load_local_peer_id() -> String {
+    match phantom_net::identity::Identity::load_or_generate("phantom") {
+        Ok(id) => id.peer_id.to_string(),
+        Err(e) => {
+            warn!("inspector: could not load local peer identity: {e}");
+            "unknown".to_string()
+        }
+    }
+}
+
 /// Dotted-name prefix the runtime writes for `EventKind::CapabilityDenied`
 /// (see `runtime::kind_dotted_name`). The `<agent_id>` suffix is appended
 /// by the runtime, so prefix-matching is the right contract: the ids vary
@@ -88,6 +105,7 @@ impl App {
         if let Ok(mut guard) = snapshot.write() {
             let mut view = self.runtime.snapshot();
             view.denials = self.collect_recent_denials();
+            view.local_node_id = load_local_peer_id();
             *guard = view;
         }
 
@@ -146,6 +164,7 @@ impl App {
         };
         let mut view = self.runtime.snapshot();
         view.denials = self.collect_recent_denials();
+        view.local_node_id = load_local_peer_id();
         if let Ok(mut guard) = snapshot.write() {
             *guard = view;
         }
@@ -412,5 +431,35 @@ mod tests {
         assert_eq!(got.attempted_class, "Act");
         assert_eq!(got.source_chain, vec![1, 2, 3]);
         assert_eq!(got.timestamp_ms, 42_000);
+    }
+
+    // =========================================================================
+    // Issue #412 — wire InspectorRuntime.local_node_id to Identity::load_or_generate
+    // =========================================================================
+
+    /// `load_local_peer_id` must invoke the load-or-generate path and return a
+    /// non-empty string that is not the old hard-coded sentinel `"localhost"`.
+    ///
+    /// In test builds the `keyring` crate uses an in-process mock backend, so
+    /// `Identity::load_or_generate` works without OS keyring access.  Two calls
+    /// with the same service namespace must return the same peer-id (stable
+    /// identity contract from phantom-net).
+    #[test]
+    fn load_local_peer_id_is_stable_and_not_localhost() {
+        let id1 = super::load_local_peer_id();
+        let id2 = super::load_local_peer_id();
+
+        assert!(
+            !id1.is_empty(),
+            "local_node_id must not be empty"
+        );
+        assert_ne!(
+            id1, "localhost",
+            "local_node_id must not be the old hard-coded sentinel"
+        );
+        assert_eq!(
+            id1, id2,
+            "load_local_peer_id must be stable across calls (load-or-generate contract)"
+        );
     }
 }

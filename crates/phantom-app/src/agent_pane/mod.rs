@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
 
-use phantom_agents::agent::{Agent, AgentMessage};
+use phantom_agents::agent::{Agent, AgentMessage, allocate_agent_id};
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig};
 use phantom_agents::chat::{ChatBackend, ChatError, ChatModel, build_backend_with_privacy};
 use phantom_agents::permissions::PermissionSet;
@@ -402,7 +402,9 @@ impl AgentPane {
             }
         };
 
-        let mut agent = Agent::new(0, task.clone());
+        // Allocate from the process-global counter so the id is distinct from
+        // any id produced via AgentManager::spawn on another path (fixes #513).
+        let mut agent = Agent::new(allocate_agent_id(), task.clone());
         let sys_prompt = agent.system_prompt();
         agent.push_message(AgentMessage::System(sys_prompt));
 

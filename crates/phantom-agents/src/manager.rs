@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use crate::agent::{Agent, AgentId, AgentStatus, AgentTask};
+use crate::agent::{Agent, AgentId, AgentStatus, AgentTask, allocate_agent_id};
 use crate::peer_routing::{AgentRouter, AnyAgentRef, RemoteAgentInfo};
 
 // ---------------------------------------------------------------------------
@@ -22,9 +22,13 @@ use crate::peer_routing::{AgentRouter, AnyAgentRef, RemoteAgentInfo};
 /// Wraps a [`AgentRouter`] for cross-peer visibility. The router starts
 /// disconnected (local-only mode) and is wired up once the relay handshake
 /// completes.
+///
+/// AgentIds are allocated from the process-global [`allocate_agent_id`]
+/// counter rather than a per-manager field, so ids remain unique across both
+/// the `AgentManager::spawn` path and the direct `AgentPane::spawn_with_opts`
+/// path (fixes #513).
 pub struct AgentManager {
     agents: Vec<Agent>,
-    next_id: AgentId,
     max_concurrent: usize,
     /// Cross-peer routing state (optional relay connection + remote agent cache).
     pub(crate) router: AgentRouter,
@@ -32,11 +36,10 @@ pub struct AgentManager {
 
 impl AgentManager {
     /// Create a new manager with the given concurrency limit.
-    #[must_use] 
+    #[must_use]
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             agents: Vec::new(),
-            next_id: 1,
             max_concurrent,
             router: AgentRouter::new(),
         }
@@ -66,9 +69,12 @@ impl AgentManager {
     }
 
     /// Spawn a new agent with the given task. Returns the agent ID.
+    ///
+    /// The ID is drawn from the process-global [`allocate_agent_id`] counter
+    /// so it is distinct from any ID produced by a concurrent
+    /// `AgentPane::spawn_with_opts` direct-spawn (fixes #513).
     pub fn spawn(&mut self, task: AgentTask) -> AgentId {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = allocate_agent_id();
 
         let mut agent = Agent::new(id, task);
 
@@ -204,15 +210,20 @@ mod tests {
         }
     }
 
+    /// IDs are drawn from the process-global allocator so absolute values are
+    /// non-deterministic across test runs. We assert uniqueness, non-zero, and
+    /// strictly increasing order instead of fixed values (fixes #513).
     #[test]
     fn spawn_assigns_sequential_ids() {
         let mut mgr = AgentManager::new(4);
         let id1 = mgr.spawn(free_task("a"));
         let id2 = mgr.spawn(free_task("b"));
         let id3 = mgr.spawn(free_task("c"));
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-        assert_eq!(id3, 3);
+        assert_ne!(id1, 0, "id must not be the sentinel 0");
+        assert!(id2 > id1, "ids must be strictly increasing");
+        assert!(id3 > id2, "ids must be strictly increasing");
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
     }
 
     #[test]

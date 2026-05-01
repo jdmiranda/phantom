@@ -482,7 +482,17 @@ fn brain_loop(
             let fwd_tx = outbound_tx.clone();
             // Spawn a lightweight bridge that converts PeerId → String for the
             // relay task, which expects (String, String).
-            std::thread::Builder::new()
+            //
+            // Daemon-thread justification (§7.3): the JoinHandle is intentionally
+            // discarded here. This bridge thread has a bounded, self-terminating
+            // lifetime: it exits as soon as `mapped_rx` is drained and closed,
+            // which happens naturally when `agent_router` drops `mapped_tx` during
+            // brain shutdown. There is no state to flush and no panic from this
+            // thread needs to propagate — the brain's supervisor loop already
+            // restarts the OODA iteration independently. Retaining the JoinHandle
+            // would require wrapping it in a Mutex or shipping it out-of-band
+            // through `brain_supervised`, adding complexity with no safety gain.
+            let _bridge_handle = std::thread::Builder::new()
                 .name("brain-relay-bridge".into())
                 .spawn(move || {
                     // We need a tokio runtime to drive the async recv.
@@ -499,6 +509,7 @@ fn brain_loop(
                     });
                 })
                 .expect("failed to spawn brain-relay-bridge");
+            // _bridge_handle is intentionally dropped — see daemon-thread comment above.
 
             agent_router.set_relay(mapped_tx, PeerId::new(local_peer_id.clone()));
             log::info!(

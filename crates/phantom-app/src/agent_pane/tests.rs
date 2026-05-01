@@ -1052,11 +1052,10 @@ fn spawn_agent_pane_task_matches_prompt() {
     assert_eq!(pane.status, AgentPaneStatus::Working);
 }
 
-/// Multiple panes must each receive a distinct agent ID from the underlying
-/// `Agent` allocation.  Uniqueness is enforced by `AgentManager::spawn`
-/// (sequential IDs starting at 1), but we verify the pane's agent id is
-/// set non-zero even in the test-fixture path by checking the two agents
-/// get different ids when constructed through the manager.
+/// Multiple panes must each receive a distinct, non-zero agent ID from the
+/// underlying `Agent` allocation. IDs are drawn from the process-global
+/// `allocate_agent_id` counter rather than a per-manager field, so they are
+/// unique regardless of which spawn path is used (fixes #513).
 #[test]
 fn spawn_two_panes_have_unique_agent_ids() {
     use phantom_agents::manager::AgentManager;
@@ -1067,8 +1066,10 @@ fn spawn_two_panes_have_unique_agent_ids() {
     let id2 = mgr.spawn(AgentTask::FreeForm { prompt: "task B".into() });
 
     assert_ne!(id1, id2, "each spawned agent must receive a unique ID");
-    assert_eq!(id1, 1);
-    assert_eq!(id2, 2);
+    assert_ne!(id1, 0, "spawned agent id must not be the sentinel 0");
+    assert_ne!(id2, 0, "spawned agent id must not be the sentinel 0");
+    // IDs increase monotonically regardless of absolute starting point.
+    assert!(id2 > id1, "second spawn must receive a higher id than the first");
 
     // Verify both are independently retrievable.
     assert!(mgr.get(id1).is_some());
@@ -1584,4 +1585,32 @@ fn non_cartographer_pane_always_has_none_dag_explorer_in_ctx() {
         "DispatchContext for a non-Cartographer pane must have dag_explorer = None \
          even when one is set on the pane (defence-in-depth)"
     );
+}
+
+// =========================================================================
+// Issue #513 — direct spawn_with_opts path must produce non-zero distinct ids
+// =========================================================================
+
+/// The process-global `allocate_agent_id` allocator must never return 0 and
+/// must return strictly increasing values on successive calls. Both
+/// `AgentManager::spawn` and `AgentPane::spawn_with_opts` call this function,
+/// so this test verifies the shared contract without requiring a live GPU or
+/// HTTP stack.
+#[test]
+fn allocate_agent_id_is_non_zero_and_increasing() {
+    use phantom_agents::agent::allocate_agent_id;
+
+    let a = allocate_agent_id();
+    let b = allocate_agent_id();
+    let c = allocate_agent_id();
+
+    assert_ne!(a, 0, "allocate_agent_id must never return 0 (reserved sentinel)");
+    assert_ne!(b, 0, "allocate_agent_id must never return 0 (reserved sentinel)");
+    assert_ne!(c, 0, "allocate_agent_id must never return 0 (reserved sentinel)");
+
+    assert!(b > a, "allocate_agent_id must be strictly increasing");
+    assert!(c > b, "allocate_agent_id must be strictly increasing");
+
+    assert_ne!(a, b, "allocate_agent_id must return distinct values");
+    assert_ne!(b, c, "allocate_agent_id must return distinct values");
 }
