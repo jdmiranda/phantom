@@ -14,6 +14,7 @@ use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 use phantom_brain::dispatch::ActionHandler;
 use phantom_brain::events::{ConnectionState, SuggestionOption};
+use phantom_ui::widgets::StatusBar;
 
 use crate::app::SuggestionOverlay;
 use crate::console::Console;
@@ -46,6 +47,9 @@ pub(crate) struct AppActionHandler<'a> {
     /// Accumulates `SpawnAgent` requests deferred to after the action loop
     /// (avoids borrow conflicts on `App`).
     pub tasks_to_spawn: &'a mut Vec<AgentSpawnOpts>,
+    /// Status bar widget; updated when offline-mode toggles so the
+    /// `[OFFLINE]` chip appears in the bottom-right of the chrome.
+    pub status_bar: &'a mut StatusBar,
 }
 
 impl ActionHandler for AppActionHandler<'_> {
@@ -150,6 +154,75 @@ impl ActionHandler for AppActionHandler<'_> {
     fn set_offline_mode(&mut self, enabled: bool) {
         info!("[PHANTOM]: Offline mode {}", if enabled { "ON" } else { "OFF" });
         // The actual router state is managed by the brain thread; this hook
-        // is the GUI-side notification surface (e.g. for status-bar updates).
+        // mirrors the flag onto the status bar so the `[OFFLINE]` chip
+        // renders in the bottom-right chrome (#424).
+        self.status_bar.set_offline_mode(enabled);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use phantom_adapter::EventBus;
+    use phantom_brain::events::AiAction;
+    use phantom_ui::layout::{LayoutEngine, Rect};
+    use phantom_ui::widgets::Widget;
+
+    fn status_rect() -> Rect {
+        Rect { x: 0.0, y: 0.0, width: 1920.0, height: 28.0 }
+    }
+
+    fn has_offline_chip(bar: &StatusBar) -> bool {
+        bar.render_text(&status_rect())
+            .iter()
+            .any(|s| s.text.contains("[OFFLINE]"))
+    }
+
+    /// `AppActionHandler::set_offline_mode` must mirror the flag onto the
+    /// `StatusBar` so the `[OFFLINE]` chip appears/clears in the chrome (#424).
+    #[test]
+    fn set_offline_mode_drives_status_bar_indicator() {
+        let mut suggestion: Option<SuggestionOverlay> = None;
+        let mut memory: Option<phantom_memory::MemoryStore> = None;
+        let mut notification_store: Option<
+            phantom_memory::notifications::NotificationStore,
+        > = None;
+        let mut console = Console::new();
+        let mut coordinator = AppCoordinator::new(EventBus::new());
+        let mut layout = LayoutEngine::new().expect("layout");
+        let mut scene = phantom_scene::tree::SceneTree::new();
+        let mut tasks_to_spawn = Vec::new();
+        let mut status_bar = StatusBar::new();
+
+        assert!(!has_offline_chip(&status_bar), "default: no chip");
+
+        AiAction::SetOfflineMode { enabled: true }.execute(&mut AppActionHandler {
+            now: Instant::now(),
+            suggestion: &mut suggestion,
+            memory: &mut memory,
+            notification_store: &mut notification_store,
+            console: &mut console,
+            coordinator: &mut coordinator,
+            layout: &mut layout,
+            scene: &mut scene,
+            tasks_to_spawn: &mut tasks_to_spawn,
+            status_bar: &mut status_bar,
+        });
+        assert!(has_offline_chip(&status_bar), "chip must appear when enabled");
+
+        AiAction::SetOfflineMode { enabled: false }.execute(&mut AppActionHandler {
+            now: Instant::now(),
+            suggestion: &mut suggestion,
+            memory: &mut memory,
+            notification_store: &mut notification_store,
+            console: &mut console,
+            coordinator: &mut coordinator,
+            layout: &mut layout,
+            scene: &mut scene,
+            tasks_to_spawn: &mut tasks_to_spawn,
+            status_bar: &mut status_bar,
+        });
+        assert!(!has_offline_chip(&status_bar), "chip must clear when disabled");
     }
 }

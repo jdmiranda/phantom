@@ -137,6 +137,7 @@ impl App {
                     layout: &mut self.layout,
                     scene: &mut self.scene,
                     tasks_to_spawn: &mut tasks_to_spawn,
+                    status_bar: &mut self.status_bar,
                 });
             }
         }
@@ -164,6 +165,7 @@ impl App {
                     layout: &mut self.layout,
                     scene: &mut self.scene,
                     tasks_to_spawn: &mut tasks_to_spawn,
+                    status_bar: &mut self.status_bar,
                 });
             }
         }
@@ -181,6 +183,7 @@ impl App {
                 layout: &mut self.layout,
                 scene: &mut self.scene,
                 tasks_to_spawn: &mut tasks_to_spawn,
+                status_bar: &mut self.status_bar,
             });
         }
 
@@ -203,6 +206,7 @@ impl App {
                             layout: &mut self.layout,
                             scene: &mut self.scene,
                             tasks_to_spawn: &mut tasks_to_spawn,
+                            status_bar: &mut self.status_bar,
                         });
                     }
                 }
