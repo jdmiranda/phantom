@@ -190,7 +190,9 @@ pub fn route_agent_envelope(
                 return Err(AgentRouteError::GrantDenied(from_peer.clone()));
             }
 
-            let payload = serde_json::to_value(&env).unwrap_or(serde_json::Value::Null);
+            let payload = serde_json::to_value(&env).map_err(|e| {
+                AgentRouteError::RelayError(format!("failed to serialize agent envelope: {e}"))
+            })?;
             let mut wire = Envelope {
                 from: from_peer.clone(),
                 to: to_peer.clone(),
