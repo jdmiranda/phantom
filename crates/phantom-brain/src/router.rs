@@ -437,6 +437,22 @@ impl BrainRouter {
     /// [`PrivacyModeViolation`] error to be returned. Non-cloud backends
     /// (heuristic, Ollama) are returned normally.
     ///
+    /// Privacy is enforced in two layers:
+    ///
+    /// 1. **Primary** — [`Self::route`] filters cloud backends out of the
+    ///    candidate list when `privacy_mode` is true (see line ~304).
+    /// 2. **Defence-in-depth** — [`Self::enforce_privacy`] (called below)
+    ///    re-scans the post-filter candidate list and returns
+    ///    [`PrivacyModeViolation`] if any cloud backend slipped through.
+    ///
+    /// Under current code the defence-in-depth layer never fires because the
+    /// primary filter is always applied first. The secondary scan exists to
+    /// catch a future regression where [`Self::route`]'s filter is removed,
+    /// reordered, or short-circuited. See
+    /// [`tests::enforce_privacy_catches_cloud_backend_in_candidates`] for a
+    /// direct test of the defence-in-depth path that does not depend on
+    /// [`Self::route`].
+    ///
     /// # Errors
     ///
     /// Returns the first [`PrivacyModeViolation`] encountered among the
@@ -447,18 +463,36 @@ impl BrainRouter {
         complexity: TaskComplexity,
     ) -> Result<Vec<&ModelBackend>, PrivacyModeViolation> {
         let candidates = self.route(complexity);
+        Self::enforce_privacy(self.config.privacy_mode, &candidates)?;
+        Ok(candidates)
+    }
 
-        if self.config.privacy_mode {
-            for backend in &candidates {
-                if backend.is_cloud_provider() {
-                    return Err(PrivacyModeViolation {
-                        provider: backend.provider_name().to_string(),
-                    });
-                }
+    /// Defence-in-depth privacy check on a candidate list.
+    ///
+    /// Returns [`PrivacyModeViolation`] when `privacy_mode` is true and any
+    /// candidate is a cloud provider. Used by [`Self::route_checked`] as a
+    /// secondary scan after [`Self::route`]'s primary cloud filter; also
+    /// directly testable to prove the layer works without depending on
+    /// [`Self::route`]'s correctness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PrivacyModeViolation`] for the first cloud backend found.
+    fn enforce_privacy(
+        privacy_mode: bool,
+        candidates: &[&ModelBackend],
+    ) -> Result<(), PrivacyModeViolation> {
+        if !privacy_mode {
+            return Ok(());
+        }
+        for backend in candidates {
+            if backend.is_cloud_provider() {
+                return Err(PrivacyModeViolation {
+                    provider: backend.provider_name().to_string(),
+                });
             }
         }
-
-        Ok(candidates)
+        Ok(())
     }
 }
 
@@ -973,5 +1007,100 @@ mod tests {
             backends.is_empty(),
             "with privacy mode on and only Claude, Complex must return empty"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Defence-in-depth: enforce_privacy direct tests (closes #475)
+    //
+    // route_checked's secondary cloud-backend scan cannot fire under normal
+    // operation because route() filters cloud backends out first. These tests
+    // exercise the secondary scan via the extracted helper, proving the layer
+    // works even if route()'s primary filter is ever removed or short-circuited.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn enforce_privacy_off_returns_ok_with_cloud_present() {
+        // Privacy off → cloud backends in candidates are fine.
+        let claude = {
+            let mut b = ModelBackend::claude_default();
+            b.available = true;
+            b
+        };
+        let candidates = vec![&claude];
+        let result = BrainRouter::enforce_privacy(false, &candidates);
+        assert!(
+            result.is_ok(),
+            "enforce_privacy must accept cloud candidates when privacy mode is OFF"
+        );
+    }
+
+    #[test]
+    fn enforce_privacy_on_with_only_local_returns_ok() {
+        // Privacy on, candidates list contains only local backends → Ok.
+        let heuristic = ModelBackend::heuristic();
+        let candidates = vec![&heuristic];
+        let result = BrainRouter::enforce_privacy(true, &candidates);
+        assert!(
+            result.is_ok(),
+            "enforce_privacy must accept all-local candidates when privacy mode is ON"
+        );
+    }
+
+    #[test]
+    fn enforce_privacy_catches_cloud_backend_in_candidates() {
+        // Defence-in-depth: simulate route() being bypassed or broken.
+        // We pass a candidates list that contains a cloud backend even though
+        // privacy_mode is true — exactly the scenario route_checked's secondary
+        // scan exists to catch. enforce_privacy must return PrivacyModeViolation.
+        let claude = {
+            let mut b = ModelBackend::claude_default();
+            b.available = true;
+            b
+        };
+        let candidates = vec![&claude];
+        let result = BrainRouter::enforce_privacy(true, &candidates);
+        match result {
+            Err(PrivacyModeViolation { provider }) => {
+                assert_eq!(
+                    provider, "claude",
+                    "violation must name the offending cloud provider"
+                );
+            }
+            Ok(_) => panic!(
+                "defence-in-depth scan failed to catch cloud backend leaked past route() filter"
+            ),
+        }
+    }
+
+    #[test]
+    fn enforce_privacy_catches_first_cloud_in_mixed_candidates() {
+        // Defence-in-depth: cloud backend mixed in with local ones.
+        // enforce_privacy must still flag the cloud backend.
+        let heuristic = ModelBackend::heuristic();
+        let openai = ModelBackend {
+            name: "openai-gpt4o".into(),
+            kind: BackendKind::OpenAICompat {
+                base_url: "https://api.openai.com".into(),
+                model: "gpt-4o".into(),
+            },
+            capabilities: vec![TaskComplexity::Complex],
+            available: true,
+            avg_latency_ms: 0.0,
+            max_context: 128_000,
+            cost_per_1k: 0.005,
+        };
+        let candidates = vec![&heuristic, &openai];
+        let result = BrainRouter::enforce_privacy(true, &candidates);
+        match result {
+            Err(PrivacyModeViolation { provider }) => {
+                assert_eq!(
+                    provider, "openai-compat",
+                    "violation must name the openai-compat cloud provider"
+                );
+            }
+            Ok(_) => panic!(
+                "defence-in-depth scan failed to catch openai-compat backend in mixed candidates"
+            ),
+        }
     }
 }
