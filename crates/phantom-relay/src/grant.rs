@@ -34,43 +34,23 @@ use crate::envelope::PeerId;
 /// The relay classifies every inbound [`crate::envelope::Envelope`] into one
 /// of these classes before consulting the [`PeerGrantRegistry`].
 ///
-/// - [`Vision`] — requests that invoke a remote vision / GPT-4V analysis
-///   pipeline (e.g. screenshot analysis forwarded to a peer running the
-///   vision backend).
-/// - [`Stt`] — requests that route audio chunks to a remote speech-to-text
-///   backend (Whisper, Deepgram, etc.) on another peer.
-/// - [`Voice`] — requests that route text to a remote text-to-speech backend
-///   (ElevenLabs, OpenAI TTS, etc.) on another peer.
-/// - [`Embeddings`] — requests that forward text/image/audio to a remote
-///   embedding backend (OpenAI, Ollama, etc.) on another peer.
-/// - [`Llm`] — requests that dispatch a prompt to a remote LLM backend
-///   (Claude, Ollama, OpenAI-compat) running on another peer. Covers both
-///   the `phantom-agents` ChatBackend path and the `phantom-brain` router's
-///   cloud-provider path when those calls are relayed rather than local.
-/// - [`Relay`] — basic peer-to-peer message forwarding with no additional
-///   cloud-backend semantics. Used for control-plane messages
-///   (handshake, heartbeat, arbitrary data tunnelling between peers).
+/// Today only [`Relay`] has an enforcement call site — a peer must hold this
+/// grant to forward any envelope through the broker (issued on handshake,
+/// revoked on disconnect). Finer-grained capability variants (Vision, Stt,
+/// Voice, Embeddings, Llm) are deferred until the upstream capability-consumer
+/// crates (`phantom-vision`, `phantom-stt`, etc.) are wired into the relay and
+/// each consumer gains a distinct enforcement path. Introducing variants before
+/// that wiring exists creates dead code that misleads reviewers about what is
+/// actually enforced. See issues #415 and the original #477 review for context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityClass {
-    /// Remote vision / GPT-4V analysis pipeline calls forwarded through the
-    /// relay to a peer hosting a vision backend.
-    Vision,
-    /// Remote speech-to-text calls (Whisper / Deepgram / etc.) forwarded
-    /// through the relay to a peer hosting an STT backend.
-    Stt,
-    /// Remote text-to-speech calls (ElevenLabs / OpenAI TTS / etc.) forwarded
-    /// through the relay to a peer hosting a voice backend.
-    Voice,
-    /// Remote embedding calls (OpenAI / Ollama / etc.) forwarded through the
-    /// relay to a peer hosting an embedding backend.
-    Embeddings,
-    /// Remote LLM inference calls (Claude / OpenAI-compat / Ollama) forwarded
-    /// through the relay to a peer hosting a language model backend.
-    Llm,
     /// Basic peer-to-peer relay forwarding (control plane, arbitrary tunnelling).
     ///
-    /// This class covers messages that do not map to a specialised cloud backend.
-    /// A peer must hold this grant to send *any* envelope through the relay.
+    /// This class covers all envelopes forwarded through the relay. A peer must
+    /// hold this grant to send any envelope. The grant is issued on a successful
+    /// handshake and revoked on disconnect. Per-capability variants (Vision,
+    /// Stt, Voice, Embeddings, Llm) will be added when their consumer crates
+    /// gain enforcement paths.
     Relay,
 }
 
@@ -255,16 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn grant_does_not_bleed_to_other_class() {
-        let mut registry = PeerGrantRegistry::new();
-        registry.grant(&peer("alice"), Grant::permanent(CapabilityClass::Relay));
-        let err = registry
-            .check(&peer("alice"), CapabilityClass::Vision)
-            .unwrap_err();
-        assert_eq!(err, GrantDenied::NoGrant);
-    }
-
-    #[test]
     fn grant_does_not_bleed_to_other_peer() {
         let mut registry = PeerGrantRegistry::new();
         registry.grant(&peer("alice"), Grant::permanent(CapabilityClass::Relay));
@@ -317,32 +287,29 @@ mod tests {
 
     #[test]
     fn revoke_only_removes_specified_class() {
+        // With a single CapabilityClass variant, grant two separate peers and
+        // confirm revoke is peer-scoped rather than class-scoped.
         let mut registry = PeerGrantRegistry::new();
         registry.grant(&peer("alice"), Grant::permanent(CapabilityClass::Relay));
-        registry.grant(&peer("alice"), Grant::permanent(CapabilityClass::Vision));
-        registry.revoke(&peer("alice"), CapabilityClass::Vision);
-        // Relay grant must still be present.
-        assert!(registry.check(&peer("alice"), CapabilityClass::Relay).is_ok());
-        // Vision grant must be gone.
+        registry.grant(&peer("bob"), Grant::permanent(CapabilityClass::Relay));
+        registry.revoke(&peer("alice"), CapabilityClass::Relay);
+        // Alice's grant must be gone.
         assert_eq!(
-            registry.check(&peer("alice"), CapabilityClass::Vision).unwrap_err(),
+            registry.check(&peer("alice"), CapabilityClass::Relay).unwrap_err(),
             GrantDenied::NoGrant
         );
+        // Bob's grant must be unaffected.
+        assert!(registry.check(&peer("bob"), CapabilityClass::Relay).is_ok());
     }
 
     #[test]
     fn revoke_all_removes_every_grant_for_peer() {
         let mut registry = PeerGrantRegistry::new();
         registry.grant(&peer("alice"), Grant::permanent(CapabilityClass::Relay));
-        registry.grant(&peer("alice"), Grant::permanent(CapabilityClass::Vision));
         registry.grant(&peer("bob"), Grant::permanent(CapabilityClass::Relay));
         registry.revoke_all(&peer("alice"));
         assert_eq!(
             registry.check(&peer("alice"), CapabilityClass::Relay).unwrap_err(),
-            GrantDenied::NoGrant
-        );
-        assert_eq!(
-            registry.check(&peer("alice"), CapabilityClass::Vision).unwrap_err(),
             GrantDenied::NoGrant
         );
         // Bob's grant must be unaffected.
@@ -382,26 +349,13 @@ mod tests {
         assert!(registry.check(&peer("bob"), CapabilityClass::Relay).is_ok());
     }
 
-    // ── all capability class variants ─────────────────────────────────────────
+    // ── canonical Relay class round-trip ──────────────────────────────────────
 
     #[test]
-    fn all_capability_classes_can_be_granted_and_checked() {
-        let classes = [
-            CapabilityClass::Vision,
-            CapabilityClass::Stt,
-            CapabilityClass::Voice,
-            CapabilityClass::Embeddings,
-            CapabilityClass::Llm,
-            CapabilityClass::Relay,
-        ];
+    fn relay_capability_class_can_be_granted_and_checked() {
         let mut registry = PeerGrantRegistry::new();
         let p = peer("tester");
-        for class in classes {
-            registry.grant(&p, Grant::permanent(class));
-            assert!(
-                registry.check(&p, class).is_ok(),
-                "check failed for {class:?}"
-            );
-        }
+        registry.grant(&p, Grant::permanent(CapabilityClass::Relay));
+        assert!(registry.check(&p, CapabilityClass::Relay).is_ok());
     }
 }

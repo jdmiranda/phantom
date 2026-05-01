@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::envelope::{ClientMessage, Envelope, PeerId, RelayMessage};
+use crate::grant::CapabilityClass;
 use crate::router::Router;
 
 // ---------------------------------------------------------------------------
@@ -94,30 +95,6 @@ pub struct AgentEnvelope {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// CapabilityClass — relay-local enum for grant enforcement
-// ---------------------------------------------------------------------------
-
-/// The capability class a peer must hold to perform an action via the relay.
-///
-/// This mirrors `phantom_agents::role::CapabilityClass` in shape and meaning.
-/// It is defined here so `phantom-relay` stays dep-free from `phantom-agents`.
-/// The caller is responsible for converting between the two representations
-/// when wiring up the grant check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CapabilityClass {
-    /// Observe state (read-only).
-    Sense,
-    /// Coordinate agent actions — minimum required to forward messages.
-    Coordinate,
-    /// Execute mutating actions.
-    Act,
-    /// Self-reflection and reasoning.
-    Reflect,
-    /// Run computationally expensive tasks.
-    Compute,
-}
-
-// ---------------------------------------------------------------------------
 // GrantDenied
 // ---------------------------------------------------------------------------
 
@@ -148,7 +125,7 @@ pub enum AgentRouteError {
 /// Function type for per-peer capability grant checks.
 ///
 /// Returns `true` iff `peer_id` is allowed to use `class`. Callers wire this
-/// to [`phantom_agents::PeerGrantRegistry::check`] or a test double.
+/// to [`crate::grant::PeerGrantRegistry::check`] or a test double.
 pub type GrantChecker<'a> = Option<&'a dyn Fn(&PeerId, CapabilityClass) -> bool>;
 
 // ---------------------------------------------------------------------------
@@ -167,7 +144,7 @@ pub type GrantChecker<'a> = Option<&'a dyn Fn(&PeerId, CapabilityClass) -> bool>
 ///
 /// When `grant_check` is `Some(f)`, the function `f(peer_id, capability)` is
 /// called before routing. Forwarding an agent envelope requires at minimum
-/// [`CapabilityClass::Coordinate`]. If the check returns `false`, this function
+/// [`CapabilityClass::Relay`]. If the check returns `false`, this function
 /// returns [`AgentRouteError::GrantDenied`].
 ///
 /// Pass `None` to skip the check (for relay-internal or trusted local paths).
@@ -187,14 +164,15 @@ pub fn route_agent_envelope(
         AgentTarget::Remote {
             peer_id: to_peer, ..
         } => {
-            // --- capability grant check (issue #8) ---
+            // --- capability grant check ---
             //
-            // Forwarding a message to a remote agent requires at minimum
-            // `Coordinate` capability. Unknown / unregistered peers are
-            // deny-all by default. Local targets bypass this check because
-            // the local dispatch path is governed by the existing role/taint
-            // model, not the peer grant registry.
-            if grant_check.is_some_and(|check| !check(from_peer, CapabilityClass::Coordinate)) {
+            // Forwarding a message to a remote agent requires the `Relay`
+            // grant. Unknown / unregistered peers are deny-all by default.
+            // Local targets bypass this check because the local dispatch path
+            // is governed by the existing role/taint model, not the peer grant
+            // registry. `Relay` is the canonical capability class after the
+            // consolidation of the two former enums (issue #492).
+            if grant_check.is_some_and(|check| !check(from_peer, CapabilityClass::Relay)) {
                 return Err(AgentRouteError::GrantDenied(from_peer.clone()));
             }
 
@@ -246,7 +224,7 @@ pub fn decode_agent_envelope(envelope: &Envelope) -> Result<AgentEnvelope, serde
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grant::{CapabilityClass as GC, Grant};
+    use crate::grant::Grant;
     use crate::session::Session;
 
     fn make_session(id: &str) -> (Session, crate::session::SessionHandle) {
@@ -334,7 +312,7 @@ mod tests {
         router.register(alice_handle).unwrap();
         router.register(bob_handle).unwrap();
         // Alice needs a Relay grant so router.route() lets the envelope through.
-        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
+        router.grant(&PeerId("alice".into()), Grant::permanent(CapabilityClass::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -363,7 +341,7 @@ mod tests {
         router.register(alice_handle).unwrap();
         // Alice holds a Relay grant so she passes the router grant check; the
         // failure must come from "ghost" not being registered.
-        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
+        router.grant(&PeerId("alice".into()), Grant::permanent(CapabilityClass::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -413,7 +391,7 @@ mod tests {
         );
     }
 
-    /// A peer with an explicit Coordinate grant is allowed through.
+    /// A peer with an explicit Relay grant is allowed through.
     #[test]
     fn granted_peer_routes_successfully() {
         let mut router = Router::new(100, 10);
@@ -422,7 +400,7 @@ mod tests {
         router.register(alice_handle).unwrap();
         router.register(bob_handle).unwrap();
         // Alice needs a router-level Relay grant so router.route() passes.
-        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
+        router.grant(&PeerId("alice".into()), Grant::permanent(CapabilityClass::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -432,15 +410,15 @@ mod tests {
             payload: serde_json::json!(null),
         };
 
-        // Allow-all grant check simulating a fully-trusted peer entry.
-        let allow_coordinate = |_peer: &PeerId, class: CapabilityClass| {
-            matches!(class, CapabilityClass::Coordinate)
+        // Grant check that accepts the canonical Relay class.
+        let allow_relay = |_peer: &PeerId, class: CapabilityClass| {
+            matches!(class, CapabilityClass::Relay)
         };
         let result = route_agent_envelope(
             &mut router,
             &PeerId("alice".into()),
             env,
-            Some(&allow_coordinate),
+            Some(&allow_relay),
         );
         assert!(result.is_ok(), "granted peer should route: {result:?}");
     }
