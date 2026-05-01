@@ -15,9 +15,9 @@
 //!    unchanged.
 
 use std::sync::{Arc, Barrier};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use phantom_skill_host::{SwapManager, SwapStatus};
+use phantom_skill_host::{SwapManager, SwapStatus, tick_reaper_for_test};
 
 // ---------------------------------------------------------------------------
 // Dummy trait for tests — avoids any real dylib dependency
@@ -39,18 +39,29 @@ fn mgr(val: u64, name: &str) -> SwapManager<dyn Widget> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: spin-wait up to `timeout` for a condition, polling every 10 ms.
+// Helper: tick-driven wait — replaces wall-clock spin-sleep with synchronous
+// reaper ticks.
+//
+// Drives the reaper synchronously on each iteration and yields to the OS
+// scheduler (so other threads can release their clones) between checks.
+// For deadline-based tests the deadline itself is real-time; `yield_now`
+// allows enough CPU time to pass without an explicit `sleep`.  Returns
+// `true` as soon as the condition holds.
 // ---------------------------------------------------------------------------
 
 fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    use std::time::Instant;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        tick_reaper_for_test();
         if condition() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::yield_now();
     }
-    condition() // final check
+    // One final tick + check after deadline.
+    tick_reaper_for_test();
+    condition()
 }
 
 // ---------------------------------------------------------------------------

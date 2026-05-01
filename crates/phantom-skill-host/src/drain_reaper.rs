@@ -154,6 +154,15 @@ impl DrainReaper {
         });
     }
 
+    /// Drive one synchronous poll cycle — test use only.
+    ///
+    /// Equivalent to what the background thread does on each wakeup, but called
+    /// on the calling thread so tests can advance reaper state deterministically
+    /// without sleeping.
+    pub(crate) fn tick_for_test(&self) {
+        self.poll_all();
+    }
+
     /// Snapshot all live entries for telemetry.
     fn snapshot_all(&self) -> Vec<SwapState> {
         let entries = self.entries.lock().unwrap();
@@ -219,6 +228,18 @@ pub(crate) fn register<T: ?Sized + Send + Sync + 'static>(
     });
     global_reaper().register_entry(entry);
     log::debug!("skill-host/reaper: registered swap target '{name}'");
+}
+
+/// Tick the global drain-reaper once synchronously — **test use only**.
+///
+/// Exposed so integration tests in `tests/` can drive one reaper poll cycle
+/// deterministically without sleeping.  Initialises the reaper singleton if it
+/// has not yet been started (safe — identical to what `register` does).
+///
+/// Production callers should never need to call this; it is intended solely
+/// for use in integration tests to avoid wall-clock `thread::sleep` delays.
+pub fn tick_reaper_for_test() {
+    global_reaper().tick_for_test();
 }
 
 /// Return the swap state of every live `SwapManager`.
