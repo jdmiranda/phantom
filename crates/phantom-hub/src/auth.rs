@@ -169,6 +169,9 @@ pub const ALL_CAPABILITIES: &[CapabilityClass] = &[
 pub struct NonceCache {
     inner: Mutex<LruCache<String, Instant>>,
     ttl: Duration,
+    /// Optional clock override used in tests to control what "now" means
+    /// without sleeping.  Production code always uses `None` (wall clock).
+    clock: Option<fn() -> Instant>,
 }
 
 impl NonceCache {
@@ -190,6 +193,47 @@ impl NonceCache {
         Self {
             inner: Mutex::new(LruCache::new(cap)),
             ttl,
+            clock: None,
+        }
+    }
+
+    /// Create a [`NonceCache`] with a custom clock function (issue #506).
+    ///
+    /// `clock_fn` is called instead of `Instant::now()` on every [`try_claim`]
+    /// invocation, enabling deterministic TTL-expiry tests without sleeping.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    /// use std::sync::Arc;
+    /// use std::time::{Duration, Instant};
+    ///
+    /// static OFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ///
+    /// fn fake_clock() -> Instant {
+    ///     *BASE.get_or_init(Instant::now)
+    ///         + Duration::from_nanos(OFFSET_NANOS.load(Ordering::Relaxed))
+    /// }
+    /// let cache = NonceCache::with_clock(16, Duration::from_secs(10), fake_clock);
+    /// ```
+    #[must_use]
+    pub fn with_clock(capacity: usize, ttl: Duration, clock_fn: fn() -> Instant) -> Self {
+        let cap = std::num::NonZeroUsize::new(capacity.max(1))
+            .expect("capacity is always ≥ 1 after max(1)");
+        Self {
+            inner: Mutex::new(LruCache::new(cap)),
+            ttl,
+            clock: Some(clock_fn),
+        }
+    }
+
+    /// Return the current instant from the injected clock or `Instant::now()`.
+    fn now(&self) -> Instant {
+        match self.clock {
+            Some(f) => f(),
+            None => Instant::now(),
         }
     }
 
@@ -207,7 +251,7 @@ impl NonceCache {
     /// unless a previous thread panicked while holding the lock.
     pub fn try_claim(&self, nonce: &str) -> bool {
         let mut cache = self.inner.lock().expect("NonceCache mutex poisoned");
-        let now = Instant::now();
+        let now = self.now();
 
         // peek without promoting to LRU-head so we don't disturb eviction order
         // for a stale entry we are about to replace.
@@ -955,6 +999,63 @@ mod tests {
         let result = JwtAuthority::from_env();
         assert!(result.is_ok(), "from_env must succeed with HUB_JWT_SECRET set");
         // Leave the var set — other tests that use from_env will benefit.
+    }
+
+    // -----------------------------------------------------------------------
+    // NonceCache TTL expiry — clock-injection tests (issue #506)
+    // -----------------------------------------------------------------------
+
+    /// Verify the TTL boundary using an injected fake clock.
+    ///
+    /// Test plan (issue #506):
+    /// a. Insert at t=0 → claim at t=TTL/2 returns `false` (replay blocked).
+    /// b. Insert at t=0 → claim at t=TTL+1s returns `true` (expired, treated as fresh).
+    #[test]
+    fn nonce_cache_ttl_expiry_clock_injection() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::OnceLock;
+
+        static OFFSET_NANOS: AtomicU64 = AtomicU64::new(0);
+        static BASE: OnceLock<Instant> = OnceLock::new();
+
+        fn fake_clock() -> Instant {
+            *BASE.get_or_init(Instant::now)
+                + Duration::from_nanos(OFFSET_NANOS.load(Ordering::Relaxed))
+        }
+
+        let ttl = Duration::from_secs(10);
+
+        // ── Part a: claim at t=TTL/2 → replay (false) ──────────────────────
+        OFFSET_NANOS.store(0, Ordering::Relaxed);
+        BASE.get_or_init(Instant::now); // pin the base
+
+        let cache = NonceCache::with_clock(16, ttl, fake_clock);
+        let first = cache.try_claim("ttl-nonce"); // t=0: claim succeeds
+
+        // Advance clock to TTL/2 (5 s).
+        OFFSET_NANOS.store(
+            (ttl.as_nanos() / 2) as u64,
+            Ordering::Relaxed,
+        );
+        let within_ttl = cache.try_claim("ttl-nonce"); // t=5s: still within TTL
+
+        assert!(first, "initial claim at t=0 must succeed");
+        assert!(!within_ttl, "re-claim at t=TTL/2 must be rejected (replay)");
+
+        // ── Part b: claim at t=TTL+1s → fresh (true) ───────────────────────
+        // Use a fresh cache so Part a's entry doesn't interfere.
+        OFFSET_NANOS.store(0, Ordering::Relaxed);
+        let cache2 = NonceCache::with_clock(16, ttl, fake_clock);
+        cache2.try_claim("ttl-nonce-b"); // t=0: insert
+
+        // Advance past TTL by 1 second.
+        OFFSET_NANOS.store(
+            (ttl + Duration::from_secs(1)).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        let after_ttl = cache2.try_claim("ttl-nonce-b"); // t=TTL+1s: expired
+
+        assert!(after_ttl, "re-claim after TTL expiry must succeed (treated as fresh nonce)");
     }
 
     // -----------------------------------------------------------------------
