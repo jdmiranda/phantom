@@ -2128,8 +2128,11 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(val.get("error").is_some(), "expected capability error, got: {val}");
         let code = val["error"]["code"].as_i64().unwrap_or(0);
-        // Today: -32003. After #528 lands, this becomes the dedicated capability-denial code (-32010).
-        assert_eq!(code, -32003, "expected -32003 capability-denied code, got {code}: {val}");
+        // -32010 is capability-denied (issue #528) — distinct from -32003 (Disconnected).
+        assert_eq!(
+            code, JSON_RPC_CAPABILITY_DENIED,
+            "expected -32010 capability-denied code, got {code}: {val}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2175,7 +2178,10 @@ mod tests {
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(val.get("error").is_some(), "expected capability error, got: {val}");
         let code = val["error"]["code"].as_i64().unwrap_or(0);
-        // Today: -32003. After #528 lands, this becomes the dedicated capability-denial code (-32010).
-        assert_eq!(code, -32003, "expected -32003 capability-denied code, got {code}: {val}");
+        // -32010 is capability-denied (issue #528) — distinct from -32003 (Disconnected).
+        assert_eq!(
+            code, JSON_RPC_CAPABILITY_DENIED,
+            "expected -32010 capability-denied code, got {code}: {val}"
+        );
     }
 }
