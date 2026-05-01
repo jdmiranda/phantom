@@ -13,11 +13,59 @@
 //! let sig = id.sign(b"hello");
 //! ```
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
 use anyhow::{Context, Result};
 use bs58;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
+
+// ---------------------------------------------------------------------------
+// Per-process Identity cache
+// ---------------------------------------------------------------------------
+//
+// `Identity::load_or_generate` reads the OS keyring on every invocation by
+// default.  On macOS each read is gated by an ACL prompt unless the user has
+// previously clicked "Always Allow" for the exact signed binary.  Because the
+// same Phantom process has multiple independent callers (relay client, hub
+// listener, inspector), repeated reads turn into prompt spam.
+//
+// To fix this we memoize the resolved `Identity` per service string in a
+// process-wide cache.  The cache lives only in heap memory — it never
+// persists keys to disk.  Cloning an `Identity` is cheap because the inner
+// signing material lives behind an `Arc`.
+static IDENTITY_CACHE: LazyLock<Mutex<HashMap<String, Identity>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// Test-only counter that observes how many times the keyring was actually
+// read for each distinct service string.  The cache test asserts that
+// repeated `load_or_generate` calls for the same service do not increment
+// the per-service count.  Keying by service string lets the test run in
+// parallel with other identity tests without false positives.
+#[cfg(test)]
+static KEYRING_READ_COUNTS: LazyLock<Mutex<HashMap<String, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+fn record_keyring_read(service: &str) {
+    let mut counts = KEYRING_READ_COUNTS
+        .lock()
+        .expect("keyring read count mutex poisoned");
+    *counts.entry(service.to_owned()).or_insert(0) += 1;
+}
+
+#[cfg(not(test))]
+fn record_keyring_read(_service: &str) {}
+
+#[cfg(test)]
+fn keyring_read_count_for(service: &str) -> usize {
+    let counts = KEYRING_READ_COUNTS
+        .lock()
+        .expect("keyring read count mutex poisoned");
+    counts.get(service).copied().unwrap_or(0)
+}
 
 // ---------------------------------------------------------------------------
 // PeerId
@@ -70,8 +118,13 @@ impl From<PeerId> for String {
 // ---------------------------------------------------------------------------
 
 /// Ed25519 signing identity with a stable, OS-keyring-backed private key.
+///
+/// Cheap to clone: the underlying signing key lives behind an `Arc`, so a
+/// clone is just a refcount bump.  This makes it safe to hand the same
+/// `Identity` to multiple subsystems without re-reading the OS keyring.
+#[derive(Clone)]
 pub struct Identity {
-    keypair: SigningKey,
+    keypair: Arc<SigningKey>,
     /// The public peer identifier derived from this keypair.
     pub peer_id: PeerId,
 }
@@ -94,11 +147,50 @@ impl Identity {
     /// (e.g. `"phantom"` or `"phantom-test"`).  Different services get
     /// separate keys.
     ///
+    /// The result is memoized in a process-wide cache keyed by `service`, so
+    /// repeated calls within the same process touch the OS keyring at most
+    /// once per distinct service string.  This prevents repeated macOS
+    /// Keychain ACL prompts when multiple subsystems each load the same
+    /// identity.
+    ///
     /// # Errors
     /// Returns an error if the keyring is unavailable or the stored bytes are
     /// corrupt.
     pub fn load_or_generate(service: &str) -> Result<Self> {
+        // Fast path — already cached.
+        {
+            let guard = IDENTITY_CACHE
+                .lock()
+                .expect("identity cache mutex poisoned");
+            if let Some(cached) = guard.get(service) {
+                return Ok(cached.clone());
+            }
+        }
+
+        // Slow path — read the keyring (or generate a fresh key).  Done
+        // outside the cache lock so concurrent loads of *different* services
+        // do not serialize on this mutex during the keyring round-trip.
+        let identity = Self::load_or_generate_uncached(service)?;
+
+        // Insert into the cache.  If another thread raced us and inserted
+        // first, prefer the existing entry so every caller observes the same
+        // `Identity` value for a given service in this process.
+        let mut guard = IDENTITY_CACHE
+            .lock()
+            .expect("identity cache mutex poisoned");
+        let entry = guard
+            .entry(service.to_owned())
+            .or_insert_with(|| identity.clone());
+        Ok(entry.clone())
+    }
+
+    /// Internal: actually read the OS keyring.  Bypasses the per-process
+    /// cache.  Callers that want the cached behavior should use
+    /// [`Identity::load_or_generate`].
+    fn load_or_generate_uncached(service: &str) -> Result<Self> {
         let entry = Self::keyring_entry(service)?;
+
+        record_keyring_read(service);
 
         let signing_key = match entry.get_password() {
             Ok(hex) => {
@@ -122,7 +214,7 @@ impl Identity {
 
         let peer_id = PeerId::from_verifying_key(&signing_key.verifying_key());
         Ok(Self {
-            keypair: signing_key,
+            keypair: Arc::new(signing_key),
             peer_id,
         })
     }
@@ -149,7 +241,10 @@ impl Identity {
     pub(crate) fn generate_ephemeral() -> Self {
         let keypair = SigningKey::generate(&mut OsRng);
         let peer_id = PeerId::from_verifying_key(&keypair.verifying_key());
-        Self { keypair, peer_id }
+        Self {
+            keypair: Arc::new(keypair),
+            peer_id,
+        }
     }
 }
 
@@ -261,5 +356,77 @@ mod tests {
             .unwrap()
             .subsec_nanos();
         format!("{ns:08x}")
+    }
+
+    /// Repeated calls to `load_or_generate` for the same service must read
+    /// the OS keyring at most once per process.  Distinct service strings
+    /// each hit the keyring exactly once.  We track read counts per service
+    /// (rather than as a single global) so this test stays deterministic
+    /// even when other identity tests run concurrently.
+    #[test]
+    fn cache_skips_keyring_on_repeat_call() {
+        let service_a = format!("phantom-cache-a-{}", uuid_short());
+        let service_b = format!("phantom-cache-b-{}", uuid_short());
+
+        // First load for service A — must hit the keyring exactly once.
+        let id_a1 = Identity::load_or_generate(&service_a).unwrap();
+        assert_eq!(
+            keyring_read_count_for(&service_a),
+            1,
+            "first load_or_generate must read the keyring exactly once"
+        );
+
+        // Repeat loads for service A — must NOT touch the keyring again.
+        let id_a2 = Identity::load_or_generate(&service_a).unwrap();
+        let id_a3 = Identity::load_or_generate(&service_a).unwrap();
+        assert_eq!(
+            keyring_read_count_for(&service_a),
+            1,
+            "repeated load_or_generate for the same service must not re-read the keyring"
+        );
+        assert_eq!(id_a1.peer_id, id_a2.peer_id);
+        assert_eq!(id_a1.peer_id, id_a3.peer_id);
+
+        // A different service string must hit the keyring exactly once.
+        let id_b1 = Identity::load_or_generate(&service_b).unwrap();
+        assert_eq!(
+            keyring_read_count_for(&service_b),
+            1,
+            "load_or_generate for a new service must read the keyring exactly once"
+        );
+        assert_eq!(
+            keyring_read_count_for(&service_a),
+            1,
+            "loading a different service must not re-read service A"
+        );
+        assert_ne!(
+            id_a1.peer_id, id_b1.peer_id,
+            "distinct service strings must yield distinct identities"
+        );
+
+        // Subsequent loads of B are also cached.
+        let _id_b2 = Identity::load_or_generate(&service_b).unwrap();
+        assert_eq!(
+            keyring_read_count_for(&service_b),
+            1,
+            "repeat load for service B must also be served from cache"
+        );
+    }
+
+    /// The cached `Identity` returned to two callers shares its inner
+    /// signing material via `Arc`.  Cloning is therefore cheap, and both
+    /// clones produce identical signatures over the same input.
+    #[test]
+    fn cache_returns_shared_signing_material() {
+        let service = format!("phantom-cache-share-{}", uuid_short());
+        let a = Identity::load_or_generate(&service).unwrap();
+        let b = Identity::load_or_generate(&service).unwrap();
+
+        // Same peer_id, same public key, same signature for the same input.
+        assert_eq!(a.peer_id, b.peer_id);
+        let msg = b"shared cache signature check";
+        let sig_a = a.sign(msg);
+        let sig_b = b.sign(msg);
+        assert_eq!(sig_a.to_bytes(), sig_b.to_bytes());
     }
 }
