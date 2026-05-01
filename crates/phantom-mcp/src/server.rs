@@ -229,7 +229,7 @@ fn builtin_tools() -> Vec<McpTool> {
         },
         McpTool {
             name: "phantom.screenshot".to_owned(),
-            description: "Capture the terminal state as text".to_owned(),
+            description: "Capture a PNG screenshot of the terminal; returns the saved file path".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
