@@ -2085,4 +2085,103 @@ mod tests {
             "expected -32010 capability-denied code, got {code}: {val}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // #530: capability scoping — list_panes denied when key lacks Coordinate
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_panes_without_coordinate_capability_returns_capability_denied() {
+        use crate::auth::CapabilityClass;
+        use std::collections::HashSet;
+
+        // Sense-only key — no Coordinate.
+        let caps = HashSet::from([CapabilityClass::Sense]);
+        let state = test_state_with_key_and_caps(TEST_API_KEY, caps);
+        let app = crate::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.list_panes",
+                            "arguments": {
+                                "phantom_id": "any-phantom"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // HTTP layer returns 200 (MCP framing); capability denial is in JSON-RPC error.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_some(), "expected capability error, got: {val}");
+        let code = val["error"]["code"].as_i64().unwrap_or(0);
+        // -32010 is capability-denied (issue #528) — distinct from -32003 (Disconnected).
+        assert_eq!(
+            code, JSON_RPC_CAPABILITY_DENIED,
+            "expected -32010 capability-denied code, got {code}: {val}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #531: capability scoping — get_agent_status denied when key lacks Coordinate
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_agent_status_without_coordinate_capability_returns_capability_denied() {
+        use crate::auth::CapabilityClass;
+        use std::collections::HashSet;
+
+        // Sense-only key — no Coordinate.
+        let caps = HashSet::from([CapabilityClass::Sense]);
+        let state = test_state_with_key_and_caps(TEST_API_KEY, caps);
+        let app = crate::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.get_agent_status",
+                            "arguments": {
+                                "phantom_id": "any-phantom",
+                                "agent_id": "agent-7"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // HTTP layer returns 200 (MCP framing); capability denial is in JSON-RPC error.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_some(), "expected capability error, got: {val}");
+        let code = val["error"]["code"].as_i64().unwrap_or(0);
+        // -32010 is capability-denied (issue #528) — distinct from -32003 (Disconnected).
+        assert_eq!(
+            code, JSON_RPC_CAPABILITY_DENIED,
+            "expected -32010 capability-denied code, got {code}: {val}"
+        );
+    }
 }

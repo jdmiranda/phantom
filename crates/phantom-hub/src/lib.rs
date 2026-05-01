@@ -341,4 +341,33 @@ mod tests {
             "when HUB_REGISTRY_DEBUG is unset /registry must not exist"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // /registry: env set + invalid api-key → 401 (issue #532)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn registry_debug_with_invalid_api_key_returns_401() {
+        let state = test_state_with_key(TEST_API_KEY);
+        let app = build_router_with_debug(state);
+
+        // Bearer token that does not match any provisioned key.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/registry")
+                    .header("Authorization", "Bearer not-a-real-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "request with unknown bearer token must return 401"
+        );
+    }
 }
