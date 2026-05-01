@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "phantom"
+path = "src/lib.rs"
+
 [[bin]]
 name = "phantom"
 path = "src/main.rs"
@@ -24,14 +28,47 @@ phantom-agents = { path = "../phantom-agents" }
 phantom-semantic = { path = "../phantom-semantic" }
 phantom-nlp = { path = "../phantom-nlp" }
 
+# Hub registration: identity + credentials persistence (issue #563).
+phantom-net = { path = "../phantom-net" }
+
 winit.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 uuid.workspace = true
 dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+
+# CLI parsing for `phantom auth ...` subcommands (issue #563).
+clap = { version = "4", features = ["derive"] }
+
+# Blocking HTTP client for `phantom auth register` POST to the hub.
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
+# Ed25519 signature handling for the hub registration challenge.
+ed25519-dalek = "2"
+
+# JWT decoding (no verification — only to extract `exp` for display).
+# Matches the hub's `jsonwebtoken` version so encoded tokens round-trip cleanly.
+jsonwebtoken = "9"
+
+# Unix-time formatting for human-readable JWT expiry output.
+chrono = { workspace = true }
+
+# Config-directory resolution for the `auth status` display path.  Mirrors
+# the resolver used inside `phantom_net::credentials` so the printed path
+# matches the actual storage location.
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+# Lightweight in-process HTTP server for `register` happy-path tests.
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+# Cross-validate the wire signature against the real hub verifier.
+phantom-hub = { path = "../phantom-hub" }
 
 [lints]
 workspace = true
