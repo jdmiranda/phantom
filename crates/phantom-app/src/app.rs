@@ -1059,10 +1059,11 @@ impl App {
         // this Phantom instance so Claude can reach it remotely.  If the env
         // var is absent this is a graceful no-op.
         //
-        // The identity and JWT are loaded from the OS keychain inside
-        // spawn_hub on each connection attempt (issue #398).  Run
-        // `phantom auth register --hub <url>` before launching to populate
-        // the JWT entry; without it the hub will reject the connection.
+        // The identity and JWT are loaded from the on-disk identity and
+        // credentials files inside spawn_hub on each connection attempt
+        // (issue #398, file-backed per #539).  Run `phantom auth register
+        // --hub <url>` before launching to populate the credentials file;
+        // without it the hub will reject the connection.
         let hub_listener = {
             let hub_url = std::env::var("PHANTOM_HUB_URL").unwrap_or_default();
             match phantom_mcp::spawn_hub(&hub_url, hub_cmd_tx) {

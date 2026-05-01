@@ -22,13 +22,13 @@ use phantom_ui::tokens::Tokens;
 use crate::adapters::inspector::InspectorAdapter;
 use crate::app::App;
 
-/// Load the local peer identity from the OS keyring and return its string
-/// representation.
+/// Load the local peer identity from the on-disk identity file and return
+/// its string representation.
 ///
 /// Uses the `"phantom"` service namespace so the key is shared across all
 /// code paths that call `Identity::load_or_generate("phantom")`.  Falls back
-/// to `"unknown"` when the keyring is unavailable (e.g. in CI or sandboxed
-/// environments) so the Peers tab always renders something legible.
+/// to `"unknown"` when the identity file is unavailable (e.g. in CI or
+/// sandboxed environments) so the Peers tab always renders something legible.
 fn load_local_peer_id() -> String {
     match phantom_net::identity::Identity::load_or_generate("phantom") {
         Ok(id) => id.peer_id.to_string(),
@@ -440,10 +440,11 @@ mod tests {
     /// `load_local_peer_id` must invoke the load-or-generate path and return a
     /// non-empty string that is not the old hard-coded sentinel `"localhost"`.
     ///
-    /// In test builds the `keyring` crate uses an in-process mock backend, so
-    /// `Identity::load_or_generate` works without OS keyring access.  Two calls
-    /// with the same service namespace must return the same peer-id (stable
-    /// identity contract from phantom-net).
+    /// `Identity::load_or_generate` reads from (and writes to) an on-disk
+    /// JSON file under the user's config directory; tests can redirect it via
+    /// `PHANTOM_IDENTITY_FILE` so no OS-level secret store is involved.  Two
+    /// calls with the same service namespace must return the same peer-id
+    /// (stable identity contract from phantom-net).
     #[test]
     fn load_local_peer_id_is_stable_and_not_localhost() {
         let id1 = super::load_local_peer_id();

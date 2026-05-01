@@ -4,7 +4,8 @@
 //! # Overview
 //!
 //! Each Phantom instance has a stable [`identity::Identity`] backed by an
-//! OS keyring (macOS Keychain / libsecret / wincred).  It connects to a
+//! on-disk JSON file (mode `0600`) under the user's config directory — see
+//! [`identity`] for the rationale and override env var.  It connects to a
 //! relay server over WebSocket, exchanges a handshake, and then sends and
 //! receives signed [`envelope::Envelope`]s to peer instances.
 //!
@@ -18,7 +19,7 @@
 //! without changing the public API.
 //!
 //! # Modules
-//! - [`identity`] — Ed25519 keypair + [`identity::PeerId`] + keyring persistence
+//! - [`identity`] — Ed25519 keypair + [`identity::PeerId`] + on-disk identity file
 //! - [`envelope`] — signed, nonce-stamped message envelope
 //! - [`transport`] — WebSocket framing (QUIC upgrade path noted)
 //! - [`client`]    — [`client::RelayClient`]: connect / send / recv / heartbeat
