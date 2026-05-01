@@ -509,15 +509,14 @@ mod tests {
         let mgr = make_mgr(999);
         let _hold = mgr.load(); // keep refcount > 1
         mgr.swap(Arc::new(PingImpl(998)) as Arc<dyn Pinger>);
-        // Counter may have incremented (reaper may not have fired yet).
+        // Counter must have incremented by at least 1 immediately after swap.
         let after = pending_swaps();
-        // After the swap, the counter is >= before (reaper hasn't run yet).
-        // We only assert it didn't wrap (saturating_sub prevents negative).
-        assert!(after < usize::MAX);
+        // The swap installs a Draining entry; pending counter must be strictly greater than before.
+        assert!(
+            after > before,
+            "pending_swaps should be > before after swap; before={before}, after={after}"
+        );
         drop(_hold);
         drop(mgr);
-        // After dropping the holder and the manager, the reaper will eventually
-        // decrement — but we don't spin-wait here (that's the integration test).
-        let _ = before; // suppress unused warning
     }
 }
