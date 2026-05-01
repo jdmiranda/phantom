@@ -29,8 +29,9 @@
 //!
 //! When the `HUB_REGISTRY_DEBUG` environment variable is set to `1`, a
 //! `GET /registry` endpoint is available that returns the list of currently
-//! connected Phantom peer IDs. This is intentionally scoped behind an env flag
-//! and must not be exposed in production without auth (pre-staging issue).
+//! connected Phantom peer IDs.  The route is only registered when the env
+//! flag is set, AND the handler requires a valid API key in the
+//! `Authorization: Bearer` header — env-only access is not sufficient (issue #502).
 
 pub mod auth;
 pub mod health;
@@ -102,9 +103,33 @@ impl AppState {
 
 /// Handler for `GET /registry` — returns connected peer IDs.
 ///
-/// Gated behind `HUB_REGISTRY_DEBUG=1`. Must not be exposed without auth
-/// before any staging deployment.
-async fn registry_debug(State(state): State<AppState>) -> impl IntoResponse {
+/// Requires both `HUB_REGISTRY_DEBUG=1` (to have the route registered at all)
+/// **and** a valid API key in `Authorization: Bearer <key>` (issue #502).
+/// Both conditions must hold independently — env-only access is not permitted.
+async fn registry_debug(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let key = match auth::extract_bearer(&headers) {
+        Some(k) => k,
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Authorization: Bearer <api-key> required",
+            )
+                .into_response();
+        }
+    };
+    if auth::validate_api_key(&key, &state.api_keys).is_err() {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "invalid or unknown API key",
+        )
+            .into_response();
+    }
+
     let reg = state.registry.read().await;
     let peers: Vec<serde_json::Value> = reg
         .list_online()
@@ -118,7 +143,7 @@ async fn registry_debug(State(state): State<AppState>) -> impl IntoResponse {
             })
         })
         .collect();
-    Json(serde_json::json!({ "phantoms": peers }))
+    Json(serde_json::json!({ "phantoms": peers })).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -176,4 +201,144 @@ pub async fn serve(addr: SocketAddr) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const TEST_SECRET: &[u8] = b"phantom-hub-lib-test-secret";
+    const TEST_API_KEY: &str = "phk_lib-test-key";
+
+    fn test_state_with_key(key: &str) -> AppState {
+        AppState {
+            jwt: Arc::new(auth::JwtAuthority::from_secret(TEST_SECRET)),
+            api_keys: Arc::new(auth::ApiKeyStore::from_raw_keys(std::iter::once(key))),
+            nonce_cache: Arc::new(auth::NonceCache::new()),
+            registry: registry::new_shared(),
+        }
+    }
+
+    /// Build a router with HUB_REGISTRY_DEBUG pre-wired for tests so we don't
+    /// rely on mutating env vars under parallel test execution.
+    fn build_router_with_debug(state: AppState) -> axum::Router {
+        let mut app = axum::Router::new()
+            .route("/healthz", axum::routing::get(health::healthz))
+            .route(
+                "/auth/register",
+                axum::routing::post(phantom_endpoint::register),
+            )
+            .route(
+                "/phantom/connect",
+                axum::routing::get(phantom_endpoint::connect),
+            )
+            .route("/mcp", axum::routing::post(mcp_endpoint::handle_jsonrpc))
+            .route("/mcp/sse", axum::routing::get(mcp_endpoint::handle_sse))
+            .with_state(state.clone());
+        // Always wire /registry for these tests (simulates HUB_REGISTRY_DEBUG=1).
+        app = app.route(
+            "/registry",
+            axum::routing::get(registry_debug).with_state(state),
+        );
+        app
+    }
+
+    // -----------------------------------------------------------------------
+    // /registry: valid key + env set → 200 (issue #502)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn registry_debug_with_valid_key_returns_200() {
+        let state = test_state_with_key(TEST_API_KEY);
+        let app = build_router_with_debug(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/registry")
+                    .header("Authorization", format!("Bearer {TEST_API_KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid API key must receive 200 from /registry"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("phantoms").is_some(), "expected phantoms key: {val}");
+    }
+
+    // -----------------------------------------------------------------------
+    // /registry: no key + env set → 401 (issue #502)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn registry_debug_without_api_key_returns_401() {
+        let state = test_state_with_key(TEST_API_KEY);
+        let app = build_router_with_debug(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated request to /registry must return 401"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // /registry: env unset → 404 (route not registered)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn registry_debug_when_env_unset_returns_404() {
+        // Use the production build_router which checks the env var.
+        // SAFETY: test-only; test binary does not rely on HUB_REGISTRY_DEBUG.
+        unsafe { std::env::remove_var("HUB_REGISTRY_DEBUG") };
+        let state = test_state_with_key(TEST_API_KEY);
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/registry")
+                    .header("Authorization", format!("Bearer {TEST_API_KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "when HUB_REGISTRY_DEBUG is unset /registry must not exist"
+        );
+    }
 }
