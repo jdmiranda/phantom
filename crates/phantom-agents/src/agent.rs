@@ -5,6 +5,7 @@
 //! and a visible output log that the renderer streams into the pane.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::correlation::CorrelationId;
@@ -23,6 +24,26 @@ use crate::tools::{ToolCall, ToolResult};
 /// [`crate::quarantine::QuarantineRegistry`]) so no narrowing cast is required
 /// at the dispatch / quarantine boundary. Fixes issue #273.
 pub type AgentId = u64;
+
+// Process-global monotonic counter shared by all AgentId allocation paths.
+//
+// Starts at 1 so that 0 is never a valid live AgentId — callers can use 0
+// as a sentinel/unset value. `AgentManager::spawn` calls `allocate_agent_id`
+// directly instead of keeping its own `next_id` field, so both the manager
+// path and the direct `AgentPane::spawn_with_opts` path pull from the same
+// sequence and IDs remain globally unique within a process.
+static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate the next unique [`AgentId`] from the process-global counter.
+///
+/// The returned id is guaranteed to be ≥ 1 and strictly greater than every
+/// previously returned value within the same process. Both
+/// [`crate::manager::AgentManager::spawn`] and
+/// `phantom_app::AgentPane::spawn_with_opts` call this function, so ids are
+/// globally unique regardless of which spawn path is used.
+pub fn allocate_agent_id() -> AgentId {
+    NEXT_AGENT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // AgentStatus

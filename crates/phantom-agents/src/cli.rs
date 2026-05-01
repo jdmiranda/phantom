@@ -857,10 +857,10 @@ mod tests {
     #[test]
     fn format_list_with_agents() {
         let mut mgr = AgentManager::new(4);
-        mgr.spawn(AgentTask::FreeForm {
+        let id1 = mgr.spawn(AgentTask::FreeForm {
             prompt: "do something".into(),
         });
-        mgr.spawn(AgentTask::ReviewCode {
+        let id2 = mgr.spawn(AgentTask::ReviewCode {
             files: vec!["a.rs".into()],
             context: "test".into(),
         });
@@ -868,9 +868,10 @@ mod tests {
         let lines = format_agent_list(&mgr);
         // Header present.
         assert!(lines.iter().any(|l| l.contains("PHANTOM AGENTS")));
-        // Both agents appear.
-        assert!(lines.iter().any(|l| l.contains("#1")));
-        assert!(lines.iter().any(|l| l.contains("#2")));
+        // Both agents appear — check by the actual allocated ids, not hardcoded
+        // constants, because ids are drawn from a process-global counter (#513).
+        assert!(lines.iter().any(|l| l.contains(&format!("#{id1}"))));
+        assert!(lines.iter().any(|l| l.contains(&format!("#{id2}"))));
         assert!(lines.iter().any(|l| l.contains("review: 1 file(s)")));
     }
 
@@ -914,7 +915,10 @@ mod tests {
         };
         let output = execute_agent_command(&cmd, &mut mgr);
         assert_eq!(mgr.agents().len(), 1);
-        assert!(output[0].contains("spawned agent #1"));
+        // Id is drawn from the global counter; check that some non-zero id is
+        // reported rather than hardcoding 1 (fixes #513).
+        let actual_id = mgr.agents()[0].id();
+        assert!(output[0].contains(&format!("spawned agent #{actual_id}")));
     }
 
     #[test]
@@ -993,7 +997,8 @@ mod tests {
             prompt: "test task".into(),
         });
         let output = execute_agent_command(&AgentCommand::Show { id }, &mut mgr);
-        assert!(output.iter().any(|l| l.contains("Agent #1")));
+        // Use the actual allocated id rather than hardcoding 1 (fixes #513).
+        assert!(output.iter().any(|l| l.contains(&format!("Agent #{id}"))));
     }
 
     #[test]
@@ -1211,7 +1216,8 @@ mod tests {
             },
         };
         let output = execute_agent_command(&cmd, &mut mgr);
-        assert!(output[0].contains("spawned agent #1"));
+        let actual_id = mgr.agents()[0].id();
+        assert!(output[0].contains(&format!("spawned agent #{actual_id}")));
         assert!(output.iter().any(|l| l.contains("claude:claude-opus-4-7")));
         assert!(output.iter().any(|l| l.contains("Actor")));
         assert!(output.iter().any(|l| l.contains("120s")));
