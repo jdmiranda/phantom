@@ -103,12 +103,13 @@ async fn unregister_drops_pending_oneshots_signalling_disconnected() {
         .register(make_id("disc"), tx, "h".into(), "v".into())
         .unwrap();
 
-    // Manually insert a pending oneshot into the registry's ConnState.
+    // Insert a pending oneshot via the test accessor (issue #500: pending is
+    // pub(crate) — external crates must not write to it directly).
     let (reply_tx, reply_rx) = oneshot::channel::<phantom_hub::router::JsonRpcResponse>();
     {
         let mut w = reg.write().await;
         let state = w.get_mut(&make_id("disc")).unwrap();
-        state.pending.insert(HubId(0), reply_tx);
+        state.insert_pending_for_test(HubId(0), reply_tx);
     }
 
     // Unregister — this should drop the pending sender.
