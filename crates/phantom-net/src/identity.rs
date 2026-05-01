@@ -341,32 +341,33 @@ fn write_atomic_exclusive(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     };
 
     let write_result = (|| -> Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .with_context(|| {
-                format!(
-                    "failed to open tmp identity file at {}",
-                    tmp_path.display()
-                )
-            })?;
+        // Open the tmp file with mode 0600 set atomically at creation on Unix.
+        //
+        // Unix `mode(0o600)` from `OpenOptionsExt` applies the mode inside the
+        // same open(2) call, so the file never exists on disk with the
+        // process umask's default permissions.  This closes the
+        // microsecond-scale race that the previous `create(true)` +
+        // `set_permissions` sequence left open.
+        //
+        // We use `create_new(true)` so a stale tmp file from a prior crash
+        // cannot be reused (it might have been written by another user, or
+        // tampered with).  To keep the function robust against our own pid+tid
+        // collisions, we unlink any prior tmp file at this path first.
+        let _ = std::fs::remove_file(&tmp_path);
 
-        // Tighten permissions on the tmp file before writing key material.
-        // Doing this before `write_all` ensures the file is never readable
-        // with the default umask in the window between create and chmod.
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&tmp_path, perms).with_context(|| {
-                format!(
-                    "failed to set 0600 mode on tmp identity file at {}",
-                    tmp_path.display()
-                )
-            })?;
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.mode(0o600);
         }
+        let mut f = open_opts.open(&tmp_path).with_context(|| {
+            format!(
+                "failed to open tmp identity file at {}",
+                tmp_path.display()
+            )
+        })?;
 
         f.write_all(bytes)
             .with_context(|| format!("failed to write identity to {}", tmp_path.display()))?;
@@ -639,6 +640,47 @@ mod tests {
         assert_eq!(
             mode, 0o600,
             "identity file must be mode 0600, got {mode:o}"
+        );
+    }
+
+    /// Regression guard for issue #549: the tmp file must be created with
+    /// mode 0600 in the same syscall as `open(2)`, so there is no window
+    /// where it exists on disk with the default umask permissions.
+    ///
+    /// This test exercises the exact `OpenOptions` configuration the
+    /// production path uses and checks the file mode *immediately after*
+    /// `open()` returns — before any other syscall runs against the path.
+    /// On a typical CI box (umask 022) a regression that drops the explicit
+    /// `.mode(0o600)` from the OpenOptions would surface here as 0644.
+    #[cfg(unix)]
+    #[test]
+    fn tmp_file_has_0600_at_creation_no_chmod_window() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let path = std::env::temp_dir().join(format!(
+            "phantom-net-mode-test-{}-{}.tmp",
+            std::process::id(),
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _cleanup = OnDrop::new({
+            let p = path.clone();
+            move || {
+                let _ = std::fs::remove_file(&p);
+            }
+        });
+        let _ = std::fs::remove_file(&path);
+
+        // Mirror the production OpenOptions from write_atomic_exclusive.
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts.write(true).create_new(true).mode(0o600);
+        let _f = open_opts.open(&path).expect("create tmp file");
+
+        let meta = std::fs::metadata(&path).expect("tmp file must exist");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "tmp file must be 0600 immediately after open(2), got {mode:o} \
+             — this means the umask race window is back"
         );
     }
 

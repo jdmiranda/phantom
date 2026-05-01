@@ -184,29 +184,33 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     };
 
     {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .with_context(|| {
-                format!(
-                    "failed to open tmp credentials file at {}",
-                    tmp_path.display()
-                )
-            })?;
+        // Open the tmp file with mode 0600 set atomically at creation on Unix.
+        //
+        // Unix `mode(0o600)` from `OpenOptionsExt` applies the mode inside the
+        // same open(2) call, so the file never exists on disk with the
+        // process umask's default permissions.  This closes the
+        // microsecond-scale race that the previous `create(true)` +
+        // `set_permissions` sequence left open for the JWT bytes.
+        //
+        // We use `create_new(true)` so a stale tmp file from a prior crash
+        // cannot be reused (it might have been written by another user, or
+        // tampered with).  Unlink any prior tmp file at this path first to
+        // keep the function robust against our own pid+tid collisions.
+        let _ = std::fs::remove_file(&tmp_path);
 
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&tmp_path, perms).with_context(|| {
-                format!(
-                    "failed to set 0600 mode on tmp credentials file at {}",
-                    tmp_path.display()
-                )
-            })?;
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.mode(0o600);
         }
+        let mut f = open_opts.open(&tmp_path).with_context(|| {
+            format!(
+                "failed to open tmp credentials file at {}",
+                tmp_path.display()
+            )
+        })?;
 
         f.write_all(bytes).with_context(|| {
             format!("failed to write credentials to {}", tmp_path.display())
