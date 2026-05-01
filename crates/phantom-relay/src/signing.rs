@@ -10,11 +10,14 @@
 //! The bytes that are actually signed are:
 //!
 //! ```text
-//! from_str || 0x00 || to_str || 0x00 || nonce_uuid_bytes(16 LE) || payload_json_bytes
+//! from_str || 0x00 || to_str || 0x00 || nonce_uuid_bytes(16, RFC 4122 big-endian) || payload_json_bytes
 //! ```
 //!
-//! This matches the layout used by `phantom-net::envelope` so that a future
-//! merge of the two crates requires no wire-format migration.
+//! The 16 nonce bytes come from [`uuid::Uuid::as_bytes`], which returns the
+//! UUID in RFC 4122 network (big-endian) byte order.
+//!
+//! Note: this layout is NOT wire-compatible with `phantom-net::envelope`,
+//! which uses an 8-byte little-endian `u64` nonce rather than a 16-byte UUID.
 //!
 //! # Signature encoding
 //!
@@ -31,7 +34,9 @@ use crate::envelope::Envelope;
 
 /// Produce the byte string that is signed and verified.
 ///
-/// Layout: `from || NUL || to || NUL || nonce_le16 || payload_json`
+/// Layout: `from || NUL || to || NUL || nonce_be16 || payload_json`
+/// where `nonce_be16` is the 16-byte RFC 4122 big-endian UUID returned by
+/// [`uuid::Uuid::as_bytes`].
 pub(crate) fn canonical_bytes(env: &Envelope) -> Vec<u8> {
     let payload_json = serde_json::to_vec(&env.payload).unwrap_or_default();
     let mut buf = Vec::with_capacity(
@@ -41,7 +46,7 @@ pub(crate) fn canonical_bytes(env: &Envelope) -> Vec<u8> {
     buf.push(0);
     buf.extend_from_slice(env.to.0.as_bytes());
     buf.push(0);
-    buf.extend_from_slice(env.nonce.as_bytes()); // 16 bytes, little-endian UUID
+    buf.extend_from_slice(env.nonce.as_bytes()); // 16 bytes, RFC 4122 big-endian UUID
     buf.extend_from_slice(&payload_json);
     buf
 }
