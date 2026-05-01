@@ -377,6 +377,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[serial_test::serial(env)]
     fn claude_unavailable_when_key_missing() {
         // Remove key for the duration of this test.
         let prev = std::env::var("ANTHROPIC_API_KEY").ok();
@@ -392,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn claude_available_when_key_present() {
         let prev = std::env::var("ANTHROPIC_API_KEY").ok();
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-test") };
@@ -411,6 +413,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[serial_test::serial(env)]
     fn openai_available_when_key_set() {
         let prev_key = std::env::var("OPENAI_API_KEY").ok();
         let prev_url = std::env::var("OPENAI_BASE_URL").ok();
@@ -432,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn openai_available_when_base_url_set() {
         let prev_key = std::env::var("OPENAI_API_KEY").ok();
         let prev_url = std::env::var("OPENAI_BASE_URL").ok();
@@ -453,6 +457,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn openai_unavailable_when_neither_set() {
         let prev_key = std::env::var("OPENAI_API_KEY").ok();
         let prev_url = std::env::var("OPENAI_BASE_URL").ok();
