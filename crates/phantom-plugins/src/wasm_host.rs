@@ -47,6 +47,10 @@ pub enum SandboxViolation {
     ///
     /// This covers all WASI imports (`wasi_snapshot_preview1::*`) as well as
     /// any unknown host namespace.
+    ///
+    /// The wrapped string identifies the offending import in the form
+    /// `namespace='<ns>', name='<name>'` so operators can diagnose the
+    /// rejection without rebuilding with verbose logging.
     UnsupportedImport(String),
 }
 
@@ -116,29 +120,26 @@ impl WasmHost {
             .set_fuel(DEFAULT_FUEL)
             .map_err(|e| anyhow::anyhow!("failed to set store fuel: {e:#}"))?;
 
-        // No host-side imports — plugins that require imports will fail here,
-        // which is the desired sandboxing behaviour.  Surface the failure as a
-        // typed `SandboxViolation` so callers can match on it specifically.
-        let instance = Instance::new(&mut store, &module, &[]).map_err(|e| {
-            let msg = e.to_string();
-            // wasmtime reports unsatisfied imports in several ways depending on
-            // version:
-            //   - "unknown import" (older wasmtime)
-            //   - "Imports provided" (older wasmtime)
-            //   - "expected N imports, found 0" (wasmtime ≥44)
-            //
-            // Any of these indicate the module declared host imports that the
-            // sandbox does not supply.  Wrap them in the typed error so callers
-            // can match on SandboxViolation specifically.
-            let is_import_error = msg.contains("unknown import")
-                || msg.contains("Imports provided")
-                || msg.contains("expected") && msg.contains("imports") && msg.contains("found");
-            if is_import_error {
-                anyhow::Error::new(SandboxViolation::UnsupportedImport(msg))
-            } else {
-                anyhow::anyhow!("failed to instantiate WASM module: {e:#}")
-            }
-        })?;
+        // Pre-instantiation import audit: the host supplies *no* imports, so
+        // the only allowlisted import set is the empty set.  Inspecting the
+        // module up front lets us surface the first offending namespace/name
+        // in the typed `SandboxViolation` — wasmtime's own instantiation error
+        // for unsatisfied imports (e.g. `"expected 1 imports, found 0"`) does
+        // not name the offending import, which leaves operators without enough
+        // information to diagnose the rejection.
+        if let Some(import) = module.imports().next() {
+            let namespace = import.module();
+            let name = import.name();
+            return Err(anyhow::Error::new(SandboxViolation::UnsupportedImport(
+                format!("namespace='{namespace}', name='{name}'"),
+            )));
+        }
+
+        // No host-side imports declared — instantiate normally.  Any failure
+        // here is a genuine wasmtime error (not an import-resolution failure)
+        // because we already verified the module has zero imports above.
+        let instance = Instance::new(&mut store, &module, &[])
+            .map_err(|e| anyhow::anyhow!("failed to instantiate WASM module: {e:#}"))?;
 
         Ok(WasmRuntime { store, instance })
     }
