@@ -125,9 +125,12 @@ unsafe extern "C" fn complete_ffi(
         return;
     }
 
-    // SAFETY: pointer/length pairs are borrowed for the duration of the call;
-    // checked UTF-8 conversion — non-UTF-8 input writes a descriptive error.
-    // out_ptr / out_len / out_err are non-null (guarded above).
+    // SAFETY: `system_prompt` and `user_message` pointer/length pairs are valid
+    // for the duration of the call (enforced by the C ABI contract documented on
+    // `LlmSkillVtable::complete`).  `out_ptr`, `out_len`, and `out_err` are
+    // non-null (null-guarded above).  UTF-8 validity is checked via
+    // `std::str::from_utf8` — invalid input is converted to a descriptive error
+    // written through the out-parameters rather than causing UB.
     let sys_bytes = unsafe { std::slice::from_raw_parts(system_prompt, system_prompt_len) };
     let sys = match std::str::from_utf8(sys_bytes) {
         Ok(s) => s,
