@@ -567,4 +567,63 @@ mod tests {
         assert_eq!(blocked.len(), 2, "both cloud entries should be blocked");
         assert!(blocked.iter().all(|e| e.reason.is_some()));
     }
+
+    // -----------------------------------------------------------------------
+    // End-to-end: AuditConfig.privacy_mode flows through CapabilityReport::compute
+    //
+    // Regression for issue #446: prior to the fix, app.rs hardcoded
+    // `privacy_mode: false` when constructing AuditConfig, so the report
+    // never reflected the user's privacy preference. This asserts the
+    // public `compute` entry point honours the flag.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn compute_with_privacy_mode_blocks_cloud_subsystems() {
+        // Set both keys so the unavailable branch cannot mask the result —
+        // the only way both cloud entries become BlockedByPolicy is if
+        // privacy_mode flowed through AuditConfig into the audit_* helpers.
+        let prev_anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
+        let prev_openai = std::env::var("OPENAI_API_KEY").ok();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-test");
+            std::env::set_var("OPENAI_API_KEY", "sk-test");
+        }
+
+        let report = CapabilityReport::compute(&AuditConfig { privacy_mode: true });
+
+        let claude = report
+            .entries()
+            .iter()
+            .find(|e| e.name == "claude-cloud")
+            .expect("claude-cloud entry present");
+        assert_eq!(
+            claude.status,
+            CapabilityStatus::BlockedByPolicy,
+            "claude-cloud must be BlockedByPolicy when AuditConfig.privacy_mode=true",
+        );
+
+        let openai = report
+            .entries()
+            .iter()
+            .find(|e| e.name == "openai-compat-cloud")
+            .expect("openai-compat-cloud entry present");
+        assert_eq!(
+            openai.status,
+            CapabilityStatus::BlockedByPolicy,
+            "openai-compat-cloud must be BlockedByPolicy when AuditConfig.privacy_mode=true",
+        );
+
+        // Restore env.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        if let Some(v) = prev_anthropic {
+            unsafe { std::env::set_var("ANTHROPIC_API_KEY", v) };
+        }
+        if let Some(v) = prev_openai {
+            unsafe { std::env::set_var("OPENAI_API_KEY", v) };
+        }
+    }
 }

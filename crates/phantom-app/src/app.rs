@@ -689,8 +689,11 @@ impl App {
         // short (≤ 2 s Ollama ping).  We run it on this thread because
         // `with_config_scaled` is already called off the render thread.
         {
+            // Mirror the user's `PhantomConfig::privacy_mode` so the audit
+            // report correctly classifies cloud subsystems as
+            // `BlockedByPolicy` when privacy mode is on. See issue #446.
             let audit_config = AuditConfig {
-                privacy_mode: false, // PR #350 will expose privacy_mode from PhantomConfig
+                privacy_mode: config.privacy_mode,
             };
             let report = CapabilityReport::compute(&audit_config);
             report.log_report();
