@@ -13,6 +13,25 @@ use crate::grant::{CapabilityClass, Grant, PeerGrantRegistry};
 use crate::rate_limit::TokenBucket;
 use crate::session::SessionHandle;
 
+/// Environment variable that flips the unsigned-envelope policy from
+/// "accept with WARN" (migration window) to "deny" (issue #525).
+///
+/// Accepted truthy values: `"1"` and `"true"` (case-insensitive). Anything
+/// else — including an unset variable — preserves the migration-window
+/// behavior so existing peers continue to work during rollout.
+pub const ENV_REQUIRE_SIGNATURES: &str = "PHANTOM_RELAY_REQUIRE_SIGNATURES";
+
+/// Returns `true` when [`ENV_REQUIRE_SIGNATURES`] is set to a truthy value.
+fn deny_unsigned_from_env() -> bool {
+    match std::env::var(ENV_REQUIRE_SIGNATURES) {
+        Ok(v) => {
+            let lower = v.to_ascii_lowercase();
+            lower == "1" || lower == "true"
+        }
+        Err(_) => false,
+    }
+}
+
 /// Shared state of the relay server.
 pub struct Router {
     /// Live peer → session handle map.
@@ -25,19 +44,48 @@ pub struct Router {
     rate_limit: u32,
     /// Maximum simultaneously connected peers.
     max_peers: usize,
+    /// When `true`, envelopes lacking an Ed25519 signature are rejected with
+    /// [`RelayMessage::SignatureRequired`] instead of being accepted with a
+    /// migration-window WARN. Toggled via [`ENV_REQUIRE_SIGNATURES`] at
+    /// construction time, or explicitly via
+    /// [`Router::with_deny_unsigned`] (issue #525).
+    deny_unsigned: bool,
 }
 
 impl Router {
     /// Create a new router with the given operator limits.
+    ///
+    /// Reads [`ENV_REQUIRE_SIGNATURES`] to decide whether unsigned envelopes
+    /// are denied. When the env var is unset (the default), the relay
+    /// preserves the migration-window behavior of accepting unsigned
+    /// envelopes with a WARN log.
     #[must_use]
     pub fn new(rate_limit: u32, max_peers: usize) -> Self {
+        Self::with_deny_unsigned(rate_limit, max_peers, deny_unsigned_from_env())
+    }
+
+    /// Create a new router with an explicit `deny_unsigned` policy, bypassing
+    /// the [`ENV_REQUIRE_SIGNATURES`] env-var lookup.
+    ///
+    /// Useful for tests and for callers that load the policy from their own
+    /// configuration source rather than the process environment.
+    #[must_use]
+    pub fn with_deny_unsigned(rate_limit: u32, max_peers: usize, deny_unsigned: bool) -> Self {
         Self {
             sessions: HashMap::new(),
             rate_buckets: HashMap::new(),
             grants: PeerGrantRegistry::new(),
             rate_limit,
             max_peers,
+            deny_unsigned,
         }
+    }
+
+    /// Returns `true` when this router is configured to reject unsigned
+    /// envelopes.
+    #[must_use]
+    pub fn deny_unsigned(&self) -> bool {
+        self.deny_unsigned
     }
 
     /// Grant a capability to `peer_id`.
@@ -109,6 +157,40 @@ impl Router {
     }
 
     fn forward(&mut self, sender: &PeerId, envelope: Envelope) -> RelayMessage {
+        // --- unsigned-envelope policy (issue #525) ---
+        //
+        // During the migration window we accept envelopes with an empty `sig`
+        // field and only emit a WARN log so existing un-upgraded peers keep
+        // working. Operators can flip this to deny-all by setting the env
+        // var `PHANTOM_RELAY_REQUIRE_SIGNATURES=1` (or `true`) before the
+        // relay process starts, or by constructing the router with
+        // [`Router::with_deny_unsigned`].
+        //
+        // When `deny_unsigned` is true, the unsigned envelope is rejected
+        // with `RelayMessage::SignatureRequired` and never reaches rate-limit
+        // accounting or destination lookup.
+        //
+        // The relay only checks for *presence* of a signature here. Full
+        // cryptographic verification is the responsibility of the recipient
+        // (see `signing::verify_envelope`); the relay does not hold per-peer
+        // verifying keys.
+        if envelope.sig.is_empty() {
+            if self.deny_unsigned {
+                warn!(
+                    "router: unsigned envelope from peer {} rejected (deny_unsigned=true)",
+                    sender
+                );
+                return RelayMessage::SignatureRequired {
+                    peer_id: sender.clone(),
+                };
+            }
+            warn!(
+                "router: unsigned envelope from peer {} accepted under migration window \
+                 (set {} to deny)",
+                sender, ENV_REQUIRE_SIGNATURES
+            );
+        }
+
         // --- capability grant check (issue #415) ---
         //
         // Every peer must hold a `Relay` grant before any envelope is
@@ -427,5 +509,150 @@ mod tests {
 
         let raw = bob_session.rx.try_recv().expect("message not delivered");
         assert!(raw.contains("future-grant"));
+    }
+
+    // ── Unsigned-envelope policy tests (issue #525) ───────────────────────────
+
+    /// Process-wide lock that serializes env-var manipulation across tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard that sets `ENV_REQUIRE_SIGNATURES` and restores the prior
+    /// value on drop. The `_lock` field keeps the test serial.
+    struct EnvGuard {
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set(value: &str) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var(ENV_REQUIRE_SIGNATURES).ok();
+            // SAFETY: tests are serialized by `ENV_LOCK`.
+            unsafe {
+                std::env::set_var(ENV_REQUIRE_SIGNATURES, value);
+            }
+            Self { prev, _lock: lock }
+        }
+
+        fn unset() -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var(ENV_REQUIRE_SIGNATURES).ok();
+            // SAFETY: tests are serialized by `ENV_LOCK`.
+            unsafe {
+                std::env::remove_var(ENV_REQUIRE_SIGNATURES);
+            }
+            Self { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests are serialized by `ENV_LOCK`.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(ENV_REQUIRE_SIGNATURES, v),
+                    None => std::env::remove_var(ENV_REQUIRE_SIGNATURES),
+                }
+            }
+        }
+    }
+
+    fn unsigned_envelope(from: &str, to: &str) -> Envelope {
+        Envelope {
+            from: PeerId(from.into()),
+            to: PeerId(to.into()),
+            payload: serde_json::json!("hello"),
+            sig: String::new(),
+            nonce: Uuid::new_v4(),
+        }
+    }
+
+    /// Default behavior (migration window): unsigned envelopes are accepted
+    /// and delivered with only a WARN log. This guards against accidental
+    /// behavior change for un-upgraded peers.
+    #[tokio::test]
+    async fn unsigned_envelope_accepted_when_deny_unsigned_false() {
+        let mut router = Router::with_deny_unsigned(100, 10, false);
+        let (mut bob_session, hb) = make_session("bob");
+        let (_, ha) = make_session("alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
+
+        let envelope = unsigned_envelope("alice", "bob");
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "expected Delivered for unsigned envelope under migration window, got {reply:?}"
+        );
+
+        let raw = bob_session.rx.try_recv().expect("message not delivered");
+        assert!(raw.contains("hello"));
+    }
+
+    /// New deny path: when `deny_unsigned == true`, unsigned envelopes are
+    /// rejected with `SignatureRequired` before any rate-limit accounting
+    /// or destination lookup runs.
+    #[test]
+    fn unsigned_envelope_rejected_when_deny_unsigned_true() {
+        let mut router = Router::with_deny_unsigned(100, 10, true);
+        let (_, ha) = make_session("alice");
+        let (_, hb) = make_session("bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
+
+        let envelope = unsigned_envelope("alice", "bob");
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::SignatureRequired { ref peer_id } if peer_id == &PeerId("alice".into())),
+            "expected SignatureRequired with deny_unsigned=true, got {reply:?}"
+        );
+    }
+
+    /// `Router::new` must honor `PHANTOM_RELAY_REQUIRE_SIGNATURES=1` and
+    /// flip `deny_unsigned` to true at construction time.
+    #[test]
+    fn env_var_phantom_relay_require_signatures_enables_deny() {
+        // Truthy "1": deny_unsigned must be set.
+        {
+            let _g = EnvGuard::set("1");
+            let r = Router::new(100, 10);
+            assert!(
+                r.deny_unsigned(),
+                "PHANTOM_RELAY_REQUIRE_SIGNATURES=1 must enable deny_unsigned"
+            );
+        }
+        // Truthy "true": case-insensitive accepted.
+        {
+            let _g = EnvGuard::set("TRUE");
+            let r = Router::new(100, 10);
+            assert!(
+                r.deny_unsigned(),
+                "PHANTOM_RELAY_REQUIRE_SIGNATURES=TRUE must enable deny_unsigned"
+            );
+        }
+        // Unset: migration-window default preserved.
+        {
+            let _g = EnvGuard::unset();
+            let r = Router::new(100, 10);
+            assert!(
+                !r.deny_unsigned(),
+                "unset env var must preserve migration-window default"
+            );
+        }
+        // Other values are not truthy.
+        {
+            let _g = EnvGuard::set("0");
+            let r = Router::new(100, 10);
+            assert!(
+                !r.deny_unsigned(),
+                "PHANTOM_RELAY_REQUIRE_SIGNATURES=0 must not enable deny_unsigned"
+            );
+        }
     }
 }
