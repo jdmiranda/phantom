@@ -11,7 +11,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
+use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -20,6 +22,29 @@ use uuid::Uuid;
 
 use phantom_relay::router::Router;
 use phantom_relay::server::run_with_listener;
+
+/// Domain-separation prefix matching `phantom_relay::server::POP_DOMAIN_TAG`.
+const POP_DOMAIN_TAG: &[u8] = b"phantom-relay-pop-v1\0";
+
+fn pop_canonical_bytes(peer_id: &str, challenge: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(POP_DOMAIN_TAG.len() + peer_id.len() + 1 + challenge.len());
+    buf.extend_from_slice(POP_DOMAIN_TAG);
+    buf.extend_from_slice(peer_id.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(challenge);
+    buf
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn decode_hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -44,18 +69,50 @@ type WsStream = futures_util::stream::SplitStream<
     >,
 >;
 
-/// Connect a WebSocket client, perform the relay handshake, return sink/stream.
+/// Connect a WebSocket client, perform the relay proof-of-possession
+/// handshake, and return the sink/stream split halves.
+///
+/// Generates a fresh Ed25519 key, receives the server's challenge, signs
+/// the canonical proof-of-possession bytes, and sends the resulting
+/// `IdentityProof`.
 async fn handshake(addr: SocketAddr, peer_id: &str) -> (WsSink, WsStream) {
+    let key = SigningKey::generate(&mut OsRng);
     let url = format!("ws://{}", addr);
     let (ws, _) = connect_async(url).await.expect("ws connect failed");
     let (mut sink, mut stream) = ws.split();
 
+    // 1. Receive the server's challenge.
+    let challenge_raw = stream.next().await.unwrap().unwrap();
+    let challenge_msg: Value = match challenge_raw {
+        Message::Text(t) => serde_json::from_str(&t).unwrap(),
+        other => panic!("expected challenge frame, got {:?}", other),
+    };
+    assert_eq!(
+        challenge_msg["type"].as_str().unwrap(),
+        "challenge",
+        "expected challenge frame, got: {challenge_msg}"
+    );
+    let challenge_hex = challenge_msg["challenge"].as_str().unwrap();
+    let challenge_bytes = decode_hex(challenge_hex);
+
+    // 2. Sign the canonical proof-of-possession bytes.
+    let canonical = pop_canonical_bytes(peer_id, &challenge_bytes);
+    let signature = key.sign(&canonical);
+    let public_key_hex = encode_hex(key.verifying_key().as_bytes());
+    let signature_hex = encode_hex(&signature.to_bytes());
+
     sink.send(Message::from(
-        json!({ "peer_id": peer_id, "proof": "test-proof" }).to_string(),
+        json!({
+            "peer_id": peer_id,
+            "public_key": public_key_hex,
+            "signature": signature_hex,
+        })
+        .to_string(),
     ))
     .await
     .unwrap();
 
+    // 3. Read the ack.
     let ack_raw = stream.next().await.unwrap().unwrap();
     let ack: Value = match ack_raw {
         Message::Text(t) => serde_json::from_str(&t).unwrap(),
@@ -221,3 +278,162 @@ async fn rate_limiter_trips_on_burst_without_disconnect() {
         .await
         .expect("connection should remain open after rate limiting");
 }
+
+// ── Test 3 — proof-of-possession (issue #526) ────────────────────────────────
+//
+// These tests cover the proof-of-possession handshake added in #526. The
+// helper `handshake` already exercises the success path on every other test
+// in this file, but we add an explicit success-path test here for clarity
+// and pin two failure modes that must be rejected: an unsigned response
+// and a signature minted with a different key than the one being claimed.
+
+/// The next text frame from `stream` parsed as JSON. Helper used by the
+/// negative-path tests to capture the relay's `auth_failed` reply.
+async fn recv_text_json(stream: &mut WsStream) -> Value {
+    let raw = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        .await
+        .expect("timeout waiting for frame")
+        .unwrap()
+        .unwrap();
+    match raw {
+        Message::Text(t) => serde_json::from_str(&t).expect("invalid JSON in text frame"),
+        other => panic!("expected text frame, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_proof_of_possession_succeeds_with_valid_signature() {
+    let addr = spawn_relay(100).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let url = format!("ws://{}", addr);
+    let (ws, _) = connect_async(url).await.expect("ws connect failed");
+    let (mut sink, mut stream) = ws.split();
+
+    // 1. Server must send a challenge frame first.
+    let challenge_msg = recv_text_json(&mut stream).await;
+    assert_eq!(
+        challenge_msg["type"].as_str().unwrap(),
+        "challenge",
+        "expected challenge frame, got: {challenge_msg}"
+    );
+    let challenge_hex = challenge_msg["challenge"].as_str().unwrap();
+    assert_eq!(
+        challenge_hex.len(),
+        64,
+        "challenge must be 32 bytes / 64 hex chars"
+    );
+    let challenge_bytes = decode_hex(challenge_hex);
+
+    // 2. Sign the canonical bytes with a fresh key.
+    let key = SigningKey::generate(&mut OsRng);
+    let canonical = pop_canonical_bytes("alice", &challenge_bytes);
+    let signature = key.sign(&canonical);
+
+    sink.send(Message::from(
+        json!({
+            "peer_id": "alice",
+            "public_key": encode_hex(key.verifying_key().as_bytes()),
+            "signature": encode_hex(&signature.to_bytes()),
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    // 3. Server must respond with a HandshakeAck.
+    let ack = recv_text_json(&mut stream).await;
+    assert_eq!(
+        ack["peer_id"].as_str().unwrap(),
+        "alice",
+        "ack peer_id mismatch"
+    );
+    assert!(
+        ack["session_token"].is_string(),
+        "ack must contain session_token"
+    );
+}
+
+#[tokio::test]
+async fn test_proof_of_possession_rejects_unsigned_challenge() {
+    let addr = spawn_relay(100).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let url = format!("ws://{}", addr);
+    let (ws, _) = connect_async(url).await.expect("ws connect failed");
+    let (mut sink, mut stream) = ws.split();
+
+    // Drain the challenge but ignore it.
+    let challenge_msg = recv_text_json(&mut stream).await;
+    assert_eq!(challenge_msg["type"].as_str().unwrap(), "challenge");
+
+    // Send an IdentityProof with no public_key / signature pair —
+    // mimicking the legacy TOFU shape the relay no longer accepts.
+    sink.send(Message::from(
+        json!({
+            "peer_id": "alice",
+            "proof": "test-proof",
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let reply = recv_text_json(&mut stream).await;
+    assert_eq!(
+        reply["type"].as_str().unwrap(),
+        "error",
+        "unsigned handshake must be rejected, got: {reply}"
+    );
+    assert_eq!(
+        reply["code"].as_str().unwrap(),
+        "auth_failed",
+        "unsigned handshake must be rejected with auth_failed, got: {reply}"
+    );
+}
+
+#[tokio::test]
+async fn test_proof_of_possession_rejects_signature_from_different_key() {
+    let addr = spawn_relay(100).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let url = format!("ws://{}", addr);
+    let (ws, _) = connect_async(url).await.expect("ws connect failed");
+    let (mut sink, mut stream) = ws.split();
+
+    let challenge_msg = recv_text_json(&mut stream).await;
+    let challenge_bytes = decode_hex(challenge_msg["challenge"].as_str().unwrap());
+
+    // Two distinct keys: the client SIGNS with `signing_key` but CLAIMS the
+    // `claimed_key`. The relay must reject this because the signature does
+    // not validate under the claimed public key.
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let claimed_key = SigningKey::generate(&mut OsRng);
+
+    let canonical = pop_canonical_bytes("alice", &challenge_bytes);
+    let signature = signing_key.sign(&canonical);
+
+    sink.send(Message::from(
+        json!({
+            "peer_id": "alice",
+            "public_key": encode_hex(claimed_key.verifying_key().as_bytes()),
+            "signature": encode_hex(&signature.to_bytes()),
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let reply = recv_text_json(&mut stream).await;
+    assert_eq!(
+        reply["type"].as_str().unwrap(),
+        "error",
+        "signature from a different key must be rejected, got: {reply}"
+    );
+    assert_eq!(
+        reply["code"].as_str().unwrap(),
+        "auth_failed",
+        "signature from different key must yield auth_failed, got: {reply}"
+    );
+}
+
