@@ -1071,7 +1071,20 @@ fn observe_terminal_output(
         .cloned();
 
     let Some(backend) = claude_backend else {
-        return None; // No Claude available — stay quiet.
+        // OBSERVABILITY (#476): the silent-None path. Distinguish privacy-mode
+        // suppression from "Claude simply unavailable" so operators inspecting
+        // brain logs can see why proactive commentary went quiet.
+        if router.privacy_mode() {
+            log::debug!(
+                "observe_terminal_output: skipping Claude observation — privacy mode is ON \
+                 (cloud backends filtered by router)"
+            );
+        } else {
+            log::trace!(
+                "observe_terminal_output: no Claude backend available; staying quiet"
+            );
+        }
+        return None;
     };
 
     let model_name = match &backend.kind {
