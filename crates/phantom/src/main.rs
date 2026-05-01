@@ -13,6 +13,7 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
+mod auth_cli;
 mod headless;
 mod path_resolver;
 
@@ -238,9 +239,10 @@ fn print_help() {
         r#"PHANTOM v0.1.0 — AI-native terminal emulator
 
 USAGE:
-    phantom [OPTIONS]
+    phantom [OPTIONS]              Launch the terminal (default).
+    phantom auth <SUBCOMMAND>      Manage hub credentials.
 
-OPTIONS:
+GUI / RUN OPTIONS:
     --headless               Run in headless REPL mode (no window, no GPU)
     --theme <NAME>          Theme: phosphor, amber, ice, blood, vapor
     --font-size <PT>        Font size in points (default: 14.0)
@@ -254,13 +256,25 @@ OPTIONS:
     --init-config            Write default config to ~/.config/phantom/config.toml
     --help                   Print this help message
 
+AUTH SUBCOMMANDS:
+    phantom auth register --hub <URL> [--service <NAME>]
+        Register this Phantom with the hub at <URL>.  Generates an Ed25519
+        identity if one does not exist, signs a registration challenge,
+        receives a JWT, and stores it under {{config_dir}}/phantom/credentials.
+    phantom auth status [--service <NAME>]
+        Print stored credentials' peer-id and expiry.
+    phantom auth clear [--service <NAME>]
+        Delete stored credentials (idempotent).
+
 CONFIG:
     ~/.config/phantom/config.toml
 
 EXAMPLES:
     phantom --theme amber --curvature 0.1
     phantom --bloom 0 --scanlines 0 --curvature 0
-    phantom --theme ice --font-size 16"#
+    phantom --theme ice --font-size 16
+    phantom auth register --hub https://hub.example.com
+    phantom auth status"#
     );
 }
 
@@ -462,6 +476,62 @@ fn chrono_timestamp() -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// `phantom auth ...` clap surface (issue #563)
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+#[command(name = "phantom", bin_name = "phantom", disable_help_flag = false)]
+struct AuthCli {
+    #[command(subcommand)]
+    cmd: AuthRoot,
+}
+
+#[derive(clap::Subcommand)]
+enum AuthRoot {
+    /// Manage hub credentials (register / status / clear).
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum AuthAction {
+    /// Register this Phantom with the hub and persist the issued JWT.
+    Register {
+        /// Hub base URL, e.g. `https://hub.example.com`.
+        #[arg(long)]
+        hub: String,
+        /// Identity / credentials namespace.  Defaults to `"phantom"`.
+        #[arg(long, default_value = auth_cli::DEFAULT_SERVICE)]
+        service: String,
+    },
+    /// Print stored credentials' peer-id and expiry.
+    Status {
+        /// Identity / credentials namespace.  Defaults to `"phantom"`.
+        #[arg(long, default_value = auth_cli::DEFAULT_SERVICE)]
+        service: String,
+    },
+    /// Delete stored credentials (idempotent).
+    Clear {
+        /// Identity / credentials namespace.  Defaults to `"phantom"`.
+        #[arg(long, default_value = auth_cli::DEFAULT_SERVICE)]
+        service: String,
+    },
+}
+
+fn run_auth_subcommand(args: &[String]) -> Result<()> {
+    use clap::Parser;
+    let parsed = AuthCli::parse_from(args);
+    let AuthRoot::Auth { action } = parsed.cmd;
+    match action {
+        AuthAction::Register { hub, service } => auth_cli::register(&hub, &service),
+        AuthAction::Status { service } => auth_cli::status(&service),
+        AuthAction::Clear { service } => auth_cli::clear(&service),
+    }
+}
+
 fn main() -> Result<()> {
     // Resolve desktop PATH before any tool is spawned. When Phantom is launched
     // via a .app bundle or .desktop file the inherited PATH is typically missing
@@ -490,6 +560,21 @@ fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().collect();
+
+    // -- Subcommand routing --
+    // The very first argument after argv[0] may be a subcommand (e.g.
+    // `auth`).  When it is, we hand all remaining args to a clap parser
+    // that owns that subcommand's flags.  When it is not — including the
+    // common case of legacy flat flags like `phantom --theme amber` —
+    // fall through to the legacy flat-flag parser below.
+    //
+    // We deliberately check argv[1] directly (not "first non-flag arg") so
+    // a value-of-flag like `phantom --theme amber` cannot accidentally
+    // route into the subcommand parser if a future theme were named
+    // `auth`.
+    if args.get(1).map(String::as_str) == Some("auth") {
+        return run_auth_subcommand(&args);
+    }
 
     // Quick exits
     if args.iter().any(|a| a == "--help" || a == "-h") {
