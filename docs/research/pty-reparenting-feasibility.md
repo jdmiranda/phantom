@@ -164,12 +164,44 @@ uses `libc::ioctl` with `TIOCGPGRP` — the raw syscall layer is already present
 ### `alacritty_terminal::tty` (current dependency)
 
 The `tty::new` call in `phantom-terminal/src/terminal.rs:191` delegates PTY
-creation entirely to alacritty's implementation. That implementation calls
-`posix_openpt` + fork internally. The resulting `tty::Pty` struct (held as
-`_pty: tty::Pty` in `PhantomTerminal`) owns the master fd, and the child is
-already running with the slave as its controlling terminal. **This is opaque —
-we cannot extract the master fd for transfer to a broker, because `tty::Pty`
-doesn't expose a raw fd with `SCM_RIGHTS` semantics in the current API.**
+creation to alacritty's implementation. Internally `tty::new` (Unix backend at
+`alacritty_terminal-0.26.0/src/tty/unix.rs:195`) calls `openpty` to allocate the
+PTY pair and then immediately delegates to a public sibling, `tty::from_fd`:
+
+```rust
+pub fn new(config: &Options, window_size: WindowSize, window_id: u64) -> Result<Pty> {
+    let pty = openpty(None, Some(&window_size.to_winsize()))?;
+    let (master, slave) = (pty.controller, pty.user);
+    from_fd(config, window_id, master, slave)
+}
+
+pub fn from_fd(
+    config: &Options,
+    window_id: u64,
+    master: OwnedFd,
+    slave: OwnedFd,
+) -> Result<Pty> { /* ... fork + execvp + setsid + TIOCSCTTY ... */ }
+```
+
+This means the public surface is *less opaque* than originally framed:
+
+- **Master fd is reachable.** `tty::Pty` exposes `pub fn file(&self) -> &File`
+  (`unix.rs:114`). `phantom-terminal/src/terminal.rs:196` already calls
+  `pty.file().try_clone()`. Combined with `AsRawFd`/`AsFd` on `&File`, the master
+  fd is trivially available for `SCM_RIGHTS` transfer with no fork of upstream.
+- **PTY pair can be supplied externally.** `tty::from_fd(config, window_id,
+  master: OwnedFd, slave: OwnedFd) -> Result<Pty>` is `pub`. A PTY broker can
+  call `nix::pty::openpty` (or `posix_openpt` + `grantpt` + `unlockpt` +
+  `open(pts_name)`) to allocate the pair externally, then hand the `OwnedFd`s to
+  `tty::from_fd`. The fork/exec, `setsid`, and `TIOCSCTTY` plumbing inside
+  alacritty stay intact — Phantom is not on the hook for re-implementing them.
+
+The remaining Pty internals (`child: Child`, `signals: UnixStream`, `sig_id:
+SigId`) are private and recreated per `from_fd` call. That is fine for the
+broker model: on re-attach the broker passes the existing master fd back, and
+the new `Pty` is *not* the goal — the goal is for `phantom-terminal` to read /
+write the master fd directly. Reconstructing a full `tty::Pty` is only required
+on the spawn path, which already takes `from_fd`.
 
 ---
 
@@ -260,21 +292,53 @@ you could ship true detach without touching the alt-screen rendering path, or
 combine them. The rendering layer doesn't need to change until the PTY
 reparenting infrastructure is working and can deliver a PTY fd to a new adapter.
 
-### 6.4 alacritty_terminal Opacity
+### 6.4 alacritty_terminal Integration Surface
 
-The single largest technical blocker today: `tty::Pty` in alacritty_terminal
-does not expose its master fd as a raw integer that can be passed via
-`SCM_RIGHTS`. Overcoming this requires either:
-- (a) Forking alacritty_terminal to expose the fd.
-- (b) Switching to `portable-pty` or a raw `nix`-based PTY creation path.
-- (c) Writing a thin wrapper that creates the PTY pair before calling into
-  alacritty_terminal, and uses `dup2` to substitute the fds.
+An earlier draft of this spike framed `alacritty_terminal::tty::Pty` as
+opaque — claiming the master fd could not be reached and that a broker would
+require either forking alacritty or bypassing it entirely with a raw `nix` +
+`fork` + `execvp` sequence. That framing is wrong against the actual public API
+of `alacritty_terminal 0.26.0`.
 
-Option (c) is the least invasive: create the PTY pair via `nix::pty::openpty`,
-then arrange for the child to use that slave — but alacritty's `tty::new` does
-its own fork. This requires changing `PhantomTerminal::new` in
-`phantom-terminal/src/terminal.rs:181–224` to bypass `tty::new` and manage
-the PTY lifecycle directly.
+The relevant public surface is, on Unix
+(`alacritty_terminal-0.26.0/src/tty/unix.rs`):
+
+| Item | Visibility | Use in broker model |
+|---|---|---|
+| `tty::Pty` | `pub struct` | Returned by both `new` and `from_fd` |
+| `tty::Pty::file(&self) -> &File` | `pub fn` (line 114) | Already called from `phantom-terminal/src/terminal.rs:196`; `as_raw_fd()` is one method away |
+| `tty::new(config, window_size, window_id) -> Result<Pty>` | `pub fn` (line 195) | Today's spawn path; allocates the PTY pair internally |
+| `tty::from_fd(config, window_id, master: OwnedFd, slave: OwnedFd) -> Result<Pty>` | `pub fn` (line 202) | **The minimal broker integration point**: caller supplies the pair |
+
+`tty::new` is implemented as `openpty(...)` followed by `from_fd(...)` — there
+is no behaviour in `new` that is not also reachable via `from_fd`. This makes
+the broker integration a one-line swap rather than a rewrite:
+
+```rust
+// Today (phantom-terminal/src/terminal.rs:191):
+let pty = tty::new(&pty_options, size.window_size(), 0)?;
+
+// Phase 2 broker re-attach path:
+let (master, slave) = supervisor_handoff.take_pty_pair()?; // OwnedFd, OwnedFd
+let pty = tty::from_fd(&pty_options, 0, master, slave)?;
+```
+
+This means:
+- **No fork of alacritty_terminal** is required.
+- **No raw `nix::pty::openpty` + `fork` + `execvp` bypass** is required inside
+  `phantom-terminal`. The broker calls `openpty` (in the supervisor); the
+  `phantom-terminal` side keeps using alacritty for `setsid` / `TIOCSCTTY` /
+  child spawn.
+- **Existing `pty.file()` plumbing is reusable** for the SCM_RIGHTS send path
+  on detach: `pty.file().as_fd()` (or `.try_clone()` for an `OwnedFd`) is
+  already what the supervisor needs in order to receive the master back when
+  Phantom shuts down cleanly.
+
+The non-trivial work moves out of `phantom-terminal` and into the supervisor:
+opening the PTY pair, holding the master across phantom restarts, and serving it
+back over `SCM_RIGHTS`. Inside `phantom-terminal`, the change is mechanical —
+swap `tty::new` for `tty::from_fd` on the re-attach branch and add an
+`OwnedFd` parameter to `PhantomTerminal::new`.
 
 ---
 
@@ -282,11 +346,13 @@ the PTY lifecycle directly.
 
 ### Why DEFER
 
-1. **No retrofit possible.** The current `PhantomTerminal` design (backed by
-   `tty::Pty` from alacritty_terminal) cannot hand off a master fd to the
-   supervisor without an invasive change to the PTY creation path. Every
-   existing terminal session would need to be born through the supervisor's
-   broker, not through `tty::new`.
+1. **No retrofit possible.** Already-running PTY sessions (those born under
+   today's `tty::new` path with no broker present) cannot be transferred to a
+   supervisor-held master after the fact — fd transfer requires a cooperating
+   process at the time of allocation. New sessions can be brokered cleanly via
+   `tty::from_fd` (see §6.4), but every existing session must still be born
+   through the supervisor's broker. The transition cost is real even though the
+   per-call code change in `phantom-terminal` is small.
 
 2. **Platform asymmetry.** A Linux-only implementation is feasible via
    `SCM_RIGHTS`. macOS is feasible but requires the same infrastructure.
@@ -317,15 +383,41 @@ this sequencing:
 - Add ancillary-data (`SCM_RIGHTS`) support to `phantom-protocol`'s Unix socket
   transport so phantom can request and receive master fds on restart.
 
-**Phase 2 — PhantomTerminal bypass of alacritty tty::new (new issue)**
-- In `phantom-terminal/src/terminal.rs`, replace `tty::new` with a direct
-  `nix::pty::openpty` + `fork` + `execvp` sequence.
-- The master fd lives in `PhantomTerminal`; at construction time, if a
-  pre-opened master fd is provided by the supervisor, use it (re-attach path);
-  otherwise create a fresh pair (new session path).
-- Signal mask audit: ensure the child process starts with a clean mask
-  (call `pthread_sigmask(SIG_SETMASK, empty_set)` in the child after fork,
-  before exec).
+**Phase 2 — PhantomTerminal switch from `tty::new` to `tty::from_fd` (new issue)**
+- In `phantom-terminal/src/terminal.rs:181–224`, change `PhantomTerminal::new`
+  to accept an optional pre-opened PTY pair from the supervisor:
+  ```rust
+  pub fn new(
+      cols: u16,
+      rows: u16,
+      handoff: Option<PtyHandoff>, // (master: OwnedFd, slave: OwnedFd) from broker
+  ) -> Result<Self> { ... }
+  ```
+- Spawn path branches on `handoff`:
+  - `Some(handoff)` → `alacritty_terminal::tty::from_fd(&pty_options, 0,
+    handoff.master, handoff.slave)` — broker-allocated pair, child still spawned
+    by alacritty with its existing `setsid` / `TIOCSCTTY` plumbing.
+  - `None` → `alacritty_terminal::tty::new(...)` (today's path) so `phantom`
+    can still run standalone without the supervisor.
+- No fork of `alacritty_terminal`, no raw `nix` + `fork` + `execvp` bypass.
+  alacritty's `pre_exec` hook (`unix.rs:248–276`) already handles `setsid`,
+  `set_controlling_terminal(slave_fd)`, master/slave fd close in child, and
+  signal-handler reset to defaults.
+- On clean shutdown, send the master fd back to the supervisor via SCM_RIGHTS
+  using `pty.file().try_clone()` (already used at line 196 for the read/write
+  handles). The remaining `tty::Pty` (containing `child` + `signals` + `sig_id`)
+  is dropped — its `Drop` impl sends `SIGHUP` to the child (`unix.rs:309–321`),
+  so on intentional handoff the broker must be the one holding the live master
+  before drop, otherwise the child is killed. Sequencing: broker receives master
+  → phantom-terminal then drops `Pty`. Order matters; this is the single most
+  delicate step in Phase 2 and warrants a focused test.
+- Signal mask audit: alacritty's `pre_exec` resets `SIGCHLD`/`SIGHUP`/`SIGINT`/
+  `SIGQUIT`/`SIGTERM`/`SIGALRM` dispositions but does not reset the *signal
+  mask* inherited from phantom. If phantom blocks signals (see
+  `phantom-supervisor/src/main.rs:574–598` for precedent), add a
+  `pthread_sigmask(SIG_SETMASK, empty_set, NULL)` call inside a phantom-side
+  `unsafe { builder.pre_exec(...) }` registered *before* alacritty's own
+  `pre_exec` registration (or upstream a PR adding mask reset to alacritty).
 
 **Phase 3 — App integration and re-attach protocol (new issue)**
 - `phantom-app/src/adapters/terminal.rs` gets a `reattach(master_fd: RawFd)`
@@ -351,19 +443,19 @@ cooperation from birth; a Windows-specific design would be a separate spike.
 
 | Location | Relevant to |
 |---|---|
-| `crates/phantom-terminal/src/terminal.rs:181–224` (`PhantomTerminal::new`) | PTY creation — replace `tty::new` with `nix::pty::openpty` |
-| `crates/phantom-terminal/src/terminal.rs:155–173` (`PhantomTerminal` struct fields) | Add `master_fd: OwnedFd` and `session_id: Uuid` fields |
+| `crates/phantom-terminal/src/terminal.rs:181–224` (`PhantomTerminal::new`) | Add optional `handoff: Option<PtyHandoff>`; branch to `alacritty_terminal::tty::from_fd` when present, retain `tty::new` for standalone path |
+| `crates/phantom-terminal/src/terminal.rs:155–173` (`PhantomTerminal` struct fields) | Add `session_id: Uuid` field; master fd stays inside `_pty: tty::Pty` (reachable via `pty.file()`) |
 | `crates/phantom-terminal/src/process.rs:13–25` (`foreground_process_name`) | Already uses `TIOCGPGRP` — extend for `TIOCSPGRP` on re-attach |
-| `crates/phantom-supervisor/src/main.rs:129–148` (`spawn_phantom`) | Add master fd set to the supervisor's state; pass via `SCM_RIGHTS` |
+| `crates/phantom-supervisor/src/main.rs:129–148` (`spawn_phantom`) | Open PTY pair via `nix::pty::openpty` before spawn; pass `(master, slave)` via `SCM_RIGHTS` |
 | `crates/phantom-supervisor/src/orphan.rs:43–51` (`PidFileData`) | Extend to track session IDs alongside child PIDs |
 | `crates/phantom-protocol/src/lib.rs` | Add binary ancillary-data message type for fd passing |
-| `crates/phantom-app/src/adapters/terminal.rs:79–101` (`TerminalAdapter::new`) | Add re-attach constructor path |
+| `crates/phantom-app/src/adapters/terminal.rs:79–101` (`TerminalAdapter::new`) | Add re-attach constructor path that threads `PtyHandoff` to `PhantomTerminal::new` |
 
 Key syscalls in order of use during a broker handoff:
-1. `nix::pty::openpty` — create PTY pair in broker.
-2. `nix::unistd::setsid` — child becomes session leader.
-3. `ioctl(slave_fd, TIOCSCTTY, 0)` — assign slave as controlling terminal.
-4. `sendmsg` with `ControlMessage::ScmRights(&[master_fd])` — pass master to app.
+1. `nix::pty::openpty` — create PTY pair in **broker (supervisor)**.
+2. `sendmsg` with `ControlMessage::ScmRights(&[master, slave])` — pass pair to phantom.
+3. `alacritty_terminal::tty::from_fd(config, 0, master, slave)` — phantom hands the pair to alacritty, which runs its existing `setsid` + `TIOCSCTTY` + `execvp` `pre_exec` block on the child.
+4. On detach: phantom sends `pty.file().try_clone()?` back to broker via `SCM_RIGHTS`, then drops `tty::Pty` *after* broker confirms receipt (otherwise `Pty::drop` SIGHUPs the child).
 5. `ioctl(master_fd, TIOCSPGRP, &pgid)` — restore foreground process group on re-attach.
 
 ---
