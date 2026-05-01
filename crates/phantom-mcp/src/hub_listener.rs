@@ -11,8 +11,8 @@
 //! spawn_hub()
 //!   └─ hub_loop  (OS thread with its own tokio runtime, or spawned on
 //!                 the caller's tokio runtime when one is already active)
-//!        ├─ Identity::load_or_generate (keychain lookup per attempt)
-//!        ├─ DeviceCredentials::load    (JWT from keychain — empty string if absent)
+//!        ├─ Identity::load_or_generate (identity file lookup per attempt)
+//!        ├─ DeviceCredentials::load    (JWT from credentials file — empty string if absent)
 //!        ├─ RelayClient::connect  (HELLO/HELLO_ACK handshake)
 //!        ├─ send_registration     (phantom_id, device_token, host, version)
 //!        └─ recv loop
@@ -27,17 +27,19 @@
 //! spawned.  The caller does not need to guard against a missing hub URL.
 //!
 //! # Auth (issue #398)
-//! The `device_token` is a JWT loaded from the OS keyring via
-//! [`phantom_net::DeviceCredentials::load`].  Run `phantom auth register
-//! --hub <url>` first to populate the keyring entry.  If no credentials are
-//! found the registration frame sends an empty token; the hub will reject the
-//! connection with code 4401.
+//! The `device_token` is a JWT loaded from the on-disk credentials file via
+//! [`phantom_net::DeviceCredentials::load`].  The default path is
+//! `{config_dir}/phantom/credentials/{namespace}.json` (mode `0600`); override
+//! with `PHANTOM_CREDENTIALS_FILE`.  Run `phantom auth register --hub <url>`
+//! first to populate the credentials file.  If no credentials are found the
+//! registration frame sends an empty token; the hub will reject the connection
+//! with code 4401.
 //!
 //! # #487 coordination
 //! `spawn_hub` no longer accepts an `Identity` parameter.  The identity is
-//! always reloaded from the OS keychain on each connection attempt — the
-//! keychain is the source of truth.  The call site in `phantom-app` has been
-//! updated accordingly.
+//! always reloaded from the on-disk identity file on each connection
+//! attempt — the file is the source of truth.  The call site in
+//! `phantom-app` has been updated accordingly.
 //!
 //! # Relation to Unix-socket listener
 //! The Unix-socket listener (`listener.rs`) is sync and thread-per-connection.
@@ -69,7 +71,7 @@ use crate::server::PhantomMcpServer;
 /// The peer-id string the hub registers under on the relay.
 const HUB_PEER_ID: &str = "hub";
 
-/// Keyring namespace used for the Phantom instance identity.
+/// Identity-file namespace used for the Phantom instance identity.
 const IDENTITY_NAMESPACE: &str = "phantom";
 
 // ---------------------------------------------------------------------------
@@ -111,12 +113,14 @@ impl HubListener {
 /// Returns `Ok(None)` immediately and without spawning anything when `hub_url`
 /// is empty.
 ///
-/// The identity and JWT are loaded from the OS keychain on each connection
-/// attempt.  The keychain is the source of truth — run `phantom auth register
-/// --hub <url>` before starting Phantom to populate the JWT entry.
+/// The identity and JWT are loaded from the on-disk identity and credentials
+/// files on each connection attempt — those files are the source of truth.
+/// Run `phantom auth register --hub <url>` before starting Phantom to populate
+/// the credentials file.  Override the file paths with `PHANTOM_IDENTITY_FILE`
+/// and `PHANTOM_CREDENTIALS_FILE` for tests.
 ///
-/// The keychain namespace defaults to `"phantom"`.  Use [`spawn_hub_ns`] to
-/// override the namespace for QA or dev instances.
+/// The identity-file namespace defaults to `"phantom"`.  Use [`spawn_hub_ns`]
+/// to override the namespace for QA or dev instances.
 pub fn spawn_hub(
     hub_url: &str,
     cmd_tx: Sender<AppCommand>,
@@ -126,7 +130,7 @@ pub fn spawn_hub(
 
 /// Like [`spawn_hub`] but accepts an explicit `identity_namespace` override.
 ///
-/// Used internally and in tests to isolate keychain slots.
+/// Used internally and in tests to isolate identity-file slots.
 pub fn spawn_hub_ns(
     hub_url: &str,
     identity_namespace: Option<String>,
@@ -190,14 +194,14 @@ async fn hub_loop(hub_url: String, identity_ns: String, cmd_tx: Sender<AppComman
             }
         };
 
-        // Load the JWT from the OS keychain (populated by `phantom auth register`).
-        // If no credentials are stored, send an empty token; the hub will respond
-        // with code 4401.  This lets Phantom start gracefully even before
-        // registration has run.
+        // Load the JWT from the on-disk credentials file (populated by
+        // `phantom auth register`).  If no credentials are stored, send an
+        // empty token; the hub will respond with code 4401.  This lets Phantom
+        // start gracefully even before registration has run.
         let device_token = match DeviceCredentials::load(&identity_ns) {
             Ok(Some(creds)) => creds.jwt,
             Ok(None) => {
-                warn!("hub_listener: no device credentials in keychain — hub will reject connection; run `phantom auth register --hub <url>`");
+                warn!("hub_listener: no device credentials on disk — hub will reject connection; run `phantom auth register --hub <url>`");
                 String::new()
             }
             Err(e) => {
@@ -536,7 +540,7 @@ mod tests {
 
         let listener_id = match NetIdentity::load_or_generate(&ns) {
             Ok(id) => id,
-            Err(_) => return, // Keychain unavailable in CI; skip routing test.
+            Err(_) => return, // Identity file unavailable in CI; skip routing test.
         };
         let listener_peer = NetPeerId::from(listener_id.peer_id.as_str().to_owned());
 
