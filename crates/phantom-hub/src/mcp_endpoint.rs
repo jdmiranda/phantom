@@ -24,11 +24,11 @@
 //! stores SHA-256 hashes; comparison is constant-time via [`crate::auth::ApiKeyStore::validate`].
 //! An absent or invalid key returns 401 immediately, before any registry access.
 //!
-//! For `phantom.spawn_agent` the hub also verifies that the target `phantom_id` is
-//! online in the registry before forwarding (404-equivalent JSON-RPC error if not).
-//! Per-key capability scoping (allowlist for spawn per API key) is deferred to issue
-//! #409 (ticket 09); v1 grants spawn to any valid API key. The comment
-//! `// SECURITY: ticket-09 will add per-key capability scoping here` marks the call site.
+//! For `phantom.spawn_agent`, `phantom.list_panes`, and `phantom.get_agent_status` the
+//! session must carry [`crate::auth::CapabilityClass::Coordinate`] (issue #511).
+//! Keys that lack this capability receive a JSON-RPC `-32003` error; the frame is not
+//! forwarded.  Keys loaded from `HUB_API_KEYS` receive all capabilities for backwards
+//! compatibility — see [`crate::auth::ALL_CAPABILITIES`].
 //!
 //! # Transport
 //!
@@ -160,9 +160,8 @@ fn fleet_tools() -> Vec<McpTool> {
             description: "Spawn an AI agent on a specific Phantom instance. \
                 Returns a stable agent_id (decimal string) and started_at timestamp \
                 immediately — the agent runs asynchronously. \
-                Use phantom.get_agent_status (issue #400) to poll for progress. \
-                NOTE: any valid API key can spawn agents in v1; per-key capability \
-                scoping is deferred to issue #409."
+                Use phantom.get_agent_status to poll for progress. \
+                Requires Coordinate capability."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -194,7 +193,7 @@ fn fleet_tools() -> Vec<McpTool> {
                 agent_id (only for agent-type panes). \
                 Use pane ids to target phantom.run_command at a specific pane. \
                 Use agent_id to poll status via phantom.get_agent_status. \
-                SECURITY: per-API-key capability scoping deferred to #511."
+                Requires Coordinate capability."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -214,7 +213,7 @@ fn fleet_tools() -> Vec<McpTool> {
             description: "Return the current status of an agent spawned via phantom.spawn_agent. \
                 Poll every 5 s until state is 'done' or 'failed'. \
                 Returns state (running/done/failed), task, and last_output_excerpt (≤256 bytes). \
-                SECURITY: per-API-key capability scoping deferred to #511."
+                Requires Coordinate capability."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -264,9 +263,10 @@ pub async fn handle_jsonrpc(
     headers: HeaderMap,
     body: axum::extract::Json<serde_json::Value>,
 ) -> Response {
-    if let Err(resp) = require_api_key(&state, &headers, "POST /mcp") {
-        return *resp;
-    }
+    let session = match require_api_key(&state, &headers, "POST /mcp") {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
 
     let request: McpRequest = match serde_json::from_value(body.0) {
         Ok(r) => r,
@@ -276,7 +276,7 @@ pub async fn handle_jsonrpc(
         }
     };
 
-    let response = dispatch_mcp_request(&state, &request).await;
+    let response = dispatch_mcp_request(&state, &session, &request).await;
     Json(response).into_response()
 }
 
@@ -294,9 +294,10 @@ pub async fn handle_sse(
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = require_api_key(&state, &headers, "GET /mcp/sse") {
-        return *resp;
-    }
+    let session = match require_api_key(&state, &headers, "GET /mcp/sse") {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
 
     // Parse the JSON-RPC request from the `request` query parameter.
     let raw = match params.get("request") {
@@ -325,7 +326,7 @@ pub async fn handle_sse(
         }
     };
 
-    let response = dispatch_mcp_request(&state, &request).await;
+    let response = dispatch_mcp_request(&state, &session, &request).await;
     sse_event(response)
 }
 
@@ -333,12 +334,16 @@ pub async fn handle_sse(
 // Core dispatcher
 // ---------------------------------------------------------------------------
 
-async fn dispatch_mcp_request(state: &AppState, request: &McpRequest) -> serde_json::Value {
+async fn dispatch_mcp_request(
+    state: &AppState,
+    session: &auth::SessionIdentity,
+    request: &McpRequest,
+) -> serde_json::Value {
     let id = request.id.clone();
 
     match request.method.as_str() {
         "tools/list" => dispatch_tools_list(id),
-        "tools/call" => dispatch_tools_call(state, id, &request.params).await,
+        "tools/call" => dispatch_tools_call(state, session, id, &request.params).await,
         "initialize" => dispatch_initialize(id),
         other => {
             warn!("mcp: unknown method '{other}'");
@@ -393,6 +398,7 @@ fn dispatch_tools_list(id: serde_json::Value) -> serde_json::Value {
 
 async fn dispatch_tools_call(
     state: &AppState,
+    session: &auth::SessionIdentity,
     id: serde_json::Value,
     params: &serde_json::Value,
 ) -> serde_json::Value {
@@ -406,11 +412,11 @@ async fn dispatch_tools_call(
         "phantom.list_phantoms" => dispatch_list_phantoms(state, id).await,
         "phantom.run_command" => dispatch_run_command(state, id, &args).await,
         "phantom.read_output" => dispatch_read_output(state, id, &args).await,
-        // Phase 2 (issue #399)
-        "phantom.spawn_agent" => dispatch_spawn_agent(state, id, &args).await,
-        // Phase 2 (issue #400)
-        "phantom.list_panes" => dispatch_list_panes(state, id, &args).await,
-        "phantom.get_agent_status" => dispatch_get_agent_status(state, id, &args).await,
+        // Phase 2 (issue #399) — requires Coordinate capability
+        "phantom.spawn_agent" => dispatch_spawn_agent(state, session, id, &args).await,
+        // Phase 2 (issue #400) — requires Coordinate capability
+        "phantom.list_panes" => dispatch_list_panes(state, session, id, &args).await,
+        "phantom.get_agent_status" => dispatch_get_agent_status(state, session, id, &args).await,
         other => {
             warn!("mcp: tools/call for unknown tool '{other}'");
             json_rpc_error(id, -32601, format!("Unknown tool: {other}"))
@@ -580,18 +586,23 @@ async fn dispatch_read_output(
 /// Auth: API key validated by the shared `require_api_key` guard (returns 401
 /// to the HTTP layer before this function is reached).
 ///
-/// Capability gate v1: any valid API key can spawn agents.  Per-key capability
-/// scoping (limiting spawn to explicitly-whitelisted keys) is deferred to
-/// issue #409.
-/// SECURITY: ticket-09 will add per-key capability scoping here.
+/// Capability gate: the session must carry [`auth::CapabilityClass::Coordinate`].
+/// Keys without it receive a JSON-RPC `403`-equivalent error (-32003) and the
+/// frame is not forwarded.
 ///
 /// The `phantom_id` existence check is enforced by `router::forward` which
 /// returns `RouteError::NotFound` when the peer is absent from the registry.
 async fn dispatch_spawn_agent(
     state: &AppState,
+    session: &auth::SessionIdentity,
     id: serde_json::Value,
     args: &serde_json::Value,
 ) -> serde_json::Value {
+    if !session.has(auth::CapabilityClass::Coordinate) {
+        warn!("mcp: spawn_agent denied — API key lacks Coordinate capability");
+        return json_rpc_error(id, -32003, "API key does not have Coordinate capability");
+    }
+
     let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_owned(),
         _ => {
@@ -618,9 +629,6 @@ async fn dispatch_spawn_agent(
     };
 
     info!("mcp: spawn_agent phantom={phantom_id} prompt={prompt:?} role={role}");
-
-    // SECURITY: ticket-09 will add per-key capability scoping here.
-    // v1: any valid API key may spawn agents.
 
     let forward_args = json!({
         "prompt": prompt,
@@ -657,13 +665,20 @@ async fn dispatch_spawn_agent(
 /// # Auth / capability gate
 ///
 /// Auth: API key validated by the shared `require_api_key` guard.
-/// Capability gate v1: any valid API key may list panes.
-/// SECURITY: per-API-key capability scoping deferred to #511.
+/// Capability gate: the session must carry [`auth::CapabilityClass::Coordinate`].
+/// Keys without it receive a JSON-RPC `403`-equivalent error (-32003) and the
+/// frame is not forwarded.
 async fn dispatch_list_panes(
     state: &AppState,
+    session: &auth::SessionIdentity,
     id: serde_json::Value,
     args: &serde_json::Value,
 ) -> serde_json::Value {
+    if !session.has(auth::CapabilityClass::Coordinate) {
+        warn!("mcp: list_panes denied — API key lacks Coordinate capability");
+        return json_rpc_error(id, -32003, "API key does not have Coordinate capability");
+    }
+
     let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_owned(),
         _ => {
@@ -672,9 +687,6 @@ async fn dispatch_list_panes(
     };
 
     info!("mcp: list_panes phantom={phantom_id}");
-
-    // SECURITY: per-API-key capability scoping deferred to #511.
-    // v1: any valid API key may list panes.
 
     let phantom_req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
@@ -706,13 +718,20 @@ async fn dispatch_list_panes(
 /// # Auth / capability gate
 ///
 /// Auth: API key validated by the shared `require_api_key` guard.
-/// Capability gate v1: any valid API key may poll agent status.
-/// SECURITY: per-API-key capability scoping deferred to #511.
+/// Capability gate: the session must carry [`auth::CapabilityClass::Coordinate`].
+/// Keys without it receive a JSON-RPC `403`-equivalent error (-32003) and the
+/// frame is not forwarded.
 async fn dispatch_get_agent_status(
     state: &AppState,
+    session: &auth::SessionIdentity,
     id: serde_json::Value,
     args: &serde_json::Value,
 ) -> serde_json::Value {
+    if !session.has(auth::CapabilityClass::Coordinate) {
+        warn!("mcp: get_agent_status denied — API key lacks Coordinate capability");
+        return json_rpc_error(id, -32003, "API key does not have Coordinate capability");
+    }
+
     let phantom_id = match args.get("phantom_id").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_owned(),
         _ => {
@@ -728,9 +747,6 @@ async fn dispatch_get_agent_status(
     };
 
     info!("mcp: get_agent_status phantom={phantom_id} agent_id={agent_id}");
-
-    // SECURITY: per-API-key capability scoping deferred to #511.
-    // v1: any valid API key may poll agent status.
 
     let forward_args = json!({ "agent_id": agent_id });
 
@@ -852,14 +868,15 @@ fn sse_event(payload: serde_json::Value) -> Response {
 
 /// Extract and validate the API key from headers.
 ///
-/// Returns `Ok(())` when the key is present and valid.
-/// Returns `Err(Box<Response>)` (a 401) otherwise.  The `Response` is boxed to
-/// keep the `Err` variant small and satisfy `clippy::result_large_err`.
+/// Returns `Ok(SessionIdentity)` (including capability set) when the key is
+/// present and valid.  Returns `Err(Box<Response>)` (a 401) otherwise.
+/// The `Response` is boxed to keep the `Err` variant small and satisfy
+/// `clippy::result_large_err`.
 fn require_api_key(
     state: &AppState,
     headers: &HeaderMap,
     endpoint: &str,
-) -> Result<(), Box<Response>> {
+) -> Result<auth::SessionIdentity, Box<Response>> {
     let key = match auth::extract_bearer(headers) {
         Some(k) => k,
         None => {
@@ -875,7 +892,7 @@ fn require_api_key(
     };
 
     match auth::validate_api_key(&key, &state.api_keys) {
-        Ok(_session) => Ok(()),
+        Ok(session) => Ok(session),
         Err(_) => {
             warn!("{endpoint}: invalid or unknown API key — auth_failure");
             Err(Box::new(
@@ -907,6 +924,21 @@ mod tests {
         crate::AppState {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::from_raw_keys(std::iter::once(key))),
+            nonce_cache: Arc::new(crate::auth::NonceCache::new()),
+            registry: crate::registry::new_shared(),
+        }
+    }
+
+    /// Build a state where `key` only has the specified capabilities (no Coordinate).
+    fn test_state_with_key_and_caps(
+        key: &str,
+        caps: std::collections::HashSet<crate::auth::CapabilityClass>,
+    ) -> crate::AppState {
+        crate::AppState {
+            jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
+            api_keys: Arc::new(ApiKeyStore::from_entries(
+                std::iter::once((key, caps)),
+            )),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
             registry: crate::registry::new_shared(),
         }
@@ -1904,5 +1936,112 @@ mod tests {
         assert!(val.get("error").is_none(), "unexpected error: {val}");
         assert_eq!(val["result"]["state"].as_str(), Some("running"), "got: {val}");
         assert_eq!(val["result"]["agent_id"].as_str(), Some("99"), "got: {val}");
+    }
+
+    // -----------------------------------------------------------------------
+    // #511: capability scoping — Coordinate-granted key allows spawn_agent
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_agent_coordinate_capability_granted_allows_forward() {
+        use crate::auth::CapabilityClass;
+        use std::collections::HashSet;
+
+        let caps = HashSet::from([CapabilityClass::Coordinate]);
+        let state = test_state_with_key_and_caps(TEST_API_KEY, caps);
+        let mut rx = register_fake_phantom(&state, "cap-phantom", "localhost", "0.1.0").await;
+
+        let reg_clone = Arc::clone(&state.registry);
+        tokio::spawn(async move {
+            let req = rx.recv().await.expect("fake phantom should receive request");
+            let hub_id = req.id.clone().unwrap().as_u64().unwrap();
+            deliver_response(
+                &reg_clone,
+                &PhantomId::new("cap-phantom"),
+                crate::router::JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: Some(serde_json::Value::Number(hub_id.into())),
+                    result: Some(json!({ "agent_id": "7", "started_at": "2026-04-30T00:00:00Z" })),
+                    error: None,
+                },
+            )
+            .await;
+        });
+
+        let app = crate::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.spawn_agent",
+                            "arguments": {
+                                "phantom_id": "cap-phantom",
+                                "prompt": "run tests"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_none(), "unexpected capability denial: {val}");
+        assert_eq!(val["result"]["agent_id"].as_str(), Some("7"), "got: {val}");
+    }
+
+    // -----------------------------------------------------------------------
+    // #511: capability scoping — key without Coordinate is denied (403-equiv)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_agent_without_coordinate_capability_returns_403_equiv() {
+        use crate::auth::CapabilityClass;
+        use std::collections::HashSet;
+
+        // Sense-only key — no Coordinate.
+        let caps = HashSet::from([CapabilityClass::Sense]);
+        let state = test_state_with_key_and_caps(TEST_API_KEY, caps);
+        let app = crate::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body(
+                        "tools/call",
+                        json!({
+                            "name": "phantom.spawn_agent",
+                            "arguments": {
+                                "phantom_id": "any-phantom",
+                                "prompt": "do something dangerous"
+                            }
+                        }),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // HTTP layer returns 200 (MCP framing); capability denial is in JSON-RPC error.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_some(), "expected capability error, got: {val}");
+        let code = val["error"]["code"].as_i64().unwrap_or(0);
+        assert_eq!(code, -32003, "expected -32003 capability-denied code, got {code}: {val}");
     }
 }
