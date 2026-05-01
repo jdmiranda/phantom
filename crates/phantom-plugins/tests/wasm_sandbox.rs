@@ -240,19 +240,13 @@ fn custom_namespace_rejected() {
 /// undefined behaviour from an unresolved import linking into arbitrary host
 /// state.
 ///
-/// # Containment gap noted (do not modify host code in this PR)
+/// # Diagnosability (closes #490)
 ///
-/// The issue spec requested that the [`SandboxViolation`] message identify
-/// both `namespace = "phantom_hots"` and `name = "do_thing"`.  In practice,
-/// wasmtime 44 uses the error format `"expected N imports, found 0"` — it does
-/// not include the import namespace or name in the string that reaches
-/// `SandboxViolation::UnsupportedImport`.  The sandbox correctly *rejects* the
-/// module (the primary security property holds), but the diagnostic message
-/// does not carry the offending namespace/name detail.
-///
-/// This is a diagnosability gap to be addressed in `wasm_host.rs` by
-/// inspecting `module.imports()` before instantiation and constructing a
-/// richer message — tracked separately; not fixed in this tests-only PR.
+/// The [`SandboxViolation::UnsupportedImport`] message must identify both the
+/// offending namespace and the offending name so operators can diagnose the
+/// rejection without rebuilding with verbose logging.  `wasm_host.rs`
+/// inspects `module.imports()` before instantiation and includes the first
+/// offending entry in the typed error.
 #[test]
 fn misspelled_namespace_rejected_with_sandbox_violation() {
     let host = WasmHost::new().expect("WasmHost::new");
@@ -271,15 +265,18 @@ fn misspelled_namespace_rejected_with_sandbox_violation() {
          SandboxViolation::UnsupportedImport, got: {err}"
     );
 
-    // The message must be non-empty so the caller receives some diagnostic.
-    // NOTE: wasmtime 44 does not include namespace/name in the error string
-    // (it reports "expected N imports, found 0").  The diagnosability gap is
-    // documented above; the containment property (Err + SandboxViolation) is
-    // what this test enforces.
+    // Diagnosability: the typed error must surface the offending namespace
+    // and name so operators can identify which import was rejected (#490).
     let msg = err.to_string();
     assert!(
-        !msg.is_empty(),
-        "SandboxViolation message must not be empty, got empty string"
+        msg.contains("phantom_hots"),
+        "SandboxViolation message must name the offending namespace \
+         'phantom_hots', got: {msg}"
+    );
+    assert!(
+        msg.contains("do_thing"),
+        "SandboxViolation message must name the offending function \
+         'do_thing', got: {msg}"
     );
 }
 
