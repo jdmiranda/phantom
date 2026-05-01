@@ -1314,7 +1314,7 @@ mod tests {
     // -- Live integration test (requires OPENAI_API_KEY) -------------------
 
     #[test]
-    #[ignore]
+    #[ignore = "live API call, requires OPENAI_API_KEY — see #427"]
     fn openai_live_say_hello() {
         let backend = match OpenAiChatBackend::from_env() {
             Ok(b) => b,
