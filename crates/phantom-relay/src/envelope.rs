@@ -52,6 +52,9 @@ pub enum RelayMessage {
     Ping,
     /// The sender peer lacks the required capability grant for this operation.
     CapabilityDenied { peer_id: PeerId, reason: String },
+    /// The envelope was unsigned and the relay is configured to require
+    /// signatures (see `PHANTOM_RELAY_REQUIRE_SIGNATURES`, issue #525).
+    SignatureRequired { peer_id: PeerId },
 }
 
 /// Messages a client sends to the relay after the handshake.
