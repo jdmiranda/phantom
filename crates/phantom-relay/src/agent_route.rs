@@ -21,11 +21,14 @@
 //! is responsible for that. For `Remote` targets it delegates to the relay
 //! [`crate::router::Router`].
 
+use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::envelope::{ClientMessage, Envelope, PeerId, RelayMessage};
+use crate::grant::CapabilityClass;
 use crate::router::Router;
+use crate::signing;
 
 // ---------------------------------------------------------------------------
 // AgentTarget — wire-compatible with phantom-agents AnyAgentRef
@@ -94,30 +97,6 @@ pub struct AgentEnvelope {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// CapabilityClass — relay-local enum for grant enforcement
-// ---------------------------------------------------------------------------
-
-/// The capability class a peer must hold to perform an action via the relay.
-///
-/// This mirrors `phantom_agents::role::CapabilityClass` in shape and meaning.
-/// It is defined here so `phantom-relay` stays dep-free from `phantom-agents`.
-/// The caller is responsible for converting between the two representations
-/// when wiring up the grant check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CapabilityClass {
-    /// Observe state (read-only).
-    Sense,
-    /// Coordinate agent actions — minimum required to forward messages.
-    Coordinate,
-    /// Execute mutating actions.
-    Act,
-    /// Self-reflection and reasoning.
-    Reflect,
-    /// Run computationally expensive tasks.
-    Compute,
-}
-
-// ---------------------------------------------------------------------------
 // GrantDenied
 // ---------------------------------------------------------------------------
 
@@ -148,7 +127,7 @@ pub enum AgentRouteError {
 /// Function type for per-peer capability grant checks.
 ///
 /// Returns `true` iff `peer_id` is allowed to use `class`. Callers wire this
-/// to [`phantom_agents::PeerGrantRegistry::check`] or a test double.
+/// to [`crate::grant::PeerGrantRegistry::check`] or a test double.
 pub type GrantChecker<'a> = Option<&'a dyn Fn(&PeerId, CapabilityClass) -> bool>;
 
 // ---------------------------------------------------------------------------
@@ -166,11 +145,22 @@ pub type GrantChecker<'a> = Option<&'a dyn Fn(&PeerId, CapabilityClass) -> bool>
 /// # Grant check
 ///
 /// When `grant_check` is `Some(f)`, the function `f(peer_id, capability)` is
-/// called before routing. Forwarding an agent envelope requires at minimum
-/// [`CapabilityClass::Coordinate`]. If the check returns `false`, this function
+/// called before routing. Forwarding an agent envelope requires at least the
+/// `Relay` capability grant. If the check returns `false`, this function
 /// returns [`AgentRouteError::GrantDenied`].
 ///
 /// Pass `None` to skip the check (for relay-internal or trusted local paths).
+///
+/// # Signing (issue #457)
+///
+/// When `signer` is `Some(key)`, the constructed relay [`Envelope`] is signed
+/// with `key` before being handed to the router. The signature covers the
+/// canonical bytes: `from || NUL || to || NUL || nonce_le16 || payload_json`.
+/// Recipients verify the signature using the sender's published Ed25519
+/// verifying key via [`crate::signing::verify_envelope`].
+///
+/// Pass `None` for relay-internal or test paths that do not require a
+/// cryptographic signature.
 ///
 /// # Errors
 ///
@@ -180,6 +170,7 @@ pub fn route_agent_envelope(
     from_peer: &PeerId,
     env: AgentEnvelope,
     grant_check: GrantChecker<'_>,
+    signer: Option<&SigningKey>,
 ) -> Result<(), AgentRouteError> {
     match &env.target {
         // Local delivery — no grant check; the caller dispatches in-process.
@@ -187,25 +178,35 @@ pub fn route_agent_envelope(
         AgentTarget::Remote {
             peer_id: to_peer, ..
         } => {
-            // --- capability grant check (issue #8) ---
+            // --- capability grant check ---
             //
-            // Forwarding a message to a remote agent requires at minimum
-            // `Coordinate` capability. Unknown / unregistered peers are
-            // deny-all by default. Local targets bypass this check because
-            // the local dispatch path is governed by the existing role/taint
-            // model, not the peer grant registry.
-            if grant_check.is_some_and(|check| !check(from_peer, CapabilityClass::Coordinate)) {
+            // Forwarding a message to a remote agent requires the `Relay`
+            // grant. Unknown / unregistered peers are deny-all by default.
+            // Local targets bypass this check because the local dispatch path
+            // is governed by the existing role/taint model, not the peer grant
+            // registry. `Relay` is the canonical capability class after the
+            // consolidation of the two former enums (issue #492).
+            if grant_check.is_some_and(|check| !check(from_peer, CapabilityClass::Relay)) {
                 return Err(AgentRouteError::GrantDenied(from_peer.clone()));
             }
 
             let payload = serde_json::to_value(&env).unwrap_or(serde_json::Value::Null);
-            let wire = Envelope {
+            let mut wire = Envelope {
                 from: from_peer.clone(),
                 to: to_peer.clone(),
                 payload,
-                sig: String::new(), // relay-internal call; sig not required
+                sig: String::new(),
                 nonce: Uuid::new_v4(),
             };
+
+            // Sign the envelope when the caller provides a signing key (issue #457).
+            // The `sig` field is left empty only on relay-internal trusted paths
+            // where no signing key is available; external callers must always pass
+            // a signer so that recipients can verify the sender's identity.
+            if let Some(key) = signer {
+                signing::sign_envelope(&mut wire, key);
+            }
+
             let reply = router.route(from_peer, ClientMessage::Send(wire));
             match reply {
                 RelayMessage::Delivered { .. } => Ok(()),
@@ -246,7 +247,7 @@ pub fn decode_agent_envelope(envelope: &Envelope) -> Result<AgentEnvelope, serde
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grant::{CapabilityClass as GC, Grant};
+    use crate::grant::Grant;
     use crate::session::Session;
 
     fn make_session(id: &str) -> (Session, crate::session::SessionHandle) {
@@ -321,8 +322,8 @@ mod tests {
             target: AgentTarget::Local(1),
             payload: serde_json::json!(null),
         };
-        // Grant check not reached for local targets; pass None.
-        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None);
+        // Grant check not reached for local targets; pass None for both.
+        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None, None);
         assert!(matches!(result, Err(AgentRouteError::LocalDelivery)));
     }
 
@@ -334,7 +335,7 @@ mod tests {
         router.register(alice_handle).unwrap();
         router.register(bob_handle).unwrap();
         // Alice needs a Relay grant so router.route() lets the envelope through.
-        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
+        router.grant(&PeerId("alice".into()), Grant::permanent(CapabilityClass::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -344,8 +345,8 @@ mod tests {
             payload: serde_json::json!({"agent_id": 5, "content": {"UserSpeak": "hi"}}),
         };
 
-        // No agent-level grant check — trusted internal path.
-        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None);
+        // No agent-level grant check and no signer — trusted internal path.
+        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None, None);
         assert!(result.is_ok(), "routing should succeed: {result:?}");
 
         // Bob's session channel should have received the forwarded envelope.
@@ -363,7 +364,7 @@ mod tests {
         router.register(alice_handle).unwrap();
         // Alice holds a Relay grant so she passes the router grant check; the
         // failure must come from "ghost" not being registered.
-        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
+        router.grant(&PeerId("alice".into()), Grant::permanent(CapabilityClass::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -373,7 +374,7 @@ mod tests {
             payload: serde_json::json!(null),
         };
 
-        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None);
+        let result = route_agent_envelope(&mut router, &PeerId("alice".into()), env, None, None);
         assert!(
             matches!(result, Err(AgentRouteError::PeerNotFound(ref p)) if p.0 == "ghost"),
             "expected PeerNotFound(ghost), got {result:?}"
@@ -406,6 +407,7 @@ mod tests {
             &PeerId("unknown-peer".into()),
             env,
             Some(&deny_all),
+            None,
         );
         assert!(
             matches!(result, Err(AgentRouteError::GrantDenied(_))),
@@ -413,7 +415,7 @@ mod tests {
         );
     }
 
-    /// A peer with an explicit Coordinate grant is allowed through.
+    /// A peer with an explicit Relay grant is allowed through.
     #[test]
     fn granted_peer_routes_successfully() {
         let mut router = Router::new(100, 10);
@@ -422,7 +424,7 @@ mod tests {
         router.register(alice_handle).unwrap();
         router.register(bob_handle).unwrap();
         // Alice needs a router-level Relay grant so router.route() passes.
-        router.grant(&PeerId("alice".into()), Grant::permanent(GC::Relay));
+        router.grant(&PeerId("alice".into()), Grant::permanent(CapabilityClass::Relay));
 
         let env = AgentEnvelope {
             target: AgentTarget::Remote {
@@ -432,15 +434,16 @@ mod tests {
             payload: serde_json::json!(null),
         };
 
-        // Allow-all grant check simulating a fully-trusted peer entry.
-        let allow_coordinate = |_peer: &PeerId, class: CapabilityClass| {
-            matches!(class, CapabilityClass::Coordinate)
+        // Grant check that accepts the canonical Relay class.
+        let allow_relay = |_peer: &PeerId, class: CapabilityClass| {
+            matches!(class, CapabilityClass::Relay)
         };
         let result = route_agent_envelope(
             &mut router,
             &PeerId("alice".into()),
             env,
-            Some(&allow_coordinate),
+            Some(&allow_relay),
+            None,
         );
         assert!(result.is_ok(), "granted peer should route: {result:?}");
     }
@@ -465,7 +468,7 @@ mod tests {
         // Expired grant returns false (as PeerGrantRegistry::check does after expiry).
         let expired = |_peer: &PeerId, _class: CapabilityClass| false;
         let result =
-            route_agent_envelope(&mut router, &PeerId("src".into()), env, Some(&expired));
+            route_agent_envelope(&mut router, &PeerId("src".into()), env, Some(&expired), None);
         assert!(
             matches!(result, Err(AgentRouteError::GrantDenied(_))),
             "expired grant must be denied, got {result:?}"
@@ -496,6 +499,7 @@ mod tests {
             &PeerId("alice".into()),
             env,
             Some(&after_revoke),
+            None,
         );
         assert!(
             matches!(result, Err(AgentRouteError::GrantDenied(_))),
@@ -524,6 +528,7 @@ mod tests {
             &PeerId("alice".into()),
             env,
             Some(&should_not_be_called),
+            None,
         );
         assert!(
             matches!(result, Err(AgentRouteError::LocalDelivery)),
@@ -570,5 +575,91 @@ mod tests {
         };
         let result = decode_agent_envelope(&relay_env);
         assert!(result.is_err());
+    }
+
+    // -- Issue #457 — envelope signing ----------------------------------------
+
+    /// Routing with a signer populates `sig` and the delivered envelope
+    /// verifies against the sender's verifying key.
+    #[tokio::test]
+    async fn signed_envelope_verifies_on_delivery() {
+        use crate::signing;
+        use crate::signing::tests::make_signing_key;
+
+        let key = make_signing_key();
+        let vk = key.verifying_key();
+
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, bob_handle) = make_session("bob");
+        let (_, alice_handle) = make_session("alice");
+        router.register(alice_handle).unwrap();
+        router.register(bob_handle).unwrap();
+        router.grant(&PeerId("alice".into()), Grant::permanent(CapabilityClass::Relay));
+
+        let env = AgentEnvelope {
+            target: AgentTarget::Remote {
+                peer_id: PeerId("bob".into()),
+                agent_id: 10,
+            },
+            payload: serde_json::json!({"agent_id": 10, "content": {"UserSpeak": "signed"}}),
+        };
+
+        let result = route_agent_envelope(
+            &mut router,
+            &PeerId("alice".into()),
+            env,
+            None,
+            Some(&key),
+        );
+        assert!(result.is_ok(), "signed routing must succeed: {result:?}");
+
+        // Deserialize the wire envelope that arrived in Bob's channel.
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("message not delivered to bob");
+        let client_msg: crate::envelope::ClientMessage =
+            serde_json::from_str(&raw).expect("invalid JSON in channel");
+        let crate::envelope::ClientMessage::Send(wire_env) = client_msg else {
+            panic!("expected Send variant");
+        };
+
+        // The sig field must be non-empty (128 hex chars).
+        assert_eq!(wire_env.sig.len(), 128, "sig must be 128 hex chars");
+
+        // Verification must succeed with Alice's verifying key.
+        assert!(
+            signing::verify_envelope(&wire_env, &vk).is_ok(),
+            "delivered envelope signature must verify"
+        );
+    }
+
+    /// A tampered envelope must fail signature verification.
+    #[test]
+    fn tampered_envelope_fails_verification() {
+        use crate::signing;
+        use crate::signing::tests::make_signing_key;
+
+        let key = make_signing_key();
+        let vk = key.verifying_key();
+
+        // Build and sign a relay envelope directly (not via route_agent_envelope
+        // — we just need a signed Envelope to tamper with).
+        let mut env = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!({"msg": "original"}),
+            sig: String::new(),
+            nonce: Uuid::new_v4(),
+        };
+        signing::sign_envelope(&mut env, &key);
+        assert!(signing::verify_envelope(&env, &vk).is_ok());
+
+        // Tamper with the payload after signing.
+        env.payload = serde_json::json!({"msg": "tampered"});
+        assert!(
+            signing::verify_envelope(&env, &vk).is_err(),
+            "tampered envelope must fail verification"
+        );
     }
 }
