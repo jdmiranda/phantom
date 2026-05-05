@@ -5727,6 +5727,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "notify",
  "phantom-adapter",
  "phantom-agents",
  "phantom-brain",

@@ -105,14 +105,43 @@ impl PhantomSettings {
         Ok(path)
     }
 
-    /// Save settings to a specific path.
+    /// Save settings to a specific path using an atomic write (write to tmp,
+    /// then rename).
+    ///
+    /// Writing via a temp file and renaming guarantees that the config watcher
+    /// never sees a half-written file. On POSIX, `rename(2)` is atomic.
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let tmp = path.with_extension("toml.tmp");
         let contents = toml::to_string_pretty(self)?;
-        std::fs::write(path, contents)?;
+        std::fs::write(&tmp, &contents)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// Build a [`PhantomSettings`] from a UI snapshot produced by
+    /// [`SettingsPanel::to_snapshot`](crate::settings_ui::SettingsPanel::to_snapshot).
+    ///
+    /// Maps every snapshot field to the corresponding settings field so that
+    /// values edited interactively in the settings overlay are faithfully written
+    /// to disk when the user presses Escape.
+    #[must_use]
+    pub(crate) fn from_snapshot(snap: &crate::settings_ui::SettingsSnapshot) -> Self {
+        Self {
+            theme: snap.theme_name.clone(),
+            font_size: snap.font_size,
+            scroll: ScrollSettings::default(),
+            crt: CrtSettings {
+                scanline_intensity: snap.scanline_intensity,
+                bloom_intensity: snap.bloom_intensity,
+                chromatic_aberration: snap.chromatic_aberration,
+                curvature: snap.curvature,
+                vignette_intensity: snap.vignette_intensity,
+                noise_intensity: snap.noise_intensity,
+            },
+        }
     }
 }
 
@@ -163,5 +192,56 @@ mod tests {
         assert_eq!(settings.theme, "ice");
         assert_eq!(settings.font_size, 18.0);
         assert_eq!(settings.scroll.history_lines, 10_000);
+    }
+
+    /// `save_to` must write atomically: the final file must not pass through
+    /// an intermediate state where the path exists but is empty/truncated.
+    #[test]
+    fn save_to_is_atomic_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        let tmp = path.with_extension("toml.tmp");
+
+        let settings = PhantomSettings {
+            theme: "vapor".into(),
+            ..PhantomSettings::default()
+        };
+        settings.save_to(&path).unwrap();
+
+        assert!(
+            !tmp.exists(),
+            "atomic write must remove the .toml.tmp sentinel"
+        );
+        let loaded = PhantomSettings::load_from(&path);
+        assert_eq!(loaded.theme, "vapor", "loaded theme must match saved value");
+    }
+
+    /// [`PhantomSettings::from_snapshot`] must faithfully transfer every field
+    /// from the snapshot into the resulting struct.
+    #[test]
+    fn from_snapshot_maps_all_fields() {
+        use crate::settings_ui::SettingsSnapshot;
+
+        let snap = SettingsSnapshot {
+            theme_name: "ice".into(),
+            font_size: 22.0,
+            scanline_intensity: 0.42,
+            bloom_intensity: 0.55,
+            chromatic_aberration: 0.007,
+            curvature: 0.12,
+            vignette_intensity: 0.33,
+            noise_intensity: 0.04,
+        };
+
+        let settings = PhantomSettings::from_snapshot(&snap);
+
+        assert_eq!(settings.theme, "ice");
+        assert!((settings.font_size - 22.0).abs() < f32::EPSILON);
+        assert!((settings.crt.scanline_intensity - 0.42).abs() < f32::EPSILON);
+        assert!((settings.crt.bloom_intensity - 0.55).abs() < f32::EPSILON);
+        assert!((settings.crt.chromatic_aberration - 0.007).abs() < f32::EPSILON);
+        assert!((settings.crt.curvature - 0.12).abs() < f32::EPSILON);
+        assert!((settings.crt.vignette_intensity - 0.33).abs() < f32::EPSILON);
+        assert!((settings.crt.noise_intensity - 0.04).abs() < f32::EPSILON);
     }
 }

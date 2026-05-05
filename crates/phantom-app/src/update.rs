@@ -428,6 +428,17 @@ impl App {
         // Poll the live shader reloader (no-op in release builds).
         self.poll_shader_reload(now_ms_tick);
 
+        // Poll the config-file watcher: if settings.toml changed on disk,
+        // reload and apply the new values. Best-effort — a missing or
+        // unparseable file falls back to the previous live state.
+        if let Some(ref watcher) = self.config_watcher {
+            if watcher.drain_changes() {
+                let new_settings = crate::settings::PhantomSettings::load();
+                info!("Config live-reload: settings.toml changed, applying");
+                self.apply_config_reload(&new_settings);
+            }
+        }
+
         // Drain completed jobs from the worker pool.
         if let Some(ref pool) = self.job_pool {
             for (job_id, result) in pool.drain_completed() {

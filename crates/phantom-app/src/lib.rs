@@ -1,5 +1,6 @@
 pub mod adapters;
 mod action_context;
+pub mod config_watcher;
 mod agent_pane;
 pub mod dag_commands;
 pub mod app;

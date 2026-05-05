@@ -426,6 +426,12 @@ pub struct App {
     //    No-op stub in release builds; zero overhead on the hot path.
     pub(crate) shader_reloader: phantom_renderer::shader_loader::ShaderReloader,
 
+    // -- Config-file watcher: monitors `settings.toml` for on-disk changes
+    //    and triggers `apply_config_reload` in `App::update`. `None` when
+    //    `notify` setup fails (unsupported path, permissions); the app boots
+    //    normally without live-reload in that case.
+    pub(crate) config_watcher: Option<crate::config_watcher::ConfigWatcher>,
+
     // -- Command history store (JSONL, one entry per completed command). --
     //    `None` on open failure; production paths never `.unwrap()`.
     //    File: `~/.local/share/phantom/history/<session_uuid>.jsonl`.
@@ -1201,6 +1207,9 @@ impl App {
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
             shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),
+            config_watcher: crate::config_watcher::ConfigWatcher::new(
+                &crate::settings::PhantomSettings::default_path(),
+            ),
             history,
             agent_capture,
             session_uuid,
@@ -1554,6 +1563,56 @@ impl App {
     // Pane management (see pane.rs for split/close)
     // Capture (see capture.rs for per-pane GPU readback + bundle persistence)
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Config live-reload
+    // -----------------------------------------------------------------------
+
+    /// Apply a freshly-loaded [`PhantomSettings`] to the live app state.
+    ///
+    /// Called from `App::update` when [`ConfigWatcher::drain_changes`] returns
+    /// `true`. Updates the theme name, shader params, and font size from the
+    /// new settings so changes written to `settings.toml` from an external
+    /// editor (or via the settings panel) are reflected immediately.
+    pub(crate) fn apply_config_reload(&mut self, settings: &crate::settings::PhantomSettings) {
+        use phantom_ui::themes;
+
+        // Theme: resolve the named built-in and swap if it changed.
+        if !settings.theme.eq_ignore_ascii_case(&self.theme.name) {
+            if let Some(new_theme) = themes::builtin_by_name(&settings.theme) {
+                self.theme = new_theme;
+                info!("Config live-reload: theme → {}", settings.theme);
+            } else {
+                warn!(
+                    "Config live-reload: unknown theme '{}', keeping current",
+                    settings.theme
+                );
+            }
+        }
+
+        // CRT shader params.
+        let sp = &mut self.theme.shader_params;
+        let crt = &settings.crt;
+        sp.scanline_intensity = crt.scanline_intensity;
+        sp.bloom_intensity = crt.bloom_intensity;
+        sp.chromatic_aberration = crt.chromatic_aberration;
+        sp.curvature = crt.curvature;
+        sp.vignette_intensity = crt.vignette_intensity;
+        sp.noise_intensity = crt.noise_intensity;
+
+        // Font size: only change if it actually differs (avoid atlas churn).
+        let current_size = self.text_renderer.font_size();
+        if (settings.font_size - current_size).abs() > 0.5 {
+            self.text_renderer.set_font_size(settings.font_size);
+            self.cell_size = self.text_renderer.measure_cell();
+            self.atlas.clear();
+            info!(
+                "Config live-reload: font_size → {:.0}pt",
+                settings.font_size
+            );
+        }
+
+    }
 }
 
 /// Construct a [`GhTicketDispatcher`] backed by the real `gh` CLI.
