@@ -137,6 +137,10 @@ pub struct App {
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
+    /// Wall-clock instant of the last adapter GC sweep. GC runs at most once
+    /// every 30 seconds so dead adapters that were not removed by the normal
+    /// `is_alive()` reap path are cleaned up without accumulating without bound.
+    pub(crate) last_gc: Instant,
 
     // -- Clock-driven terminal cursor blink timer.
     //    Ticked once per frame with wall-clock milliseconds.  The terminal
@@ -501,6 +505,13 @@ pub struct App {
     // `ooda_git_changed` — set to `true` when `GitStateChanged` is received;
     //   cleared after one OODA tick (same single-frame pulse pattern).
     pub(crate) ooda_git_changed: bool,
+
+    // -- Render-gating: force a repaint even when the scene graph is clean.
+    //    Set to `true` on any event that requires a visual update independent
+    //    of scene-node dirty flags (key press, mouse move/click, PTY data
+    //    arrival, focus change, OODA action, pane add/remove, resize).
+    //    Cleared automatically at the end of each successful `render()` call.
+    pub(crate) force_redraw: bool,
 }
 
 /// An active suggestion from the AI brain.
@@ -1117,6 +1128,7 @@ impl App {
             demo_post_boot_done: false,
             start_time: now,
             last_frame: now,
+            last_gc: now,
             cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
@@ -1215,12 +1227,71 @@ impl App {
             ooda_last_parsed: None,
             ooda_agent_just_completed: false,
             ooda_git_changed: false,
+            // Start with force_redraw=true so the very first frame is always
+            // rendered regardless of scene-graph dirty state.
+            force_redraw: true,
         })
     }
 
     /// Returns `true` if the app has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Returns `true` when the scene graph has at least one dirty node.
+    ///
+    /// Used by the winit event loop to decide whether to request a new redraw
+    /// after the current frame completes.
+    pub fn scene_is_dirty(&self) -> bool {
+        !self.scene.dirty_nodes().is_empty()
+    }
+
+    /// Returns `true` when any time-driven animation is in progress.
+    ///
+    /// Covers the boot sequence, cursor blink, console slide, keystroke glitch
+    /// effects, and alt-screen fade animations. When any of these are running
+    /// the event loop must keep requesting redraws even if the scene graph is
+    /// otherwise clean.
+    pub fn has_active_animation(&self) -> bool {
+        // Boot sequence animating.
+        if self.state == AppState::Boot && !self.boot.is_done() {
+            return true;
+        }
+        // Cursor blink (only relevant once in terminal mode).
+        if self.state == AppState::Terminal {
+            return true; // cursor blink always requires periodic repaints
+        }
+        // Console slide animation.
+        if self.console.visible() {
+            return true;
+        }
+        // Keystroke glitch effect in progress.
+        if self.keystroke_fx.is_active() {
+            return true;
+        }
+        // Alt-screen fade animations.
+        if !self.alt_screen_fade.is_empty() {
+            return true;
+        }
+        false
+    }
+
+    /// Request a full repaint on the next frame regardless of scene-graph state.
+    ///
+    /// Call this from any event handler that produces a visual change that is
+    /// not tracked by the scene-graph dirty system (e.g. PTY output, keypresses,
+    /// mouse movement, focus changes, OODA actions).
+    pub fn request_redraw(&mut self) {
+        self.force_redraw = true;
+    }
+
+    /// Returns `true` when a forced repaint has been requested via
+    /// [`request_redraw`](Self::request_redraw) and not yet consumed.
+    ///
+    /// Used by the winit event loop together with `scene_is_dirty()` and
+    /// `has_active_animation()` to decide whether to re-arm `window.request_redraw()`.
+    pub fn needs_force_redraw(&self) -> bool {
+        self.force_redraw
     }
 
     /// Watchdog trace: returns a log line every `interval` frames.
@@ -1518,17 +1589,68 @@ impl App {
             .on_window_resize((content_w, content_h), &mut self.layout);
 
         // Resize coordinator-managed adapters to match new layout dimensions.
-        for app_id in self.coordinator.all_app_ids() {
-            if let Some(pane_id) = self.coordinator.pane_id_for(app_id)
-                && let Ok(rect) = self.layout.get_pane_rect(pane_id) {
-                    let (cols, rows) = pane_cols_rows(self.cell_size, rect);
-                    let _ = self.coordinator.send_command(
-                        app_id,
-                        "resize",
-                        &serde_json::json!({"cols": cols, "rows": rows}),
-                    );
-                    trace!("Adapter {app_id} resized to {cols}x{rows}");
+        //
+        // Two-phase negotiation (Wayland-style suggest/ack):
+        //   1. Call `on_resize_propose(new_w, new_h)` on each adapter before
+        //      applying the size.  The adapter may Accept, CounterOffer, or Reject.
+        //   2. Apply the final dimensions (accepted, counter, or skip on Rejected)
+        //      via the `resize` command so the PTY and renderer stay consistent.
+        //
+        // Collect target rects before the mutable `send_command` calls so the
+        // borrow checker is satisfied with two distinct phases.
+        let resize_targets: Vec<(phantom_adapter::AppId, phantom_ui::layout::Rect)> = self
+            .coordinator
+            .all_app_ids()
+            .into_iter()
+            .filter_map(|app_id| {
+                let pane_id = self.coordinator.pane_id_for(app_id)?;
+                let rect = self.layout.get_pane_rect(pane_id).ok()?;
+                Some((app_id, rect))
+            })
+            .collect();
+
+        for (app_id, new_rect) in resize_targets {
+            use phantom_adapter::NegotiationResult;
+
+            // Phase 1: two-phase negotiation — let the adapter accept, counter, or reject.
+            let negotiated = if let Some(adapter) =
+                self.coordinator.registry_mut().get_adapter_mut(app_id)
+            {
+                match adapter.on_resize_propose(new_rect.width, new_rect.height) {
+                    NegotiationResult::Accepted => (new_rect.width, new_rect.height),
+                    NegotiationResult::CounterOffer { width, height } => {
+                        trace!(
+                            "Adapter {app_id} counter-offered resize {}x{} -> {}x{}",
+                            new_rect.width, new_rect.height, width, height
+                        );
+                        (width, height)
+                    }
+                    NegotiationResult::Rejected { .. } => {
+                        trace!(
+                            "Adapter {app_id} rejected resize {}x{}; keeping current size",
+                            new_rect.width, new_rect.height
+                        );
+                        continue; // keep current dimensions — skip resize command
+                    }
                 }
+            } else {
+                (new_rect.width, new_rect.height)
+            };
+
+            // Phase 2: apply the negotiated size via the `resize` command.
+            let final_rect = phantom_ui::layout::Rect {
+                x: new_rect.x,
+                y: new_rect.y,
+                width: negotiated.0,
+                height: negotiated.1,
+            };
+            let (cols, rows) = pane_cols_rows(self.cell_size, final_rect);
+            let _ = self.coordinator.send_command(
+                app_id,
+                "resize",
+                &serde_json::json!({"cols": cols, "rows": rows}),
+            );
+            trace!("Adapter {app_id} resized to {cols}x{rows}");
         }
 
         // Update scene graph root transform.

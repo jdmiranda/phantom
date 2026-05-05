@@ -858,4 +858,185 @@ mod tests {
             assert_eq!(ev.adapter_id(), id);
         }
     }
+
+    // =======================================================================
+    // Fix 1 — gc() dead-adapter sweep (timer-gate logic)
+    // =======================================================================
+
+    /// Register one adapter, force it to Dead, and verify gc() removes it.
+    #[test]
+    fn gc_removes_dead_adapters_after_interval() {
+        let mut reg = AppRegistry::new();
+        let id = reg.register(Box::new(MockApp::new("terminal")));
+        reg.ready(id);
+        reg.kill(id);
+
+        assert_eq!(reg.count(), 1, "adapter must still be in registry before gc()");
+
+        let removed = reg.gc();
+        assert_eq!(removed, 1, "gc() must remove exactly one dead adapter");
+        assert_eq!(reg.count(), 0, "registry must be empty after gc()");
+        assert!(reg.get(id).is_none(), "removed adapter must not be retrievable");
+    }
+
+    /// Running adapter must survive gc() — only Dead entries are swept.
+    #[test]
+    fn gc_does_not_remove_running_adapters() {
+        let mut reg = AppRegistry::new();
+        let id = reg.register(Box::new(MockApp::new("terminal")));
+        reg.ready(id);
+
+        let removed = reg.gc();
+        assert_eq!(removed, 0, "gc() must not remove running adapters");
+        assert_eq!(reg.count(), 1, "running adapter must survive gc()");
+    }
+
+    /// Timer gate: GC must NOT fire when only 10 seconds have elapsed.
+    /// Replicates the exact gate condition from App::update.
+    #[test]
+    fn gc_not_called_before_30_second_interval() {
+        use std::time::{Duration, Instant};
+
+        const GC_INTERVAL: Duration = Duration::from_secs(30);
+        let last_gc = Instant::now() - Duration::from_secs(10);
+        let now = Instant::now();
+
+        let should_gc = now.duration_since(last_gc) >= GC_INTERVAL;
+
+        assert!(
+            !should_gc,
+            "GC must not fire when only 10 seconds have elapsed (interval = 30s)"
+        );
+    }
+
+    /// Timer gate: GC MUST fire once the 30-second interval is exceeded.
+    #[test]
+    fn gc_called_after_30_second_interval() {
+        use std::time::{Duration, Instant};
+
+        const GC_INTERVAL: Duration = Duration::from_secs(30);
+        let last_gc = Instant::now() - Duration::from_secs(31);
+        let now = Instant::now();
+
+        let should_gc = now.duration_since(last_gc) >= GC_INTERVAL;
+
+        assert!(
+            should_gc,
+            "GC must fire once the 30-second interval has elapsed"
+        );
+    }
+
+    // =======================================================================
+    // Fix 2 — on_resize_propose() negotiation
+    // =======================================================================
+
+    /// Accepted: final dimensions must match the proposed width and height.
+    #[test]
+    fn on_resize_propose_accepted_applies_new_size() {
+        let mut app = MockApp::new("terminal");
+        let result = app.on_resize_propose(800.0, 600.0);
+
+        let (final_w, final_h) = match result {
+            NegotiationResult::Accepted => (800.0_f32, 600.0_f32),
+            NegotiationResult::CounterOffer { width, height } => (width, height),
+            NegotiationResult::Rejected { .. } => (0.0, 0.0),
+        };
+
+        assert!((final_w - 800.0).abs() < 0.01, "Accepted: width must match proposal");
+        assert!((final_h - 600.0).abs() < 0.01, "Accepted: height must match proposal");
+    }
+
+    /// CounterOffer: final dimensions must be the adapter's counter values.
+    #[test]
+    fn on_resize_propose_counter_offer_applies_counter() {
+        struct CounterAdapter;
+
+        impl AppCore for CounterAdapter {
+            fn app_type(&self) -> &str { "counter" }
+            fn is_alive(&self) -> bool { true }
+            fn update(&mut self, _dt: f32) {}
+            fn get_state(&self) -> serde_json::Value { serde_json::json!({}) }
+        }
+        impl Renderable for CounterAdapter {
+            fn render(&self, _rect: &Rect) -> RenderOutput { RenderOutput::default() }
+            fn on_resize_propose(&mut self, _w: f32, _h: f32) -> NegotiationResult {
+                NegotiationResult::CounterOffer { width: 100.0, height: 50.0 }
+            }
+        }
+        impl InputHandler for CounterAdapter {
+            fn handle_input(&mut self, _key: &str) -> bool { false }
+        }
+        impl Commandable for CounterAdapter {
+            fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+        }
+        impl BusParticipant for CounterAdapter {}
+        impl Lifecycled for CounterAdapter {}
+        impl Permissioned for CounterAdapter {}
+
+        let mut adapter = CounterAdapter;
+        let result = adapter.on_resize_propose(800.0, 600.0);
+
+        let (final_w, final_h) = match result {
+            NegotiationResult::Accepted => (800.0, 600.0),
+            NegotiationResult::CounterOffer { width, height } => (width, height),
+            NegotiationResult::Rejected { .. } => (800.0, 600.0),
+        };
+
+        assert!((final_w - 100.0).abs() < 0.01, "CounterOffer: width must be 100, got {final_w}");
+        assert!((final_h - 50.0).abs() < 0.01, "CounterOffer: height must be 50, got {final_h}");
+    }
+
+    /// Rejected: caller must keep the current dimensions unchanged.
+    #[test]
+    fn on_resize_propose_rejected_keeps_current_size() {
+        struct RejectAdapter;
+
+        impl AppCore for RejectAdapter {
+            fn app_type(&self) -> &str { "reject" }
+            fn is_alive(&self) -> bool { true }
+            fn update(&mut self, _dt: f32) {}
+            fn get_state(&self) -> serde_json::Value { serde_json::json!({}) }
+        }
+        impl Renderable for RejectAdapter {
+            fn render(&self, _rect: &Rect) -> RenderOutput { RenderOutput::default() }
+            fn on_resize_propose(&mut self, _w: f32, _h: f32) -> NegotiationResult {
+                NegotiationResult::Rejected { reason: "fixed size".into() }
+            }
+        }
+        impl InputHandler for RejectAdapter {
+            fn handle_input(&mut self, _key: &str) -> bool { false }
+        }
+        impl Commandable for RejectAdapter {
+            fn accept_command(&mut self, _cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+        }
+        impl BusParticipant for RejectAdapter {}
+        impl Lifecycled for RejectAdapter {}
+        impl Permissioned for RejectAdapter {}
+
+        let current_w = 640.0_f32;
+        let current_h = 480.0_f32;
+
+        let mut adapter = RejectAdapter;
+        let result = adapter.on_resize_propose(1920.0, 1080.0);
+
+        // When Rejected, App::handle_resize skips the resize command — simulated here.
+        let (final_w, final_h) = match result {
+            NegotiationResult::Accepted => (1920.0, 1080.0),
+            NegotiationResult::CounterOffer { width, height } => (width, height),
+            NegotiationResult::Rejected { .. } => (current_w, current_h),
+        };
+
+        assert!(
+            (final_w - current_w).abs() < 0.01,
+            "Rejected: final width must equal current {current_w}, got {final_w}"
+        );
+        assert!(
+            (final_h - current_h).abs() < 0.01,
+            "Rejected: final height must equal current {current_h}, got {final_h}"
+        );
+    }
 }

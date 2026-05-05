@@ -10,7 +10,6 @@ use log::{debug, info, warn};
 
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::WorldState;
-use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AgentStatusInfo, AppCommand, PaneInfo, ScreenshotReply, SpawnAgentReply};
 use phantom_protocol::Event;
@@ -83,6 +82,17 @@ impl App {
         if self.coordinator.adapter_count() == 0 {
             info!("All adapters exited, quitting");
             self.quit_requested = true;
+        }
+
+        // Periodic GC: sweep adapters that transitioned to Dead via the registry
+        // (e.g. kill() called directly) but were not caught by the is_alive() reap
+        // above. Runs at most once every 30 seconds to amortize the scan cost.
+        if now.duration_since(self.last_gc) >= std::time::Duration::from_secs(30) {
+            let removed = self.coordinator.registry_mut().gc();
+            if removed > 0 {
+                debug!("GC: removed {} dead adapter(s)", removed);
+            }
+            self.last_gc = now;
         }
 
         // Boot state machine.
@@ -324,11 +334,16 @@ impl App {
                 self.git_refresh_last = now;
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
+                let assembler_arc = self.context_assembler.clone();
                 self.git_refresh_handle = std::thread::Builder::new()
                     .name("git-refresh".into())
                     .spawn(move || {
-                        let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
-                        fresh.refresh_git();
+                        // Use the shared ContextAssembler so DAG caching is
+                        // preserved across periodic git refreshes.
+                        let path = std::path::Path::new(&project_dir);
+                        if let Ok(mut asm) = assembler_arc.lock() {
+                            asm.assemble(path);
+                        }
                         if let Some(tx) = brain_tx {
                             let _ = tx.send(AiEvent::GitStateChanged);
                         }
