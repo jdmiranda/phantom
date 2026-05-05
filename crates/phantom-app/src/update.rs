@@ -586,8 +586,8 @@ impl App {
                         .unwrap_or_default();
                     let parsed = self.semantic_skill.parse(
                         &command,
-                        "",
                         &raw_output,
+                        "",
                         Some(*exit_code),
                     );
                     self.ooda_last_parsed = Some(parsed);

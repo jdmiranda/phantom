@@ -64,6 +64,21 @@ impl SemanticParser {
         }
     }
 
+    /// Full parse pipeline with timing.  Returns the [`ParsedOutput`] and the
+    /// wall-clock duration of the parse itself.
+    #[must_use]
+    pub fn parse_with_timing(
+        &self,
+        command: &str,
+        stdout: &str,
+        stderr: &str,
+        exit_code: Option<i32>,
+    ) -> (ParsedOutput, std::time::Duration) {
+        let start = std::time::Instant::now();
+        let result = Self::parse(command, stdout, stderr, exit_code);
+        (result, start.elapsed())
+    }
+
     /// Full parse pipeline: classify, detect content type, extract errors.
     #[must_use]
     pub fn parse(
@@ -196,6 +211,14 @@ impl SemanticParser {
                 } else {
                     Self::fallback_content_type(combined)
                 }
+            }
+            CommandType::Docker(sub) => {
+                let ct = Self::parse_docker_output(sub, combined);
+                (ct, vec![], vec![])
+            }
+            CommandType::Npm(sub) => {
+                let ct = Self::parse_npm_output(sub, combined);
+                (ct, vec![], vec![])
             }
             _ => Self::fallback_content_type(combined),
         }
@@ -604,6 +627,120 @@ impl SemanticParser {
             content_type,
             body_preview,
         }))
+    }
+
+    // -- docker output ------------------------------------------------------
+
+    fn parse_docker_output(sub: &DockerCommand, output: &str) -> ContentType {
+        match sub {
+            DockerCommand::Ps => {
+                // `docker ps` prints a fixed-width table:
+                //   CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS     PORTS    NAMES
+                //   abc123def456   nginx     …         …         Up 5 min   80/tcp   web
+                // Split on 2+ spaces (docker ps uses wide column gaps).
+                let gap_re = Regex::new(r" {2,}").unwrap();
+                let mut containers = Vec::new();
+
+                // Skip the header row (first line).
+                for line in output.lines().skip(1) {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let cols: Vec<&str> = gap_re.splitn(trimmed, 7).collect();
+                    // Columns: ID IMAGE COMMAND CREATED STATUS PORTS NAMES
+                    let id = cols.first().copied().unwrap_or("").to_string();
+                    // NAMES is the last column; STATUS is index 4; PORTS is index 5.
+                    let status = cols.get(4).copied().unwrap_or("").to_string();
+                    let ports = cols.get(5).copied().unwrap_or("").to_string();
+                    let name = cols.get(6).copied().unwrap_or("").to_string();
+
+                    if !id.is_empty() {
+                        containers.push(DockerContainer { id, name, status, ports });
+                    }
+                }
+
+                ContentType::DockerOutput(DockerOutputData {
+                    containers,
+                    built_image_hash: None,
+                    build_failed: false,
+                })
+            }
+            DockerCommand::Build => {
+                // "Successfully built abc123def456" or error patterns.
+                let built_re = Regex::new(r"Successfully built ([0-9a-f]+)").unwrap();
+                let built_image_hash = built_re
+                    .captures(output)
+                    .map(|c| c[1].to_string());
+                let build_failed = output.contains("ERROR") || output.contains("failed to");
+
+                ContentType::DockerOutput(DockerOutputData {
+                    containers: vec![],
+                    built_image_hash,
+                    build_failed,
+                })
+            }
+            _ => {
+                // For other docker subcommands fall through to table/plain detection.
+                if let Some(ct) = Self::detect_table(output) {
+                    ct
+                } else {
+                    ContentType::PlainText
+                }
+            }
+        }
+    }
+
+    // -- npm output ---------------------------------------------------------
+
+    fn parse_npm_output(sub: &NpmCommand, output: &str) -> ContentType {
+        match sub {
+            NpmCommand::Install => {
+                // "added 123 packages" / "changed 5 packages" / "removed 2 packages"
+                let added_re = Regex::new(r"added (\d+) package").unwrap();
+                let audit_re = Regex::new(r"found (\d+) vulnerabilit").unwrap();
+
+                let package_count = added_re
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok());
+                let audit_warnings = audit_re
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok());
+
+                ContentType::NpmOutput(NpmOutputData {
+                    package_count,
+                    audit_warnings,
+                    tests_passed: None,
+                    tests_failed: None,
+                })
+            }
+            NpmCommand::Test => {
+                // Jest-style: "Tests: 2 failed, 5 passed, 7 total"
+                // Mocha-style: "passing (200ms)" / "failing"
+                let passing_re = Regex::new(r"(\d+) passing").unwrap();
+                let failing_re = Regex::new(r"(\d+) failing").unwrap();
+                // Jest-style
+                let jest_pass_re = Regex::new(r"Tests:.*?(\d+) passed").unwrap();
+                let jest_fail_re = Regex::new(r"Tests:.*?(\d+) failed").unwrap();
+
+                let tests_passed = passing_re
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok())
+                    .or_else(|| jest_pass_re.captures(output).and_then(|c| c[1].parse().ok()));
+                let tests_failed = failing_re
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok())
+                    .or_else(|| jest_fail_re.captures(output).and_then(|c| c[1].parse().ok()));
+
+                ContentType::NpmOutput(NpmOutputData {
+                    package_count: None,
+                    audit_warnings: None,
+                    tests_passed,
+                    tests_failed,
+                })
+            }
+            _ => ContentType::PlainText,
+        }
     }
 
     // -- table detection ----------------------------------------------------
