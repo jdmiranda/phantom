@@ -171,6 +171,15 @@ pub struct PhantomTerminal {
     /// Number of valid bytes written into `read_buf` during the last
     /// [`pty_read`](PhantomTerminal::pty_read) call.  Zero between reads.
     last_read_len: usize,
+
+    /// Whether the Kitty keyboard protocol (CSI u) is active.
+    ///
+    /// Reflects `TermMode::DISAMBIGUATE_ESC_CODES` — set by the running
+    /// program via `CSI > 1 h` (enable) and cleared via `CSI > 1 l`
+    /// (disable).  Kept as a cached bool so callers avoid importing
+    /// `alacritty_terminal` just to check a mode bit.  Refreshed after
+    /// every `pty_read` call.
+    pub kitty_keyboard_mode: bool,
 }
 
 impl PhantomTerminal {
@@ -221,6 +230,7 @@ impl PhantomTerminal {
             size,
             read_buf: vec![0u8; PTY_READ_BUF],
             last_read_len: 0,
+            kitty_keyboard_mode: false,
         })
     }
 
@@ -276,6 +286,14 @@ impl PhantomTerminal {
         // Drain any PTY-write requests the terminal generated (e.g. device
         // attribute responses) and write them back to the PTY.
         self.flush_pty_write_queue();
+
+        // Refresh the Kitty keyboard mode cache.  The running program may
+        // have sent `CSI > 1 h` / `CSI > 1 l` inside this chunk; the VTE
+        // parser already updated TermMode, so we just mirror it here.
+        self.kitty_keyboard_mode = self
+            .term
+            .mode()
+            .contains(TermMode::DISAMBIGUATE_ESC_CODES);
 
         trace!("pty_read: processed {n} bytes");
         Ok(n)
@@ -449,6 +467,17 @@ impl PhantomTerminal {
         } else if target < current {
             self.scroll_down(current - target);
         }
+    }
+
+    /// Whether the Kitty keyboard protocol (CSI u) is enabled.
+    ///
+    /// Reflects `TermMode::DISAMBIGUATE_ESC_CODES`.  Refreshed after every
+    /// `pty_read` call.  Use this instead of the `kitty_keyboard_mode` field
+    /// for read-only queries — the field is `pub` only so `TerminalAdapter`
+    /// can expose it via `get_state` without importing alacritty internals.
+    #[must_use]
+    pub fn is_kitty_keyboard_mode(&self) -> bool {
+        self.kitty_keyboard_mode
     }
 
     // -- Selection API ----------------------------------------------------

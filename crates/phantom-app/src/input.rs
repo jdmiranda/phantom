@@ -9,7 +9,7 @@ use std::time::Instant;
 use log::{debug, info};
 use winit::keyboard::{Key, NamedKey};
 
-use phantom_terminal::input::{self, KeyEvent, PhantomKey, PhantomModifiers};
+use phantom_terminal::input::{self, KeyEvent, KittyEventType, PhantomKey, PhantomModifiers};
 use phantom_ui::keybinds::Key as UiKey;
 use phantom_ui::keybinds::{Action, KeyCombo};
 
@@ -575,8 +575,27 @@ impl App {
                         .send_command(focused, "select_clear", &serde_json::json!({}));
             }
 
-            // Encode key event to raw PTY bytes.
-            let bytes = input::encode_key(&terminal_event);
+            // Check if the focused adapter has Kitty keyboard mode active.
+            let kitty_active = self
+                .coordinator
+                .focused()
+                .and_then(|id| self.coordinator.get_state(id))
+                .and_then(|s| s.get("kitty_keyboard_mode").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+
+            // Encode key event: try Kitty CSI u first when the mode is on,
+            // fall back to legacy VT100 if the key has no Kitty mapping.
+            let bytes = if kitty_active {
+                input::encode_kitty_key(
+                    terminal_event.key,
+                    terminal_event.mods,
+                    KittyEventType::Press,
+                )
+                .unwrap_or_else(|| input::encode_key(&terminal_event))
+            } else {
+                input::encode_key(&terminal_event)
+            };
+
             if bytes.is_empty() {
                 return;
             }

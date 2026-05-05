@@ -369,6 +369,10 @@ impl AppCore for TerminalAdapter {
             // Structured takeover state (issue #364): true when the edge-detector
             // considers a subprocess to be actively taking over this terminal.
             "takeover_active": self.takeover_detector.is_active(),
+            // Kitty keyboard protocol (CSI u) state. True when the running
+            // program has enabled Kitty mode via `CSI > 1 h`. The input
+            // dispatch layer reads this to select the encoding path.
+            "kitty_keyboard_mode": self.terminal.is_kitty_keyboard_mode(),
         })
     }
 
