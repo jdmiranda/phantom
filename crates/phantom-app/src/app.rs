@@ -27,7 +27,7 @@ use phantom_terminal::terminal::PhantomTerminal;
 use phantom_ui::keybinds::KeybindRegistry;
 use phantom_ui::layout::LayoutEngine;
 use phantom_ui::themes::Theme;
-use phantom_ui::widgets::{KeybindHelp, StatusBar, TabBar};
+use phantom_ui::widgets::{KeybindHelp, SearchBar, StatusBar, TabBar};
 
 use phantom_adapter::{DataType, EventBus, TopicId};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
@@ -128,6 +128,9 @@ pub struct App {
     pub(crate) tab_bar: TabBar,
     /// Full-screen keybind help overlay (F1 / ?).
     pub(crate) keybind_help: KeybindHelp,
+
+    // -- Find-in-terminal search bar (Cmd+F) --
+    pub(crate) search_bar: SearchBar,
 
     // -- Boot sequence --
     pub(crate) boot: BootSequence,
@@ -1327,6 +1330,7 @@ impl App {
             status_bar,
             tab_bar,
             keybind_help: KeybindHelp::new(),
+            search_bar: SearchBar::new(),
             boot,
             state: initial_state,
             demo_mode: config.demo_mode,

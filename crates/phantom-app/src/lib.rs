@@ -29,6 +29,7 @@ mod pane;
 pub mod profiler;
 mod render;
 mod render_overlay;
+mod search;
 pub mod resources;
 pub mod runtime;
 mod selftest;
