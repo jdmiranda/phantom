@@ -831,6 +831,90 @@ pub(crate) fn execute_run_command_with_policy(
     }
 }
 
+/// Validate and sanitise a user-supplied glob pattern for use within `base_dir`.
+///
+/// # Security contract
+///
+/// Agents supply glob patterns as untrusted input.  Without sanitisation a
+/// pattern such as `../../../*` or `/**/*` lets an agent escape the intended
+/// working-directory sandbox.  This function enforces three layered guards:
+///
+/// 1. **No `..` components** — the raw pattern string must not contain the
+///    literal substring `..`.  This catches the common traversal forms
+///    (`../`, `../../`, embedded `foo/../bar`, etc.) before any filesystem
+///    access occurs.
+///
+/// 2. **No absolute paths** — if the pattern starts with `/` it is a global
+///    filesystem path, not a relative project path.  Reject immediately.
+///
+/// 3. **Canonical root check** — the directory prefix of the full pattern
+///    (everything up to the first glob metacharacter) is canonicalized.  If
+///    the resolved path does not start with the canonicalized `base_dir`, the
+///    pattern has escaped the sandbox (e.g. via a symlink).
+///
+/// Returns the validated full pattern string (ready to pass to
+/// [`glob::glob`]) on success, or a human-readable error string on failure.
+fn sanitize_glob_pattern(pattern: &str, base_dir: &Path) -> Result<String, String> {
+    // Guard 1: reject `..` traversal components.
+    if pattern.contains("..") {
+        return Err(format!(
+            "glob pattern must not contain '..': {pattern}"
+        ));
+    }
+
+    // Guard 2: reject absolute paths.
+    if pattern.starts_with('/') {
+        return Err(format!(
+            "glob pattern must be a relative path, not absolute: {pattern}"
+        ));
+    }
+
+    // Compose the full pattern the way glob::glob will see it.
+    let full_pattern = format!("{}/{pattern}", base_dir.display());
+
+    // Guard 3: canonicalize the non-glob prefix and verify it stays inside
+    // base_dir.  We split on the first glob metacharacter to obtain a
+    // filesystem-resolvable prefix.
+    let prefix_end = full_pattern
+        .find(['*', '?', '['])
+        .unwrap_or(full_pattern.len());
+    let static_prefix = &full_pattern[..prefix_end];
+
+    // Trim a trailing slash or partial path component so we canonicalize a
+    // directory that actually exists.
+    let probe = {
+        let p = Path::new(static_prefix.trim_end_matches('/'));
+        // Walk up until we find a component that exists.
+        let mut cur = p;
+        loop {
+            if cur.exists() {
+                break cur.to_path_buf();
+            }
+            match cur.parent() {
+                Some(parent) => cur = parent,
+                None => break base_dir.to_path_buf(),
+            }
+        }
+    };
+
+    let canon_base = base_dir
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize base_dir: {e}"))?;
+    let canon_probe = probe
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize glob prefix: {e}"))?;
+
+    if !canon_probe.starts_with(&canon_base) {
+        return Err(format!(
+            "glob pattern escapes sandbox (resolved prefix {} is outside {}): {pattern}",
+            canon_probe.display(),
+            canon_base.display(),
+        ));
+    }
+
+    Ok(full_pattern)
+}
+
 fn execute_search_files(root: &Path, args: &serde_json::Value) -> ToolResult {
     let tool = ToolType::SearchFiles;
 
@@ -838,13 +922,31 @@ fn execute_search_files(root: &Path, args: &serde_json::Value) -> ToolResult {
         return tool_err(tool, "missing required parameter: pattern".into());
     };
 
-    let full_pattern = format!("{}/{pattern_str}", root.display());
+    let full_pattern = match sanitize_glob_pattern(pattern_str, root) {
+        Ok(p) => p,
+        Err(e) => return tool_err(tool, e),
+    };
+
+    // Canonicalize root once for the post-filter so that symlinked matches
+    // resolved outside the sandbox are also rejected.
+    let canon_root = match root.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return tool_err(tool, format!("cannot canonicalize working dir: {e}")),
+    };
 
     let matches: Vec<String> = match glob::glob(&full_pattern) {
         Ok(paths) => paths
             .filter_map(|entry| entry.ok())
             .filter_map(|path| {
-                path.strip_prefix(root)
+                // Canonicalize each match and verify it is still inside the
+                // sandbox root.  This catches symlinks that point outside the
+                // working directory even when the pattern itself looked safe.
+                let canon = path.canonicalize().ok()?;
+                if !canon.starts_with(&canon_root) {
+                    return None;
+                }
+                canon
+                    .strip_prefix(&canon_root)
                     .ok()
                     .map(|rel| rel.display().to_string())
             })
@@ -1899,5 +2001,93 @@ mod tests {
 
         // Provenance tool_name must still be "read_file".
         assert_eq!(result.tool_name, "read_file");
+    }
+
+    // -- Glob pattern sanitization tests (OWASP glob injection fix) ------------
+
+    /// A pattern with `..` must be rejected before any filesystem access.
+    #[test]
+    fn glob_dotdot_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let result = sanitize_glob_pattern("../../../*", tmp.path());
+        assert!(
+            result.is_err(),
+            "expected Err for dotdot pattern, got Ok({:?})",
+            result.unwrap(),
+        );
+        assert!(
+            result.unwrap_err().contains(".."),
+            "error message must mention the '..' component",
+        );
+    }
+
+    /// A pattern that starts with `/` (absolute path) must be rejected.
+    #[test]
+    fn glob_absolute_path_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let result = sanitize_glob_pattern("/etc/passwd", tmp.path());
+        assert!(
+            result.is_err(),
+            "expected Err for absolute-path pattern, got Ok({:?})",
+            result.unwrap(),
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("absolute"),
+            "error message must mention 'absolute'; got: {msg}",
+        );
+    }
+
+    /// A normal relative glob pattern must be accepted.
+    #[test]
+    fn glob_normal_pattern_is_accepted() {
+        let tmp = TempDir::new().unwrap();
+        // Create a file so the static prefix of the pattern resolves.
+        let sub = tmp.path().join("src");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("main.rs"), "fn main() {}").unwrap();
+
+        let result = sanitize_glob_pattern("src/**/*.rs", tmp.path());
+        assert!(
+            result.is_ok(),
+            "expected Ok for normal pattern, got Err({:?})",
+            result.unwrap_err(),
+        );
+    }
+
+    /// A glob pattern that resolves via a symlink to a path outside the
+    /// sandbox must be caught by the canonical-root check.
+    #[test]
+    fn glob_escape_attempt_via_symlink_is_caught() {
+        let sandbox = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        // Write a file in the outside directory.
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+
+        // Create a symlink inside the sandbox that points outside.
+        let link_path = sandbox.path().join("escape");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link_path).unwrap();
+
+        // On non-Unix platforms symlinks may not be available; skip the test.
+        #[cfg(not(unix))]
+        {
+            return;
+        }
+
+        // The pattern itself looks innocent (`escape/*.txt`) but the symlink
+        // `escape` resolves to a path outside the sandbox.
+        let result = sanitize_glob_pattern("escape/*.txt", sandbox.path());
+        assert!(
+            result.is_err(),
+            "expected Err when symlink escapes sandbox, got Ok({:?})",
+            result.unwrap(),
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("escapes sandbox"),
+            "error message must mention 'escapes sandbox'; got: {msg}",
+        );
     }
 }
