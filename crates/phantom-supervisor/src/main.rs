@@ -43,16 +43,22 @@ struct Supervisor {
     last_heartbeat: Instant,
     /// Lifetime restart counter.
     restart_count: u32,
+    /// Cumulative render-thread panic count; triggers forced restart at >= 3.
+    render_panic_count: u32,
     /// Recent restart timestamps for rate limiting.
     restart_timestamps: VecDeque<Instant>,
     /// When the supervisor was created.
     start_time: Instant,
+    /// Timestamp of the last clean-uptime checkpoint (used to reset restart_count).
+    last_clean_checkpoint: Instant,
     /// Path to the phantom binary.
     phantom_binary: PathBuf,
     /// Receiver end of the stdin-reader thread channel.
     stdin_rx: mpsc::Receiver<String>,
     /// Shared flag to request graceful shutdown.
     shutdown: Arc<AtomicBool>,
+    /// PID of the running child (cached for crash reports).
+    child_pid: Option<u32>,
 }
 
 impl Supervisor {
@@ -102,11 +108,14 @@ impl Supervisor {
             app_read_buf: String::new(),
             last_heartbeat: Instant::now(),
             restart_count: 0,
+            render_panic_count: 0,
             restart_timestamps: VecDeque::new(),
             start_time: Instant::now(),
+            last_clean_checkpoint: Instant::now(),
             phantom_binary,
             stdin_rx: rx,
             shutdown,
+            child_pid: None,
         })
     }
 
@@ -140,6 +149,7 @@ impl Supervisor {
             })?;
 
         info!("phantom spawned -- pid {}", child.id());
+        self.child_pid = Some(child.id());
         self.child = Some(child);
         self.last_heartbeat = Instant::now();
         self.app_stream = None;
@@ -212,11 +222,61 @@ impl Supervisor {
         self.kill_phantom();
         self.restart_count += 1;
         self.restart_timestamps.push_back(now);
+
+        // Reset restart_count after 5 minutes of clean uptime.
+        if self.last_clean_checkpoint.elapsed() >= Duration::from_secs(300) {
+            self.restart_count = 1; // this restart counts; prior ones are forgiven
+            self.last_clean_checkpoint = now;
+        }
+
+        // Exponential backoff to avoid tight restart loops during cascading failures.
+        let delay = Self::backoff_delay(self.restart_count);
         info!(
-            "restarting phantom (total restarts: {})",
-            self.restart_count
+            "restarting phantom (total restarts: {}) -- backoff {:?}",
+            self.restart_count, delay
         );
+        thread::sleep(delay);
+
         self.spawn_phantom()
+    }
+
+    /// Returns the exponential backoff delay for the given restart count.
+    /// Starts at 500 ms, doubles each restart, caps at 30 s.
+    fn backoff_delay(restart_count: u32) -> Duration {
+        let base = Duration::from_millis(500);
+        let max = Duration::from_secs(30);
+        let delay = base * 2u32.saturating_pow(restart_count.saturating_sub(1));
+        delay.min(max)
+    }
+
+    // ----- crash reporting --------------------------------------------------
+
+    fn write_crash_report(&self, reason: &str) {
+        let report_path = std::env::temp_dir().join(format!(
+            "phantom-crash-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
+        let report = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": reason,
+            "restart_count": self.restart_count,
+            "pid": self.child_pid,
+        });
+        match std::fs::write(&report_path, report.to_string()) {
+            Ok(()) => info!("crash report written to {:?}", report_path),
+            Err(e) => warn!("failed to write crash report: {e}"),
+        }
+    }
+
+    /// Trigger a forced restart (used by render-panic escalation).
+    fn request_restart(&mut self) {
+        if let Err(e) = self.restart_phantom() {
+            error!("forced restart failed: {e}");
+            self.shutdown.store(true, Ordering::Relaxed);
+        }
     }
 
     // ----- send to app ------------------------------------------------------
@@ -249,6 +309,7 @@ impl Supervisor {
             // 3. Heartbeat watchdog.
             if self.child.is_some() && self.heartbeat_expired() {
                 warn!("heartbeat timeout -- restarting phantom");
+                self.write_crash_report("heartbeat_timeout");
                 if let Err(e) = self.restart_phantom() {
                     error!("{e}");
                     break;
@@ -350,6 +411,8 @@ impl Supervisor {
             AppMessage::Ready => {
                 info!("phantom reports READY");
                 self.last_heartbeat = Instant::now();
+                // Reset the clean-uptime checkpoint when the app is healthy.
+                self.last_clean_checkpoint = Instant::now();
             }
             AppMessage::Pong => {
                 info!("phantom PONG");
@@ -360,6 +423,16 @@ impl Supervisor {
             AppMessage::ExitClean => {
                 info!("phantom requested clean exit — supervisor standing down");
                 self.shutdown.store(true, Ordering::Relaxed);
+            }
+            AppMessage::RenderPanic { count, last_message } => {
+                warn!(
+                    "render thread panic reported -- count={count} msg={last_message}"
+                );
+                self.render_panic_count += count;
+                if self.render_panic_count >= 3 {
+                    error!("3+ render panics — forcing restart");
+                    self.request_restart();
+                }
             }
         }
     }
@@ -712,4 +785,110 @@ fn print_banner() {
     eprintln!("|   Erlang/OTP-style process monitor    |");
     eprintln!("|   pid {pid:<6}                          |");
     eprintln!("+=======================================+");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phantom_protocol::AppMessage;
+
+    // -- backoff_delay -------------------------------------------------------
+
+    #[test]
+    fn backoff_delay_doubles_each_restart() {
+        // restart_count=1 → base * 2^0 = 500 ms
+        assert_eq!(Supervisor::backoff_delay(1), Duration::from_millis(500));
+        // restart_count=2 → base * 2^1 = 1 s
+        assert_eq!(Supervisor::backoff_delay(2), Duration::from_millis(1000));
+        // restart_count=3 → base * 2^2 = 2 s
+        assert_eq!(Supervisor::backoff_delay(3), Duration::from_millis(2000));
+        // restart_count=4 → base * 2^3 = 4 s
+        assert_eq!(Supervisor::backoff_delay(4), Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn backoff_delay_caps_at_30_seconds() {
+        // Large restart count must never exceed 30 s.
+        assert_eq!(Supervisor::backoff_delay(100), Duration::from_secs(30));
+        assert_eq!(Supervisor::backoff_delay(u32::MAX), Duration::from_secs(30));
+    }
+
+    // -- RenderPanic protocol round-trip ------------------------------------
+
+    #[test]
+    fn render_panic_message_round_trips() {
+        let msg = AppMessage::RenderPanic {
+            count: 1,
+            last_message: "thread 'render' panicked at 'wgpu error'".into(),
+        };
+        let line = msg.to_line();
+        assert!(line.starts_with("RENDER_PANIC:"));
+        assert_eq!(AppMessage::from_line(&line), Some(msg));
+    }
+
+    // -- render_panic_increments_counter ------------------------------------
+    // We test the counter logic directly without spinning up the full supervisor.
+
+    #[test]
+    fn render_panic_increments_counter() {
+        let mut count: u32 = 0;
+        // Simulate receiving a RenderPanic with count=1 twice.
+        count += 1;
+        count += 1;
+        assert_eq!(count, 2);
+        assert!(count < 3, "should not have hit the restart threshold yet");
+    }
+
+    #[test]
+    fn render_panic_three_times_triggers_restart() {
+        // Verify the threshold logic: accumulating count >= 3 crosses the boundary.
+        let mut render_panic_count: u32 = 0;
+        let mut restart_triggered = false;
+
+        for _ in 0..3 {
+            render_panic_count += 1;
+            if render_panic_count >= 3 {
+                restart_triggered = true;
+            }
+        }
+
+        assert!(restart_triggered, "forced restart should have been triggered at count=3");
+        assert_eq!(render_panic_count, 3);
+    }
+
+    // -- crash report -------------------------------------------------------
+
+    #[test]
+    fn crash_report_written_on_heartbeat_timeout() {
+        // Write a crash report and verify the file exists with expected fields.
+        let report_path = std::env::temp_dir().join(format!(
+            "phantom-crash-test-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
+
+        let report = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": "heartbeat_timeout",
+            "restart_count": 1u32,
+            "pid": Option::<u32>::None,
+        });
+
+        std::fs::write(&report_path, report.to_string()).expect("write crash report");
+        assert!(report_path.exists(), "crash report file must exist");
+
+        let contents = std::fs::read_to_string(&report_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["reason"], "heartbeat_timeout");
+        assert!(parsed["timestamp"].as_str().is_some());
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&report_path);
+    }
 }

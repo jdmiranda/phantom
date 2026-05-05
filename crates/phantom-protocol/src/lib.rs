@@ -131,6 +131,9 @@ pub enum AppMessage {
     Pong,
     /// App is exiting intentionally — supervisor should NOT restart.
     ExitClean,
+    /// The render thread panicked. `count` is the number of panics since last
+    /// reset; `last_message` is the panic message (truncated if needed).
+    RenderPanic { count: u32, last_message: String },
 }
 
 impl AppMessage {
@@ -150,6 +153,9 @@ impl AppMessage {
             Self::Log(msg) => format!("LOG:{msg}"),
             Self::Pong => "PONG".into(),
             Self::ExitClean => "EXIT_CLEAN".into(),
+            Self::RenderPanic { count, last_message } => {
+                format!("RENDER_PANIC:{count}:{last_message}")
+            }
         }
     }
 
@@ -167,6 +173,13 @@ impl AppMessage {
     pub fn from_line(s: &str) -> Option<Self> {
         if let Some(msg) = s.strip_prefix("LOG:") {
             Some(Self::Log(msg.to_owned()))
+        } else if let Some(rest) = s.strip_prefix("RENDER_PANIC:") {
+            let (count_str, last_message) = rest.split_once(':')?;
+            let count = count_str.parse().ok()?;
+            Some(Self::RenderPanic {
+                count,
+                last_message: last_message.to_owned(),
+            })
         } else {
             match s {
                 "HEARTBEAT" => Some(Self::Heartbeat),
