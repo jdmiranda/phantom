@@ -1822,6 +1822,7 @@ mod tests {
             ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
         };
 
         // One call → must produce exactly one denial result.

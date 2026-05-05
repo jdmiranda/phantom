@@ -310,6 +310,16 @@ pub(crate) struct AgentPane {
     /// `try_send` is used (non-blocking) so a slow audio device never stalls
     /// the agent pane's render loop.
     pub(super) tts_tx: Option<tokio::sync::mpsc::Sender<String>>,
+
+    /// Shared MCP tool registry for external tool fallback.
+    ///
+    /// Set at spawn time by [`App::spawn_agent_pane_with_opts`] via
+    /// [`AgentPane::set_mcp_registry`]. When `Some`, `build_dispatch_context`
+    /// forwards it into [`phantom_agents::dispatch::DispatchContext::mcp_registry`]
+    /// so unknown tool names are routed to connected MCP servers.
+    /// `None` disables MCP fallback (legacy / test paths).
+    pub(super) mcp_registry:
+        Option<std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +382,7 @@ impl AgentPane {
             dag_explorer: None,
             pane_messages: Vec::new(),
             tts_tx: None,
+            mcp_registry: None,
         }
     }
 
@@ -560,6 +571,7 @@ impl AgentPane {
                 "● Agent working...",
             )],
             tts_tx: None,
+            mcp_registry: None,
         }
     }
 
@@ -637,6 +649,20 @@ impl AgentPane {
     }
 
     /// Wire the history capture sidecar into this pane.
+    /// Wire the shared MCP tool registry into this pane.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
+    /// When wired, unknown tool names in dispatch are forwarded to the
+    /// connected MCP servers instead of returning an immediate error.
+    /// `None` (the default) disables MCP fallback — correct for legacy / test
+    /// paths that have not connected any external servers.
+    pub(crate) fn set_mcp_registry(
+        &mut self,
+        registry: std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>,
+    ) {
+        self.mcp_registry = Some(registry);
+    }
+
     ///
     /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
     /// When `None` is held (legacy / test path), tool calls and output are

@@ -106,4 +106,12 @@ pub struct DispatchContext<'a> {
     /// `None` returns an `"unknown tool"` style error for those names —
     /// correct behaviour for non-Cartographer agents and legacy test paths.
     pub dag_explorer: Option<crate::dag_explorer::DagExplorerContext>,
+    /// MCP tool registry for external tool fallback.
+    ///
+    /// When `Some`, any tool name that does not match a built-in handler is
+    /// forwarded to the connected MCP servers via
+    /// [`phantom_mcp::McpToolRegistry::invoke`]. `None` disables MCP fallback —
+    /// the correct behaviour for legacy / test paths that have not wired an
+    /// MCP registry.
+    pub mcp_registry: Option<std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>>,
 }

@@ -95,6 +95,7 @@ async fn defender_challenge_loop_smoke() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let denied_result = dispatch_tool(
@@ -235,6 +236,7 @@ async fn defender_challenge_loop_smoke() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let challenge_result = dispatch_tool(
@@ -361,6 +363,7 @@ fn offender_cannot_call_challenge_agent() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let result = dispatch_tool(

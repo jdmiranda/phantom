@@ -12,6 +12,27 @@ use log::{debug, info, warn};
 
 use phantom_ui::themes::{self, Theme};
 
+/// A single MCP server to connect on startup.
+///
+/// Configured under `[mcp_servers.<name>]` table headers in the TOML config.
+/// Each block must provide `url`. `enabled` defaults to `true`.
+///
+/// Example:
+/// ```toml
+/// [mcp_servers.my-server]
+/// url = "ws://localhost:8765"
+/// enabled = true
+/// ```
+#[derive(Debug, Clone)]
+pub struct McpServerConfig {
+    /// The logical name used for this server in the tool registry.
+    pub name: String,
+    /// WebSocket URL for the MCP server (`ws://` or `wss://`).
+    pub url: String,
+    /// When `false` the server is skipped during discovery. Defaults to `true`.
+    pub enabled: bool,
+}
+
 /// User-configurable settings loaded from TOML.
 #[derive(Debug, Clone)]
 pub struct PhantomConfig {
@@ -75,6 +96,12 @@ pub struct PhantomConfig {
     /// danger = ""  # empty string = silent
     /// ```
     pub notification_sounds: HashMap<String, Option<String>>,
+    /// MCP servers to auto-connect on startup.
+    ///
+    /// Each entry is parsed from a `[mcp_servers.<name>]` TOML table.
+    /// Empty by default. Servers with `enabled = false` are skipped during
+    /// discovery.
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -102,6 +129,7 @@ impl Default for PhantomConfig {
             offline_mode: false,
             fullscreen: false,
             notification_sounds: HashMap::new(),
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -133,16 +161,39 @@ impl PhantomConfig {
         // Track whether we're inside the [notification_sounds] section.
         let mut in_notification_sounds = false;
 
+        // Track the current `[mcp_servers.<name>]` block being parsed.
+        let mut current_mcp_server: Option<McpServerConfig> = None;
+        // Whether we are inside an [mcp_servers.*] section.
+        let mut in_mcp_section = false;
+
         for line in toml_str.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
 
-            // TOML section header — detect [notification_sounds] and any
-            // other section that would end it.
+            // TOML section header — detect [notification_sounds], [mcp_servers.<name>],
+            // and any other section that would end them.
             if line.starts_with('[') {
                 in_notification_sounds = line == "[notification_sounds]";
+
+                // Flush any in-progress mcp_server block.
+                if let Some(server) = current_mcp_server.take() {
+                    config.mcp_servers.push(server);
+                }
+
+                // `[mcp_servers.<name>]`
+                if line.starts_with("[mcp_servers.") && line.ends_with(']') {
+                    let name = &line["[mcp_servers.".len()..line.len() - 1];
+                    current_mcp_server = Some(McpServerConfig {
+                        name: name.to_string(),
+                        url: String::new(),
+                        enabled: true,
+                    });
+                    in_mcp_section = true;
+                } else {
+                    in_mcp_section = false;
+                }
                 continue;
             }
 
@@ -159,6 +210,22 @@ impl PhantomConfig {
                         Some(value.to_string())
                     };
                     config.notification_sounds.insert(key.to_string(), sound);
+                    continue;
+                }
+
+                // Key-value pairs inside an mcp_servers block.
+                if in_mcp_section {
+                    if let Some(ref mut server) = current_mcp_server {
+                        match key {
+                            "url" => server.url = value.to_string(),
+                            "enabled" => {
+                                server.enabled = !matches!(value, "false" | "0" | "no");
+                            }
+                            _ => {
+                                warn!("Unknown mcp_servers key: {key}");
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -229,6 +296,11 @@ impl PhantomConfig {
                     }
                 }
             }
+        }
+
+        // Flush the last mcp_server block if any.
+        if let Some(server) = current_mcp_server.take() {
+            config.mcp_servers.push(server);
         }
 
         Ok(config)
@@ -377,6 +449,13 @@ font_size = 14.0
 # info = "/path/to/info.wav"
 # warn = "/path/to/warn.wav"
 # danger = ""
+
+# MCP servers to auto-connect on startup.
+# Add one [mcp_servers.<name>] block per server.
+# Example:
+# [mcp_servers.my-server]
+# url = "ws://localhost:8765"
+# enabled = true
 "#;
 
 // ---------------------------------------------------------------------------
@@ -641,5 +720,59 @@ info = \"/sounds/ding.wav\"
             config.notification_sound_for("info"),
             Some("/sounds/ding.wav"),
         );
+    }
+
+    // ------------------------------------------------------------------
+    // mcp_servers tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn mcp_servers_empty_by_default() {
+        let config = PhantomConfig::default();
+        assert!(config.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn parse_single_mcp_server() {
+        let toml = "[mcp_servers.my-server]\nurl = \"ws://localhost:8765\"\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "my-server");
+        assert_eq!(config.mcp_servers[0].url, "ws://localhost:8765");
+        assert!(config.mcp_servers[0].enabled);
+    }
+
+    #[test]
+    fn parse_mcp_server_disabled() {
+        let toml = "[mcp_servers.dev]\nurl = \"ws://localhost:9000\"\nenabled = false\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert!(!config.mcp_servers[0].enabled);
+    }
+
+    #[test]
+    fn parse_multiple_mcp_servers() {
+        let toml = "[mcp_servers.alpha]\nurl = \"ws://alpha:1\"\n\n[mcp_servers.beta]\nurl = \"ws://beta:2\"\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 2);
+        assert_eq!(config.mcp_servers[0].name, "alpha");
+        assert_eq!(config.mcp_servers[1].name, "beta");
+    }
+
+    #[test]
+    fn parse_mcp_server_mixed_with_top_level_keys() {
+        let toml = "theme = \"amber\"\n\n[mcp_servers.srv]\nurl = \"ws://srv:3\"\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.theme_name, "amber");
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].url, "ws://srv:3");
+    }
+
+    #[test]
+    fn parse_mcp_server_no_url_defaults_empty() {
+        let toml = "[mcp_servers.empty]\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].url, "");
     }
 }
