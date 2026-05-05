@@ -706,13 +706,30 @@ impl App {
         }
 
         // -- AI Brain thread --
+        // Build a RouterConfig that respects the user's preferred_provider setting.
+        // When preferred_provider is set, the named backend is promoted to the front
+        // of the cascade so it is tried first. When absent, the default order is used.
+        let brain_router_config = match config.preferred_provider() {
+            Some(id) => {
+                info!("AI brain: preferred_provider = '{id}' — promoting backend in cascade");
+                phantom_brain::router::RouterConfig::with_preferred_provider(id)
+            }
+            None => phantom_brain::router::RouterConfig::default(),
+        };
+        // Always apply privacy/offline mode from the application config into the
+        // router config so the router enforces the policy from the very first event.
+        let brain_router_config = phantom_brain::router::RouterConfig {
+            privacy_mode: config.privacy_mode,
+            offline_mode: config.offline_mode,
+            ..brain_router_config
+        };
         let brain = spawn_brain(BrainConfig {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
             enable_memory: true,
-            quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real evrs
-            router: None,
-            catalog: None,
+            quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real events
+            router: Some(brain_router_config),
+            catalog: Some(phantom_brain::provider_catalog::ProviderCatalog::with_builtins()),
             privacy_mode: config.privacy_mode,
             // relay_inbound_rx: wired by the relay task on handshake completion
             // via AiEvent::RelayConnected. None in standalone (non-relay) mode.
