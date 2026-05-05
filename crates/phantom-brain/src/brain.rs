@@ -10,6 +10,7 @@ use std::sync::mpsc;
 use phantom_agents::peer_routing::{AgentRouter, PeerId, decode_inbound};
 use phantom_agents::AgentId;
 use phantom_context::ProjectContext;
+use phantom_history::HistoryEntry;
 use phantom_memory::MemoryStore;
 
 use crate::attention::Attention;
@@ -108,6 +109,13 @@ pub struct BrainConfig {
     ///
     /// `None` in standalone (non-relay) mode.
     pub relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>>,
+
+    /// Initial history snapshot to seed the brain's in-memory context.
+    ///
+    /// Populated from [`phantom_history::HistoryStore::recent`] at startup.
+    /// Updated at runtime via [`crate::events::AiEvent::HistorySnapshot`] events
+    /// so the brain always has the last N commands available for agent prompts.
+    pub history_context: Vec<HistoryEntry>,
 }
 
 impl Default for BrainConfig {
@@ -121,6 +129,7 @@ impl Default for BrainConfig {
             router: None,
             catalog: None,
             relay_inbound_rx: None,
+            history_context: Vec::new(),
         }
     }
 }
@@ -203,6 +212,11 @@ fn brain_supervised(
     // a fresh RelayConnected event from the app.
     let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
         config.relay_inbound_rx;
+    // History snapshot: Vec<HistoryEntry> is Clone, so each restart iteration
+    // gets the same initial snapshot. The brain updates it via HistorySnapshot
+    // events; restarts lose that incremental state but start from the same
+    // seeded baseline.
+    let history_context: Vec<HistoryEntry> = config.history_context;
 
     // Shared slot: the supervisor writes a fresh `iter_tx` here after each
     // restart; the bridge thread reads it to redirect events.
@@ -256,6 +270,8 @@ fn brain_supervised(
             catalog: Some(catalog.clone()),
             // relay_inbound_rx is not Clone; taken on the first iteration only.
             relay_inbound_rx: relay_inbound_rx.take(),
+            // History snapshot is Clone; each restart gets the same seeded baseline.
+            history_context: history_context.clone(),
         };
 
         // Run brain_loop under catch_unwind.
@@ -355,6 +371,8 @@ fn brain_loop(
     // Drained in the proactive timeout tick below.
     let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
         config.relay_inbound_rx;
+    // History snapshot: seeded from BrainConfig, refreshed by HistorySnapshot events.
+    let mut history_snapshot: Vec<HistoryEntry> = config.history_context;
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -389,7 +407,7 @@ fn brain_loop(
                 // time has passed, send it to Claude for commentary.
                 if !output_buffer.is_empty() && last_output_time.elapsed().as_secs() >= 2 {
                     let batch = std::mem::take(&mut output_buffer);
-                    let reply = observe_terminal_output(&batch, &context, &mut router);
+                    let reply = observe_terminal_output(&batch, &context, &mut router, &history_snapshot);
                     if let Some(action) = reply
                         && action_tx.send(action).is_err() {
                             break;
@@ -606,6 +624,13 @@ fn brain_loop(
             continue; // SetOfflineMode is handled here; skip OODA for it.
         }
 
+        // Handle history snapshot refresh.
+        if let AiEvent::HistorySnapshot(entries) = event {
+            log::debug!("Brain: history snapshot updated ({} entries)", entries.len());
+            history_snapshot = entries;
+            continue;
+        }
+
         // ACCUMULATE: OutputChunk events are batched — don't process each one
         // individually. Accumulate and let the timeout tick flush them.
         if let AiEvent::OutputChunk(ref text) = event {
@@ -624,7 +649,7 @@ fn brain_loop(
         // always respond. Try Claude first, fall back to heuristic acknowledgement.
         if let AiEvent::Interrupt(ref query) = event
             && !query.is_empty() {
-                let reply = handle_console_query(query, &context, &mut router);
+                let reply = handle_console_query(query, &context, &mut router, &history_snapshot);
                 if action_tx.send(reply).is_err() {
                     break;
                 }
@@ -1024,6 +1049,7 @@ fn observe_terminal_output(
     output: &str,
     context: &ProjectContext,
     router: &mut BrainRouter,
+    history: &[HistoryEntry],
 ) -> Option<AiAction> {
     let trimmed = output.trim();
 
@@ -1100,9 +1126,10 @@ fn observe_terminal_output(
     };
 
     let project_type = format!("{:?}", context.project_type);
+    let history_section = history_context(history);
     let prompt = format!(
         "You are Phantom, an AI brain embedded in a terminal emulator. \
-         You are observing a developer working in a {} project ({}).\n\n\
+         You are observing a developer working in a {} project ({}).{}\n\n\
          Here is the latest terminal output:\n```\n{}\n```\n\n\
          If there's something noteworthy (an error, a warning, an interesting result, \
          a potential issue), comment briefly (1 sentence). \
@@ -1110,6 +1137,7 @@ fn observe_terminal_output(
          exactly the word QUIET and nothing else.",
         project_type,
         context.name,
+        history_section,
         obs,
     );
 
@@ -1145,6 +1173,7 @@ fn handle_console_query(
     query: &str,
     context: &ProjectContext,
     router: &mut BrainRouter,
+    history: &[HistoryEntry],
 ) -> AiAction {
     // Try to find a Claude backend.
     let claude_backend: Option<ModelBackend> = router
@@ -1161,13 +1190,15 @@ fn handle_console_query(
         };
 
         let project_type = format!("{:?}", context.project_type);
+        let history_section = history_context(history);
         let prompt = format!(
             "You are Phantom, an AI-native terminal emulator's brain. \
-             The user is working in a {} project ({}) and typed this in the console:\n\n\
+             The user is working in a {} project ({}) and typed this in the console:{}\n\n\
              \"{}\"\n\n\
              Respond concisely (1-3 sentences). Be helpful and direct.",
             project_type,
             context.name,
+            history_section,
             query,
         );
 
@@ -1188,6 +1219,32 @@ fn handle_console_query(
     AiAction::ConsoleReply(format!(
         "Received: \"{query}\" (no LLM backend available for query)"
     ))
+}
+
+// ---------------------------------------------------------------------------
+// history_context — format recent command history for agent prompts
+// ---------------------------------------------------------------------------
+
+/// Format recent history entries as a Markdown prompt section.
+///
+/// Returns an empty string when `entries` is empty so callers can safely
+/// append the result to a prompt without a guard. Non-empty slices produce a
+/// `## Recent Command History` section with one bullet per entry, prefixed by
+/// a `✓` (exit 0), `✗` (non-zero exit), or `?` (no exit code recorded).
+pub(crate) fn history_context(entries: &[HistoryEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\n## Recent Command History\n");
+    for entry in entries {
+        let status = match entry.exit_code() {
+            Some(0) => "✓",
+            Some(_) => "✗",
+            None => "?",
+        };
+        out.push_str(&format!("- [{status}] {}\n", entry.command()));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1789,5 +1846,82 @@ mod tests {
             }
             other => panic!("expected DeliverInboundRelay, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // history_context tests
+    // -----------------------------------------------------------------------
+
+    /// Empty slice produces an empty string — callers can append unconditionally.
+    #[test]
+    fn history_context_returns_empty_on_no_history() {
+        let result = history_context(&[]);
+        assert!(result.is_empty(), "empty slice must produce empty string, got: {result:?}");
+    }
+
+    /// Three entries produce a formatted section with correct bullet lines.
+    #[test]
+    fn history_context_formats_recent_commands() {
+        use uuid::Uuid;
+
+        let session = Uuid::new_v4();
+        let entries = vec![
+            phantom_history::HistoryEntry::builder("cargo build", "/tmp", session)
+                .exit_code(0)
+                .build(),
+            phantom_history::HistoryEntry::builder("cargo test", "/tmp", session)
+                .exit_code(0)
+                .build(),
+            phantom_history::HistoryEntry::builder("git status", "/tmp", session)
+                .build(), // no exit code
+        ];
+
+        let result = history_context(&entries);
+
+        assert!(
+            result.contains("## Recent Command History"),
+            "output must contain the section header"
+        );
+        assert!(result.contains("cargo build"), "output must include first command");
+        assert!(result.contains("cargo test"), "output must include second command");
+        assert!(result.contains("git status"), "output must include third command");
+    }
+
+    /// Exit code != 0 is marked with the ✗ symbol.
+    #[test]
+    fn history_context_marks_failed_commands() {
+        use uuid::Uuid;
+
+        let session = Uuid::new_v4();
+        let entries = vec![
+            phantom_history::HistoryEntry::builder("cargo build", "/tmp", session)
+                .exit_code(1)
+                .build(),
+        ];
+
+        let result = history_context(&entries);
+        assert!(result.contains("✗"), "failed command must be marked with ✗, got: {result:?}");
+        assert!(!result.contains("✓"), "failed command must NOT be marked with ✓");
+    }
+
+    /// BrainConfig accepts a non-empty history_context without type errors.
+    #[test]
+    fn brain_config_accepts_history_context() {
+        use uuid::Uuid;
+
+        let session = Uuid::new_v4();
+        let entry = phantom_history::HistoryEntry::builder("ls -la", "/tmp", session)
+            .exit_code(0)
+            .build();
+
+        let config = BrainConfig {
+            history_context: vec![entry],
+            enable_suggestions: false,
+            enable_memory: false,
+            ..Default::default()
+        };
+
+        assert_eq!(config.history_context.len(), 1);
+        assert_eq!(config.history_context[0].command(), "ls -la");
     }
 }
