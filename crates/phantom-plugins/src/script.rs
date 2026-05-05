@@ -249,7 +249,9 @@ mod tests {
             license: None,
             homepage: None,
             entry_point: "script".into(),
-            permissions: vec![],
+            // RunCommands is required to execute plugin commands (permission gate added
+            // as part of the Bug-2 fix in registry.rs).
+            permissions: vec![Permission::RunCommands],
             hooks: vec![HookType::OnStartup, HookType::OnShutdown],
             commands: vec![CommandDef {
                 name: "greet".into(),

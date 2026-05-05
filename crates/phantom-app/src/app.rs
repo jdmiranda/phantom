@@ -945,7 +945,7 @@ impl App {
         );
 
         // -- Plugin registry --
-        let plugin_registry = match PluginRegistry::new() {
+        let mut plugin_registry = match PluginRegistry::new() {
             Ok(reg) => reg,
             Err(e) => {
                 warn!("Failed to create plugin registry: {e}");
@@ -961,6 +961,31 @@ impl App {
                 }
             }
         };
+
+        // Scan for installed plugins and auto-load them; errors per-plugin are
+        // logged as warnings inside scan() so one bad plugin cannot block boot.
+        match plugin_registry.scan() {
+            Ok(manifests) => {
+                info!(
+                    "Plugin scan complete: {} manifest(s) found, {} plugin(s) loaded",
+                    manifests.len(),
+                    plugin_registry.len()
+                );
+            }
+            Err(e) => {
+                warn!("Plugin scan failed: {e}");
+            }
+        }
+
+        // Dispatch OnStartup to all loaded plugins now that the registry is ready.
+        {
+            let startup_ctx = phantom_plugins::HookContext::startup(&project_dir);
+            let responses = plugin_registry
+                .dispatch_hook(&phantom_plugins::HookType::OnStartup, &startup_ctx);
+            for resp in &responses {
+                info!("[plugin startup]: {resp:?}");
+            }
+        }
 
         // -- Job pool (4 workers for async brain queries, resource loading, etc.) --
         let job_pool = crate::jobs::JobPool::start_up(4);
