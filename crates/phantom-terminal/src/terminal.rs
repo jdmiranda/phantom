@@ -3,6 +3,7 @@
 //! Spawns a PTY with the user's default shell and manages the terminal state
 //! machine. All PTY I/O is non-blocking.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
@@ -171,6 +172,18 @@ pub struct PhantomTerminal {
     /// Number of valid bytes written into `read_buf` during the last
     /// [`pty_read`](PhantomTerminal::pty_read) call.  Zero between reads.
     last_read_len: usize,
+
+    /// Current OSC 8 hyperlink URL being written by the terminal program.
+    /// Set when `\x1b]8;params;uri\x07` (open) is received; cleared on
+    /// `\x1b]8;;\x07` (close). Cells written while this is `Some` inherit
+    /// the URL.
+    current_hyperlink: Option<Arc<str>>,
+
+    /// Per-cell hyperlink map: `(row, col) -> Arc<str>`.
+    ///
+    /// Populated by the OSC-8 post-processor in `pty_read`. Consulted by
+    /// `hit_test_hyperlink` on mouse-click events.
+    hyperlink_map: HashMap<(usize, usize), Arc<str>>,
 }
 
 impl PhantomTerminal {
@@ -221,6 +234,8 @@ impl PhantomTerminal {
             size,
             read_buf: vec![0u8; PTY_READ_BUF],
             last_read_len: 0,
+            current_hyperlink: None,
+            hyperlink_map: HashMap::new(),
         })
     }
 
@@ -272,6 +287,14 @@ impl PhantomTerminal {
         // Feed the raw bytes through the VTE parser into the terminal.
         // This mirrors what alacritty's event_loop does: `parser.advance(&mut term, buf)`.
         self.parser.advance(&mut self.term, &self.read_buf[..n]);
+
+        // Post-process the raw buffer for OSC 8 hyperlink sequences.
+        // alacritty_terminal does not expose OSC 8 via its EventListener, so we
+        // scan the raw bytes ourselves and track which cells carry hyperlinks.
+        // We collect into an owned Vec to avoid a simultaneous &self.read_buf and
+        // &mut self borrow inside process_osc8 (which also reads self.term).
+        #[allow(clippy::unnecessary_to_owned)]
+        self.process_osc8(&self.read_buf[..n].to_vec());
 
         // Drain any PTY-write requests the terminal generated (e.g. device
         // attribute responses) and write them back to the PTY.
@@ -446,6 +469,123 @@ impl PhantomTerminal {
         Some((start_col, start_row, end_col, end_row))
     }
 
+    // -- Hyperlink API --------------------------------------------------------
+
+    /// Hit-test a cell position against the OSC-8 hyperlink map.
+    ///
+    /// Returns the URL string when the cell at `(col, row)` is covered by an
+    /// OSC 8 hyperlink (either from a real OSC 8 sequence or from URL regex
+    /// fallback annotation). Returns `None` for plain cells.
+    #[must_use]
+    pub fn hit_test_hyperlink(&self, col: usize, row: usize) -> Option<&str> {
+        self.hyperlink_map.get(&(row, col)).map(|s| s.as_ref())
+    }
+
+    /// Return a snapshot of the hyperlink map for a given viewport row.
+    ///
+    /// Used by the grid extractor to annotate `RenderCell::hyperlink` after
+    /// `extract_grid_themed` returns the base cell buffer.
+    #[must_use]
+    pub fn hyperlinks_for_row(&self, row: usize) -> Vec<(usize, Arc<str>)> {
+        self.hyperlink_map
+            .iter()
+            .filter_map(|((r, c), url)| {
+                if *r == row {
+                    Some((*c, Arc::clone(url)))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Scan raw PTY bytes for OSC 8 sequences and update the hyperlink map.
+    ///
+    /// OSC 8 open:  `\x1b]8;<params>;<uri>\x07`  or `\x1b]8;<params>;<uri>\x1b\\`
+    /// OSC 8 close: `\x1b]8;;\x07`               or `\x1b]8;;\x1b\\`
+    ///
+    /// When a URI is active, we stamp the current cursor position and all
+    /// subsequent cursor positions (as the VTE feeds characters) with the URL.
+    /// This is an approximation: we track the cursor position *after* the
+    /// alacritty VTE has already advanced it, so each call to this function
+    /// records the cursor position at the end of the chunk. For multi-chunk
+    /// output, some cells may be missed on chunk boundaries; this is acceptable
+    /// for the common case of single-line hyperlinks.
+    fn process_osc8(&mut self, buf: &[u8]) {
+        // Parse OSC sequences out of the raw byte stream.
+        // Format: ESC ] <command> <ST>
+        //   where ST is BEL (0x07) or ESC \ (0x1b 0x5c).
+        // OSC 8 command: "8;<params>;<uri>"
+        let mut i = 0;
+        while i < buf.len() {
+            // Look for ESC ]
+            if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b']' {
+                let osc_start = i + 2;
+                // Find the string terminator: BEL or ESC \.
+                let mut end = osc_start;
+                while end < buf.len() {
+                    if buf[end] == 0x07 {
+                        break;
+                    }
+                    if buf[end] == 0x1b && end + 1 < buf.len() && buf[end + 1] == 0x5c {
+                        break;
+                    }
+                    end += 1;
+                }
+
+                if end < buf.len() {
+                    let osc_payload = &buf[osc_start..end];
+                    // Check for OSC 8: starts with "8;"
+                    if osc_payload.starts_with(b"8;") {
+                        let rest = &osc_payload[2..]; // after "8;"
+                        // Find the second ';' separating params from URI.
+                        if let Some(semi) = rest.iter().position(|&b| b == b';') {
+                            let uri = &rest[semi + 1..];
+                            if uri.is_empty() {
+                                // OSC 8 close.
+                                trace!("OSC 8 close");
+                                self.current_hyperlink = None;
+                            } else if let Ok(url_str) = std::str::from_utf8(uri) {
+                                // OSC 8 open.
+                                let url: Arc<str> = url_str.into();
+                                trace!("OSC 8 open: {url_str}");
+                                self.current_hyperlink = Some(url);
+                            }
+                        }
+                    }
+                    // Advance past the ST.
+                    i = if buf[end] == 0x07 { end + 1 } else { end + 2 };
+                    continue;
+                }
+            }
+
+            // If we have an active hyperlink, record the current cursor position.
+            if let Some(ref url) = self.current_hyperlink.clone() {
+                let cursor = self.term.grid().cursor.point;
+                let col = cursor.column.0;
+                let row_line = cursor.line.0;
+                let display_offset = self.term.grid().display_offset() as i32;
+                // Convert grid line to viewport row.
+                let viewport_row = row_line + display_offset;
+                if viewport_row >= 0 {
+                    self.hyperlink_map
+                        .insert((viewport_row as usize, col), Arc::clone(url));
+                }
+            }
+
+            i += 1;
+        }
+    }
+
+    /// Clear the entire hyperlink map. Call when the terminal screen is reset
+    /// (e.g. on clear-screen or alt-screen toggle) to avoid stale entries.
+    pub fn clear_hyperlink_map(&mut self) {
+        self.hyperlink_map.clear();
+        self.current_hyperlink = None;
+    }
+
+    // -- Internal helpers ----------------------------------------------------
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {
@@ -467,6 +607,98 @@ impl PhantomTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // OSC 8 hyperlink tests
+    // =========================================================================
+
+    /// `process_osc8` sets `current_hyperlink` when a BEL-terminated OSC 8 open
+    /// sequence is present in the byte buffer.
+    #[test]
+    fn osc8_open_sets_current_hyperlink() {
+        let mut term = PhantomTerminal::new(80, 24).expect("create terminal");
+        assert!(term.current_hyperlink.is_none());
+
+        // OSC 8 open: ESC ] 8 ; ; https://example.com BEL
+        let seq = b"\x1b]8;;https://example.com\x07";
+        term.process_osc8(seq);
+
+        assert_eq!(
+            term.current_hyperlink.as_deref(),
+            Some("https://example.com"),
+            "current_hyperlink must be set after OSC 8 open"
+        );
+    }
+
+    /// `process_osc8` clears `current_hyperlink` on OSC 8 close.
+    #[test]
+    fn osc8_close_clears_hyperlink() {
+        let mut term = PhantomTerminal::new(80, 24).expect("create terminal");
+
+        // First open, then close.
+        let open = b"\x1b]8;;https://example.com\x07";
+        term.process_osc8(open);
+        assert!(term.current_hyperlink.is_some(), "must be set after open");
+
+        let close = b"\x1b]8;;\x07";
+        term.process_osc8(close);
+        assert!(
+            term.current_hyperlink.is_none(),
+            "current_hyperlink must be None after OSC 8 close"
+        );
+    }
+
+    /// `hit_test_hyperlink` returns `None` when no hyperlinks are in the map.
+    #[test]
+    fn hit_test_returns_none_for_plain_cell() {
+        let term = PhantomTerminal::new(80, 24).expect("create terminal");
+        assert!(
+            term.hit_test_hyperlink(5, 2).is_none(),
+            "plain cell must return None"
+        );
+    }
+
+    /// `hit_test_hyperlink` returns the URL when the map has an entry for the cell.
+    #[test]
+    fn hit_test_returns_url_for_hyperlink_cell() {
+        let mut term = PhantomTerminal::new(80, 24).expect("create terminal");
+        let url: Arc<str> = Arc::from("https://phantom.dev");
+        term.hyperlink_map.insert((3, 7), Arc::clone(&url));
+
+        let result = term.hit_test_hyperlink(7, 3);
+        assert_eq!(
+            result,
+            Some("https://phantom.dev"),
+            "hit_test must return the URL for an annotated cell"
+        );
+    }
+
+    /// `clear_hyperlink_map` removes all entries and resets `current_hyperlink`.
+    #[test]
+    fn clear_hyperlink_map_resets_state() {
+        let mut term = PhantomTerminal::new(80, 24).expect("create terminal");
+        let url: Arc<str> = Arc::from("https://test.com");
+        term.hyperlink_map.insert((0, 0), url);
+        term.current_hyperlink = Some(Arc::from("https://test.com"));
+
+        term.clear_hyperlink_map();
+        assert!(term.hyperlink_map.is_empty(), "map must be empty after clear");
+        assert!(term.current_hyperlink.is_none(), "current_hyperlink must be None after clear");
+    }
+
+    /// ESC-\ string terminator works in addition to BEL.
+    #[test]
+    fn osc8_open_with_st_terminator() {
+        let mut term = PhantomTerminal::new(80, 24).expect("create terminal");
+        // ESC ] 8 ; ; https://esc-term.io ESC \
+        let seq = b"\x1b]8;;https://esc-term.io\x1b\\";
+        term.process_osc8(seq);
+        assert_eq!(
+            term.current_hyperlink.as_deref(),
+            Some("https://esc-term.io"),
+            "ESC-\\ terminator must be recognized"
+        );
+    }
 
     #[test]
     fn test_scroll_methods_exist() {

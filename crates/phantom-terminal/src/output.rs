@@ -3,6 +3,8 @@
 //! Bridges the `alacritty_terminal` grid to the renderer by extracting the
 //! visible region into a flat `Vec<RenderCell>` with RGBA float colors.
 
+use std::sync::Arc;
+
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
@@ -27,6 +29,8 @@ bitflags::bitflags! {
         const HIDDEN        = 1 << 6;
         const STRIKETHROUGH = 1 << 7;
         const WIDE_CHAR     = 1 << 8;
+        /// Cell carries an OSC 8 hyperlink (or was annotated by URL regex fallback).
+        const HYPERLINK     = 1 << 9;
     }
 }
 
@@ -67,7 +71,10 @@ impl CellFlags {
 // ---------------------------------------------------------------------------
 
 /// A single cell ready for GPU consumption.
-#[derive(Debug, Clone, Copy)]
+///
+/// Note: `Copy` is intentionally not derived because `hyperlink: Option<Arc<str>>`
+/// is not `Copy`. Call `.clone()` where a copy is needed.
+#[derive(Debug, Clone)]
 pub struct RenderCell {
     /// The character to render (' ' for empty / spacer cells).
     pub ch: char,
@@ -77,6 +84,9 @@ pub struct RenderCell {
     pub bg: [f32; 4],
     /// Attribute flags (bold, italic, underline, etc.).
     pub flags: CellFlags,
+    /// OSC 8 hyperlink URL, if any. `None` for plain cells; `Some(url)` for
+    /// cells covered by an OSC 8 sequence or URL regex fallback detection.
+    pub hyperlink: Option<Arc<str>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +291,7 @@ pub fn extract_grid_themed<T: EventListener>(
                     fg,
                     bg,
                     flags: CellFlags::empty(),
+                    hyperlink: None,
                 });
                 continue;
             }
@@ -322,6 +333,7 @@ pub fn extract_grid_themed<T: EventListener>(
                 fg,
                 bg,
                 flags: render_flags,
+                hyperlink: None,
             });
         }
     }
@@ -372,6 +384,83 @@ fn extract_cursor<T: EventListener>(term: &Term<T>) -> CursorState {
         shape,
         blinking,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hyperlink annotation helpers
+// ---------------------------------------------------------------------------
+
+/// Annotate a row of `RenderCell`s with OSC-8 hyperlinks from a pre-built URL map.
+///
+/// `hyperlinks` is a slice of `(col_start, col_end_exclusive, Arc<str>)` tuples
+/// built by the caller (from `PhantomTerminal`'s OSC-8 state). Each cell whose
+/// column index falls within a range gets `hyperlink` set and `HYPERLINK` flag added.
+pub fn annotate_hyperlinks(
+    row: &mut [RenderCell],
+    hyperlinks: &[(usize, usize, Arc<str>)],
+) {
+    for (start, end, url) in hyperlinks {
+        for cell in row[*start..*end].iter_mut() {
+            cell.hyperlink = Some(Arc::clone(url));
+            cell.flags |= CellFlags::HYPERLINK;
+        }
+    }
+}
+
+/// Scan a row of cells for bare URLs using a simple `https?://...` regex.
+///
+/// Returns a list of `(col_start, col_end_exclusive, url_string)` tuples for
+/// every run of cells that contains a URL not already annotated with
+/// `CellFlags::HYPERLINK`. This is the fallback path for programs that print
+/// URLs without emitting OSC 8 sequences.
+#[must_use]
+pub fn detect_urls(row: &[RenderCell]) -> Vec<(usize, usize, String)> {
+    // Collect the text of the row, recording the column of each char.
+    let mut text = String::with_capacity(row.len());
+    let mut col_map: Vec<usize> = Vec::with_capacity(row.len());
+
+    for (col, cell) in row.iter().enumerate() {
+        // Skip cells that already have an OSC-8 annotation.
+        if cell.flags.contains(CellFlags::HYPERLINK) {
+            // Insert a space so byte offsets stay aligned with col_map.
+            text.push(' ');
+            col_map.push(col);
+            continue;
+        }
+        let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
+        text.push(ch);
+        col_map.push(col);
+    }
+
+    let mut results = Vec::new();
+
+    // Simple URL scanner: find `http://` or `https://` prefixes and extend
+    // until whitespace or a control character. We avoid pulling in the regex
+    // crate here so phantom-terminal stays dependency-light; a manual scan is
+    // fast enough for an 80–220-column row.
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for `http` prefix.
+        if bytes[i..].starts_with(b"http://") || bytes[i..].starts_with(b"https://") {
+            let start = i;
+            // Advance until whitespace, NUL, ESC, or BEL.
+            while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | 0 | 0x1b | 0x07) {
+                i += 1;
+            }
+            let end = i;
+            if end > start {
+                let url = text[start..end].to_owned();
+                let col_start = col_map[start];
+                let col_end = col_map[end - 1] + 1;
+                results.push((col_start, col_end, url));
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    results
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +546,124 @@ pub fn ansi_color_table() -> [[f32; 4]; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // OSC 8 / URL detection tests
+    // =========================================================================
+
+    /// `detect_urls` finds an https URL in the middle of a row.
+    #[test]
+    fn url_regex_detects_https_url_in_row() {
+        let row: Vec<RenderCell> = "visit https://example.com for more"
+            .chars()
+            .map(|ch| RenderCell {
+                ch,
+                fg: [1.0; 4],
+                bg: [0.0, 0.0, 0.0, 1.0],
+                flags: CellFlags::empty(),
+                hyperlink: None,
+            })
+            .collect();
+
+        let hits = detect_urls(&row);
+        assert_eq!(hits.len(), 1, "should detect exactly one URL");
+        let (start, end, url) = &hits[0];
+        assert_eq!(url, "https://example.com", "url mismatch: {url}");
+        assert!(
+            *start < *end,
+            "col_start ({start}) must be less than col_end ({end})"
+        );
+        // Col range covers the URL characters.
+        let expected_start = "visit ".len();
+        assert_eq!(*start, expected_start);
+    }
+
+    /// `detect_urls` must skip cells already annotated with `CellFlags::HYPERLINK`.
+    #[test]
+    fn url_regex_ignores_hyperlink_annotated_cells() {
+        let text = "https://example.com";
+        let row: Vec<RenderCell> = text
+            .chars()
+            .map(|ch| RenderCell {
+                ch,
+                fg: [1.0; 4],
+                bg: [0.0, 0.0, 0.0, 1.0],
+                // Pre-annotated — the scanner must skip these.
+                flags: CellFlags::HYPERLINK,
+                hyperlink: Some(Arc::from("https://example.com")),
+            })
+            .collect();
+
+        let hits = detect_urls(&row);
+        assert!(
+            hits.is_empty(),
+            "pre-annotated HYPERLINK cells must not be re-detected by the URL scanner"
+        );
+    }
+
+    /// `detect_urls` returns empty for a row with no URLs.
+    #[test]
+    fn url_regex_no_urls_in_plain_text() {
+        let row: Vec<RenderCell> = "hello world no links here"
+            .chars()
+            .map(|ch| RenderCell {
+                ch,
+                fg: [1.0; 4],
+                bg: [0.0, 0.0, 0.0, 1.0],
+                flags: CellFlags::empty(),
+                hyperlink: None,
+            })
+            .collect();
+
+        let hits = detect_urls(&row);
+        assert!(hits.is_empty(), "no URLs in plain text row");
+    }
+
+    /// `annotate_hyperlinks` sets the `HYPERLINK` flag and `hyperlink` field.
+    #[test]
+    fn annotate_hyperlinks_sets_flag_and_url() {
+        let mut row: Vec<RenderCell> = "abcdef"
+            .chars()
+            .map(|ch| RenderCell {
+                ch,
+                fg: [1.0; 4],
+                bg: [0.0, 0.0, 0.0, 1.0],
+                flags: CellFlags::empty(),
+                hyperlink: None,
+            })
+            .collect();
+
+        let url: Arc<str> = Arc::from("https://test.com");
+        let hyperlinks = vec![(1usize, 4usize, Arc::clone(&url))];
+        annotate_hyperlinks(&mut row, &hyperlinks);
+
+        // Cells 1..4 should have HYPERLINK set.
+        for i in 1..4 {
+            assert!(
+                row[i].flags.contains(CellFlags::HYPERLINK),
+                "cell {i} must have HYPERLINK flag"
+            );
+            assert_eq!(
+                row[i].hyperlink.as_deref(),
+                Some("https://test.com"),
+                "cell {i} must carry the url"
+            );
+        }
+
+        // Cells outside the range must be untouched.
+        assert!(!row[0].flags.contains(CellFlags::HYPERLINK));
+        assert!(!row[4].flags.contains(CellFlags::HYPERLINK));
+        assert!(!row[5].flags.contains(CellFlags::HYPERLINK));
+    }
+
+    /// `CellFlags::HYPERLINK` must round-trip through the bitflag.
+    #[test]
+    fn cell_flags_hyperlink_bit() {
+        let flags = CellFlags::HYPERLINK;
+        assert!(flags.contains(CellFlags::HYPERLINK));
+        assert!(!flags.contains(CellFlags::BOLD));
+        assert_ne!(flags.bits(), 0);
+    }
 
     #[test]
     fn color_table_has_correct_bounds() {

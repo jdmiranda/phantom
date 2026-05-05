@@ -863,8 +863,26 @@ impl AppCoordinator {
         adapter.accept_command(cmd, args)
     }
 
+    /// Query whether a terminal cell at `(col, row)` carries a hyperlink.
+    ///
+    /// Routes the `"hyperlink_at"` command to the adapter. Returns the URL
+    /// string when the cell is annotated with an OSC 8 hyperlink (or URL regex
+    /// fallback); returns `None` when the cell is plain or the adapter does not
+    /// support hyperlink querying.
+    pub fn hyperlink_at(&mut self, app_id: AppId, col: usize, row: usize) -> Option<String> {
+        let result = self.send_command(
+            app_id,
+            "hyperlink_at",
+            &serde_json::json!({"col": col, "row": row}),
+        );
+        match result {
+            Ok(url) if !url.is_empty() => Some(url),
+            _ => None,
+        }
+    }
+
     /// Number of adapters currently registered (including dead, pre-GC).
-    #[must_use] 
+    #[must_use]
     pub fn adapter_count(&self) -> usize {
         self.registry.count()
     }

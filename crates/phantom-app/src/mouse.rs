@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use log::debug;
+use log::{debug, warn};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
 use phantom_terminal::input::{
@@ -454,6 +454,20 @@ impl App {
                     debug!("Mouse focus: adapter {app_id}");
                     self.coordinator.set_focus(app_id);
                 }
+
+            // Hyperlink hit-test: on single click, check if the clicked cell
+            // carries an OSC 8 hyperlink and open it in the default browser.
+            if self.click_count == 1
+                && let Some(focused) = self.coordinator.focused()
+                    && let Some((col, row)) = self.cursor_to_cell(focused) {
+                        if let Some(url) = self.coordinator.hyperlink_at(focused, col, row) {
+                            debug!("Hyperlink click: {url}");
+                            if let Err(e) = open::that(&url) {
+                                warn!("Failed to open hyperlink {url}: {e}");
+                            }
+                            return;
+                        }
+                    }
 
             // Dispatch selection based on click count.
             if let Some(focused) = self.coordinator.focused()
