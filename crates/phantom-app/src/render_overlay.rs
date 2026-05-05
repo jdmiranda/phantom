@@ -750,6 +750,48 @@ impl App {
         }
     }
 
+    /// Build the keybind help overlay (F1 / ? toggles it).
+    ///
+    /// Rendered above all other overlays — the panel sits centred on the screen.
+    /// Uses the [`phantom_ui::widgets::Widget`] trait so the widget owns all
+    /// layout math; this method only translates `TextSegment`s into glyph
+    /// instances.
+    pub(crate) fn build_keybind_help_overlay(
+        &mut self,
+        screen_size: [f32; 2],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        use phantom_ui::widgets::Widget;
+        use phantom_ui::layout::Rect;
+
+        if !self.keybind_help.visible() {
+            return;
+        }
+
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: screen_size[0],
+            height: screen_size[1],
+        };
+
+        // Quads from the widget.
+        for q in self.keybind_help.render_quads(&rect) {
+            quads.push(QuadInstance {
+                pos: q.pos,
+                size: q.size,
+                color: q.color,
+                border_radius: q.border_radius,
+            });
+        }
+
+        // Text segments → glyph instances via the shared text renderer.
+        for seg in self.keybind_help.render_text(&rect) {
+            self.render_overlay_text(&seg.text, seg.x, seg.y, seg.color, glyphs);
+        }
+    }
+
     /// Helper: render a text string directly into the overlay glyph buffer.
     pub(crate) fn render_overlay_text(
         &mut self,

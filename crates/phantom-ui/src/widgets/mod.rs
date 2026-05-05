@@ -53,6 +53,10 @@ pub use input_bar::{INPUT_BAR_HEIGHT, InputBar, InputKey};
 pub mod focus_ring;
 pub use focus_ring::{FADE_DURATION_MS, FocusRing};
 
+// Issue #27 — full-screen keybind help overlay (F1 / ?).
+pub mod keybind_help;
+pub use keybind_help::KeybindHelp;
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------

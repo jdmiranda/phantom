@@ -396,6 +396,30 @@ impl App {
             return;
         }
 
+        // F1 or bare `?` toggles the keybind help overlay.
+        // Handled before console/suggestion routing so the overlay is always
+        // reachable regardless of which sub-mode is active.
+        if !modifiers.state().control_key()
+            && !modifiers.state().alt_key()
+            && !modifiers.state().super_key()
+        {
+            let is_f1 = matches!(&event.logical_key, Key::Named(NamedKey::F1));
+            let is_question = matches!(&event.logical_key, Key::Character(s) if s.as_str() == "?");
+            if is_f1 || is_question {
+                self.keybind_help.toggle();
+                debug!("Keybind help overlay toggled: {}", self.keybind_help.visible());
+                return;
+            }
+        }
+
+        // Escape also hides the keybind help overlay if it is visible.
+        if self.keybind_help.visible()
+            && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+        {
+            self.keybind_help.hide();
+            return;
+        }
+
         // Ctrl+Shift+Space: recall last dismissed suggestion.
         {
             let mods = modifiers.state();
