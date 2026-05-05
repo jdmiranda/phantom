@@ -371,6 +371,16 @@ pub struct App {
     /// finished within `GIT_REFRESH_TIMEOUT` we log a warning and drop it so
     /// the next 30-second tick can spawn a fresh one.
     pub(crate) git_refresh_spawned_at: Option<Instant>,
+    /// Cooperative cancellation flag for the running git-refresh thread.
+    ///
+    /// Set to `true` on timeout so the thread can exit early rather than
+    /// sending a stale GitStateChanged event after the handle is dropped.
+    pub(crate) git_refresh_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
+    // -- STT task handles (for abort on shutdown) --
+    /// JoinHandles for the two background tokio tasks spawned by the STT
+    /// pipeline.  Stored here so `shutdown()` can abort them immediately.
+    pub(crate) stt_task_handles: Option<crate::stt::SttTaskHandles>,
 
     // -- Reusable overlay text buffer (avoids per-frame alloc in console render) --
     pub(crate) overlay_line_buf: Vec<(String, [f32; 4])>,
@@ -1182,6 +1192,8 @@ impl App {
             git_refresh_last: now,
             git_refresh_handle: None,
             git_refresh_spawned_at: None,
+            git_refresh_cancel: None,
+            stt_task_handles: None,
             overlay_line_buf: Vec::with_capacity(128),
             video_renderer,
             video_playback: None,
@@ -1248,6 +1260,16 @@ impl App {
                 .filter(|e| e.app_type == "agent")
                 .count(),
         ))
+    }
+
+    /// Notify the supervisor that the render loop is escalating past the
+    /// consecutive-panic threshold and is about to force-exit.
+    ///
+    /// Best-effort: if the socket is broken the error is silently ignored.
+    pub fn notify_render_panic(&mut self, count: u32, last_message: &str) {
+        if let Some(ref mut sv) = self.supervisor {
+            sv.notify_render_panic(count, last_message);
+        }
     }
 
     /// Graceful shutdown: save session, dispatch plugin hooks, shut down brain,
@@ -1341,6 +1363,13 @@ impl App {
             info!("[plugin shutdown]: {resp:?}");
         }
         self.plugin_registry.shutdown_all();
+
+        // Abort STT background tasks immediately so the pipeline does not
+        // block shutdown waiting for the channel-close cascade to propagate
+        // through a long STT backend call.
+        if let Some(handles) = self.stt_task_handles.take() {
+            handles.abort();
+        }
 
         // Shut down the brain thread.
         if let Some(ref brain) = self.brain {

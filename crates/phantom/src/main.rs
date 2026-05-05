@@ -193,6 +193,13 @@ impl ApplicationHandler for Phantom {
                                 self.consecutive_panics,
                             );
                             if let Some(app) = &mut self.app {
+                                // Notify the supervisor before shutting down so it
+                                // can distinguish a panic-escalation crash from a
+                                // silent heartbeat-timeout crash (GPU hang, SIGKILL).
+                                app.notify_render_panic(
+                                    self.consecutive_panics,
+                                    &panic_message(&panic),
+                                );
                                 app.shutdown();
                             }
                             event_loop.exit();
