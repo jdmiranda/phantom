@@ -221,7 +221,7 @@ impl App {
         let text_color = [0.1, 0.9, 0.6, 1.0];
         let cells: Vec<phantom_renderer::text::TerminalCell> = display
             .chars()
-            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: text_color })
+            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: text_color, bold: false, italic: false })
             .collect();
 
         if !cells.is_empty() {
@@ -244,7 +244,7 @@ impl App {
             let opt_text = format!("  [{}] {}", opt.key, opt.label);
             let opt_cells: Vec<phantom_renderer::text::TerminalCell> = opt_text
                 .chars()
-                .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: opt_color })
+                .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: opt_color, bold: false, italic: false })
                 .collect();
 
             if !opt_cells.is_empty() {
@@ -761,7 +761,7 @@ impl App {
     ) {
         let cells: Vec<phantom_renderer::text::TerminalCell> = text
             .chars()
-            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: color })
+            .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: color, bold: false, italic: false })
             .collect();
         if !cells.is_empty() {
             let cols = cells.len();

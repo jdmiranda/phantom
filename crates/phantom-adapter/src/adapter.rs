@@ -96,6 +96,13 @@ pub trait AppCore: Send {
     fn take_pending_window_title(&mut self) -> Option<String> {
         None
     }
+
+    /// Drain any OSC 52 clipboard texts that the terminal has buffered since
+    /// the last call.  Terminal adapters override this to return decoded text;
+    /// all other adapters use the default empty-vec return.
+    fn drain_osc52(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Visual adapters that render into a rect.
@@ -274,6 +281,10 @@ pub struct TerminalCell {
     pub ch: char,
     pub fg: [f32; 4],
     pub bg: [f32; 4],
+    /// Whether this cell should be rendered in bold weight.
+    pub bold: bool,
+    /// Whether this cell should be rendered in italic style.
+    pub italic: bool,
 }
 
 /// Cursor position and appearance.

@@ -194,6 +194,8 @@ impl TerminalAdapter {
                 ch: rc.ch,
                 fg: rc.fg,
                 bg: rc.bg,
+                bold: rc.flags.contains(phantom_terminal::output::CellFlags::BOLD),
+                italic: rc.flags.contains(phantom_terminal::output::CellFlags::ITALIC),
             })
             .collect();
 
@@ -414,6 +416,11 @@ impl AppCore for TerminalAdapter {
     fn take_pending_window_title(&mut self) -> Option<String> {
         self.pending_title.take()
     }
+
+    /// Drain any OSC 52 clipboard texts decoded by the terminal since the last call.
+    fn drain_osc52(&mut self) -> Vec<String> {
+        self.terminal.drain_osc52()
+    }
 }
 
 impl Renderable for TerminalAdapter {
@@ -429,6 +436,8 @@ impl Renderable for TerminalAdapter {
                 ch: rc.ch,
                 fg: rc.fg,
                 bg: rc.bg,
+                bold: rc.flags.contains(phantom_terminal::output::CellFlags::BOLD),
+                italic: rc.flags.contains(phantom_terminal::output::CellFlags::ITALIC),
             })
             .collect();
 

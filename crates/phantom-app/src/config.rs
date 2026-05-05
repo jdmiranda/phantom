@@ -19,6 +19,9 @@ pub struct PhantomConfig {
     pub theme_name: String,
     /// Font size in points.
     pub font_size: f32,
+    /// Optional font family name (e.g. "Fira Code"). When `None`, the system
+    /// monospace font is used.
+    pub font_family: Option<String>,
     /// Shader param overrides (applied on top of the theme defaults).
     pub shader_overrides: ShaderOverrides,
     /// Skip the boot sequence and go straight to terminal.
@@ -90,6 +93,7 @@ impl Default for PhantomConfig {
         Self {
             theme_name: "phosphor".to_string(),
             font_size: 14.0,
+            font_family: None,
             shader_overrides: ShaderOverrides::default(),
             skip_boot: false,
             demo_mode: false,
@@ -163,6 +167,11 @@ impl PhantomConfig {
                     "font_size" => {
                         if let Ok(v) = value.parse::<f32>() {
                             config.font_size = v;
+                        }
+                    }
+                    "font_family" => {
+                        if !value.is_empty() {
+                            config.font_family = Some(value.to_string());
                         }
                     }
                     "scanline_intensity" => {
@@ -330,6 +339,9 @@ theme = "phosphor"
 
 # Font size in points
 font_size = 14.0
+
+# Font family (optional). Uses system monospace font when not set.
+# font_family = "Fira Code"
 
 # CRT Shader Parameters (0.0 - 1.0)
 # Uncomment and adjust to override the theme defaults.
