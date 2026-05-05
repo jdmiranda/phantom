@@ -66,6 +66,10 @@ pub use keybind_help::KeybindHelp;
 pub mod search_bar;
 pub use search_bar::{SEARCH_BAR_HEIGHT, SearchBar, SearchBarAction, SearchKey};
 
+// Context menu widget — floating popup with keyboard navigation.
+pub mod context_menu;
+pub use context_menu::{ContextMenu, ContextMenuItem};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------
