@@ -86,7 +86,8 @@ fn skill_is_send_sync() {
 #[cfg(all(debug_assertions, feature = "hot-modules"))]
 #[ignore = "requires cdylib build step and PHANTOM_HOT_MODULES=1; CI harness tracked in #450"]
 fn dylib_load_and_classify() {
-    std::env::set_var("PHANTOM_HOT_MODULES", "1");
+    // SAFETY: single-threaded ignored test.
+    unsafe { std::env::set_var("PHANTOM_HOT_MODULES", "1") };
     let skill = SkillHost::build();
     // If the dylib loaded, classify_command should still work correctly.
     let ct = skill.classify_command("git log --oneline");
@@ -98,7 +99,8 @@ fn dylib_load_and_classify() {
 #[cfg(all(debug_assertions, feature = "hot-modules"))]
 #[ignore = "requires cdylib build step and PHANTOM_HOT_MODULES=1; CI harness tracked in #450"]
 fn dylib_parse_round_trips() {
-    std::env::set_var("PHANTOM_HOT_MODULES", "1");
+    // SAFETY: single-threaded ignored test.
+    unsafe { std::env::set_var("PHANTOM_HOT_MODULES", "1") };
     let skill = SkillHost::build();
     let out = skill.parse("cargo build", "", "", Some(0));
     assert_eq!(out.command_type, CommandType::Cargo(CargoCommand::Build));

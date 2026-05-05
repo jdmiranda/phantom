@@ -6082,11 +6082,14 @@ name = "phantom-skill-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "libloading",
  "log",
  "notify",
  "phantom-nlp",
  "phantom-semantic",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 

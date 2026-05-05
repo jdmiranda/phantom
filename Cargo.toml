@@ -84,3 +84,7 @@ chrono = { version = "0.4", features = ["serde"] }
 libloading = "0.8"
 notify     = "6"
 tempfile   = "3"
+
+# Cryptographic hashing (phantom-skill-host dylib signature verification).
+sha2 = "0.10"
+hex  = "0.4"
