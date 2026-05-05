@@ -28,6 +28,8 @@ use futures_core::Stream;
 use lru::LruCache;
 
 pub mod openai;
+pub mod piper;
+pub use piper::PiperVoiceBackend;
 
 // ── OpenAiVoice enum ──────────────────────────────────────────────────────────
 
@@ -374,7 +376,7 @@ impl<B: VoiceSynth> VoiceSynth for CachingVoiceSynth<B> {
 
 /// Emits exactly one chunk, then completes. Avoids pulling in `async-stream`
 /// for this simple case.
-fn single_chunk_stream(chunk: SynthAudioChunk) -> SingleChunkStream {
+pub(crate) fn single_chunk_stream(chunk: SynthAudioChunk) -> SingleChunkStream {
     SingleChunkStream { chunk: Some(chunk) }
 }
 
