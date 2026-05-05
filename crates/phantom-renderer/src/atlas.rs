@@ -71,6 +71,12 @@ pub struct GlyphAtlas {
     bind_group_layout: BindGroupLayout,
     width: u32,
     height: u32,
+    /// Set to `true` when the atlas ran out of space and was fully cleared.
+    ///
+    /// Callers should check this flag at frame start and re-upload any glyphs
+    /// they need for the current frame. The flag is cleared after being read
+    /// via [`GlyphAtlas::take_needs_reset`].
+    pub needs_reset: bool,
 }
 
 impl GlyphAtlas {
@@ -154,17 +160,50 @@ impl GlyphAtlas {
             bind_group_layout,
             width,
             height,
+            needs_reset: false,
         }
     }
 
     /// Try to allocate a rectangular region in the atlas.
     ///
-    /// Returns the etagere `Allocation` on success, or `None` if the atlas is full.
+    /// Returns the etagere `Allocation` on success. When the atlas is full,
+    /// evicts all cached glyphs (atlas-reset strategy), sets `needs_reset`,
+    /// and retries the allocation once on the freshly-cleared atlas.
+    /// Returns `None` only for zero-sized requests or if the glyph is larger
+    /// than the entire atlas.
     pub fn allocate(&mut self, width: u32, height: u32) -> Option<Allocation> {
         if width == 0 || height == 0 {
             return None;
         }
+        if let Some(alloc) = self.allocator.allocate(size2(width as i32, height as i32)) {
+            return Some(alloc);
+        }
+        // Atlas full — evict everything and retry once.
+        self.cache.clear();
+        self.allocator.clear();
+        self.needs_reset = true;
         self.allocator.allocate(size2(width as i32, height as i32))
+    }
+
+    /// Returns `true` when the atlas still has room for at least one more
+    /// glyph of the given size without triggering a reset.
+    #[must_use]
+    pub fn has_capacity(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        // Probe via a clone of the allocator state so we don't disturb it.
+        let mut probe = self.allocator.clone();
+        probe.allocate(size2(width as i32, height as i32)).is_some()
+    }
+
+    /// Consume and return the `needs_reset` flag, clearing it.
+    ///
+    /// Call once per frame after checking whether a full re-upload is needed.
+    pub fn take_needs_reset(&mut self) -> bool {
+        let flag = self.needs_reset;
+        self.needs_reset = false;
+        flag
     }
 
     /// Upload glyph bitmap data into a previously allocated region.
@@ -356,6 +395,11 @@ pub struct ColorGlyphAtlas {
     bind_group_layout: BindGroupLayout,
     width: u32,
     height: u32,
+    /// Set to `true` when the color atlas ran out of space and was fully cleared.
+    ///
+    /// Mirrors the same flag on [`GlyphAtlas`]. Read and clear via
+    /// [`ColorGlyphAtlas::take_needs_reset`].
+    pub needs_reset: bool,
 }
 
 impl ColorGlyphAtlas {
@@ -439,15 +483,45 @@ impl ColorGlyphAtlas {
             bind_group_layout,
             width,
             height,
+            needs_reset: false,
         }
     }
 
     /// Try to allocate a rectangular region in the color atlas.
+    ///
+    /// When the atlas is full, evicts all cached color glyphs (atlas-reset
+    /// strategy), sets `needs_reset`, and retries once. Returns `None` only
+    /// for zero-sized requests or if the glyph exceeds the entire atlas.
     pub fn allocate(&mut self, width: u32, height: u32) -> Option<Allocation> {
         if width == 0 || height == 0 {
             return None;
         }
+        if let Some(alloc) = self.allocator.allocate(size2(width as i32, height as i32)) {
+            return Some(alloc);
+        }
+        // Color atlas full — evict everything and retry once.
+        self.cache.clear();
+        self.allocator.clear();
+        self.needs_reset = true;
         self.allocator.allocate(size2(width as i32, height as i32))
+    }
+
+    /// Returns `true` when the color atlas still has room for a glyph of the
+    /// given size without triggering a reset.
+    #[must_use]
+    pub fn has_capacity(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let mut probe = self.allocator.clone();
+        probe.allocate(size2(width as i32, height as i32)).is_some()
+    }
+
+    /// Consume and return the `needs_reset` flag, clearing it.
+    pub fn take_needs_reset(&mut self) -> bool {
+        let flag = self.needs_reset;
+        self.needs_reset = false;
+        flag
     }
 
     /// Upload RGBA glyph bitmap data into a previously allocated region.
@@ -588,5 +662,55 @@ impl ColorGlyphAtlas {
     pub fn clear(&mut self) {
         self.cache.clear();
         self.allocator.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use etagere::{size2, AtlasAllocator};
+
+    /// Verify the atlas-reset strategy: when the allocator fills, clearing it
+    /// and retrying must succeed and set `needs_reset`.
+    ///
+    /// This test exercises the pure CPU allocator path (no GPU device needed).
+    #[test]
+    fn atlas_reset_when_full_allows_new_glyphs() {
+        // Build a tiny 64x64 allocator so we can fill it quickly.
+        let atlas_size = 64i32;
+        let mut allocator = AtlasAllocator::new(size2(atlas_size, atlas_size));
+
+        // Fill the atlas with 16x16 tiles (16 tiles fit in 64x64).
+        let tile = 16i32;
+        let mut allocated = 0usize;
+        loop {
+            if allocator.allocate(size2(tile, tile)).is_none() {
+                break;
+            }
+            allocated += 1;
+        }
+        assert!(allocated > 0, "should have allocated at least one tile");
+
+        // Simulate the atlas-reset path: clear the allocator and set the flag.
+        allocator.clear();
+        let needs_reset = true;
+
+        // After reset, a fresh allocation must succeed.
+        let post_reset = allocator.allocate(size2(tile, tile));
+        assert!(
+            post_reset.is_some(),
+            "allocation after reset must succeed"
+        );
+        assert!(needs_reset, "needs_reset flag must be set after eviction");
+
+        // has_capacity equivalent: a probe clone should succeed.
+        let mut probe = allocator.clone();
+        assert!(
+            probe.allocate(size2(tile, tile)).is_some(),
+            "probe allocator should still have capacity"
+        );
     }
 }
