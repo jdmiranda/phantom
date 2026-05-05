@@ -162,24 +162,27 @@ impl App {
                         focused,
                         "select_copy",
                         &serde_json::json!({}),
-                    ) {
-                        if !text.is_empty() {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new()
-                                && let Err(e) = clipboard.set_text(&text) {
-                                    debug!("clipboard write failed: {e}");
-                                }
-                            info!("Copied {} chars to clipboard", text.len());
-                        } else {
-                            debug!("Copy: no selection");
+                    )
+                {
+                    if !text.is_empty() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new()
+                            && let Err(e) = clipboard.set_text(&text)
+                        {
+                            debug!("clipboard write failed: {e}");
                         }
+                        info!("Copied {} chars to clipboard", text.len());
+                    } else {
+                        debug!("Copy: no selection");
                     }
+                }
             }
             Action::Paste => {
                 if let Ok(mut clipboard) = arboard::Clipboard::new()
-                    && let Ok(text) = clipboard.get_text() {
-                        self.coordinator.route_bytes(text.as_bytes());
-                        info!("Pasted {} bytes from clipboard", text.len());
-                    }
+                    && let Ok(text) = clipboard.get_text()
+                {
+                    self.coordinator.route_bytes(text.as_bytes());
+                    info!("Pasted {} bytes from clipboard", text.len());
+                }
             }
             // Phantom is panes-first; tabs are not a shipped concept.
             // Redirect tab actions to their pane equivalents so the keybind
@@ -381,11 +384,10 @@ impl App {
         self.last_input_time = Instant::now();
 
         // Escape dismisses context menu.
-        if self.context_menu.visible
-            && matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
-                self.context_menu.hide();
-                return;
-            }
+        if self.context_menu.visible && matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.context_menu.hide();
+            return;
+        }
 
         // Escape exits fullscreen mode.
         if self.fullscreen_pane.is_some()
@@ -485,10 +487,11 @@ impl App {
             && matches!(&event.logical_key, Key::Character(s) if s == "D" || s == "d")
         {
             if let Some(focused) = self.coordinator.focused()
-                && self.coordinator.is_floating(focused) {
-                    self.coordinator
-                        .dock_to_grid(focused, &mut self.layout, &mut self.scene);
-                }
+                && self.coordinator.is_floating(focused)
+            {
+                self.coordinator
+                    .dock_to_grid(focused, &mut self.layout, &mut self.scene);
+            }
             return;
         }
 
@@ -517,42 +520,44 @@ impl App {
         if !modifiers.state().control_key()
             && !modifiers.state().alt_key()
             && !modifiers.state().super_key()
-            && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
-                self.console.toggle();
-                debug!("Console toggled open");
-                return;
-            }
+            && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`")
+        {
+            self.console.toggle();
+            debug!("Console toggled open");
+            return;
+        }
 
         if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers)
-            && let Some(action) = self.keybinds.lookup(&combo) {
-                // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
-                // Let them fall through to the PTY so the program receives them.
-                let is_scroll = matches!(
-                    action,
-                    Action::ScrollPageUp
-                        | Action::ScrollPageDown
-                        | Action::ScrollToTop
-                        | Action::ScrollToBottom
-                );
-                if is_scroll {
-                    // Check if focused adapter is in alt-screen mode (vim/htop/less).
-                    // If so, let the keypress fall through to the PTY.
-                    let in_alt = self
-                        .coordinator
-                        .focused()
-                        .and_then(|id| self.coordinator.get_state(id))
-                        .and_then(|state| state.get("alt_screen").and_then(|v| v.as_bool()))
-                        .unwrap_or(false);
-                    if !in_alt {
-                        self.dispatch_action(*action);
-                        return;
-                    }
-                    // alt screen: fall through to PTY encoding
-                } else {
+            && let Some(action) = self.keybinds.lookup(&combo)
+        {
+            // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
+            // Let them fall through to the PTY so the program receives them.
+            let is_scroll = matches!(
+                action,
+                Action::ScrollPageUp
+                    | Action::ScrollPageDown
+                    | Action::ScrollToTop
+                    | Action::ScrollToBottom
+            );
+            if is_scroll {
+                // Check if focused adapter is in alt-screen mode (vim/htop/less).
+                // If so, let the keypress fall through to the PTY.
+                let in_alt = self
+                    .coordinator
+                    .focused()
+                    .and_then(|id| self.coordinator.get_state(id))
+                    .and_then(|state| state.get("alt_screen").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+                if !in_alt {
                     self.dispatch_action(*action);
                     return;
                 }
+                // alt screen: fall through to PTY encoding
+            } else {
+                self.dispatch_action(*action);
+                return;
             }
+        }
 
         if self.state == AppState::Boot {
             self.boot.skip();
@@ -595,10 +600,28 @@ impl App {
             Key::Named(NamedKey::ArrowRight) => self.settings_panel.adjust(1.0),
             Key::Named(NamedKey::ArrowLeft) => self.settings_panel.adjust(-1.0),
             Key::Named(NamedKey::Tab) => self.settings_panel.next_section(),
+            // [R] Revert to Defaults: reset all settings panel values, apply
+            // the default CRT parameters immediately, and persist defaults.
+            Key::Character(s) if s.as_str() == "r" || s.as_str() == "R" => {
+                self.settings_panel.revert_to_defaults();
+                let snap = self.settings_panel.to_snapshot();
+                self.apply_settings_snapshot(&snap);
+                let settings = crate::settings::PhantomSettings::default();
+                if let Err(e) = settings.save() {
+                    log::warn!("Failed to save default settings: {e}");
+                }
+                self.console.system("Settings reverted to defaults");
+                return;
+            }
             _ => {}
         }
-        // Apply CRT changes live.
+        // Apply live changes from every other key.
         let snap = self.settings_panel.to_snapshot();
+        self.apply_settings_snapshot(&snap);
+    }
+
+    /// Apply a `SettingsSnapshot` to the live theme shader parameters.
+    fn apply_settings_snapshot(&mut self, snap: &crate::settings_ui::SettingsSnapshot) {
         self.theme.shader_params.scanline_intensity = snap.scanline_intensity;
         self.theme.shader_params.bloom_intensity = snap.bloom_intensity;
         self.theme.shader_params.chromatic_aberration = snap.chromatic_aberration;
