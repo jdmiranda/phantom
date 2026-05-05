@@ -36,7 +36,7 @@ pub use panel::{Panel, TITLE_BAR_HEIGHT};
 
 // Issue #16 — 8px vertical scrollbar with token-driven colors.
 pub mod scrollbar;
-pub use scrollbar::{SCROLLBAR_WIDTH, ScrollState, Scrollbar, track_y_to_offset};
+pub use scrollbar::{SCROLLBAR_WIDTH, ScrollState, ScrollbarAction, Scrollbar, track_y_to_offset};
 
 // Issue #25 — horizontal tab strip with badge and keyboard nav.
 pub mod tab_strip;
