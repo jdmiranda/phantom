@@ -30,6 +30,8 @@ members = [
     "crates/phantom-voice",
     # Code dependency graph — DAG extraction + .planning/dag.json schema.
     "crates/phantom-dag",
+    # Audio capture backend abstraction — ScreenCaptureKit (macOS) + mock.
+    "crates/phantom-audio",
     # Speech-to-text backend abstraction (issues #56, #68).
     "crates/phantom-stt",
     # Stateless WebSocket message broker (issue #4).
