@@ -415,6 +415,14 @@ pub struct App {
     pub(crate) bundle_store: Option<std::sync::Arc<phantom_bundle_store::BundleStore>>,
     pub(crate) capture_state: crate::capture::CaptureState,
 
+    // -- STT pipeline (None when no API key is configured or privacy mode is on) --
+    //    Constructed at boot via `SttPipeline::build()`. Holds the audio sender
+    //    half of the capture pipeline; drop to shut down gracefully.
+    //    Pending mic-capture integration (issue #56/#68): `push_chunk` and
+    //    `drain_stt_events` will be called here once ScreenCaptureKit audio is wired.
+    #[allow(dead_code)]
+    pub(crate) stt: Option<crate::stt::SttPipeline>,
+
     // -- Per-pane last-command tracking (issue #226).
     //    Populated from `Event::CommandStarted` so that the subsequent
     //    `Event::CommandComplete` handler in `drain_bus_to_brain` can feed
@@ -789,6 +797,18 @@ impl App {
         } else {
             info!("Bundle store unavailable — per-pane capture disabled");
         }
+
+        // -- STT pipeline (best-effort: None when no key or privacy mode) --
+        // Must be built inside a tokio context because `SttPipeline::start`
+        // calls `tokio::spawn` internally.  `with_config_scaled` is always
+        // called from a tokio-aware thread (the main event loop has a
+        // current-thread runtime).
+        let stt = if config.privacy_mode {
+            log::info!("STT: disabled — privacy mode is on");
+            None
+        } else {
+            crate::stt::SttPipeline::build()
+        };
 
         // -- Scene graph --
         let mut scene = SceneTree::new();
@@ -1196,6 +1216,7 @@ impl App {
             last_click_pos: (0.0, 0.0),
             click_count: 0,
             settings_panel: crate::settings_ui::SettingsPanel::new(),
+            stt,
             bundle_store,
             capture_state: crate::capture::CaptureState::new(),
             ticket_dispatcher,
