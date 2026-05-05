@@ -55,6 +55,15 @@ pub enum RelayMessage {
     /// The envelope was unsigned and the relay is configured to require
     /// signatures (see `PHANTOM_RELAY_REQUIRE_SIGNATURES`, issue #525).
     SignatureRequired { peer_id: PeerId },
+    /// The `envelope.from` field did not match the authenticated sender identity.
+    ///
+    /// The relay overwrites `envelope.from` with the server-side authenticated
+    /// `PeerId` before routing (defense-in-depth). This notification is sent
+    /// back to the originating connection so that well-behaved clients can
+    /// detect and fix a bug in their envelope construction. Malicious clients
+    /// are silently corrected; the message is still delivered with the real
+    /// sender identity stamped in.
+    FromMismatch { claimed: PeerId, actual: PeerId },
 }
 
 /// Messages a client sends to the relay after the handshake.
