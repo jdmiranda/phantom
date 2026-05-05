@@ -261,6 +261,15 @@ pub struct App {
     // -- Hub registration listener (outbound WSS to phantom-hub, issue #395) --
     pub(crate) _hub_listener: Option<phantom_mcp::HubListener>,
 
+    // -- MCP external-server discovery barrier.
+    //    Set to `true` by the async discovery task once all servers listed in
+    //    `$PHANTOM_MCP_SERVERS` have been connected and their `tools/list`
+    //    responses indexed into the tool registry.  Agent spawn waits up to
+    //    500 ms for this flag before proceeding (non-blocking: if discovery
+    //    is still running the agent gets an empty external tool list and can
+    //    still function).
+    pub(crate) mcp_discovery_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
     // -- Render pools (reused each frame via clear() to avoid per-frame allocs) --
     pub(crate) pool_quads: Vec<QuadInstance>,
     pub(crate) pool_glyphs: Vec<phantom_renderer::text::GlyphInstance>,
@@ -1095,6 +1104,72 @@ impl App {
         // can self-correct.
         let ticket_dispatcher = build_ticket_dispatcher();
 
+        // -- MCP external-server discovery (Bug 3 fix).
+        //
+        // Spawn an async task that connects to each URL listed in
+        // `$PHANTOM_MCP_SERVERS` (comma-separated), calls `tools/list` on each,
+        // and sets `mcp_discovery_complete` to `true` when done.
+        //
+        // Agent spawn checks this flag and waits up to 500 ms so that agents
+        // started immediately after boot have access to the full external tool
+        // list. If discovery is still running after 500 ms, the agent proceeds
+        // with whatever tools are available (empty external list is acceptable).
+        let mcp_discovery_complete =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let flag = std::sync::Arc::clone(&mcp_discovery_complete);
+            let server_urls: Vec<String> = std::env::var("PHANTOM_MCP_SERVERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+
+            if server_urls.is_empty() {
+                // No external servers configured — mark discovery done immediately.
+                flag.store(true, std::sync::atomic::Ordering::Release);
+                debug!("MCP discovery: no PHANTOM_MCP_SERVERS configured, skipping");
+            } else {
+                // Spin up a one-shot tokio runtime on a background thread so we
+                // don't block the winit event loop.
+                std::thread::Builder::new()
+                    .name("mcp-discovery".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("mcp-discovery: tokio runtime");
+                        rt.block_on(async move {
+                            let mut registry = phantom_mcp::McpToolRegistry::new();
+                            for url in &server_urls {
+                                match phantom_mcp::McpClient::connect(url).await {
+                                    Ok(mut client) => {
+                                        if let Err(e) = client.list_tools().await {
+                                            warn!("MCP discovery: list_tools failed for {url}: {e}");
+                                        }
+                                        let server_name = url
+                                            .trim_start_matches("ws://")
+                                            .trim_start_matches("wss://")
+                                            .to_owned();
+                                        registry.register_server(&server_name, client);
+                                        info!("MCP discovery: registered server {url} ({} tools)",
+                                            registry.tool_count());
+                                    }
+                                    Err(e) => {
+                                        warn!("MCP discovery: connect failed for {url}: {e}");
+                                    }
+                                }
+                            }
+                            // Mark discovery done so agents can proceed.
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                            info!("MCP discovery complete ({} tools indexed)", registry.tool_count());
+                        });
+                    })
+                    .expect("mcp-discovery thread spawn");
+            }
+        }
+
         let now = Instant::now();
 
         Ok(Self {
@@ -1151,6 +1226,7 @@ impl App {
             mcp_cmd_rx,
             _mcp_listener: mcp_listener,
             _hub_listener: hub_listener,
+            mcp_discovery_complete,
             pool_quads: Vec::with_capacity(256),
             pool_glyphs: Vec::with_capacity(4096),
             pool_color_glyphs: Vec::with_capacity(64),
