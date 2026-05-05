@@ -223,6 +223,12 @@ impl ApplicationHandler for Phantom {
 
                     std::panic::catch_unwind(AssertUnwindSafe(|| {
                         app.update();
+                        // Bug 3: forward OSC 2 window title changes to the OS.
+                        if let Some(title) = app.take_pending_window_title()
+                            && let Some(window) = &self.window
+                        {
+                            window.set_title(&title);
+                        }
                         if let Err(e) = app.render() {
                             log::error!("Render error: {e}");
                         }

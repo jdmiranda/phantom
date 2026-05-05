@@ -85,6 +85,17 @@ pub trait AppCore: Send {
     /// `attach_alt_screen_snapshot`.  Called when the secondary pane is
     /// collapsed.  The default is a no-op.
     fn detach_alt_screen_snapshot(&mut self) {}
+
+    /// Consume and return the most recent OSC 2 window title emitted by the
+    /// running program since the last call, if any.
+    ///
+    /// Terminal adapters override this to drain the title queue populated by
+    /// `Event::Title`.  The main event loop calls this each frame and forwards
+    /// the result to `winit_window.set_title()`.  Non-terminal adapters return
+    /// `None` (the default) and are silently skipped.
+    fn take_pending_window_title(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Visual adapters that render into a rect.

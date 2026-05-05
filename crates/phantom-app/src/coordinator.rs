@@ -981,6 +981,16 @@ impl AppCoordinator {
         self.registry.get_adapter(app_id)?.output_buf_snapshot()
     }
 
+    /// Drain the latest OSC 2 window title from the focused terminal adapter.
+    ///
+    /// Called once per frame by the main event loop; the returned title (if
+    /// any) is forwarded to `winit_window.set_title()`.  Returns `None` when
+    /// no title change has arrived since the last call.
+    pub fn take_focused_window_title(&mut self) -> Option<String> {
+        let focused = self.focused?;
+        self.registry.get_adapter_mut(focused)?.take_pending_window_title()
+    }
+
     // -----------------------------------------------------------------------
     // Pane lineage API (issue #365)
     // -----------------------------------------------------------------------

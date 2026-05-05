@@ -1273,6 +1273,15 @@ impl App {
         self.quit_requested
     }
 
+    /// Drain the latest OSC 2 window title from the focused terminal adapter.
+    ///
+    /// Returns the title string when the running program has emitted a new
+    /// title since the last call.  The caller should forward this to
+    /// `winit_window.set_title()`.  Returns `None` when no change arrived.
+    pub fn take_pending_window_title(&mut self) -> Option<String> {
+        self.coordinator.take_focused_window_title()
+    }
+
     /// Watchdog trace: returns a log line every `interval` frames.
     /// Written directly to disk by the event loop (bypasses Rust logger,
     /// survives SIGKILL mid-frame).
