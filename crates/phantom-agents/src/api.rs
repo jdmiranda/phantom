@@ -992,6 +992,55 @@ mod tests {
         );
     }
 
+    // -- Bug 2: malformed content arrays must not panic ----------------------
+    //
+    // The Claude API contract guarantees `content` is an array of objects.
+    // When the API returns malformed responses (e.g. during a transient server
+    // error), `parse_response` must emit an `Error` event and never panic.
+    // All `.unwrap()` / `.expect()` in the production response-parsing path
+    // use `unwrap_or` / `and_then` / `?` forms — no bare panicking unwraps.
+    // This test documents and guards that contract.
+
+    /// A content array containing a `tool_use` block with a missing `id` field
+    /// must not panic. The missing field must fall back to an empty string and
+    /// the block must still be processed (or produce an error) gracefully.
+    #[test]
+    fn malformed_content_array_returns_error_not_panic() {
+        // Simulate a malformed response: content is an array, but the tool_use
+        // block is missing the `id` key entirely and has a non-object `input`.
+        let response = serde_json::json!({
+            "id": "msg_malformed",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    // `id` key intentionally absent
+                    "name": "read_file",
+                    "input": 12345  // non-object input — malformed
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 5}
+        });
+
+        let (tx, rx) = mpsc::channel();
+        // Must not panic.
+        parse_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+
+        // The malformed input must produce at least one event (Error or Done).
+        assert!(
+            !events.is_empty(),
+            "parse_response must emit at least one event for malformed content, got none"
+        );
+        // Specifically the non-object input must produce an Error event.
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(_))),
+            "non-object tool_use input must produce an Error event; got: {events:?}"
+        );
+    }
+
     // -- ApiHandle ----------------------------------------------------------
 
     #[test]

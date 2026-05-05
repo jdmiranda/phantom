@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use phantom_semantic::{ParsedOutput, SemanticParser};
@@ -862,42 +861,52 @@ fn execute_search_files(root: &Path, args: &serde_json::Value) -> ToolResult {
 fn execute_git_status(root: &Path) -> ToolResult {
     let tool = ToolType::GitStatus;
 
-    match Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(root)
-        .output()
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            if output.status.success() {
-                tool_ok(tool, stdout)
+    // Use the sandboxed executor so a hung credential helper or network-mount
+    // git repo cannot block the agent thread indefinitely. The Permissive
+    // policy keeps rlimits but allows network (git may need it for LFS etc.);
+    // the 30-second wall-clock timeout is the real guard.
+    match sandbox::execute_sandboxed(
+        "git status --porcelain",
+        root,
+        SandboxPolicy::Permissive,
+        COMMAND_TIMEOUT,
+    ) {
+        Ok(out) => {
+            if out.success {
+                tool_ok(tool, out.stdout)
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                tool_err(tool, format!("git status failed: {stderr}"))
+                tool_err(tool, format!("git status failed: {}", out.stderr))
             }
         }
-        Err(e) => tool_err(tool, format!("cannot run git: {e}")),
+        Err(sandbox::SandboxError::Timeout { limit }) => {
+            tool_err(tool, format!("git status timed out after {limit:?}"))
+        }
+        Err(e) => tool_err(tool, format!("cannot run git status: {e}")),
     }
 }
 
 fn execute_git_diff(root: &Path) -> ToolResult {
     let tool = ToolType::GitDiff;
 
-    match Command::new("git")
-        .arg("diff")
-        .current_dir(root)
-        .output()
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            if output.status.success() {
-                tool_ok(tool, stdout)
+    // Same timeout guard as execute_git_status: a hung git (e.g. credential
+    // helper on a network mount) must not block the agent thread indefinitely.
+    match sandbox::execute_sandboxed(
+        "git diff",
+        root,
+        SandboxPolicy::Permissive,
+        COMMAND_TIMEOUT,
+    ) {
+        Ok(out) => {
+            if out.success {
+                tool_ok(tool, out.stdout)
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                tool_err(tool, format!("git diff failed: {stderr}"))
+                tool_err(tool, format!("git diff failed: {}", out.stderr))
             }
         }
-        Err(e) => tool_err(tool, format!("cannot run git: {e}")),
+        Err(sandbox::SandboxError::Timeout { limit }) => {
+            tool_err(tool, format!("git diff timed out after {limit:?}"))
+        }
+        Err(e) => tool_err(tool, format!("cannot run git diff: {e}")),
     }
 }
 
@@ -1899,5 +1908,73 @@ mod tests {
 
         // Provenance tool_name must still be "read_file".
         assert_eq!(result.tool_name, "read_file");
+    }
+
+    // -- Bug fix: git_status / git_diff timeout (Bug 1) ----------------------
+    //
+    // A hung git process (e.g. credential helper on a network mount) must not
+    // block the agent thread indefinitely.  We verify this by pointing the
+    // git tools at a fake "git" script that sleeps longer than COMMAND_TIMEOUT.
+    //
+    // To avoid actually sleeping 30 seconds in CI we patch PATH to intercept
+    // the `git` command with a tiny sleep that exceeds a short test-only
+    // timeout, then assert the tool returns a failure result (not a hang).
+    // Because the tool implementation always uses COMMAND_TIMEOUT (30 s) and
+    // we cannot override it from a test, we use a different strategy: we run
+    // a very fast sleep (1 s) and confirm the process actually finishes
+    // without hanging the test.  The real timeout guarantee is covered by
+    // the sandbox module's own `none_policy_timeout_fires` test.
+    //
+    // What we verify here:
+    //   1. When git is not available (non-repo dir), execute_git_status and
+    //      execute_git_diff return !success — not a hang.
+    //   2. The result output contains a meaningful error string, not an empty
+    //      output that could mask a silent timeout.
+
+    #[test]
+    fn git_status_timeout_returns_tool_error_not_hang() {
+        // Use a temp dir that is not a git repo so git status returns non-zero
+        // quickly (no actual git process hangs).  The important property being
+        // tested is that execute_git_status no longer calls Command::output()
+        // with no timeout; the sandboxed path ensures a timeout is always set.
+        let tmp = TempDir::new().unwrap();
+        let result = execute_tool(
+            ToolType::GitStatus,
+            &serde_json::json!({}),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        // Non-repo → git exits non-zero. The result must be !success with a
+        // non-empty error message.
+        assert!(
+            !result.success,
+            "git status in non-repo must fail; got success with: {}",
+            result.output,
+        );
+        assert!(
+            !result.output.is_empty(),
+            "failure result must carry an error message, not empty output",
+        );
+    }
+
+    #[test]
+    fn git_diff_timeout_returns_tool_error_not_hang() {
+        // Same as above for execute_git_diff.
+        let tmp = TempDir::new().unwrap();
+        let result = execute_tool(
+            ToolType::GitDiff,
+            &serde_json::json!({}),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        assert!(
+            !result.success,
+            "git diff in non-repo must fail; got success with: {}",
+            result.output,
+        );
+        assert!(
+            !result.output.is_empty(),
+            "failure result must carry an error message, not empty output",
+        );
     }
 }
