@@ -42,7 +42,7 @@ static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 /// `phantom_app::AgentPane::spawn_with_opts` call this function, so ids are
 /// globally unique regardless of which spawn path is used.
 pub fn allocate_agent_id() -> AgentId {
-    NEXT_AGENT_ID.fetch_add(1, Ordering::Relaxed)
+    NEXT_AGENT_ID.fetch_add(1, Ordering::AcqRel)
 }
 
 // ---------------------------------------------------------------------------
@@ -1997,5 +1997,35 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             let back: PauseReason = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(r, &back, "PauseReason must round-trip through serde");
         }
+    }
+
+    #[test]
+    fn agent_id_monotonically_increases() {
+        let a = allocate_agent_id();
+        let b = allocate_agent_id();
+        let c = allocate_agent_id();
+        assert!(b > a, "second id must be greater than first");
+        assert!(c > b, "third id must be greater than second");
+    }
+
+    #[test]
+    fn agent_id_unique_across_threads() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let ids: Arc<Mutex<HashSet<AgentId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let ids = Arc::clone(&ids);
+            handles.push(thread::spawn(move || {
+                let id = allocate_agent_id();
+                ids.lock().unwrap().insert(id);
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(ids.lock().unwrap().len(), 8, "all 8 thread-allocated ids must be unique");
     }
 }
