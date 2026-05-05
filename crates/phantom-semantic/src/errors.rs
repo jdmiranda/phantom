@@ -747,6 +747,7 @@ error: aborting due to 1 previous error
             warnings: vec![],
             duration_ms: None,
             raw_output: "error: err1\nerror: err2\n".to_string(),
+            classification_notes: vec![],
         };
         let s = ErrorHighlighter::error_summary(&parsed).unwrap();
         assert!(s.contains("2 errors"), "got: {s}");

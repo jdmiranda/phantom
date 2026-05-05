@@ -637,6 +637,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(5),
             raw_output: "file1".into(),
+            classification_notes: vec![],
         }
     }
 
@@ -650,6 +651,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(500),
             raw_output: "error: type mismatch".into(),
+            classification_notes: vec![],
         }
     }
 
@@ -667,6 +669,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(2000),
             raw_output: "errors".into(),
+            classification_notes: vec![],
         }
     }
 

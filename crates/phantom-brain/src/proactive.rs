@@ -1310,6 +1310,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(800),
             raw_output: "error[E0308]: mismatched types".into(),
+            classification_notes: vec![],
         }
     }
 
@@ -1324,6 +1325,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(400),
             raw_output: "Finished".into(),
+            classification_notes: vec![],
         }
     }
 

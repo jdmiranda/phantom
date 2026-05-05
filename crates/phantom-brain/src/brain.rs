@@ -1652,6 +1652,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(10),
             raw_output: "file1\nfile2".into(),
+            classification_notes: vec![],
         };
 
         orient(&AiEvent::CommandComplete(parsed), &mut scorer);
@@ -1730,6 +1731,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(2000),
             raw_output: "errors".into(),
+            classification_notes: vec![],
         }
     }
 
@@ -1745,6 +1747,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(500),
             raw_output: "error".into(),
+            classification_notes: vec![],
         }
     }
 

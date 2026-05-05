@@ -224,4 +224,8 @@ pub struct ParsedOutput {
     pub duration_ms: Option<u64>,
     /// Full raw stdout+stderr concatenated.
     pub raw_output: String,
+    /// Diagnostic notes recorded during classification (e.g. why JSON/table
+    /// detection fell back to PlainText).  Empty on a successful classification.
+    #[serde(default)]
+    pub classification_notes: Vec<String>,
 }
