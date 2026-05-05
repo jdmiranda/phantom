@@ -1,7 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+
+use phantom_dag::CodeDag;
 
 use crate::detect::{
     detect_commands, detect_framework, detect_package_manager, detect_project, Framework,
@@ -140,8 +144,19 @@ impl ProjectContext {
     }
 
     /// Multi-line context string for feeding into an agent or LLM.
+    ///
+    /// When called via [`ContextAssembler`], a `## Crate Topology` section is
+    /// appended for Rust projects.  When called directly on a bare
+    /// [`ProjectContext`] there is no cached DAG, so the topology section is
+    /// omitted.
     #[must_use]
     pub fn agent_context(&self) -> String {
+        self.agent_context_with_dag(None)
+    }
+
+    /// Inner implementation that accepts an optional pre-built [`CodeDag`].
+    #[must_use]
+    pub(crate) fn agent_context_with_dag(&self, dag: Option<&CodeDag>) -> String {
         let mut lines = Vec::new();
         lines.push(format!("Project: {}", self.name));
         lines.push(format!("Root: {}", self.root));
@@ -206,13 +221,179 @@ impl ProjectContext {
             }
         }
 
+        // Append crate topology when a DAG is available.
+        if let Some(d) = dag
+            && let Some(section) = topology_section(d)
+        {
+            lines.push(section);
+        }
+
         lines.join("\n")
     }
 }
 
 // ---------------------------------------------------------------------------
+// ContextAssembler
+// ---------------------------------------------------------------------------
+
+/// Builds [`ProjectContext`] with an optional cached [`CodeDag`].
+///
+/// For Rust projects, the assembler runs `cargo metadata` once and caches the
+/// resulting [`CodeDag`].  The cache is invalidated whenever the `mtime` of
+/// `Cargo.toml` in the workspace root changes.  If `cargo metadata` fails (not
+/// a Rust project, `cargo` not on `PATH`, etc.) the topology section is
+/// silently omitted.
+#[derive(Debug, Default)]
+pub struct ContextAssembler {
+    dag: Option<CodeDag>,
+    /// mtime of `Cargo.toml` at the time the DAG was last built.
+    cargo_toml_mtime: Option<SystemTime>,
+}
+
+impl ContextAssembler {
+    /// Create a new, empty assembler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build a [`ProjectContext`] for `dir`, refreshing the DAG cache when
+    /// `Cargo.toml` has changed.
+    #[must_use]
+    pub fn assemble(&mut self, dir: &Path) -> ProjectContext {
+        let ctx = ProjectContext::detect(dir);
+
+        if matches!(ctx.project_type, ProjectType::Rust) {
+            self.refresh_dag_if_stale(dir);
+        } else {
+            // Non-Rust project: drop any stale cached DAG.
+            self.dag = None;
+            self.cargo_toml_mtime = None;
+        }
+
+        ctx
+    }
+
+    /// Produce the agent context string, including the topology section when a
+    /// DAG is available.
+    #[must_use]
+    pub fn agent_context(&mut self, dir: &Path) -> String {
+        let ctx = self.assemble(dir);
+        ctx.agent_context_with_dag(self.dag.as_ref())
+    }
+
+    /// Return the upstream (dependencies) and downstream (dependents) neighbours
+    /// of `crate_name` from the cached DAG as a short human-readable string.
+    ///
+    /// Returns `None` when no DAG has been built yet or the crate is not found.
+    #[must_use]
+    pub fn crate_summary(&self, crate_name: &str) -> Option<String> {
+        let dag = self.dag.as_ref()?;
+
+        // Check the crate exists in the DAG.
+        dag.get_node(crate_name)?;
+
+        // Upstream: edges where crate_name is the *from* end (crate depends on these).
+        let upstream: Vec<&str> = dag
+            .edges()
+            .filter(|e| e.from() == crate_name)
+            .map(|e| e.to())
+            .collect();
+
+        // Downstream: edges where crate_name is the *to* end (these depend on crate_name).
+        let downstream: Vec<&str> = dag
+            .edges()
+            .filter(|e| e.to() == crate_name)
+            .map(|e| e.from())
+            .collect();
+
+        let mut parts = Vec::new();
+        if upstream.is_empty() {
+            parts.push("  depends on: (none)".to_owned());
+        } else {
+            parts.push(format!("  depends on: {}", upstream.join(", ")));
+        }
+        if downstream.is_empty() {
+            parts.push("  depended on by: (none)".to_owned());
+        } else {
+            parts.push(format!("  depended on by: {}", downstream.join(", ")));
+        }
+
+        Some(format!("{}:\n{}", crate_name, parts.join("\n")))
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    fn refresh_dag_if_stale(&mut self, dir: &Path) {
+        let mtime = cargo_toml_mtime(dir);
+        let stale = match (mtime, self.cargo_toml_mtime) {
+            (Some(m), Some(cached)) => m != cached,
+            _ => true,
+        };
+        if stale {
+            let dag_path = dir.join(".planning/dag.json");
+            match std::fs::read_to_string(&dag_path).map_err(anyhow::Error::from).and_then(|s| CodeDag::from_json(&s)) {
+                Ok(dag) => {
+                    self.dag = Some(dag);
+                    self.cargo_toml_mtime = mtime;
+                }
+                Err(e) => {
+                    log::debug!("phantom-context: DAG load failed (skipping topology): {e}");
+                    self.dag = None;
+                    self.cargo_toml_mtime = None;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Topology section helper
+// ---------------------------------------------------------------------------
+
+/// Build the `## Crate Topology` markdown section from a [`CodeDag`].
+///
+/// Lists the top 5 crates by in-degree (most depended-upon) in descending
+/// order.  Returns `None` when the DAG has no edges.
+fn topology_section(dag: &CodeDag) -> Option<String> {
+    // Count in-degree: how many edges point *to* each node.
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    for node in dag.nodes() {
+        in_degree.entry(node.id()).or_insert(0);
+    }
+    for edge in dag.edges() {
+        *in_degree.entry(edge.to()).or_insert(0) += 1;
+    }
+
+    if in_degree.is_empty() {
+        return None;
+    }
+
+    // Sort by descending in-degree, then alphabetically for determinism.
+    let mut ranked: Vec<(&&str, &usize)> = in_degree.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+
+    let top5: Vec<String> = ranked
+        .into_iter()
+        .take(5)
+        .map(|(name, count)| format!("  {name} (in-degree: {count})"))
+        .collect();
+
+    Some(format!("## Crate Topology\nTop crates by dependents:\n{}", top5.join("\n")))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Return the `mtime` of `Cargo.toml` in `dir`, or `None` on any I/O error.
+fn cargo_toml_mtime(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir.join("Cargo.toml"))
+        .ok()
+        .and_then(|m| m.modified().ok())
+}
 
 /// Extract the project name from the manifest file, falling back to dir name.
 fn extract_project_name(dir: &Path, project_type: &ProjectType) -> String {
@@ -361,11 +542,175 @@ fn version_from_cmd(cmd: &str, args: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use phantom_dag::{DagEdge, DagNode, EdgeKind, NodeKind};
+    use std::path::PathBuf;
+
     use super::*;
     use tempfile::TempDir;
 
     fn tmp() -> TempDir {
         TempDir::new().unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // ContextAssembler / topology tests
+    // -----------------------------------------------------------------------
+
+    /// Build a hand-constructed DAG with a known in-degree distribution and
+    /// verify that the topology section appears in the agent context output.
+    #[test]
+    fn topology_section_included_for_rust_project() {
+        // Build a small hand-constructed DAG:
+        //   phantom-core depended on by phantom-app and phantom-brain (in-degree 2)
+        //   phantom-app  in-degree 0
+        //   phantom-brain in-degree 0
+        let mut dag = CodeDag::new();
+        let node = |name: &str| {
+            DagNode::new(name.to_owned(), NodeKind::Module, PathBuf::from("Cargo.toml"), 1)
+        };
+        dag.add_node(node("phantom-core"));
+        dag.add_node(node("phantom-app"));
+        dag.add_node(node("phantom-brain"));
+        dag.add_edge(DagEdge::new(
+            "phantom-app".to_owned(),
+            "phantom-core".to_owned(),
+            EdgeKind::Uses,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom-brain".to_owned(),
+            "phantom-core".to_owned(),
+            EdgeKind::Uses,
+        ));
+
+        // Build a ProjectContext directly (no subprocess) and call the inner method.
+        let ctx = ProjectContext {
+            root: "/tmp/phantom".into(),
+            name: "phantom".into(),
+            project_type: ProjectType::Rust,
+            package_manager: crate::detect::PackageManager::Cargo,
+            framework: crate::detect::Framework::None,
+            commands: ProjectCommands {
+                build: None,
+                test: None,
+                run: None,
+                lint: None,
+                format: None,
+            },
+            git: None,
+            rust_version: None,
+            node_version: None,
+            python_version: None,
+        };
+
+        let output = ctx.agent_context_with_dag(Some(&dag));
+        assert!(
+            output.contains("## Crate Topology"),
+            "expected '## Crate Topology' in output:\n{output}"
+        );
+        assert!(
+            output.contains("phantom-core"),
+            "expected phantom-core (highest in-degree) in topology section:\n{output}"
+        );
+    }
+
+    /// For a non-Rust project (or when no DAG is available), the topology
+    /// section must be absent.
+    #[test]
+    fn topology_section_absent_for_non_rust_project() {
+        let ctx = ProjectContext {
+            root: "/tmp/myapp".into(),
+            name: "myapp".into(),
+            project_type: ProjectType::Node,
+            package_manager: crate::detect::PackageManager::Npm,
+            framework: crate::detect::Framework::None,
+            commands: ProjectCommands {
+                build: None,
+                test: None,
+                run: None,
+                lint: None,
+                format: None,
+            },
+            git: None,
+            rust_version: None,
+            node_version: None,
+            python_version: None,
+        };
+
+        // Pass no DAG — simulates DAG build failure or non-Rust project.
+        let output = ctx.agent_context_with_dag(None);
+        assert!(
+            !output.contains("## Crate Topology"),
+            "unexpected '## Crate Topology' in non-Rust output:\n{output}"
+        );
+    }
+
+    /// The top-5 list must be sorted by descending in-degree.
+    #[test]
+    fn top_five_depended_crates_sorted_by_in_degree() {
+        let mut dag = CodeDag::new();
+        let node = |name: &str| {
+            DagNode::new(name.to_owned(), NodeKind::Module, PathBuf::from("Cargo.toml"), 1)
+        };
+
+        // Create 7 crates.
+        let crates = ["a", "b", "c", "d", "e", "f", "g"];
+        for name in crates {
+            dag.add_node(node(name));
+        }
+
+        // Give 'a' in-degree 6, 'b' in-degree 5, ..., 'g' in-degree 0.
+        // "a" is depended on by b, c, d, e, f, g  → in-degree 6
+        // "b" is depended on by c, d, e, f, g       → in-degree 5
+        // "c" is depended on by d, e, f, g            → in-degree 4
+        // "d" is depended on by e, f, g               → in-degree 3
+        // "e" is depended on by f, g                  → in-degree 2
+        // "f" is depended on by g                     → in-degree 1
+        // "g" has no dependents                        → in-degree 0
+        let depends_on = [
+            ("b", "a"),
+            ("c", "a"),
+            ("d", "a"),
+            ("e", "a"),
+            ("f", "a"),
+            ("g", "a"),
+            ("c", "b"),
+            ("d", "b"),
+            ("e", "b"),
+            ("f", "b"),
+            ("g", "b"),
+            ("d", "c"),
+            ("e", "c"),
+            ("f", "c"),
+            ("g", "c"),
+            ("e", "d"),
+            ("f", "d"),
+            ("g", "d"),
+            ("f", "e"),
+            ("g", "e"),
+            ("g", "f"),
+        ];
+        for (from, to) in depends_on {
+            dag.add_edge(DagEdge::new(from.to_owned(), to.to_owned(), EdgeKind::Uses));
+        }
+
+        let section = topology_section(&dag).expect("topology_section must return Some");
+
+        // The section must list the crates in order a, b, c, d, e (top 5).
+        // Verify positional ordering by finding each name's byte offset.
+        let pos_a = section.find("a (in-degree").expect("'a' must appear");
+        let pos_b = section.find("b (in-degree").expect("'b' must appear");
+        let pos_c = section.find("c (in-degree").expect("'c' must appear");
+        let pos_d = section.find("d (in-degree").expect("'d' must appear");
+        let pos_e = section.find("e (in-degree").expect("'e' must appear");
+
+        assert!(
+            pos_a < pos_b && pos_b < pos_c && pos_c < pos_d && pos_d < pos_e,
+            "crates not in descending in-degree order in:\n{section}"
+        );
+
+        // 'f' and 'g' must NOT appear (only top 5).
+        assert!(!section.contains("f (in-degree"), "f must not appear (outside top 5)");
+        assert!(!section.contains("g (in-degree"), "g must not appear (outside top 5)");
     }
 
     #[test]
