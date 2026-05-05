@@ -1588,6 +1588,121 @@ fn non_cartographer_pane_always_has_none_dag_explorer_in_ctx() {
 }
 
 // =========================================================================
+// Bug-fix tests: flush_capture_record and tool_call output_json population
+// =========================================================================
+
+/// `flush_capture_record` must write an `AgentRecord` to the capture sidecar
+/// when `agent_capture` is wired and `ApiEvent::Done` is received.
+#[test]
+fn flush_capture_record_writes_to_history_store() {
+    use phantom_history::AgentOutputCapture;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let sidecar_path = tmp.path().join("agents.jsonl");
+
+    let (mut pane, tx) = agent_with_handle();
+    let capture = AgentOutputCapture::open_at(&sidecar_path);
+    pane.set_agent_capture(capture.clone(), uuid::Uuid::new_v4());
+
+    // Send text then Done so the agent completes.
+    tx.send(ApiEvent::TextDelta("agent output text".into())).unwrap();
+    tx.send(ApiEvent::Done).unwrap();
+    pane.poll();
+
+    assert_eq!(pane.status, AgentPaneStatus::Done);
+
+    // The sidecar must have exactly one record.
+    let count = capture.count().expect("count must succeed");
+    assert_eq!(count, 1, "flush_capture_record must write one record on Done");
+
+    // The record must contain the agent output.
+    let records = capture.recent(1).expect("recent must succeed");
+    assert_eq!(records.len(), 1);
+    assert!(
+        records[0].text_output().contains("agent output text"),
+        "captured record text_output must contain the agent's streamed text; got: {}",
+        records[0].text_output()
+    );
+}
+
+/// `flush_capture_record` must also fire on `ApiEvent::Error` (failed agent).
+#[test]
+fn flush_capture_record_writes_on_error() {
+    use phantom_history::AgentOutputCapture;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let sidecar_path = tmp.path().join("agents.jsonl");
+
+    let (mut pane, tx) = agent_with_handle();
+    let capture = AgentOutputCapture::open_at(&sidecar_path);
+    pane.set_agent_capture(capture.clone(), uuid::Uuid::new_v4());
+
+    tx.send(ApiEvent::Error("network timeout".into())).unwrap();
+    pane.poll();
+
+    assert_eq!(pane.status, AgentPaneStatus::Failed);
+
+    let count = capture.count().expect("count must succeed");
+    assert_eq!(count, 1, "flush_capture_record must write one record on Error");
+}
+
+/// Tool calls recorded in `capture_tool_calls` must have `output_json`
+/// populated after the tool result arrives in `execute_pending_tools`.
+///
+/// This is the Bug 2 fix: previously tool call records were created with
+/// `output_json: None` and never updated, meaning the sidecar only captured
+/// the input arguments but not the tool's return value.
+#[test]
+fn tool_call_output_json_populated_on_result() {
+    use phantom_history::AgentOutputCapture;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let sidecar_path = tmp.path().join("agents.jsonl");
+
+    let (mut pane, tx) = agent_with_handle();
+    let capture = AgentOutputCapture::open_at(&sidecar_path);
+    pane.set_agent_capture(capture.clone(), uuid::Uuid::new_v4());
+    // Use a temp dir for tool execution so ListFiles has a real path.
+    pane.working_dir = tmp.path().to_string_lossy().into_owned();
+
+    // Inject a ToolUse (ListFiles) then Done — this triggers execute_pending_tools.
+    tx.send(ApiEvent::ToolUse {
+        id: "toolu_capture_test".into(),
+        call: phantom_agents::tools::ToolCall {
+            tool: phantom_agents::tools::ToolType::ListFiles,
+            args: serde_json::json!({"path": "."}),
+        },
+    })
+    .unwrap();
+    tx.send(ApiEvent::Done).unwrap();
+
+    // First poll: processes ToolUse + Done → executes ListFiles and re-invokes
+    // the backend.  capture_tool_calls still holds the record (not yet flushed).
+    pane.poll();
+    assert_eq!(pane.status, AgentPaneStatus::Working, "should re-invoke after tool");
+
+    // At this point the bug would leave output_json as None.
+    // After the fix, output_json must be Some on the pending capture record.
+    assert_eq!(pane.capture_tool_calls.len(), 1, "one capture record must be pending");
+    assert!(
+        pane.capture_tool_calls[0].output_json().is_some(),
+        "output_json must be populated after execute_pending_tools (Bug 2 fix); was None"
+    );
+
+    // Send a final Done so the agent finishes and flushes the capture to disk.
+    if let Some(ref mut h) = pane.api_handle {
+        // inject Done on the replacement handle; handle is an mpsc channel,
+        // but we can't easily inject here without a test sender. Instead,
+        // just assert the in-memory state captured above — that is the
+        // load-bearing assertion for Bug 2.
+        let _ = h; // suppress unused warning
+    }
+}
+
+// =========================================================================
 // Issue #513 — direct spawn_with_opts path must produce non-zero distinct ids
 // =========================================================================
 
