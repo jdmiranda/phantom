@@ -36,5 +36,6 @@ pub mod settings;
 pub(crate) mod settings_ui;
 pub mod supervisor_client;
 mod sysmon;
+pub mod tts;
 mod update;
 mod video;

@@ -512,6 +512,14 @@ pub struct App {
     // `tick_alt_screen_fade` into `collapse_alt_screen_pane`.
     pub(crate) alt_screen_pending_collapses: Vec<phantom_adapter::AppId>,
 
+    // -- TTS pipeline (optional: None when OPENAI_API_KEY is absent or TTS
+    //    is otherwise unavailable). Receives full assistant messages from
+    //    agent panes and speaks them aloud via the system audio device.
+    pub(crate) tts: Option<crate::tts::TtsPipeline>,
+    // Keeps the background worker task alive for the process lifetime.
+    #[allow(dead_code)]
+    pub(crate) _tts_handles: Option<crate::tts::TtsTaskHandles>,
+
     // -- Privacy mode: hard block on cloud API calls.
     //    Mirrors `PhantomConfig::privacy_mode`. Toggled at runtime by the
     //    `ghost privacy on/off` command. When `true`:
@@ -1257,6 +1265,19 @@ impl App {
             }
         }
 
+        // -- TTS pipeline (best-effort; no-op when OPENAI_API_KEY is absent) --
+        // Privacy mode blocks cloud API calls, so we skip TTS init to avoid
+        // a live network call on first synthesis.
+        let (tts, _tts_handles) = if config.privacy_mode {
+            debug!("TTS pipeline disabled (privacy mode)");
+            (None, None)
+        } else {
+            match crate::tts::build_tts_pipeline_from_env() {
+                Some((p, h)) => (Some(p), Some(h)),
+                None => (None, None),
+            }
+        };
+
         let now = Instant::now();
 
         Ok(Self {
@@ -1382,6 +1403,8 @@ impl App {
             alt_screen_pending_collapses: Vec::new(),
             privacy_mode: config.privacy_mode,
             peer_grant_registry: crate::peer_grants::load_peer_grant_registry(),
+            tts,
+            _tts_handles,
             // OODA signal cache — all start zeroed; populated by drain_bus_to_brain.
             ooda_last_parsed: None,
             ooda_agent_just_completed: false,
