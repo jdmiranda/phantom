@@ -10,6 +10,7 @@ use phantom_agents::spawn_rules::{EventKind, EventSource};
 
 use super::{
     AgentPane, AgentPaneStatus, DEFAULT_AGENT_PANE_ROLE,
+    PaneMessageRole,
     new_agent_snapshot_queue, new_blocked_event_sink, new_denied_event_sink,
     MAX_TOOL_ROUNDS,
 };
@@ -69,6 +70,7 @@ fn agent_with_handle() -> (AgentPane, mpsc::Sender<ApiEvent>) {
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
+        pane_messages: Vec::new(),
     };
     (pane, tx)
 }
@@ -171,6 +173,7 @@ fn poll_returns_false_when_no_handle() {
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
+        pane_messages: Vec::new(),
     };
     assert!(!pane.poll());
 }
@@ -1046,6 +1049,7 @@ fn spawn_agent_pane_task_matches_prompt() {
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
+        pane_messages: Vec::new(),
     };
     let _ = tx; // keep sender alive so handle stays live
     assert_eq!(pane.task, "fix the failing tests");
@@ -1613,4 +1617,118 @@ fn allocate_agent_id_is_non_zero_and_increasing() {
 
     assert_ne!(a, b, "allocate_agent_id must return distinct values");
     assert_ne!(b, c, "allocate_agent_id must return distinct values");
+}
+
+// =========================================================================
+// Fix 1 — cached_lines includes the partial (no-trailing-newline) last line
+// =========================================================================
+
+/// `tail_lines` uses `str::lines()` which does NOT require a trailing `\n`.
+/// A streaming delta mid-line must appear in the rendered output without
+/// the caller having to wait for a newline terminator.
+#[test]
+fn cached_lines_includes_partial_last_line() {
+    let (mut pane, _tx) = agent_with_handle();
+    // Write two complete lines and one partial line (no trailing newline).
+    pane.output = "first line\nsecond line\npartial".into();
+    pane.cached_len = 0; // force cache invalidation
+    let lines = pane.tail_lines(200);
+    assert!(
+        lines.iter().any(|l| l == "partial"),
+        "tail_lines must include the partial last line; got: {lines:?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|l| l.as_str() == "partial").count(),
+        1,
+        "partial last line must appear exactly once; got: {lines:?}"
+    );
+}
+
+// =========================================================================
+// Fix 2 — structured message history captures role transitions
+// =========================================================================
+
+/// After receiving a TextDelta event followed by a ToolUse event, the
+/// `pane_messages` vec must contain at least one `Assistant` entry and
+/// one `ToolCall` entry, in that order, with the correct tool name.
+#[test]
+fn messages_vec_captures_role_transitions() {
+    let (mut pane, tx) = agent_with_handle();
+
+    tx.send(ApiEvent::TextDelta("Let me check the file.".into())).unwrap();
+    tx.send(ApiEvent::ToolUse {
+        id: "toolu_abc".into(),
+        call: phantom_agents::tools::ToolCall {
+            tool: phantom_agents::tools::ToolType::ReadFile,
+            args: serde_json::json!({"path": "src/main.rs"}),
+        },
+    })
+    .unwrap();
+
+    pane.poll();
+
+    let msgs = pane.messages();
+
+    let has_assistant = msgs
+        .iter()
+        .any(|m| matches!(m.role, PaneMessageRole::Assistant));
+    assert!(has_assistant, "messages must contain an Assistant entry after TextDelta");
+
+    let tool_call_idx = msgs
+        .iter()
+        .position(|m| matches!(&m.role, PaneMessageRole::ToolCall { tool_name } if tool_name == "read_file"));
+    assert!(
+        tool_call_idx.is_some(),
+        "messages must contain a ToolCall entry with tool_name=read_file; got: {msgs:?}",
+        msgs = msgs.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
+    );
+
+    let assistant_idx = msgs
+        .iter()
+        .position(|m| matches!(m.role, PaneMessageRole::Assistant))
+        .unwrap();
+    assert!(
+        assistant_idx < tool_call_idx.unwrap(),
+        "Assistant entry must precede ToolCall entry"
+    );
+}
+
+// =========================================================================
+// Fix 3 — working indicator appears in render output
+// =========================================================================
+
+/// When the pane status is `Working`, the render output must contain at
+/// least one text segment whose text includes "working" (case-insensitive).
+#[test]
+fn working_status_shows_indicator_in_render() {
+    use crate::adapters::agent::AgentAdapter;
+    use phantom_adapter::adapter::Rect;
+    use phantom_adapter::Renderable;
+
+    let (pane, _tx) = agent_with_handle();
+    assert_eq!(pane.status(), AgentPaneStatus::Working);
+
+    let adapter = AgentAdapter::new(pane);
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 400.0,
+        height: 300.0,
+        ..Rect::default()
+    };
+    let output = adapter.render(&rect);
+    let working_found = output
+        .text_segments
+        .iter()
+        .any(|seg| seg.text.to_lowercase().contains("working"));
+    assert!(
+        working_found,
+        "render output must contain a 'working' indicator when status is Working; \
+         segments: {segs:?}",
+        segs = output
+            .text_segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+    );
 }

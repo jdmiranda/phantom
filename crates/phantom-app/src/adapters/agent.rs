@@ -233,6 +233,20 @@ impl Renderable for AgentAdapter {
             });
         }
 
+        // Working indicator: a dim "▶ working..." line below the last visible
+        // output line, only shown while the agent is still streaming.
+        if self.pane.status() == AgentPaneStatus::Working {
+            let indicator_y = rect.y + pad + (visible.len() as f32) * LINE_HEIGHT;
+            if indicator_y + LINE_HEIGHT <= rect.y + output_height + pad {
+                text_segments.push(TextData {
+                    text: "▶ working...".to_string(),
+                    x: rect.x + pad,
+                    y: indicator_y,
+                    color: [0.2, 0.7, 0.3, 0.6],
+                });
+            }
+        }
+
         // --- Input bar: fixed at the bottom ---
         let input_y = rect.y + rect.height - INPUT_BAR_HEIGHT;
 
