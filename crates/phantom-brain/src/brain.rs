@@ -108,6 +108,12 @@ pub struct BrainConfig {
     ///
     /// `None` in standalone (non-relay) mode.
     pub relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>>,
+    /// In-memory recall context for seeding agent prompts with relevant
+    /// command history.  When `Some`, the brain indexes each observed command
+    /// and appends the top-K most relevant hits to Claude prompts.
+    ///
+    /// `None` disables recall-augmented prompt injection.
+    pub recall_context: Option<crate::recall::BrainRecallContext>,
 }
 
 impl Default for BrainConfig {
@@ -121,6 +127,7 @@ impl Default for BrainConfig {
             router: None,
             catalog: None,
             relay_inbound_rx: None,
+            recall_context: Some(crate::recall::BrainRecallContext::new()),
         }
     }
 }
@@ -203,6 +210,11 @@ fn brain_supervised(
     // a fresh RelayConnected event from the app.
     let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
         config.relay_inbound_rx;
+    // recall_context is not Clone (InMemoryRecallEngine has mutable state);
+    // consumed on the first iteration. On panic-restart, a fresh empty context
+    // is used — history is observable via the output accumulation path.
+    let mut recall_context: Option<crate::recall::BrainRecallContext> =
+        config.recall_context;
 
     // Shared slot: the supervisor writes a fresh `iter_tx` here after each
     // restart; the bridge thread reads it to redirect events.
@@ -256,6 +268,9 @@ fn brain_supervised(
             catalog: Some(catalog.clone()),
             // relay_inbound_rx is not Clone; taken on the first iteration only.
             relay_inbound_rx: relay_inbound_rx.take(),
+            // recall_context is not Clone; taken on the first iteration only.
+            // Subsequent restarts start with an empty recall context.
+            recall_context: recall_context.take(),
         };
 
         // Run brain_loop under catch_unwind.
@@ -355,6 +370,8 @@ fn brain_loop(
     // Drained in the proactive timeout tick below.
     let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
         config.relay_inbound_rx;
+    // Recall context: index commands and inject relevant hits into prompts.
+    let mut recall_ctx: Option<crate::recall::BrainRecallContext> = config.recall_context;
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -624,7 +641,7 @@ fn brain_loop(
         // always respond. Try Claude first, fall back to heuristic acknowledgement.
         if let AiEvent::Interrupt(ref query) = event
             && !query.is_empty() {
-                let reply = handle_console_query(query, &context, &mut router);
+                let reply = handle_console_query(query, &context, &mut router, &recall_ctx);
                 if action_tx.send(reply).is_err() {
                     break;
                 }
@@ -634,6 +651,14 @@ fn brain_loop(
 
         // ORIENT: update world model.
         orient(&event, &mut scorer);
+
+        // RECALL INDEX: seed the recall engine with each completed command so
+        // subsequent agent prompts have relevant history injected.
+        if let AiEvent::CommandComplete(ref parsed) = event {
+            if let Some(ref mut rc) = recall_ctx {
+                rc.index_command(&parsed.command, &parsed.raw_output, vec![]);
+            }
+        }
 
         // PROACTIVE: run the trigger-based suggester on every event.
         // Emits AiAction::Suggest when a pattern is observed and the
@@ -1145,6 +1170,7 @@ fn handle_console_query(
     query: &str,
     context: &ProjectContext,
     router: &mut BrainRouter,
+    recall: &Option<crate::recall::BrainRecallContext>,
 ) -> AiAction {
     // Try to find a Claude backend.
     let claude_backend: Option<ModelBackend> = router
@@ -1160,15 +1186,22 @@ fn handle_console_query(
             _ => unreachable!(),
         };
 
+        // Retrieve relevant context from recall index to augment the prompt.
+        let recall_section = recall
+            .as_ref()
+            .map(|r| r.format_for_prompt(query, 5))
+            .unwrap_or_default();
+
         let project_type = format!("{:?}", context.project_type);
         let prompt = format!(
             "You are Phantom, an AI-native terminal emulator's brain. \
              The user is working in a {} project ({}) and typed this in the console:\n\n\
-             \"{}\"\n\n\
+             \"{}\"\n{}\n\
              Respond concisely (1-3 sentences). Be helpful and direct.",
             project_type,
             context.name,
             query,
+            recall_section,
         );
 
         match crate::claude::generate(model_name, &prompt, 200) {

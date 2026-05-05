@@ -11,6 +11,7 @@ phantom-adapter = { path = "../phantom-adapter" }
 phantom-context = { path = "../phantom-context" }
 phantom-memory = { path = "../phantom-memory" }
 phantom-history = { path = "../phantom-history" }
+phantom-recall = { path = "../phantom-recall" }
 
 log.workspace = true
 anyhow.workspace = true
