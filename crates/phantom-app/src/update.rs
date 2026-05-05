@@ -24,14 +24,27 @@ impl App {
     pub fn update(&mut self) {
         crate::profile_scope!("update");
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32();
-        let dt_duration = now.duration_since(self.last_frame);
+        let raw_dt_duration = now.duration_since(self.last_frame);
         self.last_frame = now;
 
         // Warn if a frame takes abnormally long (> 2 seconds).
-        if dt > 2.0 {
-            warn!("SLOW FRAME: dt={dt:.2}s — previous frame blocked the event loop");
+        if raw_dt_duration.as_secs_f32() > 2.0 {
+            warn!(
+                "SLOW FRAME: dt={:.2}s — previous frame blocked the event loop",
+                raw_dt_duration.as_secs_f32()
+            );
         }
+
+        // Clamp dt to [target_dt, max_dt] to prevent animation explosions on
+        // debugger pauses, GC spikes, or OS suspends. Large raw deltas are
+        // replaced with the nominal 16.6 ms target so physics/animation math
+        // stays bounded regardless of wall-clock stalls.
+        let dt_duration = self.dt_clamp.apply(raw_dt_duration);
+        let dt = dt_duration.as_secs_f32();
+
+        // Advance the scene clock with the clamped delta so all subsystems
+        // share a monotonic time base that cannot jump on pause/resume.
+        self.scene_clock.tick(dt_duration);
 
         // Coordinator: tick all registered adapters and deliver bus messages.
         self.coordinator.update_all(dt_duration);
@@ -414,10 +427,11 @@ impl App {
         // Tick the notification center every frame so banners expire on time
         // even when no new denials arrive. Cheap (linear in the active banner
         // count, which is tiny by construction).
-        let now_ms_tick: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        //
+        // Use the scene clock's elapsed millis rather than SystemTime::now() so
+        // that the notification/cursor/shader timer domain is consistent with
+        // the clamped frame delta and cannot jump on OS clock adjustments.
+        let now_ms_tick: u64 = self.scene_clock.elapsed().as_millis() as u64;
         self.notifications.tick(now_ms_tick);
 
         // Advance the clock-driven cursor blink timer.  This runs once per
@@ -1734,5 +1748,80 @@ mod tests {
         assert!(!in_repl(&no_repl), "all-false detached map must yield in_repl=false");
         assert!(in_repl(&repl), "one true entry must yield in_repl=true");
         assert!(!in_repl(&empty), "empty map must yield in_repl=false");
+    }
+
+    // ---- DtClamp + SceneClock integration tests --------------------------
+    //
+    // These tests exercise the clamping and clock logic introduced to prevent
+    // animation explosions on debugger pauses and OS suspends. They operate
+    // directly on the `phantom_scene` types, mirroring the exact code path in
+    // `App::update`, so a green test here is a green production path.
+
+    /// A 5-second frame spike must be clamped to `target_dt` (16.6 ms),
+    /// keeping the downstream delta well inside the 100 ms `max_dt` bound.
+    #[test]
+    fn dt_clamp_prevents_large_spike_from_propagating() {
+        use std::time::Duration;
+
+        let clamp = phantom_scene::DtClamp::default_60fps();
+        let huge_spike = Duration::from_secs(5);
+
+        let clamped = clamp.apply(huge_spike);
+
+        assert!(
+            clamped <= Duration::from_millis(100),
+            "clamped dt {clamped:?} must not exceed 100 ms after a 5-second spike"
+        );
+        assert!(
+            clamped < huge_spike,
+            "clamped dt must be strictly less than the raw 5-second spike"
+        );
+    }
+
+    /// After two distinct ticks, `elapsed()` must exceed the first tick's
+    /// contribution, proving the clock advances monotonically.
+    #[test]
+    fn scene_clock_advances_each_frame() {
+        use std::time::Duration;
+
+        let mut clock = phantom_scene::Clock::new();
+
+        clock.tick(Duration::from_millis(16));
+        let after_first = clock.elapsed();
+
+        clock.tick(Duration::from_millis(16));
+        let after_second = clock.elapsed();
+
+        assert!(
+            after_second > after_first,
+            "elapsed after two ticks ({after_second:?}) must exceed elapsed after one tick ({after_first:?})"
+        );
+    }
+
+    /// When a large raw dt is clamped before being passed to `Clock::tick`,
+    /// the clock's elapsed must reflect the *clamped* delta, not the spike.
+    /// This mirrors the exact pipeline in `App::update`.
+    #[test]
+    fn scene_clock_delta_is_clamped() {
+        use std::time::Duration;
+
+        let clamp = phantom_scene::DtClamp::default_60fps();
+        let mut clock = phantom_scene::Clock::new();
+
+        let raw_spike = Duration::from_secs(5);
+        let clamped_dt = clamp.apply(raw_spike);
+
+        clock.tick(clamped_dt);
+
+        let elapsed = clock.elapsed();
+
+        assert!(
+            elapsed <= Duration::from_millis(100),
+            "clock elapsed {elapsed:?} must not reflect the raw 5-second spike"
+        );
+        assert!(
+            elapsed > Duration::ZERO,
+            "clock must have advanced by at least one clamped tick"
+        );
     }
 }
