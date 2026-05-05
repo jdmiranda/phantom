@@ -982,11 +982,19 @@ mod tests {
     const TEST_SECRET: &[u8] = b"phantom-hub-test-secret-for-mcp-endpoint-tests";
     const TEST_API_KEY: &str = "phk_test-api-key-for-unit-tests";
 
+    fn make_test_limiter() -> std::sync::Arc<crate::rate_limit::IpRateLimiter> {
+        std::sync::Arc::new(crate::rate_limit::IpRateLimiter::new(
+            std::time::Duration::from_secs(60),
+            10,
+        ))
+    }
+
     fn test_state_with_key(key: &str) -> crate::AppState {
         crate::AppState {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::from_raw_keys(std::iter::once(key))),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
+            register_limiter: make_test_limiter(),
             registry: crate::registry::new_shared(),
             registry_rate_limiter: Arc::new(
                 crate::auth::IpRateLimiter::registry_default(),
@@ -1006,6 +1014,7 @@ mod tests {
                 std::iter::once((key, caps)),
             )),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
+            register_limiter: make_test_limiter(),
             registry: crate::registry::new_shared(),
             registry_rate_limiter: Arc::new(
                 crate::auth::IpRateLimiter::registry_default(),
@@ -1019,6 +1028,7 @@ mod tests {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::default()),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
+            register_limiter: make_test_limiter(),
             registry: crate::registry::new_shared(),
             registry_rate_limiter: Arc::new(
                 crate::auth::IpRateLimiter::registry_default(),

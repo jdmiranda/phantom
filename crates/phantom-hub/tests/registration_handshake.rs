@@ -37,6 +37,10 @@ fn test_state() -> AppState {
         jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
         api_keys: Arc::new(ApiKeyStore::default()),
         nonce_cache: Arc::new(NonceCache::new()),
+        register_limiter: Arc::new(phantom_hub::rate_limit::IpRateLimiter::new(
+            std::time::Duration::from_secs(60),
+            10,
+        )),
         registry: new_shared(),
         registry_rate_limiter: Arc::new(IpRateLimiter::registry_default()),
         admin_token: Arc::new(AdminToken::disabled()),

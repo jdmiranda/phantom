@@ -558,9 +558,9 @@ mod tests {
         let reg_clone = Arc::clone(&registry);
         tokio::spawn(async move {
             let req = rx.recv().await.unwrap();
-            // The wire id must be a hub-local u64 (0), not Claude's 99.
+            // The wire id must be a hub-local random u64, not Claude's 99.
             let wire_id = req.id.clone().unwrap().as_u64().unwrap();
-            assert_eq!(wire_id, 0, "expected hub id 0 on the wire");
+            assert_ne!(wire_id, 99, "hub must rewrite Claude's id on the wire");
             deliver_response(&reg_clone, &phantom_id("id-test"), make_response(wire_id)).await;
         });
 

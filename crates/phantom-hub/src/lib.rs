@@ -37,13 +37,16 @@ pub mod auth;
 pub mod health;
 pub mod mcp_endpoint;
 pub mod phantom_endpoint;
+pub mod rate_limit;
 pub mod registry;
 pub mod router;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::{Router, extract::State, Json};
+use rate_limit::IpRateLimiter;
 use registry::SharedRegistry;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -71,6 +74,11 @@ pub struct AppState {
     /// is recorded here; a second presentation of the same nonce within the
     /// TTL window is rejected with `409 Conflict`.
     pub nonce_cache: Arc<auth::NonceCache>,
+    /// Per-IP rate limiter for `POST /auth/register`.
+    ///
+    /// Limits each IP to 10 registration attempts per 60-second window.
+    /// Returns `429 Too Many Requests` when the limit is exceeded.
+    pub register_limiter: Arc<IpRateLimiter>,
     /// Connection registry — tracks live Phantom WebSocket connections.
     pub registry: SharedRegistry,
     /// Per-IP rate limiter for the `/registry` debug endpoint (10 req/min).
@@ -88,6 +96,10 @@ impl AppState {
     /// The [`auth::NonceCache`] is always initialised with production defaults
     /// (capacity [`auth::NONCE_CACHE_CAPACITY`], TTL [`auth::NONCE_CACHE_TTL`]).
     ///
+    /// A background Tokio task is spawned to call
+    /// [`IpRateLimiter::evict_stale`] every two minutes, preventing unbounded
+    /// memory growth from dormant IP entries.
+    ///
     /// # Errors
     ///
     /// Returns an error if `HUB_JWT_SECRET` is absent or empty.
@@ -95,10 +107,23 @@ impl AppState {
         let jwt = auth::JwtAuthority::from_env()?;
         let api_keys = auth::ApiKeyStore::from_env();
         let admin_token = auth::AdminToken::from_env();
+        let register_limiter = Arc::new(IpRateLimiter::new(Duration::from_secs(60), 10));
+
+        // Spawn a background task that prunes stale IP entries every 2 minutes.
+        let limiter_for_task = Arc::clone(&register_limiter);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                limiter_for_task.evict_stale();
+            }
+        });
+
         Ok(Self {
             jwt: Arc::new(jwt),
             api_keys: Arc::new(api_keys),
             nonce_cache: Arc::new(auth::NonceCache::new()),
+            register_limiter,
             registry: registry::new_shared(),
             registry_rate_limiter: Arc::new(auth::IpRateLimiter::registry_default()),
             admin_token: Arc::new(admin_token),
@@ -271,6 +296,10 @@ mod tests {
             jwt: Arc::new(auth::JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(auth::ApiKeyStore::from_raw_keys(std::iter::once(key))),
             nonce_cache: Arc::new(auth::NonceCache::new()),
+            register_limiter: Arc::new(rate_limit::IpRateLimiter::new(
+                std::time::Duration::from_secs(60),
+                10,
+            )),
             registry: registry::new_shared(),
             registry_rate_limiter: Arc::new(auth::IpRateLimiter::registry_default()),
             admin_token: Arc::new(auth::AdminToken::from_token(TEST_ADMIN_TOKEN)),
