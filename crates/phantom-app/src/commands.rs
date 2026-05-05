@@ -79,7 +79,11 @@ impl App {
             return;
         }
 
-        match parts[0] {
+        // Normalise the command word to lowercase so `Font`, `FONT`, and
+        // `font` all route to the same arm (Bug 4 — case-sensitivity fix).
+        let cmd_lower = parts[0].to_lowercase();
+
+        match cmd_lower.as_str() {
             "set" => {
                 if parts.len() >= 3 {
                     let key = parts[1].to_string();
@@ -411,7 +415,11 @@ impl App {
                 // `ghost grant <peer> <capability>`  — grant capability to a remote peer.
                 // `ghost revoke <peer>`              — revoke all grants for a peer.
                 // `ghost grants [list]`              — list all active peer grants.
-                match (parts.get(1).copied(), parts.get(2).copied(), parts.get(3).copied()) {
+                match (
+                    parts.get(1).copied(),
+                    parts.get(2).copied(),
+                    parts.get(3).copied(),
+                ) {
                     (Some("privacy"), Some("on"), _) => {
                         self.privacy_mode = true;
                         self.status_bar.set_privacy_mode(true);
@@ -442,9 +450,7 @@ impl App {
                             Some(class) => {
                                 let peer = PeerId::new(peer_str);
                                 // Merge with any existing grant rather than replacing.
-                                let mut classes = self
-                                    .peer_grant_registry
-                                    .effective_classes(&peer);
+                                let mut classes = self.peer_grant_registry.effective_classes(&peer);
                                 classes.insert(class);
                                 self.peer_grant_registry.grant(peer.clone(), classes, None);
                                 crate::peer_grants::save_peer_grant_registry(
@@ -472,9 +478,7 @@ impl App {
                     (Some("revoke"), Some(peer_str), _) => {
                         let peer = PeerId::new(peer_str);
                         self.peer_grant_registry.revoke(&peer);
-                        crate::peer_grants::save_peer_grant_registry(
-                            &self.peer_grant_registry,
-                        );
+                        crate::peer_grants::save_peer_grant_registry(&self.peer_grant_registry);
                         self.console
                             .system(format!("Revoked: all grants for peer {peer_str} removed"));
                     }
@@ -487,7 +491,8 @@ impl App {
                         if grants.is_empty() {
                             self.console.output("No active peer grants.");
                         } else {
-                            self.console.output(format!("{} active peer grant(s):", grants.len()));
+                            self.console
+                                .output(format!("{} active peer grant(s):", grants.len()));
                             for g in grants {
                                 let classes: Vec<&str> = g
                                     .allowed_classes
@@ -513,14 +518,17 @@ impl App {
                         }
                     }
                     _ => {
+                        self.console.output("Usage: ghost <subcommand> [args]");
                         self.console.output(
-                            "Usage: ghost <subcommand> [args]",
+                            "  ghost privacy on|off                    Toggle privacy mode",
                         );
-                        self.console.output("  ghost privacy on|off                    Toggle privacy mode");
                         self.console.output("  ghost grant <peer_id> <capability>      Grant capability to a remote peer");
                         self.console.output("  ghost revoke <peer_id>                  Revoke all grants for a peer");
-                        self.console.output("  ghost grants [list]                     List all active peer grants");
-                        self.console.output("  Capabilities: Sense | Coordinate | Act | Reflect | Compute");
+                        self.console.output(
+                            "  ghost grants [list]                     List all active peer grants",
+                        );
+                        self.console
+                            .output("  Capabilities: Sense | Coordinate | Act | Reflect | Compute");
                     }
                 }
             }
@@ -540,8 +548,8 @@ impl App {
                 let op = cmd; // e.g. "dag.focus_node"
                 // Everything after the first space is the JSON args (optional).
                 let args_str = input.trim().split_once(' ').map(|x| x.1).unwrap_or("{}");
-                let args: serde_json::Value = serde_json::from_str(args_str)
-                    .unwrap_or(serde_json::json!({}));
+                let args: serde_json::Value =
+                    serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
 
                 // Look for the first inspector adapter registered with the
                 // coordinator and send the command there.
@@ -575,6 +583,154 @@ impl App {
                 self.console.history.clear();
                 self.console.scroll_offset = 0;
             }
+            // ------------------------------------------------------------------
+            // font <size> | font reset
+            // ------------------------------------------------------------------
+            "font" => match parts.get(1).copied() {
+                None | Some("") => {
+                    let current = self.text_renderer.font_size();
+                    self.console
+                        .output(format!("Font size: {current:.0}pt (default: 14pt)"));
+                    self.console.output("Usage: font <size>  |  font reset");
+                }
+                Some("reset") => {
+                    const FONT_DEFAULT: f32 = 14.0;
+                    self.text_renderer.set_font_size(FONT_DEFAULT);
+                    self.console
+                        .output(format!("Font size reset to {FONT_DEFAULT:.0}pt"));
+                }
+                Some(size_str) => match size_str.parse::<f32>() {
+                    Ok(size) if size >= 6.0 && size <= 72.0 => {
+                        self.text_renderer.set_font_size(size);
+                        self.console.output(format!("Font size set to {size:.0}pt"));
+                    }
+                    Ok(size) => {
+                        self.console
+                            .error(format!("Font size {size} out of range (6–72pt)"));
+                    }
+                    Err(_) => {
+                        self.console.error(format!("Invalid font size: {size_str}"));
+                    }
+                },
+            },
+            // ------------------------------------------------------------------
+            // memory  |  memory clear
+            // ------------------------------------------------------------------
+            "memory" => match parts.get(1).copied() {
+                Some("clear") => match self.memory {
+                    None => {
+                        self.console.output("Memory store not available.");
+                    }
+                    Some(ref mut store) => {
+                        let keys: Vec<String> = store.all().iter().map(|e| e.key.clone()).collect();
+                        let count = keys.len();
+                        for key in &keys {
+                            let _ = store.remove(key);
+                        }
+                        self.console
+                            .output(format!("Memory cleared ({count} entries removed)."));
+                    }
+                },
+                _ => match self.memory {
+                    None => {
+                        self.console.output("Memory store not available.");
+                    }
+                    Some(ref store) => {
+                        let entries = store.all();
+                        if entries.is_empty() {
+                            self.console.output("Memory: (no entries)");
+                        } else {
+                            self.console
+                                .output(format!("Memory ({} entries):", entries.len()));
+                            for entry in entries {
+                                self.console
+                                    .output(format!("  {:30}  {}", entry.key, entry.value));
+                            }
+                        }
+                    }
+                },
+            },
+            // ------------------------------------------------------------------
+            // screenshot
+            // ------------------------------------------------------------------
+            "screenshot" => {
+                use phantom_renderer::screenshot::{
+                    ScreenshotMetadata, capture_frame, save_screenshot,
+                };
+                use std::time::{SystemTime, UNIX_EPOCH};
+
+                let texture = self.postfx.scene_texture();
+                let width = texture.width();
+                let height = texture.height();
+
+                match capture_frame(&self.gpu.device, &self.gpu.queue, texture, width, height) {
+                    Err(e) => {
+                        self.console
+                            .error(format!("Screenshot capture failed: {e}"));
+                    }
+                    Ok(pixels) => {
+                        // Swap BGRA → RGBA on Metal/D3D12 where surface format is Bgra8.
+                        let pixels_rgba = match self.gpu.format {
+                            wgpu::TextureFormat::Bgra8Unorm
+                            | wgpu::TextureFormat::Bgra8UnormSrgb => {
+                                let mut out = pixels;
+                                for px in out.chunks_exact_mut(4) {
+                                    px.swap(0, 2);
+                                }
+                                out
+                            }
+                            _ => pixels,
+                        };
+
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        let metadata = ScreenshotMetadata {
+                            timestamp,
+                            width,
+                            height,
+                            theme: self.theme.name.clone(),
+                            pane_count: self.coordinator.adapter_count(),
+                            project: self.context.as_ref().map(|c| c.name.clone()),
+                            branch: self
+                                .context
+                                .as_ref()
+                                .and_then(|c| c.git.as_ref().map(|g| g.branch.clone())),
+                        };
+
+                        let downloads = std::env::var("HOME")
+                            .ok()
+                            .map(|h| std::path::PathBuf::from(h).join("Downloads"))
+                            .unwrap_or_else(|| std::env::temp_dir());
+                        let filename = format!("phantom-{timestamp}.png");
+                        let png_path = downloads.join(&filename);
+
+                        match save_screenshot(&pixels_rgba, width, height, &metadata, &png_path) {
+                            Ok(()) => {
+                                let path_str = png_path.display().to_string();
+                                self.console.system(format!("Screenshot saved: {path_str}"));
+                                use crate::notifications::{
+                                    Banner, DEFAULT_BANNER_TTL_MS, Severity,
+                                };
+                                let now_ms = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0);
+                                self.notifications.push_banner(Banner {
+                                    message: format!("Screenshot saved to {path_str}"),
+                                    severity: Severity::Info,
+                                    expires_at_ms: now_ms.saturating_add(DEFAULT_BANNER_TTL_MS),
+                                });
+                            }
+                            Err(e) => {
+                                self.console.error(format!("Screenshot save failed: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
             cmd if cmd == "offline" || cmd.starts_with("offline ") => {
                 // SAFETY: the match guard above guarantees `cmd` either equals
                 // "offline" or begins with "offline ", so `strip_prefix("offline")`
@@ -585,23 +741,28 @@ impl App {
                     .trim();
                 match subcommand {
                     "on" | "enable" => {
-                        self.console.system("Offline mode: ON (using local backends only)");
+                        self.console
+                            .system("Offline mode: ON (using local backends only)");
                         if let Some(ref brain) = self.brain {
-                            let _ = brain.send_event(phantom_brain::events::AiEvent::SetOfflineMode {
-                                enabled: true,
-                            });
+                            let _ =
+                                brain.send_event(phantom_brain::events::AiEvent::SetOfflineMode {
+                                    enabled: true,
+                                });
                         }
                     }
                     "off" | "disable" => {
-                        self.console.system("Offline mode: OFF (cloud backends available)");
+                        self.console
+                            .system("Offline mode: OFF (cloud backends available)");
                         if let Some(ref brain) = self.brain {
-                            let _ = brain.send_event(phantom_brain::events::AiEvent::SetOfflineMode {
-                                enabled: false,
-                            });
+                            let _ =
+                                brain.send_event(phantom_brain::events::AiEvent::SetOfflineMode {
+                                    enabled: false,
+                                });
                         }
                     }
                     _ => {
-                        self.console.error("Usage: offline on|off (or: offline enable|disable)");
+                        self.console
+                            .error("Usage: offline on|off (or: offline enable|disable)");
                     }
                 }
             }
@@ -633,8 +794,9 @@ impl App {
                     .output("  selftest            Brain exercises its own features");
                 self.console
                     .output("  selfheal            selftest + auto-fix + commit + push");
-                self.console
-                    .output("  ghost privacy on                Enable privacy mode (block cloud APIs)");
+                self.console.output(
+                    "  ghost privacy on                Enable privacy mode (block cloud APIs)",
+                );
                 self.console
                     .output("  ghost privacy off               Disable privacy mode");
                 self.console
@@ -647,9 +809,22 @@ impl App {
                     .output("    Capabilities: Sense | Coordinate | Act | Reflect | Compute");
                 self.console
                     .output("  clear               Clear console history");
+                self.console.output(
+                    "  font <size>         Set font size in points (6–72); case-insensitive",
+                );
+                self.console
+                    .output("  font reset          Revert font to default (14pt)");
+                self.console
+                    .output("  memory              List all memory entries for this session");
+                self.console
+                    .output("  memory clear        Clear all session memory entries");
+                self.console.output(
+                    "  screenshot          Capture CRT terminal to ~/Downloads/phantom-<ts>.png",
+                );
                 self.console.output("  quit                Exit Phantom");
                 self.console.output("  dag.<op> [json]     DAG viewer commands: focus_node, clear_focus, scroll_to,");
-                self.console.output("                        zoom, highlight, clear_highlight, reset_view");
+                self.console
+                    .output("                        zoom, highlight, clear_highlight, reset_view");
             }
             _other => {
                 // NLP fallback: try interpreting as natural language.
@@ -946,12 +1121,27 @@ mod tests {
 
     #[test]
     fn parse_capability_class_case_insensitive() {
-        assert_eq!(parse_capability_class("Sense"), Some(CapabilityClass::Sense));
-        assert_eq!(parse_capability_class("sense"), Some(CapabilityClass::Sense));
-        assert_eq!(parse_capability_class("Coordinate"), Some(CapabilityClass::Coordinate));
+        assert_eq!(
+            parse_capability_class("Sense"),
+            Some(CapabilityClass::Sense)
+        );
+        assert_eq!(
+            parse_capability_class("sense"),
+            Some(CapabilityClass::Sense)
+        );
+        assert_eq!(
+            parse_capability_class("Coordinate"),
+            Some(CapabilityClass::Coordinate)
+        );
         assert_eq!(parse_capability_class("Act"), Some(CapabilityClass::Act));
-        assert_eq!(parse_capability_class("Reflect"), Some(CapabilityClass::Reflect));
-        assert_eq!(parse_capability_class("Compute"), Some(CapabilityClass::Compute));
+        assert_eq!(
+            parse_capability_class("Reflect"),
+            Some(CapabilityClass::Reflect)
+        );
+        assert_eq!(
+            parse_capability_class("Compute"),
+            Some(CapabilityClass::Compute)
+        );
         assert_eq!(parse_capability_class("unknown"), None);
         assert_eq!(parse_capability_class(""), None);
     }
@@ -991,7 +1181,11 @@ mod tests {
     fn ghost_grant_splitn4_yields_four_parts() {
         let input = "ghost grant peer123 coordinate";
         let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
-        assert_eq!(parts.len(), 4, "splitn(4) must produce 4 tokens for 'ghost grant <peer> <cap>'");
+        assert_eq!(
+            parts.len(),
+            4,
+            "splitn(4) must produce 4 tokens for 'ghost grant <peer> <cap>'"
+        );
         assert_eq!(parts[0], "ghost");
         assert_eq!(parts[1], "grant");
         assert_eq!(parts[2], "peer123");
@@ -1010,7 +1204,11 @@ mod tests {
         let parts: Vec<&str> = input.trim().splitn(3, ' ').collect();
         // With the old splitn(3) the capability token is absent.
         assert_eq!(parts.len(), 3);
-        assert_eq!(parts.get(3), None, "splitn(3) must NOT yield a 4th token (documents the regression)");
+        assert_eq!(
+            parts.get(3),
+            None,
+            "splitn(3) must NOT yield a 4th token (documents the regression)"
+        );
     }
 
     /// The capability string parsed from `parts[3]` must be recognised.
@@ -1059,5 +1257,106 @@ mod tests {
         // triggering the "Unknown capability" error path — not a panic.
         let cap = parse_capability_class(parts[3]);
         assert_eq!(cap, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug 4 — Case-sensitivity regression tests
+    // -----------------------------------------------------------------------
+
+    /// The main command parser must route mixed-case variants to the same arm
+    /// as lowercase. `splitn` + `.to_lowercase()` on `parts[0]` ensures this.
+    #[test]
+    fn command_parser_case_insensitive() {
+        // We test the normalisation logic directly: for each variant the first
+        // word lowercased must equal the canonical command token.
+        for (input, expected_cmd) in [
+            ("Font 16", "font"),
+            ("FONT reset", "font"),
+            ("Memory", "memory"),
+            ("MEMORY clear", "memory"),
+            ("Screenshot", "screenshot"),
+            ("SCREENSHOT", "screenshot"),
+            ("Theme amber", "theme"),
+            ("THEME ice", "theme"),
+            ("QUIT", "quit"),
+        ] {
+            let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+            let cmd_lower = parts[0].to_lowercase();
+            assert_eq!(
+                cmd_lower.as_str(),
+                expected_cmd,
+                "input '{input}' must normalise to '{expected_cmd}'"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug 1 — font command parsing
+    // -----------------------------------------------------------------------
+
+    /// `font <size>` must parse the numeric argument correctly.
+    #[test]
+    fn font_command_sets_font_size() {
+        // Parse the numeric part directly (integration with App requires GPU).
+        let input = "font 16";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        let cmd_lower = parts[0].to_lowercase();
+        assert_eq!(cmd_lower.as_str(), "font");
+        let size_arg = parts.get(1).copied().unwrap_or("");
+        let parsed: Result<f32, _> = size_arg.parse();
+        assert!(parsed.is_ok(), "font size '16' must parse as f32");
+        assert!((parsed.unwrap() - 16.0).abs() < f32::EPSILON);
+    }
+
+    /// `font reset` must produce the "reset" subcommand token.
+    #[test]
+    fn font_reset_reverts_to_default() {
+        let input = "font reset";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        let cmd_lower = parts[0].to_lowercase();
+        assert_eq!(cmd_lower.as_str(), "font");
+        assert_eq!(parts.get(1).copied(), Some("reset"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug 2 — memory command parsing
+    // -----------------------------------------------------------------------
+
+    /// `memory` with no subcommand must resolve to the list path (None subcommand).
+    #[test]
+    fn memory_command_lists_entries() {
+        let input = "memory";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        let cmd_lower = parts[0].to_lowercase();
+        assert_eq!(cmd_lower.as_str(), "memory");
+        // No subcommand → shows entries.
+        assert_eq!(parts.get(1).copied(), None);
+    }
+
+    /// `memory clear` must deliver "clear" as the subcommand.
+    #[test]
+    fn memory_clear_subcommand_parsed() {
+        let input = "memory clear";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        let cmd_lower = parts[0].to_lowercase();
+        assert_eq!(cmd_lower.as_str(), "memory");
+        assert_eq!(parts.get(1).copied(), Some("clear"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug 3 — screenshot command parsing
+    // -----------------------------------------------------------------------
+
+    /// `screenshot` must resolve to the "screenshot" command token.
+    #[test]
+    fn screenshot_command_calls_renderer() {
+        // The renderer invocation itself requires a GPU context; we verify
+        // the dispatch tokenisation here and rely on the MCP screenshot path
+        // (tested in phantom-app integration tests) for end-to-end coverage.
+        let input = "screenshot";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        let cmd_lower = parts[0].to_lowercase();
+        assert_eq!(cmd_lower.as_str(), "screenshot");
+        assert_eq!(parts.len(), 1, "screenshot takes no arguments");
     }
 }

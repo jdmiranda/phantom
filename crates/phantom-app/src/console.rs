@@ -24,13 +24,16 @@ pub(crate) const COMMANDS: &[&str] = &[
     "clear",
     "debug",
     "exit",
+    "font",
     "help",
     "goal",
     "inspect",
+    "memory",
     "plain",
     "plugins",
     "quit",
     "reload",
+    "screenshot",
     "selfheal",
     "selftest",
     "set",
@@ -124,10 +127,7 @@ impl Console {
         self.scroll_offset = 0;
         self.history_index = None;
 
-        if self
-            .command_history
-            .last() != Some(&cmd)
-        {
+        if self.command_history.last() != Some(&cmd) {
             self.command_history.push(cmd.clone());
         }
 
