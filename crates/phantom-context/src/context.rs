@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::process::Command;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+
+use phantom_dag::CodeDag;
 
 use crate::detect::{
     detect_commands, detect_framework, detect_package_manager, detect_project, Framework,
@@ -211,8 +214,179 @@ impl ProjectContext {
 }
 
 // ---------------------------------------------------------------------------
+// ContextAssembler
+// ---------------------------------------------------------------------------
+
+/// Builds [`ProjectContext`] with an optional cached [`CodeDag`].
+///
+/// For Rust projects the assembler calls [`CodeDag::from_cargo_metadata`] and
+/// caches the result in `.planning/dag.json`.  On subsequent calls within the
+/// same 5-minute window the file is loaded directly, avoiding a shell-out.
+/// The cache is invalidated when `Cargo.toml` mtime changes.  If
+/// `cargo metadata` fails the topology section is silently omitted.
+#[derive(Debug, Default)]
+pub struct ContextAssembler {
+    dag: Option<CodeDag>,
+    /// mtime of `Cargo.toml` at the time the DAG was last built.
+    cargo_toml_mtime: Option<SystemTime>,
+}
+
+impl ContextAssembler {
+    /// Create a new, empty assembler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build and return a [`ProjectContext`] for `dir`, refreshing the DAG
+    /// when `Cargo.toml` has changed.
+    #[must_use]
+    pub fn assemble(&mut self, dir: &Path) -> ProjectContext {
+        let ctx = ProjectContext::detect(dir);
+        if matches!(ctx.project_type, ProjectType::Rust) {
+            self.refresh_dag_if_stale(dir);
+        } else {
+            self.dag = None;
+            self.cargo_toml_mtime = None;
+        }
+        ctx
+    }
+
+    /// Produce the agent context string, appending a crate topology section
+    /// when a DAG is available.
+    #[must_use]
+    pub fn agent_context(&mut self, dir: &Path) -> String {
+        let ctx = self.assemble(dir);
+        match &self.dag {
+            Some(dag) => {
+                let base = ctx.agent_context();
+                match topology_section(dag) {
+                    Some(t) => format!("{base}\n{t}"),
+                    None => base,
+                }
+            }
+            None => ctx.agent_context(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    fn refresh_dag_if_stale(&mut self, dir: &Path) {
+        let mtime = cargo_toml_mtime(dir);
+        let stale = match (mtime, self.cargo_toml_mtime) {
+            (Some(m), Some(cached)) => m != cached,
+            _ => true,
+        };
+        if !stale {
+            return;
+        }
+
+        let dag_path = dir.join(".planning").join("dag.json");
+
+        // Serve the cache if it was written within the last 5 minutes.
+        let dag_age = std::fs::metadata(&dag_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mt| SystemTime::now().duration_since(mt).ok());
+        let cache_fresh = dag_age
+            .map(|age| age < std::time::Duration::from_secs(300))
+            .unwrap_or(false);
+
+        if cache_fresh {
+            match std::fs::read_to_string(&dag_path)
+                .map_err(anyhow::Error::from)
+                .and_then(|s| CodeDag::from_json(&s))
+            {
+                Ok(dag) => {
+                    self.dag = Some(dag);
+                    self.cargo_toml_mtime = mtime;
+                    return;
+                }
+                Err(e) => {
+                    log::debug!(
+                        "phantom-context: DAG cache load failed (will rebuild): {e}"
+                    );
+                }
+            }
+        }
+
+        // Cache miss or stale — rebuild from cargo metadata.
+        match CodeDag::from_cargo_metadata() {
+            Ok(dag) => {
+                // Persist for future fast loads.
+                if let Ok(json) = dag.to_json() {
+                    let _ = std::fs::create_dir_all(dir.join(".planning"));
+                    let _ = std::fs::write(&dag_path, json);
+                }
+                self.dag = Some(dag);
+                self.cargo_toml_mtime = mtime;
+            }
+            Err(e) => {
+                log::debug!(
+                    "phantom-context: from_cargo_metadata failed (skipping topology): {e}"
+                );
+                // Fall back to any on-disk file even if it's stale.
+                match std::fs::read_to_string(&dag_path)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|s| CodeDag::from_json(&s))
+                {
+                    Ok(dag) => {
+                        self.dag = Some(dag);
+                        self.cargo_toml_mtime = mtime;
+                    }
+                    Err(_) => {
+                        self.dag = None;
+                        self.cargo_toml_mtime = None;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Topology section helper
+// ---------------------------------------------------------------------------
+
+/// Build a `## Crate Topology` section from the top-5 most-depended-upon
+/// crates (highest in-degree).  Returns `None` when the graph has no edges.
+fn topology_section(dag: &CodeDag) -> Option<String> {
+    use std::collections::HashMap as Map;
+    let mut in_degree: Map<&str, usize> = Map::new();
+    for node in dag.nodes() {
+        in_degree.entry(node.id()).or_insert(0);
+    }
+    for edge in dag.edges() {
+        *in_degree.entry(edge.to()).or_insert(0) += 1;
+    }
+    if in_degree.is_empty() {
+        return None;
+    }
+    let mut ranked: Vec<(&&str, &usize)> = in_degree.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let top5: Vec<String> = ranked
+        .into_iter()
+        .take(5)
+        .map(|(name, count)| format!("  {name} (in-degree: {count})"))
+        .collect();
+    Some(format!(
+        "## Crate Topology\nTop crates by dependents:\n{}",
+        top5.join("\n")
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Return the `mtime` of `Cargo.toml` in `dir`, or `None` on any I/O error.
+fn cargo_toml_mtime(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir.join("Cargo.toml"))
+        .ok()
+        .and_then(|m| m.modified().ok())
+}
 
 /// Extract the project name from the manifest file, falling back to dir name.
 fn extract_project_name(dir: &Path, project_type: &ProjectType) -> String {

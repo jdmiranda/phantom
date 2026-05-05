@@ -5830,6 +5830,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "phantom-dag",
  "serde",
  "serde_json",
  "tempfile",
