@@ -396,8 +396,18 @@ impl OodaLoop {
             },
             "notify_agent_complete" => AiAction::ShowNotification("Agent completed.".into()),
             "notify_change" => AiAction::ShowNotification("Files or git state changed.".into()),
-            // quiet / watch_build / unknown → DoNothing
-            _ => AiAction::DoNothing,
+            // Quiet and watch_build are intentional no-ops.
+            "quiet" | "watch_build" => AiAction::DoNothing,
+            // These AiAction variants are emitted directly by the brain event
+            // loop — they never arrive as BDS behavior IDs. Guard against any
+            // future mis-wiring by logging a warning before falling through to
+            // DoNothing rather than silently masking the misconfiguration.
+            id => {
+                log::warn!("unknown behavior id: {}", id);
+                #[cfg(debug_assertions)]
+                debug_assert!(false, "unhandled behavior id: {}", id);
+                AiAction::DoNothing
+            }
         }
     }
 }
@@ -564,6 +574,27 @@ mod tests {
         assert!(ctx.has_active_process);
         assert!((ctx.chattiness - 0.3).abs() < f32::EPSILON);
         assert_eq!(ctx.suggestions_since_input, 2);
+    }
+
+    // =======================================================================
+    // Test 7.5: unknown behavior_id returns DoNothing
+    // =======================================================================
+
+    // The debug_assert! in behavior_to_action panics on unknown IDs in debug
+    // builds — that is the correct behavior for catching mis-wiring during
+    // development.  Gate this test to release mode so the assertion-level check
+    // can verify the DoNothing return without triggering the panic.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn unknown_behavior_id_returns_do_nothing_with_warn() {
+        let world = quiet_world();
+        // Invoke directly to confirm unknown IDs map to DoNothing.
+        let action = OodaLoop::behavior_to_action("totally_unknown_behavior", &world);
+        assert!(
+            matches!(action, AiAction::DoNothing),
+            "expected DoNothing for unknown behavior, got {:?}",
+            action
+        );
     }
 
     // =======================================================================
