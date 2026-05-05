@@ -17,6 +17,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::jsonl::{CURRENT_SCHEMA_VERSION, schema_v1};
+
 // ---------------------------------------------------------------------------
 // ToolCall
 // ---------------------------------------------------------------------------
@@ -76,6 +78,9 @@ impl ToolCall {
 /// A single captured record from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentRecord {
+    /// Schema version — defaults to 1 when deserialising pre-versioned records.
+    #[serde(default = "schema_v1")]
+    schema_version: u32,
     /// UUID of this record.
     id: Uuid,
     /// Which agent produced this record.
@@ -148,6 +153,7 @@ impl AgentOutputCapture {
         text_output: impl Into<String>,
     ) -> Result<()> {
         let record = AgentRecord {
+            schema_version: CURRENT_SCHEMA_VERSION,
             id: Uuid::new_v4(),
             agent_name: agent_name.into(),
             session_id,
@@ -203,8 +209,13 @@ impl AgentOutputCapture {
         for line in reader.lines() {
             let line = line.context("read error counting agent sidecar lines")?;
             let t = line.trim();
-            if !t.is_empty() && serde_json::from_str::<AgentRecord>(t).is_ok() {
-                count += 1;
+            if t.is_empty() {
+                continue;
+            }
+            if let Ok(r) = serde_json::from_str::<AgentRecord>(t) {
+                if r.schema_version <= CURRENT_SCHEMA_VERSION {
+                    count += 1;
+                }
             }
         }
         Ok(count)
@@ -233,7 +244,16 @@ impl AgentOutputCapture {
                 continue;
             }
             match serde_json::from_str::<AgentRecord>(trimmed) {
-                Ok(r) => records.push(CapturedAgent::from(r)),
+                Ok(r) => {
+                    if r.schema_version > CURRENT_SCHEMA_VERSION {
+                        log::warn!(
+                            "skipping agent sidecar record with unsupported schema_version {}",
+                            r.schema_version
+                        );
+                        continue;
+                    }
+                    records.push(CapturedAgent::from(r));
+                }
                 Err(e) => log::warn!("skipping corrupt agent sidecar line: {e}"),
             }
         }

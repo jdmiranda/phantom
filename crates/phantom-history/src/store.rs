@@ -35,6 +35,16 @@ use uuid::Uuid;
 use crate::jsonl::HistoryEntry;
 
 // ---------------------------------------------------------------------------
+// Rotation constants
+// ---------------------------------------------------------------------------
+
+/// Default maximum number of entries before the JSONL file is rotated.
+const DEFAULT_MAX_HISTORY_ENTRIES: usize = 100_000;
+
+/// Maximum number of rotated backup files kept (`.1`, `.2`, `.3`).
+const MAX_ROTATED_FILES: u32 = 3;
+
+// ---------------------------------------------------------------------------
 // HistoryStore
 // ---------------------------------------------------------------------------
 
@@ -46,6 +56,14 @@ use crate::jsonl::HistoryEntry;
 /// The store holds an exclusive advisory flock on `<path>.lock` for its
 /// entire lifetime.  A second `HistoryStore` opened on the same path will
 /// fail with a "locked" error until the first is dropped.
+///
+/// ## Rotation
+///
+/// When the number of entries reaches `max_entries`, [`HistoryStore::append`]
+/// rotates the current file: the existing file is renamed to `<path>.1` (bumping
+/// older rotations up to `.2`, `.3`), and the oldest file beyond
+/// [`MAX_ROTATED_FILES`] is deleted.  The active store then starts with a fresh,
+/// empty file.
 pub struct HistoryStore {
     /// Path to the `.jsonl` file.
     path: PathBuf,
@@ -59,6 +77,10 @@ pub struct HistoryStore {
     agent_index: Option<HashMap<String, Vec<u64>>>,
     /// Byte offset where the next append will begin.
     next_offset: u64,
+    /// Number of valid entries currently in the active file.
+    entry_count: usize,
+    /// Maximum entries before the active file is rotated.
+    max_entries: usize,
     /// Holds the exclusive flock on `<path>.lock` for the store's lifetime.
     /// Dropping this field releases the lock.
     _lock_file: File,
@@ -124,11 +146,25 @@ impl HistoryStore {
             index: HashMap::new(),
             agent_index: None,
             next_offset: 0,
+            entry_count: 0,
+            max_entries: DEFAULT_MAX_HISTORY_ENTRIES,
             _lock_file: lock_file,
         };
 
         store.rebuild_index()?;
         Ok(store)
+    }
+
+    /// Override the rotation threshold (number of entries before rotation).
+    ///
+    /// Must be called immediately after [`open_at`] / [`open`] and before
+    /// the first [`append`].  The entry count accumulated during `open_at`
+    /// is preserved; rotation will trigger on the next [`append`] if the
+    /// existing file already exceeds `max_entries`.
+    #[must_use]
+    pub fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
     }
 
     // -----------------------------------------------------------------------
@@ -139,6 +175,14 @@ impl HistoryStore {
     ///
     /// The in-memory index is updated so subsequent id-lookups reflect the new
     /// entry without a file rescan.
+    ///
+    /// ## Rotation
+    ///
+    /// After writing, if `entry_count` reaches `max_entries` the store rotates:
+    /// the current file is renamed to `<path>.1`, older rotations are bumped
+    /// (`.1` → `.2`, etc.), and any rotation beyond [`MAX_ROTATED_FILES`] is
+    /// deleted.  The in-memory index, offsets, and entry count are then reset
+    /// to reflect the new empty file.
     pub fn append(&mut self, entry: &HistoryEntry) -> Result<()> {
         let line = entry.to_jsonl_line()?;
 
@@ -155,9 +199,67 @@ impl HistoryStore {
         // line + '\n'
         self.next_offset += line.len() as u64 + 1;
         self.index.insert(entry.id(), offset);
+        self.entry_count += 1;
         // Invalidate the lazy agent index so the next by_agent call will
         // rebuild it and include this new entry.
         self.agent_index = None;
+
+        // Rotate if the file has grown beyond the limit.
+        if self.entry_count >= self.max_entries {
+            self.rotate()?;
+        }
+
+        Ok(())
+    }
+
+    /// Rotate the active JSONL file.
+    ///
+    /// Renames rotated files upward (`.2` → `.3`, `.1` → `.2`), deletes the
+    /// oldest if it would exceed [`MAX_ROTATED_FILES`], then renames the active
+    /// file to `.1`.  The in-memory state is reset to represent a new, empty
+    /// active file.
+    fn rotate(&mut self) -> Result<()> {
+        // Walk backwards so we don't clobber files still needing to be renamed.
+        // Delete the oldest rotation if it exists to make room.
+        let overflow_path = rotated_path(&self.path, MAX_ROTATED_FILES);
+        if overflow_path.exists() {
+            fs::remove_file(&overflow_path).with_context(|| {
+                format!("cannot remove oldest rotation: {}", overflow_path.display())
+            })?;
+        }
+
+        // Bump .2 → .3, .1 → .2  (iterate from MAX_ROTATED_FILES-1 down to 1)
+        for n in (1..MAX_ROTATED_FILES).rev() {
+            let src = rotated_path(&self.path, n);
+            let dst = rotated_path(&self.path, n + 1);
+            if src.exists() {
+                fs::rename(&src, &dst).with_context(|| {
+                    format!(
+                        "cannot rename rotation {} → {}",
+                        src.display(),
+                        dst.display()
+                    )
+                })?;
+            }
+        }
+
+        // Rename the active file to .1
+        let backup = rotated_path(&self.path, 1);
+        if self.path.exists() {
+            fs::rename(&self.path, &backup).with_context(|| {
+                format!(
+                    "cannot rotate history file: {} → {}",
+                    self.path.display(),
+                    backup.display()
+                )
+            })?;
+        }
+
+        // Reset in-memory state — the active file is now empty.
+        self.index.clear();
+        self.agent_index = None;
+        self.next_offset = 0;
+        self.entry_count = 0;
 
         Ok(())
     }
@@ -350,10 +452,11 @@ impl HistoryStore {
         Ok(entries)
     }
 
-    /// Scan the file to populate `index` and `next_offset`.
+    /// Scan the file to populate `index`, `next_offset`, and `entry_count`.
     fn rebuild_index(&mut self) -> Result<()> {
         if !self.path.exists() {
             self.next_offset = 0;
+            self.entry_count = 0;
             return Ok(());
         }
 
@@ -379,6 +482,7 @@ impl HistoryStore {
             offset += line_len;
         }
         self.next_offset = offset;
+        self.entry_count = self.index.len();
         Ok(())
     }
 }
@@ -399,6 +503,16 @@ fn lock_path_for(path: &Path) -> PathBuf {
     let mut lock = path.to_path_buf().into_os_string();
     lock.push(".lock");
     PathBuf::from(lock)
+}
+
+/// Return the path for a rotated backup of `path`.
+///
+/// For example, `rotated_path("/data/history.jsonl", 1)` returns
+/// `/data/history.jsonl.1`.
+fn rotated_path(path: &Path, n: u32) -> PathBuf {
+    let mut p = path.as_os_str().to_os_string();
+    p.push(format!(".{n}"));
+    PathBuf::from(p)
 }
 
 /// Default data directory: `~/.local/share/phantom/history/`.
@@ -888,5 +1002,72 @@ mod tests {
             after.iter().any(|e| e.command() == "new-cmd"),
             "newly appended entry should be found by by_agent"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. rotation_triggered_at_max_entries
+    //
+    //     When entry_count reaches max_entries the active file is rotated:
+    //     a `.1` backup appears and the active file is fresh / empty.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rotation_triggered_at_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let session = Uuid::new_v4();
+
+        // Use a tiny limit so we don't have to write 100k entries.
+        let mut store = HistoryStore::open_at(&path).unwrap().with_max_entries(3);
+
+        // Write exactly max_entries entries; rotation happens on the 3rd append.
+        for i in 0..3u32 {
+            store.append(&entry(&format!("cmd-{i}"), session)).unwrap();
+        }
+
+        // After rotation the active file must not exist yet (it was renamed to
+        // `.1` and a fresh empty file hasn't been created until the next append).
+        let backup = rotated_path(&path, 1);
+        assert!(backup.exists(), "history.jsonl.1 must exist after rotation");
+
+        // The in-memory state must reflect an empty active store.
+        assert_eq!(store.count(), 0, "entry_count should be reset after rotation");
+
+        // A subsequent append goes to the new (empty) active file.
+        store.append(&entry("cmd-after-rotation", session)).unwrap();
+        assert_eq!(store.count(), 1);
+        assert!(path.exists(), "new active file must exist after first post-rotation append");
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. rotated_files_capped_at_three
+    //
+    //     After 4 rotations only .1, .2, .3 remain; the overflow (.4) is
+    //     deleted.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rotated_files_capped_at_three() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let session = Uuid::new_v4();
+
+        // max_entries = 1 so every single append triggers a rotation.
+        let mut store = HistoryStore::open_at(&path).unwrap().with_max_entries(1);
+
+        // 4 appends → 4 rotations attempted; only .1 .2 .3 should survive.
+        for i in 0..4u32 {
+            store.append(&entry(&format!("cmd-{i}"), session)).unwrap();
+        }
+
+        // .1, .2, .3 must exist
+        for n in 1..=3u32 {
+            let rp = rotated_path(&path, n);
+            assert!(rp.exists(), "rotation file .{n} should exist after 4 appends");
+        }
+
+        // .4 must NOT exist (deleted during the 4th rotation)
+        let rp4 = rotated_path(&path, 4);
+        assert!(!rp4.exists(), "rotation file .4 must be deleted (cap is 3)");
     }
 }
