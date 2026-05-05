@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use phantom_semantic::CommandType;
+use phantom_semantic::{CommandType, SemanticParser};
 
 // ---------------------------------------------------------------------------
 // HistoryEntry
@@ -29,6 +29,9 @@ pub struct HistoryEntry {
     session_id: Uuid,
     /// Semantic classification of the command (from phantom-semantic).
     semantic_type: CommandType,
+    /// Optional agent that generated or requested this command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
 }
 
 impl HistoryEntry {
@@ -78,6 +81,10 @@ impl HistoryEntry {
     #[must_use]
     pub fn semantic_type(&self) -> &CommandType { &self.semantic_type }
 
+    /// Agent that generated or requested this command, if any.
+    #[must_use]
+    pub fn agent_id(&self) -> Option<&str> { self.agent_id.as_deref() }
+
     // -----------------------------------------------------------------------
     // (De)serialisation helpers
     // -----------------------------------------------------------------------
@@ -107,10 +114,12 @@ pub struct HistoryEntryBuilder {
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
     semantic_type: CommandType,
+    agent_id: Option<String>,
 }
 
 impl HistoryEntryBuilder {
     fn new(command: String, cwd: PathBuf, session_id: Uuid) -> Self {
+        let semantic_type = SemanticParser::classify_command(&command);
         Self {
             command,
             cwd,
@@ -119,7 +128,8 @@ impl HistoryEntryBuilder {
             timestamp: Utc::now(),
             exit_code: None,
             duration_ms: None,
-            semantic_type: CommandType::Unknown,
+            semantic_type,
+            agent_id: None,
         }
     }
 
@@ -143,6 +153,13 @@ impl HistoryEntryBuilder {
     #[must_use]
     pub fn semantic_type(mut self, t: CommandType) -> Self { self.semantic_type = t; self }
 
+    /// Tag this entry with the agent that produced it.
+    #[must_use]
+    pub fn agent_id(mut self, id: impl Into<String>) -> Self {
+        self.agent_id = Some(id.into());
+        self
+    }
+
     /// Finalise and return the entry.
     #[must_use]
     pub fn build(self) -> HistoryEntry {
@@ -155,6 +172,7 @@ impl HistoryEntryBuilder {
             cwd: self.cwd,
             session_id: self.session_id,
             semantic_type: self.semantic_type,
+            agent_id: self.agent_id,
         }
     }
 }
@@ -183,7 +201,8 @@ mod tests {
         assert_eq!(e.exit_code(), None);
         assert_eq!(e.duration_ms(), None);
         assert_eq!(e.cwd(), &PathBuf::from("/home/dev/project"));
-        assert_eq!(e.semantic_type(), &CommandType::Unknown);
+        // "ls" is a known shell builtin — auto-classified at construction time.
+        assert_eq!(e.semantic_type(), &CommandType::Shell);
     }
 
     // -----------------------------------------------------------------------

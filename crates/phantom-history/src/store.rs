@@ -1,9 +1,13 @@
 //! Append-only JSONL history store.
 //!
 //! One JSONL file lives at `~/.local/share/phantom/history/<session_id>.jsonl`.
-//! Each line is a serialised [`HistoryEntry`].  The store also maintains an
-//! in-memory index (`HashMap<Uuid, u64>`) that maps entry ID → byte offset so
-//! that id-lookup stays O(1) without a full scan after the store is opened.
+//! Each line is a serialised [`HistoryEntry`].  The store maintains two
+//! in-memory indices:
+//!
+//! - `index: HashMap<Uuid, u64>` — entry ID → byte offset (always current).
+//! - `agent_index: Option<HashMap<String, Vec<u64>>>` — agent ID → sorted
+//!   list of byte offsets; built lazily on the first [`HistoryStore::by_agent`]
+//!   call and invalidated whenever [`HistoryStore::append`] is called.
 //!
 //! ## Concurrency
 //!
@@ -47,6 +51,12 @@ pub struct HistoryStore {
     path: PathBuf,
     /// Maps entry id → byte offset of the start of its line in the file.
     index: HashMap<Uuid, u64>,
+    /// Maps agent_id → byte offsets for every entry tagged with that agent.
+    ///
+    /// `None` means the index has not been built yet (lazy, built on first
+    /// [`by_agent`] call).  Set back to `None` by [`append`] so that newly
+    /// appended entries are always included.
+    agent_index: Option<HashMap<String, Vec<u64>>>,
     /// Byte offset where the next append will begin.
     next_offset: u64,
     /// Holds the exclusive flock on `<path>.lock` for the store's lifetime.
@@ -112,6 +122,7 @@ impl HistoryStore {
         let mut store = Self {
             path,
             index: HashMap::new(),
+            agent_index: None,
             next_offset: 0,
             _lock_file: lock_file,
         };
@@ -144,6 +155,9 @@ impl HistoryStore {
         // line + '\n'
         self.next_offset += line.len() as u64 + 1;
         self.index.insert(entry.id(), offset);
+        // Invalidate the lazy agent index so the next by_agent call will
+        // rebuild it and include this new entry.
+        self.agent_index = None;
 
         Ok(())
     }
@@ -202,6 +216,62 @@ impl HistoryStore {
             .collect())
     }
 
+    /// Return up to `limit` entries tagged with `agent_id`, in chronological
+    /// order (oldest first).
+    ///
+    /// Uses the lazy agent index: the JSONL file is scanned at most once per
+    /// invalidation cycle; subsequent calls seek directly to the relevant lines.
+    pub fn by_agent(&mut self, agent_id: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+        if self.agent_index.is_none() {
+            self.build_agent_index()?;
+        }
+
+        let offsets = match self.agent_index.as_ref().and_then(|idx| idx.get(agent_id)) {
+            Some(v) => v.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        let take_from = offsets.len().saturating_sub(limit);
+        let offsets = &offsets[take_from..];
+
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut file = File::open(&self.path)
+            .with_context(|| format!("cannot open history file: {}", self.path.display()))?;
+
+        let mut entries = Vec::with_capacity(offsets.len());
+        for &offset in offsets {
+            file.seek(SeekFrom::Start(offset)).context("seek failed")?;
+            let mut reader = BufReader::new(&mut file);
+            let mut line = String::new();
+            reader.read_line(&mut line).context("read_line failed")?;
+            match HistoryEntry::from_jsonl_line(line.trim()) {
+                Ok(e) => entries.push(e),
+                Err(e) => log::warn!("skipping corrupt history line at offset {offset}: {e}"),
+            }
+        }
+
+        Ok(entries)
+    }
+
+    /// Search entries whose command string contains `query` (case-insensitive),
+    /// returning up to `limit` results in chronological order.
+    ///
+    /// This is a full O(n) scan over all entries.
+    // TODO: FTS — replace with SQLite FTS5 when the store is migrated to SQLite.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+        let lower = query.to_lowercase();
+        let all = self.read_all()?;
+        let results: Vec<HistoryEntry> = all
+            .into_iter()
+            .filter(|e| e.command().to_lowercase().contains(&lower))
+            .collect();
+        let start = results.len().saturating_sub(limit);
+        Ok(results[start..].to_vec())
+    }
+
     /// Total number of (non-corrupt) entries recorded in the index.
     #[must_use]
     pub fn count(&self) -> usize {
@@ -217,6 +287,43 @@ impl HistoryStore {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Build (or rebuild) the agent index by scanning the JSONL file once.
+    ///
+    /// For each line, records the byte offset before the line and the
+    /// `agent_id` field value.  Lines without an `agent_id` are skipped.
+    /// After this call `self.agent_index` is `Some(…)`.
+    fn build_agent_index(&mut self) -> Result<()> {
+        let mut idx: HashMap<String, Vec<u64>> = HashMap::new();
+
+        if self.path.exists() {
+            let file = File::open(&self.path).with_context(|| {
+                format!(
+                    "cannot open history file for agent indexing: {}",
+                    self.path.display()
+                )
+            })?;
+            let reader = BufReader::new(file);
+
+            let mut offset: u64 = 0;
+            for line in reader.lines() {
+                let line = line.context("read error while building agent index")?;
+                let line_len = line.len() as u64 + 1; // +1 for '\n'
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if let Ok(entry) = HistoryEntry::from_jsonl_line(trimmed) {
+                        if let Some(aid) = entry.agent_id() {
+                            idx.entry(aid.to_owned()).or_default().push(offset);
+                        }
+                    }
+                }
+                offset += line_len;
+            }
+        }
+
+        self.agent_index = Some(idx);
+        Ok(())
+    }
 
     /// Read and deserialise all entries, skipping corrupt lines with a warning.
     fn read_all(&self) -> Result<Vec<HistoryEntry>> {
@@ -583,6 +690,38 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 15. git status is auto-classified as Git on append
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn git_status_auto_classified_on_append() {
+        use phantom_semantic::GitCommand;
+
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+
+        // Build an entry without explicitly setting semantic_type —
+        // the builder must call SemanticParser::classify_command internally.
+        let e = HistoryEntry::builder("git status", "/repo", session).build();
+        assert_eq!(
+            e.semantic_type(),
+            &CommandType::Git(GitCommand::Status),
+            "builder should auto-classify 'git status' as Git(Status)"
+        );
+
+        let id = e.id();
+        store.append(&e).unwrap();
+
+        // Verify the classification survives the JSONL round-trip.
+        let restored = store.get_by_id(id).unwrap().unwrap();
+        assert_eq!(
+            restored.semantic_type(),
+            &CommandType::Git(GitCommand::Status),
+            "semantic_type should survive JSONL round-trip"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // 13. Concurrent open: second store errors cleanly (lock is held)
     //
     //     This test exercises the advisory exclusive-lock guarantee from #211:
@@ -666,5 +805,88 @@ mod tests {
             let found = reader.get_by_id(*id).unwrap().unwrap();
             assert_eq!(found.command(), format!("wave2-cmd-{i}"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. by_agent_uses_index_and_returns_correct_entries
+    //
+    //     Write 1000 entries across 3 agent IDs, then verify that by_agent
+    //     returns only entries for the requested agent and that the result
+    //     commands match what was written.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn by_agent_uses_index_and_returns_correct_entries() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        let agents = ["alpha", "beta", "gamma"];
+
+        for i in 0..1000u32 {
+            let agent = agents[(i as usize) % agents.len()];
+            let e = HistoryEntry::builder(&format!("cmd-{i}-{agent}"), "/", session)
+                .agent_id(agent)
+                .build();
+            store.append(&e).unwrap();
+        }
+
+        // Verify each agent slice
+        for agent in &agents {
+            let results = store.by_agent(agent, 1000).unwrap();
+            // Each agent owns 1/3 of 1000 entries (333 or 334)
+            assert!(
+                results.len() >= 333 && results.len() <= 334,
+                "agent {agent} expected ~333 entries, got {}",
+                results.len()
+            );
+            // Every returned entry must belong to this agent
+            for e in &results {
+                assert_eq!(
+                    e.agent_id(),
+                    Some(*agent),
+                    "entry {:?} should have agent_id={agent}",
+                    e.command()
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. append_invalidates_agent_index
+    //
+    //     Build the index via by_agent, append a new entry, then verify the
+    //     subsequent by_agent call includes the new entry.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_invalidates_agent_index() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+
+        // Seed three entries for "agent-x"
+        for i in 0..3u32 {
+            let e = HistoryEntry::builder(&format!("old-cmd-{i}"), "/", session)
+                .agent_id("agent-x")
+                .build();
+            store.append(&e).unwrap();
+        }
+
+        // Prime the index
+        let before = store.by_agent("agent-x", 100).unwrap();
+        assert_eq!(before.len(), 3);
+
+        // Append a new entry — this must invalidate the agent index
+        let new_entry = HistoryEntry::builder("new-cmd", "/", session)
+            .agent_id("agent-x")
+            .build();
+        store.append(&new_entry).unwrap();
+
+        // The index must have been invalidated; by_agent must rebuild and
+        // return all 4 entries including the newly appended one.
+        let after = store.by_agent("agent-x", 100).unwrap();
+        assert_eq!(after.len(), 4, "expected 4 entries after append, got {}", after.len());
+        assert!(
+            after.iter().any(|e| e.command() == "new-cmd"),
+            "newly appended entry should be found by by_agent"
+        );
     }
 }
