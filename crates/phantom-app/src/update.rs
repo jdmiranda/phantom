@@ -10,7 +10,6 @@ use log::{debug, info, warn};
 
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::WorldState;
-use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AgentStatusInfo, AppCommand, PaneInfo, ScreenshotReply, SpawnAgentReply};
 use phantom_protocol::Event;
@@ -324,11 +323,17 @@ impl App {
                 self.git_refresh_last = now;
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
+                let assembler_arc = self.context_assembler.clone();
                 self.git_refresh_handle = std::thread::Builder::new()
                     .name("git-refresh".into())
                     .spawn(move || {
-                        let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
-                        fresh.refresh_git();
+                        // Use the shared ContextAssembler so DAG caching is
+                        // preserved across periodic git refreshes rather than
+                        // calling ProjectContext::detect() on every 30s tick.
+                        let path = std::path::Path::new(&project_dir);
+                        if let Ok(mut asm) = assembler_arc.lock() {
+                            let _ = asm.assemble(path);
+                        }
                         if let Some(tx) = brain_tx {
                             let _ = tx.send(AiEvent::GitStateChanged);
                         }

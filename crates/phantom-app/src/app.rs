@@ -34,7 +34,7 @@ use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
 use phantom_brain::capability_audit::{AuditConfig, CapabilityReport};
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::{OodaConfig, OodaLoop};
-use phantom_context::ProjectContext;
+use phantom_context::{ContextAssembler, ProjectContext};
 use phantom_history::{AgentOutputCapture, HistoryStore};
 use phantom_mcp::{AppCommand, McpListener, spawn_listener};
 use phantom_memory::MemoryStore;
@@ -181,6 +181,12 @@ pub struct App {
 
     // -- Project context (auto-detected) --
     pub(crate) context: Option<ProjectContext>,
+
+    // -- Context assembler (caches DAG topology so agent invocations call
+    //    assembler.assemble() instead of bare ProjectContext::detect()).
+    //    Wrapped in Arc<Mutex> so agent pane threads can share it without
+    //    holding a reference back to App. --
+    pub(crate) context_assembler: std::sync::Arc<std::sync::Mutex<ContextAssembler>>,
 
     // -- Memory store (persistent per-project) --
     pub(crate) memory: Option<MemoryStore>,
@@ -617,7 +623,12 @@ impl App {
         let project_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".into());
-        let context = ProjectContext::detect(Path::new(&project_dir));
+        // Use ContextAssembler so subsequent agent invocations benefit from
+        // DAG caching rather than calling ProjectContext::detect() on every spawn.
+        let mut context_assembler = ContextAssembler::new();
+        let context = context_assembler.assemble(Path::new(&project_dir));
+        let context_assembler =
+            std::sync::Arc::new(std::sync::Mutex::new(context_assembler));
         info!(
             "Project detected: {} [{:?}]",
             context.name, context.project_type
@@ -1129,6 +1140,7 @@ impl App {
             ooda_loop: OodaLoop::new(OodaConfig::default()),
             runtime,
             context: Some(context),
+            context_assembler,
             memory,
             notification_store,
             session_manager,
