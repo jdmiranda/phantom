@@ -73,6 +73,13 @@ pub struct RecallQuery {
     pub modality_hint: Option<Modality>,
     /// Maximum number of hits to return after fusion + rerank.
     pub limit: usize,
+    /// Rewritten or enriched query string produced by an LLM rewriter.
+    ///
+    /// Set by [`QueryRewriter`] implementations that expand or reformulate
+    /// the natural-language input before embedding. Falls back to
+    /// `natural_language` when absent.
+    #[serde(default)]
+    pub enriched_query: Option<String>,
 }
 
 /// A single retrieval hit with both raw signals and the fused score.
@@ -217,6 +224,7 @@ impl QueryRewriter for MockRewriter {
             time_window_unix_ms: None,
             modality_hint: Some(Modality::Text),
             limit: 10,
+            enriched_query: None,
         })
     }
 }
@@ -276,6 +284,7 @@ mod tests {
             time_window_unix_ms: Some((1_700_000_000_000, 1_710_000_000_000)),
             modality_hint: Some(Modality::Text),
             limit: 25,
+            enriched_query: Some("pricing meeting discussion argument".into()),
         };
         let json = serde_json::to_string(&q).expect("serialize");
         let restored: RecallQuery = serde_json::from_str(&json).expect("deserialize");
@@ -285,6 +294,35 @@ mod tests {
         assert_eq!(restored.time_window_unix_ms, q.time_window_unix_ms);
         assert!(matches!(restored.modality_hint, Some(Modality::Text)));
         assert_eq!(restored.limit, q.limit);
+        assert_eq!(restored.enriched_query, q.enriched_query);
+    }
+
+    #[test]
+    fn recall_query_has_enriched_query_field() {
+        // Verify the field exists, can be set, and defaults to None when absent
+        // (via serde default).
+        let q = RecallQuery {
+            natural_language: "search for something".into(),
+            intent_hint: None,
+            tags: vec![],
+            time_window_unix_ms: None,
+            modality_hint: None,
+            limit: 5,
+            enriched_query: Some("expanded search for something relevant".into()),
+        };
+        assert_eq!(
+            q.enriched_query.as_deref(),
+            Some("expanded search for something relevant")
+        );
+
+        // Deserializing JSON without the field must default to None.
+        let json_without = r#"{"natural_language":"hi","tags":[],"limit":1}"#;
+        let restored: RecallQuery =
+            serde_json::from_str(json_without).expect("deserialize without enriched_query");
+        assert!(
+            restored.enriched_query.is_none(),
+            "serde(default) must produce None when field is absent"
+        );
     }
 
     #[test]
@@ -405,6 +443,7 @@ mod tests {
             time_window_unix_ms: None,
             modality_hint: None,
             limit: 10,
+            enriched_query: None,
         };
         let results = backend.search(query).await.expect("search");
         let scores: Vec<f32> = results.iter().map(|h| h.score).collect();
@@ -421,6 +460,7 @@ mod tests {
             time_window_unix_ms: None,
             modality_hint: None,
             limit: 2,
+            enriched_query: None,
         };
         let results = backend.search(query).await.expect("search");
         assert_eq!(results.len(), 2);

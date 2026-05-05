@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 phantom-bundles = { path = "../phantom-bundles" }
+phantom-embeddings = { path = "../phantom-embeddings" }
 serde = { version = "1", features = ["derive"] }
 async-trait = "0.1"
 thiserror = "2"

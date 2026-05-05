@@ -41,6 +41,7 @@
 
 pub mod attention;
 pub mod brain;
+pub mod recall;
 pub mod capability_audit;
 pub mod chat_backend;
 pub mod claude;
