@@ -63,7 +63,8 @@
 //! be used until its exp; rotation is via `phantom auth register --renew`
 //! (ticket 09).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -272,6 +273,154 @@ impl NonceCache {
 impl Default for NonceCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IpRateLimiter — sliding-window per-IP request throttle
+// ---------------------------------------------------------------------------
+
+/// Per-IP sliding-window rate limiter.
+///
+/// Tracks recent request timestamps for each IP address and enforces a maximum
+/// number of requests within a rolling time window.  Designed to protect
+/// debug or low-frequency administrative endpoints from enumeration attacks.
+///
+/// # Design
+///
+/// The sliding-window implementation keeps a `VecDeque` of `Instant`s per IP.
+/// On every call the limiter prunes timestamps older than `window`, then checks
+/// whether the remaining count is below `max_requests`.  If the count is at or
+/// above the limit the call returns `false` (throttled).  Otherwise the current
+/// timestamp is pushed and the call returns `true` (allowed).
+///
+/// Stale IP entries (IPs with no requests in the last `2 * window`) are evicted
+/// lazily to keep memory bounded.
+///
+/// # Thread safety
+///
+/// All mutable state is behind a `Mutex`.  The lock is never held across an
+/// `.await` point — each `check_and_record` call acquires and releases
+/// synchronously.
+pub struct IpRateLimiter {
+    inner: Mutex<HashMap<IpAddr, std::collections::VecDeque<Instant>>>,
+    /// Number of requests allowed per IP within `window`.
+    max_requests: usize,
+    /// The rolling time window over which `max_requests` is counted.
+    window: Duration,
+}
+
+impl IpRateLimiter {
+    /// Create a new limiter: `max_requests` per IP per `window`.
+    #[must_use]
+    pub fn new(max_requests: usize, window: Duration) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            max_requests,
+            window,
+        }
+    }
+
+    /// Create the standard registry-endpoint limiter: 10 requests per minute.
+    #[must_use]
+    pub fn registry_default() -> Self {
+        Self::new(10, Duration::from_secs(60))
+    }
+
+    /// Check whether `ip` is within its rate limit and record the attempt.
+    ///
+    /// Returns `true` when the request is allowed (count was below the limit
+    /// before recording).  Returns `false` when the IP has already reached
+    /// `max_requests` within the sliding `window`.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal `Mutex` is poisoned.
+    pub fn check_and_record(&self, ip: IpAddr) -> bool {
+        let mut map = self.inner.lock().expect("IpRateLimiter mutex poisoned");
+        let now = Instant::now();
+        let cutoff = now.checked_sub(self.window).unwrap_or(now);
+
+        let timestamps = map.entry(ip).or_default();
+
+        // Prune entries older than the sliding window.
+        while timestamps.front().is_some_and(|&t| t <= cutoff) {
+            timestamps.pop_front();
+        }
+
+        if timestamps.len() >= self.max_requests {
+            return false; // rate limit exceeded
+        }
+
+        timestamps.push_back(now);
+
+        // Lazy eviction: remove IPs with empty timestamp queues to keep
+        // memory bounded for connections that stopped after being throttled.
+        map.retain(|_, ts| !ts.is_empty());
+
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdminToken — admin bearer token for protected debug endpoints
+// ---------------------------------------------------------------------------
+
+/// Optional bearer token that protects administrative debug endpoints.
+///
+/// Loaded from `PHANTOM_HUB_ADMIN_TOKEN` at startup.  When the environment
+/// variable is absent or empty the token is `None` and the protected endpoint
+/// is disabled entirely (returns `404 Not Found`).
+///
+/// The comparison is **not** constant-time because the token guards a debug
+/// endpoint that should normally be unreachable in production.  Constant-time
+/// comparison is reserved for the crypto-sensitive API key store.
+#[derive(Clone, Debug)]
+pub struct AdminToken(Option<String>);
+
+impl AdminToken {
+    /// Load from `PHANTOM_HUB_ADMIN_TOKEN` environment variable.
+    ///
+    /// Returns `AdminToken(None)` when the variable is unset or empty.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let token = std::env::var("PHANTOM_HUB_ADMIN_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        Self(token)
+    }
+
+    /// Construct from an explicit token value.  Used in tests and bootstrapping.
+    #[must_use]
+    pub fn from_token(token: impl Into<String>) -> Self {
+        Self(Some(token.into()))
+    }
+
+    /// Construct a disabled admin token (no token configured).
+    ///
+    /// When used in [`AppState`], the `/registry` endpoint returns
+    /// `503 Service Unavailable` for all requests.  Used in tests.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self(None)
+    }
+
+    /// Returns `true` when the admin token is configured (env var is set and non-empty).
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Validate `presented` against the stored token.
+    ///
+    /// Returns `true` iff the admin token is configured AND `presented` matches
+    /// it exactly.  Returns `false` in all other cases (unconfigured, mismatch).
+    #[must_use]
+    pub fn validate(&self, presented: &str) -> bool {
+        match &self.0 {
+            Some(stored) => stored == presented,
+            None => false,
+        }
     }
 }
 
