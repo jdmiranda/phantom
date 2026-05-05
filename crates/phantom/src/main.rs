@@ -119,6 +119,8 @@ impl ApplicationHandler for Phantom {
             WindowEvent::Resized(new_size) => {
                 if let Some(app) = &mut self.app {
                     app.handle_resize(new_size.width, new_size.height);
+                    // Resize always requires a full repaint.
+                    app.request_redraw();
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -133,12 +135,17 @@ impl ApplicationHandler for Phantom {
                     if let Err(ref panic) = result {
                         log::error!("Input panic: {}", panic_message(panic));
                     }
+                    // Any keypress requires a repaint.
+                    app.request_redraw();
                 }
                 if let Some(app) = &mut self.app
                     && app.should_quit()
                 {
                     app.shutdown();
                     event_loop.exit();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -147,16 +154,41 @@ impl ApplicationHandler for Phantom {
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_cursor_moved(position.x, position.y);
+                    // Mouse movement may affect hover state — request repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_mouse_click(state, button);
+                    // Click/release always requires a repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_mouse_scroll(delta);
+                    // Scroll always requires a repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Focused(focused) => {
+                if let Some(app) = &mut self.app {
+                    // Focus changes affect cursor rendering and active-pane chrome.
+                    let _ = focused;
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -200,8 +232,15 @@ impl ApplicationHandler for Phantom {
                         }
                     }
                 }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                // Only schedule the next frame when something will actually change.
+                // When scene is clean and no animation is running we stop requesting
+                // redraws; the next window event (key/mouse/PTY) re-arms the loop.
+                if let Some(app) = &self.app
+                    && (app.scene_is_dirty() || app.has_active_animation() || app.needs_force_redraw())
+                {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             _ => {}

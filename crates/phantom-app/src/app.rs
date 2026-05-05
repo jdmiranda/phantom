@@ -151,6 +151,11 @@ pub struct App {
     // -- Whether a quit has been requested --
     pub(crate) quit_requested: bool,
 
+    // -- Force-redraw latch set by external events (key/mouse/resize/focus).
+    //    Cleared after every GPU submit. Ensures at least one repaint happens
+    //    even when the scene graph is fully clean.
+    pub(crate) force_redraw: bool,
+
     // -- Supervisor connection (None when running standalone) --
     pub(crate) supervisor: Option<SupervisorClient>,
 
@@ -1120,6 +1125,7 @@ impl App {
             cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
+            force_redraw: true,
             supervisor,
             console: crate::console::Console::new(),
             debug_hud: false,
@@ -1221,6 +1227,55 @@ impl App {
     /// Returns `true` if the app has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Returns `true` when the scene graph has at least one dirty node,
+    /// meaning the GPU pipeline has pending work to upload this frame.
+    pub fn scene_is_dirty(&self) -> bool {
+        self.scene.has_dirty_nodes()
+    }
+
+    /// Returns `true` when a visual animation is in progress that requires
+    /// the render loop to keep running even if the scene graph is clean.
+    pub fn has_active_animation(&self) -> bool {
+        // Boot sequence is animating.
+        if self.state == AppState::Boot && !self.boot.is_done() {
+            return true;
+        }
+        // Terminal mode: cursor blinking requires continuous repaints.
+        if self.state == AppState::Terminal {
+            return true;
+        }
+        // Quake console is visible (slide animation or idle — keeps animating).
+        if self.console.visible() {
+            return true;
+        }
+        // Per-keystroke glitch effect is running.
+        if self.keystroke_fx.is_active() {
+            return true;
+        }
+        // Alt-screen fade-in/out.
+        if !self.alt_screen_fade.is_empty() {
+            return true;
+        }
+        false
+    }
+
+    /// Set the force-redraw latch so at least one render happens this frame
+    /// even if the scene graph is clean.
+    ///
+    /// Call this from event handlers (key, mouse, resize, focus, OODA action)
+    /// to ensure the frame loop re-arms itself.
+    pub fn request_redraw(&mut self) {
+        self.force_redraw = true;
+    }
+
+    /// Returns the current value of the force-redraw latch.
+    ///
+    /// Used by the winit event loop to decide whether to re-arm
+    /// `window.request_redraw()` after a static frame.
+    pub fn needs_force_redraw(&self) -> bool {
+        self.force_redraw
     }
 
     /// Watchdog trace: returns a log line every `interval` frames.

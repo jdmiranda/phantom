@@ -60,6 +60,14 @@ impl KeystrokeFx {
         });
     }
 
+    /// Returns `true` when at least one glitch animation is still running.
+    ///
+    /// Used by `App::has_active_animation` to keep the render loop alive while
+    /// per-keystroke glitch effects are in progress.
+    pub fn is_active(&self) -> bool {
+        !self.cells.is_empty()
+    }
+
     /// Advance the frame counter and expire old animations. Call once per frame.
     pub fn tick(&mut self) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
