@@ -92,7 +92,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -153,12 +153,35 @@ pub struct RegisterResponse {
 /// Verifies the Ed25519 registration signature, enforces nonce single-use via
 /// [`auth::NonceCache`], and issues a JWT device token.
 ///
+/// Returns `429 Too Many Requests` when the calling IP has exceeded 10
+/// registration attempts within the current 60-second window.
+///
 /// Returns `409 Conflict` when the nonce has already been claimed — this is the
 /// replay-rejection path.
 pub async fn register(
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> impl IntoResponse {
+    // Per-IP rate limiting: 10 registrations per 60-second window.
+    // Prefer the real client IP from X-Forwarded-For when running behind a
+    // reverse proxy; fall back to the TCP peer address.
+    let client_ip: IpAddr = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| peer_addr.ip());
+
+    if !state.register_limiter.check_and_record(client_ip) {
+        warn!(
+            %client_ip,
+            "register: rate limit exceeded — too_many_requests"
+        );
+        return (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response();
+    }
+
     let pubkey_bytes = match hex_decode_exact::<32>(&body.public_key_hex) {
         Ok(b) => b,
         Err(()) => {
@@ -820,9 +843,28 @@ mod tests {
     use super::*;
     use crate::auth::{ApiKeyStore, JwtAuthority, NonceCache};
     use axum::body::Body;
+    use axum::extract::connect_info::MockConnectInfo;
     use axum::http::{Method, Request};
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    /// Wrap a router with a [`MockConnectInfo`] layer so that handlers that
+    /// extract [`ConnectInfo<SocketAddr>`] work in unit tests (which use
+    /// `oneshot` rather than a real TCP listener).
+    fn with_mock_connect_info(
+        router: axum::Router,
+    ) -> impl tower::Service<
+        Request<Body>,
+        Response = axum::response::Response,
+        Error = std::convert::Infallible,
+        Future = impl std::future::Future<
+            Output = Result<axum::response::Response, std::convert::Infallible>,
+        >,
+    > {
+        let mock_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        router.layer(MockConnectInfo(mock_addr))
+    }
 
     const TEST_SECRET: &[u8] = b"phantom-hub-test-secret-for-endpoint-tests";
 
@@ -831,6 +873,10 @@ mod tests {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::default()),
             nonce_cache: Arc::new(NonceCache::new()),
+            register_limiter: Arc::new(crate::rate_limit::IpRateLimiter::new(
+                std::time::Duration::from_secs(60),
+                10,
+            )),
             registry: crate::registry::new_shared(),
             registry_rate_limiter: Arc::new(crate::auth::IpRateLimiter::registry_default()),
             admin_token: Arc::new(crate::auth::AdminToken::disabled()),
@@ -878,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn register_valid_signature_returns_jwt() {
         let state = test_state();
-        let app = crate::build_router(state);
+        let app = with_mock_connect_info(crate::build_router(state));
         let body = make_register_body("test-peer-valid");
 
         let resp = app
@@ -906,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn register_tampered_signature_returns_401() {
         let state = test_state();
-        let app = crate::build_router(state);
+        let app = with_mock_connect_info(crate::build_router(state));
         let mut body = make_register_body("test-peer-tampered");
         body.signature_hex = "aa".repeat(64);
 
@@ -939,7 +985,7 @@ mod tests {
         // Use separate apps but the same state so both share the NonceCache.
         let body = make_register_body_with_nonce("replay-peer", "replay-nonce-xyz");
 
-        let first_resp = crate::build_router(state.clone())
+        let first_resp = with_mock_connect_info(crate::build_router(state.clone()))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -952,7 +998,7 @@ mod tests {
             .unwrap();
 
         // Replay the identical request (same nonce, same signature).
-        let second_resp = crate::build_router(state)
+        let second_resp = with_mock_connect_info(crate::build_router(state))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -990,7 +1036,7 @@ mod tests {
         let body_a = make_register_body_with_nonce("peer-alpha", "nonce-alpha-unique-001");
         let body_b = make_register_body_with_nonce("peer-beta", "nonce-beta-unique-002");
 
-        let resp_a = crate::build_router(state.clone())
+        let resp_a = with_mock_connect_info(crate::build_router(state.clone()))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -1002,7 +1048,7 @@ mod tests {
             .await
             .unwrap();
 
-        let resp_b = crate::build_router(state)
+        let resp_b = with_mock_connect_info(crate::build_router(state))
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
