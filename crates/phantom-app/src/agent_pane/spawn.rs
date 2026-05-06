@@ -205,6 +205,15 @@ impl App {
             agent_pane.set_agent_capture(capture.clone(), self.session_uuid);
         }
 
+        // Wire TTS: when a pipeline is active, hand the pane a clone of the
+        // sender so completed assistant messages are forwarded for speech
+        // playback. No-op when TTS is disabled (None).
+        if let Some(ref tts) = self.tts
+            && let Some(ref tx) = tts.tts_tx
+        {
+            agent_pane.set_tts_tx(tx.clone());
+        }
+
         // Capture the stable AgentId BEFORE the pane is moved into the adapter.
         // This is the value returned to MCP callers (issue #399).
         let agent_id = agent_pane.agent_id();

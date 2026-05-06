@@ -71,6 +71,7 @@ fn agent_with_handle() -> (AgentPane, mpsc::Sender<ApiEvent>) {
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
         pane_messages: Vec::new(),
+        tts_tx: None,
     };
     (pane, tx)
 }
@@ -174,6 +175,7 @@ fn poll_returns_false_when_no_handle() {
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
         pane_messages: Vec::new(),
+        tts_tx: None,
     };
     assert!(!pane.poll());
 }
@@ -1050,6 +1052,7 @@ fn spawn_agent_pane_task_matches_prompt() {
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
         pane_messages: Vec::new(),
+        tts_tx: None,
     };
     let _ = tx; // keep sender alive so handle stays live
     assert_eq!(pane.task, "fix the failing tests");
