@@ -715,6 +715,11 @@ impl App {
         }
 
         // -- AI Brain thread --
+        // Seed the brain's initial history snapshot (up to 20 most recent commands).
+        let initial_history_context: Vec<phantom_history::HistoryEntry> = history
+            .as_ref()
+            .and_then(|s| s.recent(20).ok())
+            .unwrap_or_default();
         let brain = spawn_brain(BrainConfig {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
@@ -726,6 +731,7 @@ impl App {
             // relay_inbound_rx: wired by the relay task on handshake completion
             // via AiEvent::RelayConnected. None in standalone (non-relay) mode.
             relay_inbound_rx: None,
+            history_context: initial_history_context,
         });
         if config.privacy_mode {
             info!("Privacy mode enabled — cloud API calls blocked");

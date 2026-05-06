@@ -586,6 +586,18 @@ impl App {
                         if let Err(e) = store.append(&entry) {
                             warn!("history append failed: {e}");
                         }
+                        // Refresh the brain's history snapshot every 10 commands.
+                        // This keeps the snapshot fresh without hammering the JSONL
+                        // file on every single command.
+                        if store.count() % 10 == 0 {
+                            if let Ok(recent) = store.recent(20) {
+                                if let Some(ref brain) = self.brain {
+                                    let _ = brain.send_event(
+                                        phantom_brain::events::AiEvent::HistorySnapshot(recent),
+                                    );
+                                }
+                            }
+                        }
                     }
                     // OODA cache (#358): store the parsed result so
                     // build_world_state() can derive has_errors / error_count.
