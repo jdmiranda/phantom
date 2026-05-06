@@ -577,7 +577,7 @@ impl App {
             "Font: {:.0}pt logical × {:.1}x scale = {:.0}pt physical",
             config.font_size, scale_factor, scaled_font_size
         );
-        let mut text_renderer = TextRenderer::new(scaled_font_size);
+        let mut text_renderer = TextRenderer::with_font_family(scaled_font_size, config.font_family.clone());
         let cell_size = text_renderer.measure_cell();
         info!(
             "Cell size: {:.1}x{:.1} at {:.0}pt",

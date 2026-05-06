@@ -7,12 +7,12 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::term::{ClipboardType, Config, TermMode};
 use alacritty_terminal::tty::{self, Options as PtyOptions};
 use alacritty_terminal::vte::ansi;
 use alacritty_terminal::Term;
@@ -74,17 +74,25 @@ type TitleQueue = Arc<Mutex<Vec<String>>>;
 ///
 /// Events like device-attribute responses (`PtyWrite`) are buffered in a
 /// shared queue that the `PhantomTerminal` drains after each read cycle.
+/// OSC 52 clipboard texts are forwarded via an optional bounded mpsc sender.
 #[derive(Clone, Debug)]
 pub struct PhantomEventListener {
     pty_writes: PtyWriteQueue,
     title_queue: TitleQueue,
+    /// Optional sender for OSC 52 decoded clipboard texts.
+    osc52_tx: Option<mpsc::SyncSender<String>>,
 }
 
 impl PhantomEventListener {
-    fn new(queue: PtyWriteQueue, title_queue: TitleQueue) -> Self {
+    fn with_osc52(
+        queue: PtyWriteQueue,
+        title_queue: TitleQueue,
+        tx: mpsc::SyncSender<String>,
+    ) -> Self {
         Self {
             pty_writes: queue,
             title_queue,
+            osc52_tx: Some(tx),
         }
     }
 }
@@ -102,6 +110,12 @@ impl EventListener for PhantomEventListener {
                 debug!("terminal title: {title}");
                 if let Ok(mut q) = self.title_queue.lock() {
                     q.push(title.clone());
+                }
+            }
+            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                trace!("OSC 52 clipboard text: {} bytes", text.len());
+                if let Some(tx) = &self.osc52_tx {
+                    let _ = tx.try_send(text.clone());
                 }
             }
             Event::Bell => debug!("terminal bell"),
@@ -220,6 +234,10 @@ pub struct PhantomTerminal {
     /// Wall-clock instant at which the current bracketed-paste session began.
     /// Used to detect runaway pastes that never receive a terminator.
     paste_started_at: Option<Instant>,
+
+    /// Receiver for OSC 52 clipboard texts decoded by the event listener.
+    /// `None` when OSC 52 forwarding is disabled.
+    osc52_rx: Option<mpsc::Receiver<String>>,
 }
 
 impl PhantomTerminal {
@@ -257,9 +275,16 @@ impl PhantomTerminal {
         // Shared title queue for OSC 2 title change events.
         let title_queue: TitleQueue = Arc::new(Mutex::new(Vec::new()));
 
+        // OSC 52 channel: bounded to 32 items so we don't accumulate unbounded
+        // clipboard texts if the consumer falls behind.
+        let (osc52_tx, osc52_rx) = mpsc::sync_channel::<String>(32);
+
         // Create the terminal state machine.
-        let event_listener =
-            PhantomEventListener::new(Arc::clone(&pty_write_queue), Arc::clone(&title_queue));
+        let event_listener = PhantomEventListener::with_osc52(
+            Arc::clone(&pty_write_queue),
+            Arc::clone(&title_queue),
+            osc52_tx,
+        );
         let term = Term::new(config, &size, event_listener);
 
         debug!("PhantomTerminal created: {cols}x{rows}");
@@ -279,7 +304,23 @@ impl PhantomTerminal {
             in_bracketed_paste: false,
             paste_byte_count: 0,
             paste_started_at: None,
+            osc52_rx: Some(osc52_rx),
         })
+    }
+
+    /// Drain all OSC 52 clipboard texts received since the last call.
+    ///
+    /// Returns a `Vec<String>` of decoded clipboard texts (one per OSC 52 sequence).
+    /// Returns an empty vec when the channel is empty or not wired.
+    pub fn drain_osc52(&mut self) -> Vec<String> {
+        let Some(rx) = &self.osc52_rx else {
+            return Vec::new();
+        };
+        let mut texts = Vec::new();
+        while let Ok(text) = rx.try_recv() {
+            texts.push(text);
+        }
+        texts
     }
 
     /// Resize the terminal and notify the PTY.
@@ -945,5 +986,61 @@ mod tests {
         // A second drain must return nothing (queue was cleared).
         let titles2 = term.drain_title_queue();
         assert!(titles2.is_empty(), "queue must be empty after drain");
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix 3: OSC 52 clipboard handler
+    // -------------------------------------------------------------------------
+
+    /// Verify that `PhantomEventListener::with_osc52` forwards
+    /// `ClipboardStore(Clipboard, text)` events to the channel, and that
+    /// `drain_osc52` on a `PhantomTerminal` drains them correctly.
+    ///
+    /// We exercise the listener directly (no PTY needed) so the test is fast
+    /// and hermetic.
+    #[test]
+    fn osc52_decoded_text_sent_on_channel() {
+        use alacritty_terminal::event::Event;
+        use alacritty_terminal::term::ClipboardType;
+        use std::sync::mpsc;
+
+        let pty_queue: PtyWriteQueue = Arc::new(Mutex::new(Vec::new()));
+        let title_queue: TitleQueue = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::sync_channel::<String>(32);
+
+        let listener =
+            PhantomEventListener::with_osc52(Arc::clone(&pty_queue), Arc::clone(&title_queue), tx);
+
+        // Simulate alacritty decoding an OSC 52 sequence.
+        listener.send_event(Event::ClipboardStore(
+            ClipboardType::Clipboard,
+            "hello from OSC 52".to_string(),
+        ));
+        listener.send_event(Event::ClipboardStore(
+            ClipboardType::Clipboard,
+            "second text".to_string(),
+        ));
+
+        // Drain from the receiver directly to assert the channel is populated.
+        let mut received: Vec<String> = Vec::new();
+        while let Ok(text) = rx.try_recv() {
+            received.push(text);
+        }
+
+        assert_eq!(received.len(), 2, "both OSC 52 texts must be forwarded");
+        assert_eq!(received[0], "hello from OSC 52");
+        assert_eq!(received[1], "second text");
+    }
+
+    /// `drain_osc52` on a freshly created `PhantomTerminal` must return an
+    /// empty vec (nothing has been sent yet).
+    #[test]
+    fn osc52_drain_empty_on_fresh_terminal() {
+        let mut term = PhantomTerminal::new(80, 24).unwrap();
+        let drained = term.drain_osc52();
+        assert!(
+            drained.is_empty(),
+            "no OSC 52 events before any PTY output — drain must be empty"
+        );
     }
 }

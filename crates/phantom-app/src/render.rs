@@ -312,6 +312,8 @@ impl App {
                         line.color[2],
                         line.color[3] * opacity,
                     ],
+                    bold: false,
+                    italic: false,
                 })
                 .collect();
 
@@ -371,6 +373,8 @@ impl App {
                             ch: tc.ch,
                             fg: tc.fg,
                             bg: tc.bg,
+                            bold: tc.bold,
+                            italic: tc.italic,
                         }));
 
                     let (mut bg_quads, batch) = GridRenderData::prepare(
@@ -646,6 +650,8 @@ impl App {
                         ch: tc.ch,
                         fg: tc.fg,
                         bg: tc.bg,
+                        bold: tc.bold,
+                        italic: tc.italic,
                     }));
 
                 let origin = (grid.origin.0, grid.origin.1);
@@ -798,7 +804,7 @@ impl App {
             self.text_cell_buf.extend(
                 seg.text
                     .chars()
-                    .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: seg.color }),
+                    .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: seg.color, bold: false, italic: false }),
             );
 
             if self.text_cell_buf.is_empty() {

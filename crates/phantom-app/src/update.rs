@@ -54,6 +54,9 @@ impl App {
         self.poll_alt_screen_transitions();
         self.tick_alt_screen_fade(dt);
 
+        // Drain OSC 52 clipboard sequences from all terminal adapters.
+        self.drain_osc52_clipboard();
+
         // Substrate runtime: reap dead supervisor children, drain pending
         // substrate events into the on-disk log, and evaluate spawn rules.
         // Cheap when nothing is pending; bounded by events pushed since the
@@ -1378,6 +1381,34 @@ impl App {
             chattiness,
             suggestions_since_input,
         )
+    }
+
+    /// Drain OSC 52 clipboard texts from all terminal adapters and write them
+    /// to the system clipboard via `arboard`.
+    ///
+    /// Called once per frame. Each OSC 52 sequence decoded by alacritty results
+    /// in one text being pushed to the system clipboard (last writer wins).
+    pub(crate) fn drain_osc52_clipboard(&mut self) {
+        for app_id in self.coordinator.all_app_ids() {
+            let Some(adapter) = self
+                .coordinator
+                .registry_mut()
+                .get_adapter_mut(app_id) else { continue; };
+
+            let texts = adapter.drain_osc52();
+            for text in texts {
+                match arboard::Clipboard::new() {
+                    Ok(mut cb) => {
+                        if let Err(e) = cb.set_text(&text) {
+                            warn!("OSC 52: failed to set clipboard text: {e}");
+                        } else {
+                            debug!("OSC 52: wrote {} bytes to clipboard", text.len());
+                        }
+                    }
+                    Err(e) => warn!("OSC 52: failed to open clipboard: {e}"),
+                }
+            }
+        }
     }
 }
 
