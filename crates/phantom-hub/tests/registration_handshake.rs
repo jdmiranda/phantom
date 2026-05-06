@@ -24,7 +24,7 @@ use tokio_tungstenite::{
     tungstenite::{ClientRequestBuilder, Message},
 };
 
-use phantom_hub::{AppState, auth::{ApiKeyStore, JwtAuthority, NonceCache}, build_router, registry::new_shared};
+use phantom_hub::{AppState, auth::{AdminToken, ApiKeyStore, IpRateLimiter, JwtAuthority, NonceCache}, build_router, registry::new_shared};
 
 // ---------------------------------------------------------------------------
 // Test state and hub helpers
@@ -38,6 +38,8 @@ fn test_state() -> AppState {
         api_keys: Arc::new(ApiKeyStore::default()),
         nonce_cache: Arc::new(NonceCache::new()),
         registry: new_shared(),
+        registry_rate_limiter: Arc::new(IpRateLimiter::registry_default()),
+        admin_token: Arc::new(AdminToken::disabled()),
     }
 }
 

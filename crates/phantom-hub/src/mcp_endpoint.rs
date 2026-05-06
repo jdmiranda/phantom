@@ -334,6 +334,29 @@ pub async fn handle_sse(
 }
 
 // ---------------------------------------------------------------------------
+// Method name whitelist
+// ---------------------------------------------------------------------------
+
+/// Exhaustive allowlist of JSON-RPC method names the hub accepts.
+///
+/// Any method name not in this list is rejected with a `-32601` (Method not
+/// found) error before reaching the dispatcher.  This prevents method-name
+/// probing and eliminates any risk of future methods being accidentally
+/// reachable before their implementation is wired in.
+const VALID_METHODS: &[&str] = &[
+    "initialize",
+    "tools/list",
+    "tools/call",
+    "resources/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "completion/complete",
+    "logging/setLevel",
+    "ping",
+];
+
+// ---------------------------------------------------------------------------
 // Core dispatcher
 // ---------------------------------------------------------------------------
 
@@ -344,12 +367,26 @@ async fn dispatch_mcp_request(
 ) -> serde_json::Value {
     let id = request.id.clone();
 
+    // Validate method name against the whitelist before dispatching.
+    // This prevents method-name enumeration and closes the gap where an
+    // unrecognised method string could bypass future guards.
+    if !VALID_METHODS.contains(&request.method.as_str()) {
+        warn!("mcp: method '{}' not in whitelist — rejecting", request.method);
+        return json_rpc_error(
+            id,
+            -32601,
+            format!("Method not found: {}", request.method),
+        );
+    }
+
     match request.method.as_str() {
         "tools/list" => dispatch_tools_list(id),
         "tools/call" => dispatch_tools_call(state, session, id, &request.params).await,
         "initialize" => dispatch_initialize(id),
         other => {
-            warn!("mcp: unknown method '{other}'");
+            // Method is in the whitelist but has no handler yet (e.g. resources/*,
+            // prompts/*, completion/*, logging/setLevel, ping).
+            warn!("mcp: whitelisted method '{other}' has no handler yet");
             json_rpc_error(
                 id,
                 -32601,
@@ -951,6 +988,10 @@ mod tests {
             api_keys: Arc::new(ApiKeyStore::from_raw_keys(std::iter::once(key))),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
             registry: crate::registry::new_shared(),
+            registry_rate_limiter: Arc::new(
+                crate::auth::IpRateLimiter::registry_default(),
+            ),
+            admin_token: Arc::new(crate::auth::AdminToken::disabled()),
         }
     }
 
@@ -966,6 +1007,10 @@ mod tests {
             )),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
             registry: crate::registry::new_shared(),
+            registry_rate_limiter: Arc::new(
+                crate::auth::IpRateLimiter::registry_default(),
+            ),
+            admin_token: Arc::new(crate::auth::AdminToken::disabled()),
         }
     }
 
@@ -975,6 +1020,10 @@ mod tests {
             api_keys: Arc::new(ApiKeyStore::default()),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
             registry: crate::registry::new_shared(),
+            registry_rate_limiter: Arc::new(
+                crate::auth::IpRateLimiter::registry_default(),
+            ),
+            admin_token: Arc::new(crate::auth::AdminToken::disabled()),
         }
     }
 
@@ -2133,6 +2182,75 @@ mod tests {
             code, JSON_RPC_CAPABILITY_DENIED,
             "expected -32010 capability-denied code, got {code}: {val}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug fix: method whitelist — invalid method name returns -32601
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invalid_method_name_returns_32601() {
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body("evil/method", json!({}))))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let code = val["error"]["code"].as_i64().unwrap_or(0);
+        assert_eq!(
+            code, -32601,
+            "invalid method must return JSON-RPC -32601, got: {val}"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_method_name_is_accepted() {
+        // `initialize` is in VALID_METHODS and has a handler — must return a result.
+        let app = crate::build_router(test_state_with_key(TEST_API_KEY));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("Authorization", auth_header(TEST_API_KEY))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(mcp_request_body("initialize", json!({}))))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Must not be rejected by the whitelist — error field must be absent or
+        // must NOT be a -32601 whitelist error (could be another kind for unimplemented).
+        if let Some(err) = val.get("error") {
+            let code = err["code"].as_i64().unwrap_or(0);
+            assert_ne!(
+                code, -32601,
+                "whitelisted method 'initialize' must not be rejected by the whitelist guard: {val}"
+            );
+        } else {
+            // No error at all — method returned a result.
+            assert!(
+                val.get("result").is_some(),
+                "expected result for 'initialize': {val}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
