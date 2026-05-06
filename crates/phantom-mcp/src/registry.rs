@@ -17,15 +17,22 @@
 //!
 //! All failure modes are captured by [`McpError`]:
 //! - [`McpError::UnknownTool`] — no registered server handles the name.
-//! - [`McpError::InvokeError`] — the client build/call step returned an error
+//! - [`McpError::NotConnected`] — the routed server has no live [`McpClient`]
+//!   in the registry (e.g. the test helper registered a server without a client).
+//! - [`McpError::InvokeError`] — the client call step returned an error
 //!   (e.g. the server rejected the request).
 //!
 //! ## Threading
 //!
-//! [`McpToolRegistry`] is `Send + Sync` (all state behind `&mut self`). Callers
-//! that need shared access should wrap it in `Arc<Mutex<McpToolRegistry>>`.
+//! [`McpToolRegistry`] is `Send + Sync`. Clients are stored behind
+//! `tokio::sync::Mutex` so the async [`invoke`](McpToolRegistry::invoke) can
+//! lock them without blocking the executor thread. Callers that need shared
+//! registry access should wrap it in `Arc<tokio::sync::RwLock<McpToolRegistry>>`
+//! (or `Arc<tokio::sync::Mutex<McpToolRegistry>>`).
 
 use std::collections::{HashMap, HashSet};
+
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::client::McpClient;
 use crate::protocol::JsonRpcResponse;
@@ -96,7 +103,10 @@ pub struct ToolProvenance {
 /// ```
 pub struct McpToolRegistry {
     /// Named client connections (populated by `register_server`).
-    clients: HashMap<String, McpClient>,
+    ///
+    /// Each client is behind a `tokio::sync::Mutex` so the async `invoke`
+    /// method can lock it without blocking the executor.
+    clients: HashMap<String, TokioMutex<McpClient>>,
     /// Set of all registered server names; lets test helpers register routing
     /// entries without a live [`McpClient`] connection.
     registered_servers: HashSet<String>,
@@ -140,7 +150,7 @@ impl McpToolRegistry {
             }
         }
         self.registered_servers.insert(name.to_owned());
-        self.clients.insert(name.to_owned(), client);
+        self.clients.insert(name.to_owned(), TokioMutex::new(client));
     }
 
     /// Find which server handles `tool_name`.
@@ -156,20 +166,20 @@ impl McpToolRegistry {
 
     /// Invoke `tool_name` with `args` on the owning server.
     ///
-    /// Builds a `tools/call` JSON-RPC request via the resolved [`McpClient`],
-    /// then synthesises the result from the response. Because `McpClient` is
-    /// a message-construction layer (not a live transport), this method treats
-    /// the *absence of a JSON-RPC error* in a simulated response as success.
-    /// In integration with a real transport, the caller would send the built
-    /// request over the wire and pass the server's response to
-    /// [`Self::handle_call_response`].
-    ///
-    /// For unit-test purposes the registry executes the full routing and
-    /// request-building path; error responses are surfaced as
-    /// [`McpError::InvokeError`].
+    /// Resolves which server handles the tool, acquires a lock on the
+    /// [`McpClient`] for that server, and performs a live `tools/call`
+    /// JSON-RPC round-trip over the WebSocket connection.
     ///
     /// Returns `(result_payload, provenance)` on success.
-    pub fn invoke(
+    ///
+    /// # Errors
+    ///
+    /// - [`McpError::UnknownTool`] — no registered server advertises the name.
+    /// - [`McpError::NotConnected`] — the server was registered without a live
+    ///   client (e.g. via the test-only helper path that only populates the index).
+    /// - Any [`McpError`] propagated from [`McpClient::call_tool`] (transport,
+    ///   timeout, server error, etc.).
+    pub async fn invoke(
         &self,
         tool_name: &str,
         args: serde_json::Value,
@@ -178,25 +188,27 @@ impl McpToolRegistry {
             .resolve_tool(tool_name)
             .ok_or_else(|| McpError::UnknownTool { name: tool_name.to_owned() })?;
 
-        if !self.registered_servers.contains(&route.server_name) {
-            return Err(McpError::InvokeError {
-                tool: tool_name.to_string(),
-                detail: "index/client map desync".to_string(),
-            });
-        }
+        // Look up the live client for the resolved server.
+        let client_mutex = self
+            .clients
+            .get(&route.server_name)
+            .ok_or(McpError::NotConnected)?;
 
-        // Build the tools/call request for the tool invocation.
-        let _request = crate::client::build_call_tool_request(tool_name, args);
-
-        // In a real transport the request would be sent over the wire and a
-        // response received. Here we return a synthetic success payload so
-        // the routing and provenance path can be exercised without a live
-        // server. Real wiring will replace this with the transport round-trip.
         let provenance = ToolProvenance {
             tool_name: route.provenance_tag(),
         };
 
-        Ok((serde_json::json!({"content": [{"type": "text", "text": "ok"}]}), provenance))
+        // Acquire the per-client lock and call the remote server.
+        let mut client = client_mutex.lock().await;
+        let result = client
+            .call_tool(tool_name, args)
+            .await
+            .map_err(|e| McpError::InvokeError {
+                tool: provenance.tool_name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        Ok((result, provenance))
     }
 
     /// Process a `tools/call` response that was received from the transport
@@ -262,8 +274,9 @@ mod tests {
     /// Register a named server with the given tool names directly into `reg`,
     /// without requiring a live [`McpClient`] WebSocket connection.
     ///
-    /// Populates `tool_index` and `registered_servers` so that
-    /// `invoke` and `resolve_tool` work correctly in unit tests.
+    /// Populates `tool_index` and `registered_servers` only — no entry is
+    /// added to `clients`. Calls to `invoke` on these tools will return
+    /// [`McpError::NotConnected`] because there is no real transport.
     fn register_test_server(reg: &mut McpToolRegistry, server: &str, tool_names: &[&str]) {
         for name in tool_names {
             reg.tool_index.insert((*name).to_owned(), server.to_owned());
@@ -307,33 +320,195 @@ mod tests {
         assert!(reg.resolve_tool("").is_none());
     }
 
-    // ---- Invoke -------------------------------------------------------------
+    // ---- Invoke — no live client (index-only registration) ------------------
 
-    #[test]
-    fn invoke_known_tool_returns_ok() {
+    /// When a server is registered without a real client (index-only via the
+    /// test helper), `invoke` must return `NotConnected`, not the old hardcoded
+    /// stub payload.
+    #[tokio::test]
+    async fn invoke_without_client_returns_not_connected() {
         let mut reg = McpToolRegistry::new();
         register_test_server(&mut reg, "fs", &["fs.read_file"]);
 
-        let result = reg.invoke("fs.read_file", json!({"path": "/tmp/test.txt"}));
-        assert!(result.is_ok(), "invoke should succeed: {result:?}");
+        let err = reg
+            .invoke("fs.read_file", json!({"path": "/tmp/test.txt"}))
+            .await
+            .expect_err("should fail: no live client");
 
-        let (payload, provenance) = result.unwrap();
-        assert!(payload.is_object(), "payload should be an object");
-        assert_eq!(provenance.tool_name, "mcp:fs/fs.read_file");
+        assert!(
+            matches!(err, McpError::NotConnected),
+            "expected NotConnected, got {err:?}"
+        );
     }
 
-    #[test]
-    fn invoke_unknown_tool_returns_mcp_error() {
+    #[tokio::test]
+    async fn invoke_unknown_tool_returns_mcp_error() {
         let reg = McpToolRegistry::new();
 
         let err = reg
             .invoke("ghost.tool", json!({}))
+            .await
             .expect_err("should fail for unknown tool");
 
         assert_eq!(
             err,
             McpError::UnknownTool { name: "ghost.tool".to_owned() },
         );
+    }
+
+    // ---- Invoke — real client round-trip ------------------------------------
+
+    /// Spawn a minimal mock WebSocket MCP server, register a real [`McpClient`]
+    /// with the registry, and verify that `invoke` reaches the server and
+    /// returns the server's real response — not the old hardcoded stub.
+    #[tokio::test]
+    async fn registry_invoke_calls_real_client_not_stub() {
+        use crate::client::McpClient;
+        use crate::protocol::{self, JsonRpcRequest};
+        use futures_util::{SinkExt, StreamExt};
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Spawn a mock MCP server that handles initialize, tools/list, and tools/call.
+        async fn spawn_mock() -> SocketAddr {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else { break };
+                    tokio::spawn(async move {
+                        let mut ws = accept_async(stream).await.unwrap();
+                        while let Some(Ok(msg)) = ws.next().await {
+                            let text = match msg {
+                                Message::Text(t) => t,
+                                Message::Close(_) => break,
+                                _ => continue,
+                            };
+                            let req: JsonRpcRequest =
+                                match serde_json::from_str(&text) {
+                                    Ok(r) => r,
+                                    Err(_) => continue,
+                                };
+                            let id = req.id.clone().unwrap_or(json!(0));
+                            let resp = match req.method.as_str() {
+                                "initialize" => protocol::create_response(
+                                    id,
+                                    json!({
+                                        "protocolVersion": "2024-11-05",
+                                        "capabilities": {"tools": {}},
+                                        "serverInfo": {"name": "mock", "version": "0.0.1"},
+                                    }),
+                                ),
+                                "tools/list" => protocol::create_response(
+                                    id,
+                                    json!({ "tools": [{
+                                        "name": "echo",
+                                        "description": "Echo",
+                                        "inputSchema": {"type": "object"},
+                                    }]}),
+                                ),
+                                "tools/call" => {
+                                    let msg_val = req
+                                        .params
+                                        .as_ref()
+                                        .and_then(|p| p.get("arguments"))
+                                        .and_then(|a| a.get("message"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("(none)");
+                                    protocol::create_response(
+                                        id,
+                                        json!({
+                                            "content": [{"type": "text", "text": format!("real:{msg_val}")}]
+                                        }),
+                                    )
+                                }
+                                other => protocol::create_error(
+                                    id,
+                                    protocol::METHOD_NOT_FOUND,
+                                    &format!("unknown: {other}"),
+                                ),
+                            };
+                            let text = serde_json::to_string(&resp).unwrap();
+                            let _ = ws.send(Message::Text(text.into())).await;
+                        }
+                    });
+                }
+            });
+            addr
+        }
+
+        let addr = spawn_mock().await;
+        let url = format!("ws://{addr}/mcp");
+
+        // Connect a real client and prime its tool list.
+        let mut client = McpClient::connect(&url).await.expect("connect");
+        client.list_tools().await.expect("list_tools");
+
+        // Register the live client in the registry.
+        let mut reg = McpToolRegistry::new();
+        reg.register_server("mock", client);
+
+        // invoke must reach the real server, not return the old hardcoded stub.
+        let (result, provenance) = reg
+            .invoke("echo", json!({"message": "hello"}))
+            .await
+            .expect("invoke should succeed with real client");
+
+        // The server echoes "real:<message>" — the old stub returned "ok".
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert_eq!(
+            text, "real:hello",
+            "invoke must return the server's real response, not the hardcoded stub"
+        );
+        assert_eq!(provenance.tool_name, "mcp:mock/echo");
+    }
+
+    // ---- Two-server routing: each tool resolves to the right server ---------
+
+    #[test]
+    fn two_server_routing_fs_tool_goes_to_fs() {
+        let mut reg = McpToolRegistry::new();
+        register_test_server(&mut reg, "fs", &["read_file", "write_file"]);
+        register_test_server(&mut reg, "browser", &["navigate", "click"]);
+
+        // fs tools
+        for name in &["read_file", "write_file"] {
+            let route = reg.resolve_tool(name).expect("should resolve");
+            assert_eq!(
+                route.server_name, "fs",
+                "tool '{name}' should route to 'fs', got '{}'",
+                route.server_name
+            );
+        }
+        // browser tools
+        for name in &["navigate", "click"] {
+            let route = reg.resolve_tool(name).expect("should resolve");
+            assert_eq!(
+                route.server_name, "browser",
+                "tool '{name}' should route to 'browser', got '{}'",
+                route.server_name
+            );
+        }
+    }
+
+    /// invoke without a live client returns NotConnected (provenance prefix is
+    /// still correct when the route resolves but the client map has no entry).
+    #[tokio::test]
+    async fn two_server_routing_invoke_without_clients_returns_not_connected() {
+        let mut reg = McpToolRegistry::new();
+        register_test_server(&mut reg, "fs", &["read_file"]);
+        register_test_server(&mut reg, "browser", &["navigate"]);
+
+        let err_fs = reg.invoke("read_file", json!({})).await.unwrap_err();
+        assert!(matches!(err_fs, McpError::NotConnected));
+
+        let err_br = reg
+            .invoke("navigate", json!({"url": "https://example.com"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err_br, McpError::NotConnected));
     }
 
     // ---- Provenance tag -----------------------------------------------------
@@ -383,47 +558,6 @@ mod tests {
         );
     }
 
-    // ---- Two-server routing: each tool goes to the right server -------------
-
-    #[test]
-    fn two_server_routing_fs_tool_goes_to_fs() {
-        let mut reg = McpToolRegistry::new();
-        register_test_server(&mut reg, "fs", &["read_file", "write_file"]);
-        register_test_server(&mut reg, "browser", &["navigate", "click"]);
-
-        // fs tools
-        for name in &["read_file", "write_file"] {
-            let route = reg.resolve_tool(name).expect("should resolve");
-            assert_eq!(
-                route.server_name, "fs",
-                "tool '{name}' should route to 'fs', got '{}'",
-                route.server_name
-            );
-        }
-        // browser tools
-        for name in &["navigate", "click"] {
-            let route = reg.resolve_tool(name).expect("should resolve");
-            assert_eq!(
-                route.server_name, "browser",
-                "tool '{name}' should route to 'browser', got '{}'",
-                route.server_name
-            );
-        }
-    }
-
-    #[test]
-    fn two_server_routing_invoke_produces_correct_provenance() {
-        let mut reg = McpToolRegistry::new();
-        register_test_server(&mut reg, "fs", &["read_file"]);
-        register_test_server(&mut reg, "browser", &["navigate"]);
-
-        let (_, prov_fs) = reg.invoke("read_file", json!({})).unwrap();
-        assert_eq!(prov_fs.tool_name, "mcp:fs/read_file");
-
-        let (_, prov_browser) = reg.invoke("navigate", json!({"url": "https://example.com"})).unwrap();
-        assert_eq!(prov_browser.tool_name, "mcp:browser/navigate");
-    }
-
     // ---- Error display -------------------------------------------------------
 
     #[test]
@@ -453,10 +587,10 @@ mod tests {
         assert_eq!(reg.tool_count(), 0);
     }
 
-    #[test]
-    fn empty_registry_invoke_returns_unknown_tool() {
+    #[tokio::test]
+    async fn empty_registry_invoke_returns_unknown_tool() {
         let reg = McpToolRegistry::new();
-        let err = reg.invoke("any.tool", json!({})).unwrap_err();
+        let err = reg.invoke("any.tool", json!({})).await.unwrap_err();
         assert!(matches!(err, McpError::UnknownTool { .. }));
     }
 }
