@@ -39,6 +39,7 @@
 //! }
 //! ```
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::curves::{BehaviorDecisionSystem, ScoringContext, build_default_behaviors};
@@ -136,6 +137,10 @@ pub struct OodaConfig {
     /// Minimum BDS score required to emit an action. Scores at or below this
     /// value produce `AiAction::DoNothing`. Default: 15.0 (Basic class ceiling).
     action_threshold: f32,
+    /// Per-behavior emission cooldown in seconds. Once a behavior emits, the
+    /// same `behavior_id` is suppressed for this many seconds. Default: 5.0.
+    /// Set to 0.0 to disable.
+    cooldown_secs: f32,
 }
 
 impl OodaConfig {
@@ -143,24 +148,38 @@ impl OodaConfig {
     ///
     /// * `budget_ms` — frame-budget cap in milliseconds.
     /// * `action_threshold` — minimum BDS score required to emit an action.
-    #[must_use] 
+    #[must_use]
     pub fn new(budget_ms: f32, action_threshold: f32) -> Self {
         Self {
             budget_ms,
             action_threshold,
+            cooldown_secs: 5.0,
         }
     }
 
+    /// Builder: set the per-behavior emission cooldown in seconds.
+    #[must_use]
+    pub fn with_cooldown_secs(mut self, secs: f32) -> Self {
+        self.cooldown_secs = secs;
+        self
+    }
+
     /// Frame-budget cap in milliseconds.
-    #[must_use] 
+    #[must_use]
     pub fn budget_ms(&self) -> f32 {
         self.budget_ms
     }
 
     /// Minimum BDS score required to emit an action.
-    #[must_use] 
+    #[must_use]
     pub fn action_threshold(&self) -> f32 {
         self.action_threshold
+    }
+
+    /// Per-behavior emission cooldown in seconds.
+    #[must_use]
+    pub fn cooldown_secs(&self) -> f32 {
+        self.cooldown_secs
     }
 }
 
@@ -169,6 +188,7 @@ impl Default for OodaConfig {
         Self {
             budget_ms: 2.0,
             action_threshold: 15.0,
+            cooldown_secs: 5.0,
         }
     }
 }
@@ -247,11 +267,13 @@ pub struct OodaLoop {
     metrics: TickMetrics,
     /// Phase trace — records which phases ran in the last tick (for tests).
     last_phases: Vec<&'static str>,
+    /// Per-behavior emission timestamps for cooldown debounce.
+    last_emitted: HashMap<String, Instant>,
 }
 
 impl OodaLoop {
     /// Create a new OODA loop with the default DA:I behaviors registered.
-    #[must_use] 
+    #[must_use]
     pub fn new(config: OodaConfig) -> Self {
         let mut bds = BehaviorDecisionSystem::new();
         for behavior in build_default_behaviors() {
@@ -262,6 +284,7 @@ impl OodaLoop {
             bds,
             metrics: TickMetrics::default(),
             last_phases: Vec::new(),
+            last_emitted: HashMap::new(),
         }
     }
 
@@ -335,12 +358,20 @@ impl OodaLoop {
         self.metrics.last_winner_score = eval.winner_score;
 
         if eval.winner_score > self.config.action_threshold {
-            self.metrics.actions_emitted += 1;
-            let action = Self::behavior_to_action(&eval.winner_id, &snapshot);
-            vec![action]
-        } else {
-            Vec::new()
+            let now = Instant::now();
+            let cooldown = std::time::Duration::from_secs_f32(self.config.cooldown_secs);
+            let allowed = self
+                .last_emitted
+                .get(&eval.winner_id)
+                .map_or(true, |&last| now.duration_since(last) >= cooldown);
+            if allowed {
+                self.last_emitted.insert(eval.winner_id.clone(), now);
+                self.metrics.actions_emitted += 1;
+                let action = Self::behavior_to_action(&eval.winner_id, &snapshot);
+                return vec![action];
+            }
         }
+        Vec::new()
     }
 
     // -----------------------------------------------------------------------
@@ -586,5 +617,31 @@ mod tests {
             "expected error-related winner, got {:?}",
             winner
         );
+    }
+
+    // =======================================================================
+    // Test 9: per-behavior cooldown suppresses repeated emissions
+    // =======================================================================
+
+    #[test]
+    fn cooldown_suppresses_repeated_emission() {
+        let mut ooda = OodaLoop::new(OodaConfig::default());
+        let world = error_world();
+        let first = ooda.tick(&world, 16);
+        assert!(!first.is_empty(), "first tick must emit");
+        let second = ooda.tick(&world, 16);
+        assert!(second.is_empty(), "second tick within cooldown must suppress");
+    }
+
+    // =======================================================================
+    // Test 10: cooldown_secs=0 disables debounce
+    // =======================================================================
+
+    #[test]
+    fn cooldown_zero_allows_repeated_emission() {
+        let mut ooda = OodaLoop::new(OodaConfig::default().with_cooldown_secs(0.0));
+        let world = error_world();
+        assert!(!ooda.tick(&world, 16).is_empty());
+        assert!(!ooda.tick(&world, 16).is_empty(), "cooldown_secs=0 should allow repeats");
     }
 }
