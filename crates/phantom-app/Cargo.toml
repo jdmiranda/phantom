@@ -68,6 +68,8 @@ phantom-stt = { path = "../phantom-stt", features = ["test-utils"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 phantom-nlp = { path = "../phantom-nlp", features = ["testing"] }
 phantom-context = { path = "../phantom-context" }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
 
 [lints]
 workspace = true

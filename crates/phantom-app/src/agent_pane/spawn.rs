@@ -172,6 +172,11 @@ impl App {
         // at shutdown and persists the snapshots via AgentStatePersister.
         agent_pane.set_snapshot_sink(self.agent_snapshot_queue.clone());
 
+        // Wire the MCP tool registry so this pane can fall back to external
+        // MCP servers for tool names not in the built-in surface. The same
+        // Arc is shared across all panes spawned in this session.
+        agent_pane.set_mcp_registry(std::sync::Arc::clone(&self.mcp_registry));
+
         // Issue #235: inject the ticket dispatcher for Dispatcher-role panes.
         // `agent_pane.role` was just set by `set_substrate_handles` above.
         // For the current default (Conversational) this is a no-op. When a

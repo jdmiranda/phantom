@@ -403,8 +403,63 @@ pub fn dispatch_tool(
             }
         }
     } else {
-        // ---- Unknown -------------------------------------------------------
-        result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+        // ---- MCP fallback / Unknown ----------------------------------------
+        //
+        // If the agent's DispatchContext carries an MCP registry, forward the
+        // call to the first connected server that knows this tool name.
+        // `blocking_read()` is safe here because dispatch runs on a sync agent
+        // thread, never inside an async executor.
+        if let Some(ref registry_arc) = ctx.mcp_registry {
+            // `McpToolRegistry::invoke` is `async fn` (since #625 wired the real
+            // server-call path). Dispatch runs on a sync agent thread, so we
+            // either reuse the ambient tokio runtime (when present) via
+            // `Handle::block_on`, or fall back to a one-shot current-thread
+            // runtime. Either way the agent thread blocks until the network
+            // round-trip completes.
+            let registry_arc = std::sync::Arc::clone(registry_arc);
+            let name_owned = name.to_owned();
+            let args_clone = args.clone();
+            let invoke_result: Result<
+                (serde_json::Value, phantom_mcp::ToolProvenance),
+                phantom_mcp::McpError,
+            > = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        let registry = registry_arc.read().await;
+                        registry.invoke(&name_owned, args_clone).await
+                    })
+                }),
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("dispatch: tokio runtime");
+                    rt.block_on(async {
+                        let registry = registry_arc.read().await;
+                        registry.invoke(&name_owned, args_clone).await
+                    })
+                }
+            };
+            match invoke_result {
+                Ok((payload, _provenance)) => {
+                    let output = serde_json::to_string(&payload)
+                        .unwrap_or_else(|_| payload.to_string());
+                    result(PLACEHOLDER_TOOL, true, output)
+                }
+                Err(phantom_mcp::McpError::UnknownTool { .. }) => {
+                    result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+                }
+                Err(e) => {
+                    result(
+                        PLACEHOLDER_TOOL,
+                        false,
+                        format!("mcp invoke error for '{name}': {e}"),
+                    )
+                }
+            }
+        } else {
+            result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+        }
     };
 
     // ---- Correlation ID: emit tool.invoked event with correlation_id -------
