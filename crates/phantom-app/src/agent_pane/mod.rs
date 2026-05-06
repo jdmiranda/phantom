@@ -92,6 +92,43 @@ pub(crate) fn new_agent_snapshot_queue() -> AgentSnapshotQueue {
 }
 
 // ---------------------------------------------------------------------------
+// PaneMessage — structured UI-layer message log
+// ---------------------------------------------------------------------------
+
+/// Role of a message in the agent pane's structured message log.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // ToolResult variant constructed by execute.rs; tool_name consumed by future adapter
+pub(crate) enum PaneMessageRole {
+    Assistant,
+    ToolCall { tool_name: String },
+    ToolResult,
+    System,
+}
+
+/// A single entry in the agent pane's structured message history.
+#[derive(Debug, Clone)]
+pub(crate) struct PaneMessage {
+    pub(crate) role: PaneMessageRole,
+    pub(crate) content: String,
+    #[allow(dead_code)] // timestamp_ms read by the timeline adapter (Phase 2)
+    pub(crate) timestamp_ms: u64,
+}
+
+impl PaneMessage {
+    fn now(role: PaneMessageRole, content: impl Into<String>) -> Self {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Self {
+            role,
+            content: content.into(),
+            timestamp_ms,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AgentPane — a running agent with its output stream
 // ---------------------------------------------------------------------------
 
@@ -259,6 +296,13 @@ pub(crate) struct AgentPane {
     /// string instead of panicking — the graceful fallback is always preserved.
     pub(super) dag_explorer:
         Option<phantom_agents::dag_explorer::DagExplorerContext>,
+
+    /// Structured UI-layer message log. Each `PaneMessage` captures a role
+    /// transition (Assistant text delta, ToolCall, ToolResult, System) with a
+    /// millisecond-precision timestamp. The adapter reads this to render a
+    /// richer message timeline instead of the raw `output` string.
+    #[allow(dead_code)] // Read by the timeline adapter (Phase 2) and tests
+    pub(super) pane_messages: Vec<PaneMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +363,7 @@ impl AgentPane {
             capture_session_uuid: uuid::Uuid::nil(),
             capture_tool_calls: Vec::new(),
             dag_explorer: None,
+            pane_messages: Vec::new(),
         }
     }
 
@@ -502,6 +547,10 @@ impl AgentPane {
             capture_tool_calls: Vec::new(),
             quarantine: None,
             dag_explorer: None,
+            pane_messages: vec![PaneMessage::now(
+                PaneMessageRole::System,
+                "● Agent working...",
+            )],
         }
     }
 
@@ -595,6 +644,18 @@ impl AgentPane {
                     self.output_tokens += (text.len() / 4) as u32;
                     self.output.push_str(&text);
                     self.current_assistant_text.push_str(&text);
+                    // Accumulate into the last Assistant message or start a new one.
+                    match self.pane_messages.last_mut() {
+                        Some(PaneMessage { role: PaneMessageRole::Assistant, content, .. }) => {
+                            content.push_str(&text);
+                        }
+                        _ => {
+                            self.pane_messages.push(PaneMessage::now(
+                                PaneMessageRole::Assistant,
+                                &text,
+                            ));
+                        }
+                    }
                     if let Some(ref mut j) = self.journal {
                         let first_line = text.lines().next().unwrap_or("").to_string();
                         if !first_line.is_empty()
@@ -615,6 +676,18 @@ impl AgentPane {
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
+                    {
+                        let tool_name = call.tool.api_name().to_string();
+                        let tool_display = if args_display.is_empty() {
+                            tool_name.clone()
+                        } else {
+                            format!("{tool_name} {args_display}")
+                        };
+                        self.pane_messages.push(PaneMessage::now(
+                            PaneMessageRole::ToolCall { tool_name },
+                            tool_display,
+                        ));
+                    }
                     if let Some(ref mut j) = self.journal
                         && let Err(e) = j.record_tool_call(self.agent.id(), call.tool.api_name(), &args_display) {
                             warn!("AgentJournal::record_tool_call failed: {e}");
@@ -700,6 +773,26 @@ impl AgentPane {
         &self.task
     }
 
+    /// Return the agent's full conversation message history.
+    ///
+    /// Used by `AgentAdapter::render` to build `MessageBlock` widgets for
+    /// each turn instead of rendering raw cached output lines (Bug 4 fix).
+    pub(crate) fn messages(&self) -> &[AgentMessage] {
+        self.agent.messages()
+    }
+
+    /// Format a `ToolCall`'s args as a compact human-readable string.
+    ///
+    /// Delegates to `execute::format_tool_args`; exposed at `pub(crate)` so
+    /// `adapters/agent.rs` can use it when building `MessageBlock` widgets for
+    /// `ToolUse` messages without needing access to the private `execute` module.
+    pub(crate) fn format_tool_args_for_display(
+        tool: &phantom_agents::tools::ToolType,
+        args: &serde_json::Value,
+    ) -> String {
+        execute::format_tool_args(tool, args)
+    }
+
     /// Return the stable [`phantom_agents::AgentId`] assigned at spawn time.
     ///
     /// Used by `phantom.spawn_agent` (issue #399) to return a stable id to
@@ -727,6 +820,16 @@ impl AgentPane {
     /// driven by `AgentAdapter::update`.
     pub(crate) fn cached_lines(&self) -> &[String] {
         &self.cached_lines
+    }
+
+    /// Return the structured message history for this pane.
+    ///
+    /// Each entry carries a [`PaneMessageRole`], content string, and
+    /// millisecond-precision timestamp so adapters can render a rich timeline
+    /// instead of scanning the raw `output` string.
+    #[allow(dead_code)] // Called by the timeline adapter (Phase 2) and tests
+    pub(crate) fn messages(&self) -> &[PaneMessage] {
+        &self.pane_messages
     }
 
     /// Override the status field from adapter-side command handling.

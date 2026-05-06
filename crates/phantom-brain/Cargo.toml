@@ -23,6 +23,7 @@ tokio = { version = "1", features = ["fs", "sync", "rt", "macros"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 serial_test = "3"
+uuid.workspace = true
 
 [lints]
 workspace = true

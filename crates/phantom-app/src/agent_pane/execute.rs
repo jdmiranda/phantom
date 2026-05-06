@@ -122,7 +122,7 @@ impl AgentPane {
         let calls: Vec<(String, ToolCall)> = self.pending_tools.drain(..).collect();
 
         // Execute each tool (with permission check) and append results.
-        for (_, call) in calls {
+        for (api_id, call) in calls {
             self.tool_call_count += 1;
             let start = std::time::Instant::now();
             let dispatch_ctx = self.build_dispatch_context();
@@ -168,6 +168,19 @@ impl AgentPane {
             // Drop the dispatch context borrow before mutating `self` below.
             drop(dispatch_ctx);
             let elapsed = start.elapsed();
+
+            // Bug 2 fix: backfill the output_json on the matching capture record.
+            // The capture_tool_calls and tool_use_ids vectors are parallel — both
+            // were appended together in poll() when ApiEvent::ToolUse arrived.
+            // Find the index in tool_use_ids that matches this api_id so we can
+            // update the corresponding HistoryToolCall with the real tool output.
+            if let Some(idx) = self.tool_use_ids.iter().rposition(|id| id == &api_id)
+                && let Some(record) = self.capture_tool_calls.get_mut(idx)
+            {
+                let output_str = serde_json::to_string(&result.output)
+                    .unwrap_or_else(|_| result.output.clone());
+                record.set_output_json(output_str);
+            }
 
             // Track file edits for rollback.
             if result.success && matches!(call.tool, ToolType::WriteFile | ToolType::EditFile) {

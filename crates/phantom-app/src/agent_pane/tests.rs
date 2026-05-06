@@ -10,6 +10,7 @@ use phantom_agents::spawn_rules::{EventKind, EventSource};
 
 use super::{
     AgentPane, AgentPaneStatus, DEFAULT_AGENT_PANE_ROLE,
+    PaneMessageRole,
     new_agent_snapshot_queue, new_blocked_event_sink, new_denied_event_sink,
     MAX_TOOL_ROUNDS,
 };
@@ -69,6 +70,7 @@ fn agent_with_handle() -> (AgentPane, mpsc::Sender<ApiEvent>) {
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
+        pane_messages: Vec::new(),
     };
     (pane, tx)
 }
@@ -171,6 +173,7 @@ fn poll_returns_false_when_no_handle() {
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
+        pane_messages: Vec::new(),
     };
     assert!(!pane.poll());
 }
@@ -1046,6 +1049,7 @@ fn spawn_agent_pane_task_matches_prompt() {
         capture_session_uuid: uuid::Uuid::nil(),
         capture_tool_calls: Vec::new(),
         dag_explorer: None,
+        pane_messages: Vec::new(),
     };
     let _ = tx; // keep sender alive so handle stays live
     assert_eq!(pane.task, "fix the failing tests");
@@ -1588,6 +1592,121 @@ fn non_cartographer_pane_always_has_none_dag_explorer_in_ctx() {
 }
 
 // =========================================================================
+// Bug-fix tests: flush_capture_record and tool_call output_json population
+// =========================================================================
+
+/// `flush_capture_record` must write an `AgentRecord` to the capture sidecar
+/// when `agent_capture` is wired and `ApiEvent::Done` is received.
+#[test]
+fn flush_capture_record_writes_to_history_store() {
+    use phantom_history::AgentOutputCapture;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let sidecar_path = tmp.path().join("agents.jsonl");
+
+    let (mut pane, tx) = agent_with_handle();
+    let capture = AgentOutputCapture::open_at(&sidecar_path);
+    pane.set_agent_capture(capture.clone(), uuid::Uuid::new_v4());
+
+    // Send text then Done so the agent completes.
+    tx.send(ApiEvent::TextDelta("agent output text".into())).unwrap();
+    tx.send(ApiEvent::Done).unwrap();
+    pane.poll();
+
+    assert_eq!(pane.status, AgentPaneStatus::Done);
+
+    // The sidecar must have exactly one record.
+    let count = capture.count().expect("count must succeed");
+    assert_eq!(count, 1, "flush_capture_record must write one record on Done");
+
+    // The record must contain the agent output.
+    let records = capture.recent(1).expect("recent must succeed");
+    assert_eq!(records.len(), 1);
+    assert!(
+        records[0].text_output().contains("agent output text"),
+        "captured record text_output must contain the agent's streamed text; got: {}",
+        records[0].text_output()
+    );
+}
+
+/// `flush_capture_record` must also fire on `ApiEvent::Error` (failed agent).
+#[test]
+fn flush_capture_record_writes_on_error() {
+    use phantom_history::AgentOutputCapture;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let sidecar_path = tmp.path().join("agents.jsonl");
+
+    let (mut pane, tx) = agent_with_handle();
+    let capture = AgentOutputCapture::open_at(&sidecar_path);
+    pane.set_agent_capture(capture.clone(), uuid::Uuid::new_v4());
+
+    tx.send(ApiEvent::Error("network timeout".into())).unwrap();
+    pane.poll();
+
+    assert_eq!(pane.status, AgentPaneStatus::Failed);
+
+    let count = capture.count().expect("count must succeed");
+    assert_eq!(count, 1, "flush_capture_record must write one record on Error");
+}
+
+/// Tool calls recorded in `capture_tool_calls` must have `output_json`
+/// populated after the tool result arrives in `execute_pending_tools`.
+///
+/// This is the Bug 2 fix: previously tool call records were created with
+/// `output_json: None` and never updated, meaning the sidecar only captured
+/// the input arguments but not the tool's return value.
+#[test]
+fn tool_call_output_json_populated_on_result() {
+    use phantom_history::AgentOutputCapture;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let sidecar_path = tmp.path().join("agents.jsonl");
+
+    let (mut pane, tx) = agent_with_handle();
+    let capture = AgentOutputCapture::open_at(&sidecar_path);
+    pane.set_agent_capture(capture.clone(), uuid::Uuid::new_v4());
+    // Use a temp dir for tool execution so ListFiles has a real path.
+    pane.working_dir = tmp.path().to_string_lossy().into_owned();
+
+    // Inject a ToolUse (ListFiles) then Done — this triggers execute_pending_tools.
+    tx.send(ApiEvent::ToolUse {
+        id: "toolu_capture_test".into(),
+        call: phantom_agents::tools::ToolCall {
+            tool: phantom_agents::tools::ToolType::ListFiles,
+            args: serde_json::json!({"path": "."}),
+        },
+    })
+    .unwrap();
+    tx.send(ApiEvent::Done).unwrap();
+
+    // First poll: processes ToolUse + Done → executes ListFiles and re-invokes
+    // the backend.  capture_tool_calls still holds the record (not yet flushed).
+    pane.poll();
+    assert_eq!(pane.status, AgentPaneStatus::Working, "should re-invoke after tool");
+
+    // At this point the bug would leave output_json as None.
+    // After the fix, output_json must be Some on the pending capture record.
+    assert_eq!(pane.capture_tool_calls.len(), 1, "one capture record must be pending");
+    assert!(
+        pane.capture_tool_calls[0].output_json().is_some(),
+        "output_json must be populated after execute_pending_tools (Bug 2 fix); was None"
+    );
+
+    // Send a final Done so the agent finishes and flushes the capture to disk.
+    if let Some(ref mut h) = pane.api_handle {
+        // inject Done on the replacement handle; handle is an mpsc channel,
+        // but we can't easily inject here without a test sender. Instead,
+        // just assert the in-memory state captured above — that is the
+        // load-bearing assertion for Bug 2.
+        let _ = h; // suppress unused warning
+    }
+}
+
+// =========================================================================
 // Issue #513 — direct spawn_with_opts path must produce non-zero distinct ids
 // =========================================================================
 
@@ -1613,4 +1732,118 @@ fn allocate_agent_id_is_non_zero_and_increasing() {
 
     assert_ne!(a, b, "allocate_agent_id must return distinct values");
     assert_ne!(b, c, "allocate_agent_id must return distinct values");
+}
+
+// =========================================================================
+// Fix 1 — cached_lines includes the partial (no-trailing-newline) last line
+// =========================================================================
+
+/// `tail_lines` uses `str::lines()` which does NOT require a trailing `\n`.
+/// A streaming delta mid-line must appear in the rendered output without
+/// the caller having to wait for a newline terminator.
+#[test]
+fn cached_lines_includes_partial_last_line() {
+    let (mut pane, _tx) = agent_with_handle();
+    // Write two complete lines and one partial line (no trailing newline).
+    pane.output = "first line\nsecond line\npartial".into();
+    pane.cached_len = 0; // force cache invalidation
+    let lines = pane.tail_lines(200);
+    assert!(
+        lines.iter().any(|l| l == "partial"),
+        "tail_lines must include the partial last line; got: {lines:?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|l| l.as_str() == "partial").count(),
+        1,
+        "partial last line must appear exactly once; got: {lines:?}"
+    );
+}
+
+// =========================================================================
+// Fix 2 — structured message history captures role transitions
+// =========================================================================
+
+/// After receiving a TextDelta event followed by a ToolUse event, the
+/// `pane_messages` vec must contain at least one `Assistant` entry and
+/// one `ToolCall` entry, in that order, with the correct tool name.
+#[test]
+fn messages_vec_captures_role_transitions() {
+    let (mut pane, tx) = agent_with_handle();
+
+    tx.send(ApiEvent::TextDelta("Let me check the file.".into())).unwrap();
+    tx.send(ApiEvent::ToolUse {
+        id: "toolu_abc".into(),
+        call: phantom_agents::tools::ToolCall {
+            tool: phantom_agents::tools::ToolType::ReadFile,
+            args: serde_json::json!({"path": "src/main.rs"}),
+        },
+    })
+    .unwrap();
+
+    pane.poll();
+
+    let msgs = pane.messages();
+
+    let has_assistant = msgs
+        .iter()
+        .any(|m| matches!(m.role, PaneMessageRole::Assistant));
+    assert!(has_assistant, "messages must contain an Assistant entry after TextDelta");
+
+    let tool_call_idx = msgs
+        .iter()
+        .position(|m| matches!(&m.role, PaneMessageRole::ToolCall { tool_name } if tool_name == "read_file"));
+    assert!(
+        tool_call_idx.is_some(),
+        "messages must contain a ToolCall entry with tool_name=read_file; got: {msgs:?}",
+        msgs = msgs.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
+    );
+
+    let assistant_idx = msgs
+        .iter()
+        .position(|m| matches!(m.role, PaneMessageRole::Assistant))
+        .unwrap();
+    assert!(
+        assistant_idx < tool_call_idx.unwrap(),
+        "Assistant entry must precede ToolCall entry"
+    );
+}
+
+// =========================================================================
+// Fix 3 — working indicator appears in render output
+// =========================================================================
+
+/// When the pane status is `Working`, the render output must contain at
+/// least one text segment whose text includes "working" (case-insensitive).
+#[test]
+fn working_status_shows_indicator_in_render() {
+    use crate::adapters::agent::AgentAdapter;
+    use phantom_adapter::adapter::Rect;
+    use phantom_adapter::Renderable;
+
+    let (pane, _tx) = agent_with_handle();
+    assert_eq!(pane.status(), AgentPaneStatus::Working);
+
+    let adapter = AgentAdapter::new(pane);
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 400.0,
+        height: 300.0,
+        ..Rect::default()
+    };
+    let output = adapter.render(&rect);
+    let working_found = output
+        .text_segments
+        .iter()
+        .any(|seg| seg.text.to_lowercase().contains("working"));
+    assert!(
+        working_found,
+        "render output must contain a 'working' indicator when status is Working; \
+         segments: {segs:?}",
+        segs = output
+            .text_segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+    );
 }

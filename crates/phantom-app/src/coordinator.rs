@@ -60,7 +60,7 @@ impl AppCoordinator {
     /// The arbiter is initialized with zero size; call
     /// `set_arbiter_size()` once the window content area and cell size
     /// are known (typically right after window creation).
-    #[must_use] 
+    #[must_use]
     pub fn new(bus: EventBus) -> Self {
         Self {
             registry: AppRegistry::new(),
@@ -93,6 +93,11 @@ impl AppCoordinator {
         self.run_arbiter_negotiation(layout);
     }
 
+    /// Minimum pane width in pixels — approximately 10 characters at 8px per char.
+    const MIN_PANE_WIDTH_PX: f32 = 80.0;
+    /// Minimum pane height in pixels — approximately 2 lines at 12px per line.
+    const MIN_PANE_HEIGHT_PX: f32 = 24.0;
+
     /// Collect spatial preferences from all running adapters, run the arbiter,
     /// and apply the resulting allocations as Taffy `min_size` / `max_size`
     /// constraints on the matching pane nodes.
@@ -101,6 +106,10 @@ impl AppCoordinator {
     /// `app_pane_map` and forwarded to [`LayoutEngine::set_pane_size_constraints`].
     /// Adapters that have no pane mapping (e.g. headless adapters registered
     /// without a layout pane) are skipped silently.
+    ///
+    /// Allocated dimensions are clamped to a minimum of
+    /// [`MIN_PANE_WIDTH_PX`] × [`MIN_PANE_HEIGHT_PX`] so that a denied arbiter
+    /// allocation never collapses a pane to zero pixels.
     fn run_arbiter_negotiation(&mut self, layout: &mut LayoutEngine) {
         let default_pref = SpatialPreference::simple(40, 10);
 
@@ -140,8 +149,10 @@ impl AppCoordinator {
                 continue;
             };
 
-            let min = Some((rect.width, rect.height));
-            let max = Some((rect.width, rect.height));
+            let clamped_width = rect.width.max(Self::MIN_PANE_WIDTH_PX);
+            let clamped_height = rect.height.max(Self::MIN_PANE_HEIGHT_PX);
+            let min = Some((clamped_width, clamped_height));
+            let max = Some((clamped_width, clamped_height));
             if let Err(e) = layout.set_pane_size_constraints(pane_id, min, max) {
                 log::warn!("Failed to apply arbiter constraints for adapter {id}: {e}");
             }
@@ -284,9 +295,9 @@ impl AppCoordinator {
 
         self.cadences.remove(&app_id);
 
-        if self.focused == Some(app_id) {
-            self.focused = self.registry.all_running().into_iter().next();
-        }
+        // Shift focus if the removed adapter was focused, or if the focused
+        // adapter's pane entry was otherwise invalidated.
+        self.validate_focus();
 
         // Re-negotiate so remaining adapters can claim freed space.
         self.run_arbiter_negotiation(layout);
@@ -379,7 +390,7 @@ impl AppCoordinator {
     ///
     /// `cell_size` is required because chrome insets are expressed in
     /// multiples of cell metrics (see [`crate::pane::pane_inner_rect`]).
-    #[must_use] 
+    #[must_use]
     pub fn render_all(
         &self,
         layout: &LayoutEngine,
@@ -448,41 +459,43 @@ impl AppCoordinator {
     pub fn sync_arbiter_to_scene(&self, plan: &LayoutPlan, scene: &mut SceneTree) {
         for (&app_id, rect) in &plan.allocations {
             if let Some(&node_id) = self.scene_map.get(&app_id)
-                && let Some(node) = scene.get_mut(node_id) {
-                    node.transform.x = rect.x;
-                    node.transform.y = rect.y;
-                    node.transform.width = rect.width;
-                    node.transform.height = rect.height;
-                    node.dirty |= DirtyFlags::TRANSFORM;
-                    log::debug!(
-                        "Scene sync: adapter {app_id} -> node {node_id} at ({:.0}, {:.0}, {:.0}x{:.0})",
-                        rect.x,
-                        rect.y,
-                        rect.width,
-                        rect.height,
-                    );
-                }
+                && let Some(node) = scene.get_mut(node_id)
+            {
+                node.transform.x = rect.x;
+                node.transform.y = rect.y;
+                node.transform.width = rect.width;
+                node.transform.height = rect.height;
+                node.dirty |= DirtyFlags::TRANSFORM;
+                log::debug!(
+                    "Scene sync: adapter {app_id} -> node {node_id} at ({:.0}, {:.0}, {:.0}x{:.0})",
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                );
+            }
         }
     }
 
     /// Build a `LayoutPlan` from the current Taffy layout.
-    #[must_use] 
+    #[must_use]
     pub fn build_layout_plan(&self, layout: &LayoutEngine) -> LayoutPlan {
         let mut allocations = HashMap::new();
         for id in self.registry.all_running() {
             if let Some(pane_id) = self.app_pane_map.get(&id)
-                && let Ok(r) = layout.get_pane_rect(*pane_id) {
-                    allocations.insert(
-                        id,
-                        Rect {
-                            x: r.x,
-                            y: r.y,
-                            width: r.width,
-                            height: r.height,
-                            ..Default::default()
-                        },
-                    );
-                }
+                && let Ok(r) = layout.get_pane_rect(*pane_id)
+            {
+                allocations.insert(
+                    id,
+                    Rect {
+                        x: r.x,
+                        y: r.y,
+                        width: r.width,
+                        height: r.height,
+                        ..Default::default()
+                    },
+                );
+            }
         }
         LayoutPlan { allocations }
     }
@@ -490,7 +503,7 @@ impl AppCoordinator {
     /// Scene-graph-aware render: reads positions from world_transform,
     /// sorted by z_order (lowest first = drawn first = behind).
     /// Focused adapter gets +1 z_order bonus.
-    #[must_use] 
+    #[must_use]
     pub fn render_all_with_scene(&self, scene: &SceneTree) -> Vec<(AppId, Rect, RenderOutput)> {
         let mut outputs = Vec::new();
         for id in self.registry.all_running() {
@@ -540,7 +553,7 @@ impl AppCoordinator {
     }
 
     /// Query which render layer an adapter's scene node belongs to.
-    #[must_use] 
+    #[must_use]
     pub fn render_layer_for(&self, app_id: AppId, scene: &SceneTree) -> RenderLayer {
         self.scene_map
             .get(&app_id)
@@ -551,7 +564,7 @@ impl AppCoordinator {
 
     /// Collect render outputs partitioned by RenderLayer.
     #[allow(dead_code)]
-    #[must_use] 
+    #[must_use]
     pub fn render_all_layered(
         &self,
         layout: &LayoutEngine,
@@ -604,19 +617,24 @@ impl AppCoordinator {
             let _ = layout.remove_pane(pane_id);
         }
 
+        // The floating adapter is removed from the tiled pane map; ensure focus
+        // does not point at an adapter without a tiled pane entry.
+        self.validate_focus();
+
         self.floating.insert(app_id);
         self.float_rects.insert(app_id, rect.clone());
 
         if let Some(&node_id) = self.scene_map.get(&app_id)
-            && let Some(node) = scene.get_mut(node_id) {
-                node.z_order = 50;
-                node.render_layer = RenderLayer::Overlay;
-                node.transform.x = rect.x;
-                node.transform.y = rect.y;
-                node.transform.width = rect.width;
-                node.transform.height = rect.height;
-                node.dirty |= DirtyFlags::TRANSFORM;
-            }
+            && let Some(node) = scene.get_mut(node_id)
+        {
+            node.z_order = 50;
+            node.render_layer = RenderLayer::Overlay;
+            node.transform.x = rect.x;
+            node.transform.y = rect.y;
+            node.transform.width = rect.width;
+            node.transform.height = rect.height;
+            node.dirty |= DirtyFlags::TRANSFORM;
+        }
 
         self.run_arbiter_negotiation(layout);
         log::info!(
@@ -629,16 +647,16 @@ impl AppCoordinator {
     }
 
     /// Get the scene node ID for an adapter, if it exists.
-    #[must_use] 
+    #[must_use]
     pub fn scene_node_for(&self, app_id: AppId) -> Option<phantom_scene::node::NodeId> {
         self.scene_map.get(&app_id).copied()
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn is_floating(&self, app_id: AppId) -> bool {
         self.floating.contains(&app_id)
     }
-    #[must_use] 
+    #[must_use]
     pub fn float_rect(&self, app_id: AppId) -> Option<&Rect> {
         self.float_rects.get(&app_id)
     }
@@ -684,11 +702,12 @@ impl AppCoordinator {
         }
 
         if let Some(&node_id) = self.scene_map.get(&app_id)
-            && let Some(node) = scene.get_mut(node_id) {
-                node.z_order = 0;
-                node.render_layer = RenderLayer::Scene;
-                node.dirty |= DirtyFlags::TRANSFORM;
-            }
+            && let Some(node) = scene.get_mut(node_id)
+        {
+            node.z_order = 0;
+            node.render_layer = RenderLayer::Scene;
+            node.dirty |= DirtyFlags::TRANSFORM;
+        }
 
         self.run_arbiter_negotiation(layout);
         log::info!("Docked adapter {app_id} back to grid");
@@ -698,10 +717,11 @@ impl AppCoordinator {
     #[allow(dead_code)]
     pub fn set_render_layer(&self, app_id: AppId, layer: RenderLayer, scene: &mut SceneTree) {
         if let Some(&node_id) = self.scene_map.get(&app_id)
-            && let Some(node) = scene.get_mut(node_id) {
-                node.render_layer = layer;
-                node.dirty |= DirtyFlags::VISIBILITY;
-            }
+            && let Some(node) = scene.get_mut(node_id)
+        {
+            node.render_layer = layer;
+            node.dirty |= DirtyFlags::VISIBILITY;
+        }
     }
 
     /// Mark all adapter scene nodes as dirty (call on window resize).
@@ -786,7 +806,7 @@ impl AppCoordinator {
     /// Checks the adapter's state JSON for a `mouse_mode` field that is
     /// not `"none"`. Terminal adapters report this based on DEC mode
     /// tracking (modes 1000/1002/1003).
-    #[must_use] 
+    #[must_use]
     pub fn adapter_wants_mouse(&self, app_id: AppId) -> bool {
         self.registry
             .get_adapter(app_id)
@@ -818,14 +838,28 @@ impl AppCoordinator {
         self.focused = Some(app_id);
     }
 
+    /// Ensure the focused adapter still has a valid pane.
+    ///
+    /// If the currently focused `AppId` is no longer present in
+    /// `app_pane_map` (because its pane was removed), the focus is shifted
+    /// to the next available adapter. This prevents `route_input` and
+    /// `send_command_to_focused` from operating on a pane-less adapter.
+    fn validate_focus(&mut self) {
+        if let Some(focused_id) = self.focused {
+            if !self.app_pane_map.contains_key(&focused_id) {
+                self.focused = self.app_pane_map.keys().next().copied();
+            }
+        }
+    }
+
     /// The currently focused adapter, if any.
-    #[must_use] 
+    #[must_use]
     pub fn focused(&self) -> Option<AppId> {
         self.focused
     }
 
     /// Get the current state JSON from an adapter.
-    #[must_use] 
+    #[must_use]
     pub fn get_state(&self, app_id: AppId) -> Option<serde_json::Value> {
         let adapter = self.registry.get_adapter(app_id)?;
         Some(adapter.get_state())
@@ -902,25 +936,25 @@ impl AppCoordinator {
     }
 
     /// All app IDs that are currently running.
-    #[must_use] 
+    #[must_use]
     pub fn all_app_ids(&self) -> Vec<AppId> {
         self.registry.all_running()
     }
 
     /// The layout pane associated with an adapter.
-    #[must_use] 
+    #[must_use]
     pub fn pane_id_for(&self, app_id: AppId) -> Option<PaneId> {
         self.app_pane_map.get(&app_id).copied()
     }
 
     /// Look up which adapter owns a given layout pane.
-    #[must_use] 
+    #[must_use]
     pub fn app_id_for_pane(&self, pane_id: PaneId) -> Option<AppId> {
         self.pane_map.get(&pane_id).copied()
     }
 
     /// Immutable access to the event bus.
-    #[must_use] 
+    #[must_use]
     pub fn bus(&self) -> &EventBus {
         &self.bus
     }
@@ -931,7 +965,7 @@ impl AppCoordinator {
     }
 
     /// Immutable access to the app registry.
-    #[must_use] 
+    #[must_use]
     pub fn registry(&self) -> &AppRegistry {
         &self.registry
     }
@@ -946,11 +980,7 @@ impl AppCoordinator {
         self.registry
             .all_running()
             .into_iter()
-            .find(|&id| {
-                self.registry
-                    .get(id)
-                    .is_some_and(|e| e.app_type == ty)
-            })
+            .find(|&id| self.registry.get(id).is_some_and(|e| e.app_type == ty))
     }
 
     /// Mutable access to the app registry.
@@ -964,9 +994,19 @@ impl AppCoordinator {
     ///
     /// Used by the bus-drain loop to populate `ParsedOutput::raw_output`
     /// when a `CommandComplete` event fires (issue #226).
-    #[must_use] 
+    #[must_use]
     pub fn terminal_output_buf(&self, app_id: AppId) -> Option<String> {
         self.registry.get_adapter(app_id)?.output_buf_snapshot()
+    }
+
+    /// Drain the latest OSC 2 window title from the focused terminal adapter.
+    ///
+    /// Called once per frame by the main event loop; the returned title (if
+    /// any) is forwarded to `winit_window.set_title()`.  Returns `None` when
+    /// no title change has arrived since the last call.
+    pub fn take_focused_window_title(&mut self) -> Option<String> {
+        let focused = self.focused?;
+        self.registry.get_adapter_mut(focused)?.take_pending_window_title()
     }
 
     // -----------------------------------------------------------------------
@@ -2198,5 +2238,102 @@ mod tests {
             rect.width,
             available.0,
         );
+    }
+
+    // ── Bug-fix: arbiter zero-pixel clamp ────────────────────────────────────
+
+    /// When the arbiter allocates 0 × 0 px (window too small to satisfy
+    /// minimums), the negotiation must clamp to at least MIN_PANE_WIDTH_PX ×
+    /// MIN_PANE_HEIGHT_PX rather than collapsing the pane to invisible.
+    #[test]
+    fn pane_arbiter_clamps_to_min_width() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        // Configure an absurdly small content area so the arbiter will deny
+        // all spatial requests and return 0-pixel allocations.
+        coord.set_arbiter_size((1.0, 1.0), (8.0, 16.0));
+
+        let id = register_mock(&mut coord, &mut layout, &mut scene, content, "tiny");
+
+        // Recompute at the same tiny size.
+        layout.resize(1.0, 60.0).unwrap(); // 60 ≈ chrome heights
+
+        let pane_id = coord.pane_id_for(id).expect("pane must have a layout node");
+        let rect = layout
+            .get_pane_rect(pane_id)
+            .expect("rect must be computable");
+
+        // The Taffy min_size was clamped, so the pane rect must be at least
+        // MIN_PANE_WIDTH_PX wide and MIN_PANE_HEIGHT_PX tall.
+        assert!(
+            rect.width >= AppCoordinator::MIN_PANE_WIDTH_PX,
+            "pane width {} must be clamped to at least {}",
+            rect.width,
+            AppCoordinator::MIN_PANE_WIDTH_PX,
+        );
+        assert!(
+            rect.height >= AppCoordinator::MIN_PANE_HEIGHT_PX,
+            "pane height {} must be clamped to at least {}",
+            rect.height,
+            AppCoordinator::MIN_PANE_HEIGHT_PX,
+        );
+    }
+
+    // ── Bug-fix: stale focus after pane removal ───────────────────────────────
+
+    /// After removing the focused adapter, `focused()` must return `None` when
+    /// no other adapters remain.
+    #[test]
+    fn focus_clears_when_focused_pane_removed() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id = register_mock(&mut coord, &mut layout, &mut scene, content, "only");
+        assert_eq!(coord.focused(), Some(id));
+
+        coord.remove_adapter(id, &mut layout, &mut scene);
+
+        assert_eq!(
+            coord.focused(),
+            None,
+            "focus must be None when the focused adapter is removed and no others remain"
+        );
+    }
+
+    /// After removing the focused adapter when another adapter is present,
+    /// focus must shift to the remaining adapter.
+    #[test]
+    fn focus_shifts_to_next_pane_after_close() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "a");
+        let id_b = register_mock(&mut coord, &mut layout, &mut scene, content, "b");
+
+        // First adapter gets auto-focus.
+        assert_eq!(coord.focused(), Some(id_a));
+
+        // Remove the focused adapter.
+        coord.remove_adapter(id_a, &mut layout, &mut scene);
+
+        // Focus must now point at the surviving adapter (not None, not id_a).
+        let focused = coord.focused();
+        assert!(
+            focused.is_some(),
+            "focus must shift to a surviving adapter, got None"
+        );
+        assert_ne!(
+            focused,
+            Some(id_a),
+            "focus must not point at removed adapter"
+        );
+        assert_eq!(focused, Some(id_b), "focus must shift to id_b");
     }
 }

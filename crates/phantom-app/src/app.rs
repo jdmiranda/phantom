@@ -27,7 +27,7 @@ use phantom_terminal::terminal::PhantomTerminal;
 use phantom_ui::keybinds::KeybindRegistry;
 use phantom_ui::layout::LayoutEngine;
 use phantom_ui::themes::Theme;
-use phantom_ui::widgets::{StatusBar, TabBar};
+use phantom_ui::widgets::{KeybindHelp, StatusBar, TabBar};
 
 use phantom_adapter::{DataType, EventBus, TopicId};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
@@ -44,6 +44,7 @@ use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
 use phantom_session::session::{PaneState, SessionManager, SessionState, is_session_restore};
 use phantom_session::{AgentStatePersister, GoalStatePersister};
+use phantom_session::{RestoredSession, SessionRestorer};
 
 use crate::boot::BootSequence;
 use crate::boot_order::ShutdownGuard;
@@ -125,6 +126,8 @@ pub struct App {
     pub(crate) theme: Theme,
     pub(crate) status_bar: StatusBar,
     pub(crate) tab_bar: TabBar,
+    /// Full-screen keybind help overlay (F1 / ?).
+    pub(crate) keybind_help: KeybindHelp,
 
     // -- Boot sequence --
     pub(crate) boot: BootSequence,
@@ -137,6 +140,15 @@ pub struct App {
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
+    /// Frame-dt safety clamp: prevents animation explosions caused by
+    /// abnormally long frames (debugger pauses, OS suspends, GC spikes).
+    /// When measured dt exceeds `max_dt` (100 ms), the clamp substitutes
+    /// `target_dt` (16.6 ms) so downstream animation math stays bounded.
+    pub(crate) dt_clamp: phantom_scene::DtClamp,
+    /// Centralized monotonic game clock (scene time).
+    /// Ticked once per frame with the clamped dt so all subsystems share a
+    /// single advancing time base that cannot jump on pause/resume.
+    pub(crate) scene_clock: phantom_scene::Clock,
 
     // -- Clock-driven terminal cursor blink timer.
     //    Ticked once per frame with wall-clock milliseconds.  The terminal
@@ -197,6 +209,13 @@ pub struct App {
     //    when no session path could be determined (e.g. $HOME unset). --
     pub(crate) agent_persister: Option<AgentStatePersister>,
     pub(crate) goal_persister: Option<GoalStatePersister>,
+
+    // -- Snapshots loaded from the previous session's sidecar files.
+    //    Populated by `SessionRestorer::restore()` during `with_config_scaled`
+    //    and consumed (`.take()`'d) by `update.rs` on the first Terminal tick
+    //    to emit an `AiEvent::Interrupt` resume prompt when non-empty.
+    //    `None` after the prompt has been fired or when there is nothing to restore. --
+    pub(crate) restored_session: Option<RestoredSession>,
 
     // -- Shared queue that agent panes push an AgentSnapshot into whenever
     //    they reach a terminal state (Done / Failed). The App drains this at
@@ -260,6 +279,15 @@ pub struct App {
     pub(crate) _mcp_listener: Option<McpListener>,
     // -- Hub registration listener (outbound WSS to phantom-hub, issue #395) --
     pub(crate) _hub_listener: Option<phantom_mcp::HubListener>,
+
+    // -- MCP external-server discovery barrier.
+    //    Set to `true` by the async discovery task once all servers listed in
+    //    `$PHANTOM_MCP_SERVERS` have been connected and their `tools/list`
+    //    responses indexed into the tool registry.  Agent spawn waits up to
+    //    500 ms for this flag before proceeding (non-blocking: if discovery
+    //    is still running the agent gets an empty external tool list and can
+    //    still function).
+    pub(crate) mcp_discovery_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     // -- Render pools (reused each frame via clear() to avoid per-frame allocs) --
     pub(crate) pool_quads: Vec<QuadInstance>,
@@ -414,6 +442,22 @@ pub struct App {
     //    jobs can hold their own handle without an extra clone-of-clone.
     pub(crate) bundle_store: Option<std::sync::Arc<phantom_bundle_store::BundleStore>>,
     pub(crate) capture_state: crate::capture::CaptureState,
+    /// GPT-4V analyzer. `None` when `OPENAI_API_KEY` is absent or the
+    /// capture pipeline is disabled. When present, frames that pass the
+    /// dHash+SAD dedup gate are forwarded to GPT-4V asynchronously.
+    ///
+    /// Stored behind `Arc` so the capture loop can clone a cheap handle
+    /// into each spawned tokio task without blocking the render thread.
+    pub(crate) vision_analyzer: Option<std::sync::Arc<phantom_vision::VisionAnalyzer>>,
+
+    // -- Embedding backend (optional, initialized from OPENAI_API_KEY).
+    //    `None` when `OPENAI_API_KEY` is absent or empty — the capture
+    //    pipeline persists bundles without vector indexing in that case.
+    //    Stored as `Arc<dyn EmbeddingBackend>` so it can be shared with
+    //    off-thread persistence jobs via `Arc::clone` without holding a
+    //    reference back to the `App`.
+    pub(crate) embedding_backend:
+        Option<std::sync::Arc<dyn phantom_embeddings::EmbeddingBackend>>,
 
     // -- Per-pane last-command tracking (issue #226).
     //    Populated from `Event::CommandStarted` so that the subsequent
@@ -560,7 +604,7 @@ impl App {
             "Font: {:.0}pt logical × {:.1}x scale = {:.0}pt physical",
             config.font_size, scale_factor, scaled_font_size
         );
-        let mut text_renderer = TextRenderer::new(scaled_font_size);
+        let mut text_renderer = TextRenderer::with_font_family(scaled_font_size, config.font_family.clone());
         let cell_size = text_renderer.measure_cell();
         info!(
             "Cell size: {:.1}x{:.1} at {:.0}pt",
@@ -706,6 +750,11 @@ impl App {
         }
 
         // -- AI Brain thread --
+        // Seed the brain's initial history snapshot (up to 20 most recent commands).
+        let initial_history_context: Vec<phantom_history::HistoryEntry> = history
+            .as_ref()
+            .and_then(|s| s.recent(20).ok())
+            .unwrap_or_default();
         let brain = spawn_brain(BrainConfig {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
@@ -717,6 +766,7 @@ impl App {
             // relay_inbound_rx: wired by the relay task on handshake completion
             // via AiEvent::RelayConnected. None in standalone (non-relay) mode.
             relay_inbound_rx: None,
+            history_context: initial_history_context,
         });
         if config.privacy_mode {
             info!("Privacy mode enabled — cloud API calls blocked");
@@ -789,6 +839,28 @@ impl App {
         } else {
             info!("Bundle store unavailable — per-pane capture disabled");
         }
+
+        // -- Embedding backend (optional). Constructed from OPENAI_API_KEY when
+        //    present so the capture pipeline can vector-index sealed bundles.
+        //    When the key is absent we store None and log at debug level — bundles
+        //    still persist with metadata; only vector search is unavailable.
+        //    The client is cached inside the backend (not per-request) so the
+        //    Arc<dyn EmbeddingBackend> can be shared cheaply with job workers.
+        let embedding_backend: Option<std::sync::Arc<dyn phantom_embeddings::EmbeddingBackend>> =
+            match phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env() {
+                Ok(backend) => {
+                    info!("Embedding backend ready (OpenAI text-embedding-3-large)");
+                    Some(std::sync::Arc::new(backend))
+                }
+                Err(phantom_embeddings::EmbedError::NotConfigured(_)) => {
+                    debug!("OPENAI_API_KEY not set — embedding backend disabled");
+                    None
+                }
+                Err(e) => {
+                    warn!("Embedding backend init failed: {e} — vector indexing disabled");
+                    None
+                }
+            };
 
         // -- Scene graph --
         let mut scene = SceneTree::new();
@@ -923,6 +995,30 @@ impl App {
                 }
             }
         }
+
+        // -- Session restore: load agent + goal snapshots from sidecar files --
+        // Called after both persisters are initialised so the sidecar paths are
+        // known.  Partial failure (corrupt sidecar on one side) is handled
+        // gracefully inside `SessionRestorer::restore`.  The result is stored on
+        // `App` and consumed on the first Terminal-state OODA tick in `update.rs`.
+        let restored_session: Option<RestoredSession> = {
+            let agent_path = agent_persister.as_ref().map(|p| p.path().to_path_buf());
+            let goal_path = goal_persister.as_ref().map(|p| p.path().to_path_buf());
+            let session = SessionRestorer::restore(
+                agent_path.as_deref(),
+                goal_path.as_deref(),
+            );
+            if session.is_empty() {
+                None
+            } else {
+                info!(
+                    "RestoredSession ready: {} agent(s), {} goal(s)",
+                    session.agent_count(),
+                    session.goal_count(),
+                );
+                Some(session)
+            }
+        };
 
         // -- Event bus (single instance, will be handed to AppCoordinator) --
         let mut event_bus = EventBus::new();
@@ -1095,6 +1191,72 @@ impl App {
         // can self-correct.
         let ticket_dispatcher = build_ticket_dispatcher();
 
+        // -- MCP external-server discovery (Bug 3 fix).
+        //
+        // Spawn an async task that connects to each URL listed in
+        // `$PHANTOM_MCP_SERVERS` (comma-separated), calls `tools/list` on each,
+        // and sets `mcp_discovery_complete` to `true` when done.
+        //
+        // Agent spawn checks this flag and waits up to 500 ms so that agents
+        // started immediately after boot have access to the full external tool
+        // list. If discovery is still running after 500 ms, the agent proceeds
+        // with whatever tools are available (empty external list is acceptable).
+        let mcp_discovery_complete =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let flag = std::sync::Arc::clone(&mcp_discovery_complete);
+            let server_urls: Vec<String> = std::env::var("PHANTOM_MCP_SERVERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+
+            if server_urls.is_empty() {
+                // No external servers configured — mark discovery done immediately.
+                flag.store(true, std::sync::atomic::Ordering::Release);
+                debug!("MCP discovery: no PHANTOM_MCP_SERVERS configured, skipping");
+            } else {
+                // Spin up a one-shot tokio runtime on a background thread so we
+                // don't block the winit event loop.
+                std::thread::Builder::new()
+                    .name("mcp-discovery".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("mcp-discovery: tokio runtime");
+                        rt.block_on(async move {
+                            let mut registry = phantom_mcp::McpToolRegistry::new();
+                            for url in &server_urls {
+                                match phantom_mcp::McpClient::connect(url).await {
+                                    Ok(mut client) => {
+                                        if let Err(e) = client.list_tools().await {
+                                            warn!("MCP discovery: list_tools failed for {url}: {e}");
+                                        }
+                                        let server_name = url
+                                            .trim_start_matches("ws://")
+                                            .trim_start_matches("wss://")
+                                            .to_owned();
+                                        registry.register_server(&server_name, client);
+                                        info!("MCP discovery: registered server {url} ({} tools)",
+                                            registry.tool_count());
+                                    }
+                                    Err(e) => {
+                                        warn!("MCP discovery: connect failed for {url}: {e}");
+                                    }
+                                }
+                            }
+                            // Mark discovery done so agents can proceed.
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                            info!("MCP discovery complete ({} tools indexed)", registry.tool_count());
+                        });
+                    })
+                    .expect("mcp-discovery thread spawn");
+            }
+        }
+
         let now = Instant::now();
 
         Ok(Self {
@@ -1111,12 +1273,15 @@ impl App {
             theme,
             status_bar,
             tab_bar,
+            keybind_help: KeybindHelp::new(),
             boot,
             state: initial_state,
             demo_mode: config.demo_mode,
             demo_post_boot_done: false,
             start_time: now,
             last_frame: now,
+            dt_clamp: phantom_scene::DtClamp::default_60fps(),
+            scene_clock: phantom_scene::Clock::new(),
             cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
@@ -1134,6 +1299,7 @@ impl App {
             session_manager,
             agent_persister,
             goal_persister,
+            restored_session,
             agent_snapshot_queue: crate::agent_pane::new_agent_snapshot_queue(),
             last_input_time: now,
             suggestion: None,
@@ -1151,6 +1317,7 @@ impl App {
             mcp_cmd_rx,
             _mcp_listener: mcp_listener,
             _hub_listener: hub_listener,
+            mcp_discovery_complete,
             pool_quads: Vec::with_capacity(256),
             pool_glyphs: Vec::with_capacity(4096),
             pool_color_glyphs: Vec::with_capacity(64),
@@ -1198,6 +1365,10 @@ impl App {
             settings_panel: crate::settings_ui::SettingsPanel::new(),
             bundle_store,
             capture_state: crate::capture::CaptureState::new(),
+            vision_analyzer: phantom_vision::VisionAnalyzer::from_env()
+                .ok()
+                .map(std::sync::Arc::new),
+            embedding_backend,
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
             shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),
@@ -1221,6 +1392,15 @@ impl App {
     /// Returns `true` if the app has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Drain the latest OSC 2 window title from the focused terminal adapter.
+    ///
+    /// Returns the title string when the running program has emitted a new
+    /// title since the last call.  The caller should forward this to
+    /// `winit_window.set_title()`.  Returns `None` when no change arrived.
+    pub fn take_pending_window_title(&mut self) -> Option<String> {
+        self.coordinator.take_focused_window_title()
     }
 
     /// Watchdog trace: returns a log line every `interval` frames.
@@ -1615,16 +1795,14 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
         return None;
     }
 
-    // Resolve master key from the OS keychain. If the keyring isn't
-    // available (CI, sandboxed test runs), we fall back to a deterministic
-    // key derived from `$HOME`. The fallback isn't secure — bundles
-    // written under it are encrypted but with a key any process on the
-    // box can rederive — and we surface a clear log line so the user
-    // notices.
-    let master_key = match MasterKey::from_keyring() {
+    // Resolve master key from the on-disk store under `dirs::config_dir()`.
+    // First run generates a fresh key and persists it at mode 0600; later
+    // runs read it back. See `phantom-bundle-store::crypto` for the file
+    // layout and the `PHANTOM_BUNDLE_STORE_MASTER_KEY_FILE` test override.
+    let master_key = match MasterKey::load_or_generate() {
         Ok(k) => k,
         Err(e) => {
-            warn!("Bundle store keychain unavailable ({e}); skipping capture init");
+            warn!("Bundle store master-key load failed ({e}); skipping capture init");
             return None;
         }
     };
@@ -1658,6 +1836,66 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
 #[cfg(test)]
 mod tests {
     use super::open_bundle_store;
+
+    // -- Helpers for env-var mutation in tests --------------------------------
+
+    /// Serialize env-var mutations so parallel tests in the same binary
+    /// don't stomp on each other.
+    fn with_env_var<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var(key).ok();
+        // SAFETY: serialized by LOCK.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    // -- Embedding backend construction tests --------------------------------
+
+    /// `embedding_backend_created_when_key_present`
+    ///
+    /// When `OPENAI_API_KEY` is set to a non-empty value,
+    /// `OpenAiEmbeddingBackend::from_env()` must succeed and produce a
+    /// backend whose `name()` is `"openai-embedding"`.
+    #[test]
+    fn embedding_backend_created_when_key_present() {
+        use phantom_embeddings::EmbeddingBackend;
+        with_env_var("OPENAI_API_KEY", Some("sk-test-fixture"), || {
+            let backend = phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env()
+                .expect("from_env should succeed when key is set");
+            assert_eq!(backend.name(), "openai-embedding");
+        });
+    }
+
+    /// `embedding_backend_none_when_no_key`
+    ///
+    /// When `OPENAI_API_KEY` is absent, `OpenAiEmbeddingBackend::from_env()`
+    /// must return `Err(EmbedError::NotConfigured(_))` — the App then stores
+    /// `None` for `embedding_backend`.
+    #[test]
+    fn embedding_backend_none_when_no_key() {
+        with_env_var("OPENAI_API_KEY", None, || {
+            let result = phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env();
+            assert!(
+                matches!(result, Err(phantom_embeddings::EmbedError::NotConfigured(_))),
+                "expected NotConfigured, got {result:?}"
+            );
+        });
+    }
+
+    // -- Bundle store env guard test -----------------------------------------
 
     /// Setting `PHANTOM_DISABLE_BUNDLE_STORE=1` must short-circuit
     /// `open_bundle_store()` and return `None` WITHOUT touching the

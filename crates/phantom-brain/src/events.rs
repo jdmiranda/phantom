@@ -8,6 +8,7 @@ use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 use phantom_agents::peer_routing::RemoteMessageContent;
 use phantom_agents::{AgentId, AgentTask};
+use phantom_history::HistoryEntry;
 use phantom_semantic::ParsedOutput;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,13 @@ pub enum AiEvent {
         /// This instance's peer id string (e.g. a UUIDv4).
         local_peer_id: String,
     },
+
+    /// Refresh the brain's in-memory history snapshot.
+    ///
+    /// Sent by the app thread every N commands (or on startup) so the brain
+    /// can inject recent session history into agent prompts without holding
+    /// a reference to the `HistoryStore` across thread boundaries.
+    HistorySnapshot(Vec<HistoryEntry>),
 
     /// Graceful shutdown request.
     Shutdown,

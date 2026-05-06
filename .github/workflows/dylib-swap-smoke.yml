@@ -1,0 +1,108 @@
+# CI harness for the phantom-skill-host dylib hot-swap integration tests.
+#
+# Resolves issue #450.
+#
+# Why a separate workflow?
+# The swap_smoke tests are marked `#[ignore]` because they invoke `cargo build`
+# inside the test runner (to produce the phantom-semantic cdylib) and therefore
+# require a full Rust toolchain and ~30-60 s of compile time.  Running them
+# unconditionally in the main CI sweep would add that overhead to every PR,
+# even ones that don't touch the hot-module path.
+#
+# This workflow triggers only on changes to phantom-skill-host or
+# phantom-semantic, keeping the feedback loop tight for hot-reload work.
+#
+# Local equivalent:
+#   cargo build -p phantom-semantic
+#   PHANTOM_HOT_MODULES=1 \
+#       cargo test -p phantom-skill-host --features hot-modules \
+#       --tests -- --ignored swap_smoke --nocapture
+
+name: dylib-swap-smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/phantom-skill-host/**'
+      - 'crates/phantom-semantic/**'
+      - '.github/workflows/dylib-swap-smoke.yml'
+  pull_request:
+    paths:
+      - 'crates/phantom-skill-host/**'
+      - 'crates/phantom-semantic/**'
+      - '.github/workflows/dylib-swap-smoke.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Opt into the hot-modules reload path inside test binaries.
+  PHANTOM_HOT_MODULES: "1"
+  # Reduce debug-info size — full debuginfo doubles link time for no benefit
+  # in integration tests.
+  CARGO_PROFILE_DEV_DEBUG: "1"
+  RUST_LOG: "phantom_skill_host=debug"
+
+jobs:
+  dylib-swap-smoke:
+    name: dylib swap smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache the cargo registry + target directory.  The key includes the
+      # OS and the Cargo.lock hash so the cache is invalidated correctly on
+      # dependency updates.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-dylib-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-dylib-smoke-
+            ${{ runner.os }}-cargo-target-
+
+      # Step 1: Build the phantom-semantic cdylib so the test harness can load it.
+      #
+      # The test's `build_semantic_dylib()` helper will skip this step when
+      # PHANTOM_HOT_MODULES_DIR is set and the artifact already exists, but we
+      # run it explicitly here so CI output shows the build step clearly and
+      # any compile errors surface before the test runner starts.
+      - name: Build phantom-semantic cdylib
+        run: cargo build -p phantom-semantic
+
+      # Step 2: Run only the ignored swap_smoke tests.
+      #
+      # --tests      — run integration tests (tests/ directory), not unit tests
+      # --ignored    — run only #[ignore]-tagged tests
+      # swap_smoke   — filter to tests whose name contains "swap_smoke" (the
+      #                test binary is named after the file, so all tests in
+      #                tests/swap_smoke.rs match)
+      #
+      # The PHANTOM_HOT_MODULES env var is already set for the whole job.
+      - name: Run dylib swap_smoke integration tests
+        run: >
+          cargo test
+          -p phantom-skill-host
+          --features hot-modules
+          --tests
+          -- --ignored swap_smoke --nocapture --test-threads=1
