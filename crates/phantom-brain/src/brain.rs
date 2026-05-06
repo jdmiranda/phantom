@@ -44,6 +44,13 @@ const BRAIN_DENIAL_THRESHOLD: usize = phantom_agents::DEFAULT_QUARANTINE_THRESHO
 pub struct BrainHandle {
     pub(crate) event_tx: mpsc::Sender<AiEvent>,
     pub(crate) action_rx: mpsc::Receiver<AiAction>,
+    /// `JoinHandle` for the supervisor thread spawned by [`spawn_brain`].
+    ///
+    /// Retained so callers can drive a clean shutdown via [`BrainHandle::shutdown`]
+    /// rather than abandoning the OS thread. Wrapped in `Option` so `shutdown()`
+    /// can `take()` it (making the call idempotent) without requiring the caller
+    /// to give up ownership of `BrainHandle`.
+    pub(crate) brain_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl BrainHandle {
@@ -63,9 +70,64 @@ impl BrainHandle {
     }
 
     /// Get a clone of the event sender (for fan-in from multiple threads).
-    #[must_use] 
+    #[must_use]
     pub fn event_sender(&self) -> mpsc::Sender<AiEvent> {
         self.event_tx.clone()
+    }
+
+    /// Shut down the brain cleanly and wait for the supervisor thread to exit.
+    ///
+    /// Sends [`AiEvent::Shutdown`] to the brain's event channel, then joins the
+    /// supervisor thread. After this call returns the OS thread is guaranteed to
+    /// have exited.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor thread itself panicked (propagates the payload).
+    /// In practice `brain_supervised` catches all inner panics via `catch_unwind`,
+    /// so this should never trigger under normal operation.
+    ///
+    /// # Notes
+    ///
+    /// This method is idempotent: calling it a second time is a no-op because
+    /// `brain_handle` is `take()`-d on the first call.
+    pub fn shutdown(&mut self) {
+        // Best-effort send — the receiver may already be gone if the brain
+        // thread exited on its own (e.g., channel closed from the other side).
+        let _ = self.event_tx.send(AiEvent::Shutdown);
+        if let Some(handle) = self.brain_handle.take() {
+            // join() only returns Err if the thread panicked. brain_supervised
+            // uses catch_unwind internally so this path is reachable only for
+            // panics *in the supervisor itself* (extremely unlikely).
+            if let Err(payload) = handle.join() {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
+impl Drop for BrainHandle {
+    /// On drop, attempt a graceful shutdown so we do not leave a zombie
+    /// supervisor thread running after the handle goes out of scope.
+    ///
+    /// Per §7.3 of the project rubric: every spawned thread whose lifetime is
+    /// bounded by a struct must be joined (or explicitly detached with
+    /// documentation) on `Drop`.
+    ///
+    /// We send `Shutdown` and then join. If the send fails the brain is already
+    /// gone; if `join` returns `Err` the panic payload is *not* re-raised (we are
+    /// inside `Drop` and propagating a panic from `Drop` causes an abort).
+    /// A log message is emitted instead.
+    fn drop(&mut self) {
+        let _ = self.event_tx.send(AiEvent::Shutdown);
+        if let Some(handle) = self.brain_handle.take() {
+            if let Err(_payload) = handle.join() {
+                log::error!(
+                    "phantom-brain supervisor thread panicked during Drop; \
+                     the panic payload is suppressed to avoid a double-panic abort"
+                );
+            }
+        }
     }
 }
 
@@ -155,7 +217,7 @@ pub fn spawn_brain(config: BrainConfig) -> BrainHandle {
     let (event_tx, event_rx) = mpsc::channel::<AiEvent>();
     let (action_tx, action_rx) = mpsc::channel::<AiAction>();
 
-    std::thread::Builder::new()
+    let brain_handle = std::thread::Builder::new()
         .name("phantom-brain".into())
         .spawn(move || {
             brain_supervised(config, event_rx, action_tx);
@@ -165,6 +227,7 @@ pub fn spawn_brain(config: BrainConfig) -> BrainHandle {
     BrainHandle {
         event_tx,
         action_rx,
+        brain_handle: Some(brain_handle),
     }
 }
 
