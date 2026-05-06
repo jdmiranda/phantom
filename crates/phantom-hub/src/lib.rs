@@ -36,6 +36,7 @@
 pub mod auth;
 pub mod health;
 pub mod mcp_endpoint;
+pub mod peer_key_store;
 pub mod phantom_endpoint;
 pub mod registry;
 pub mod router;
@@ -92,7 +93,7 @@ impl AppState {
             jwt: Arc::new(jwt),
             api_keys: Arc::new(api_keys),
             nonce_cache: Arc::new(auth::NonceCache::new()),
-            registry: registry::new_shared(),
+            registry: registry::new_shared()?,
         })
     }
 }
@@ -219,11 +220,13 @@ mod tests {
     const TEST_API_KEY: &str = "phk_lib-test-key";
 
     fn test_state_with_key(key: &str) -> AppState {
+        // Use `new_shared_for_tests` so each call gets its own peer-keys tmp
+        // file and tests do not race on the user's real config dir (issue #527).
         AppState {
             jwt: Arc::new(auth::JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(auth::ApiKeyStore::from_raw_keys(std::iter::once(key))),
             nonce_cache: Arc::new(auth::NonceCache::new()),
-            registry: registry::new_shared(),
+            registry: registry::new_shared_for_tests(),
         }
     }
 

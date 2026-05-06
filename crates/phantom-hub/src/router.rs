@@ -340,7 +340,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::registry::{new_shared, OUTBOUND_CHANNEL_CAPACITY};
+    use crate::registry::{new_shared_for_tests, OUTBOUND_CHANNEL_CAPACITY};
 
     fn phantom_id(s: &str) -> PhantomId {
         PhantomId::new(s)
@@ -383,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_delivers_frame_and_receives_response() {
-        let registry = new_shared();
+        let registry = new_shared_for_tests();
         let idem_map = new_idempotency_map();
         let mut phantom_rx = register_mock(&registry, "phantom-a").await;
 
@@ -413,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_returns_disconnected_when_registry_entry_dropped() {
-        let registry = new_shared();
+        let registry = new_shared_for_tests();
         let idem_map = new_idempotency_map();
         let _phantom_rx = register_mock(&registry, "phantom-b").await;
 
@@ -448,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_not_found_for_unregistered_phantom() {
-        let registry = new_shared();
+        let registry = new_shared_for_tests();
         let idem_map = new_idempotency_map();
 
         let req = make_request("tools/call");
@@ -462,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_times_out_when_phantom_does_not_reply() {
-        let registry = new_shared();
+        let registry = new_shared_for_tests();
         let idem_map = new_idempotency_map();
         let _phantom_rx = register_mock(&registry, "phantom-slow").await;
         // Keep _phantom_rx alive so the channel is not closed (we want Timeout, not Disconnected).
@@ -492,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_returns_backpressure_when_channel_full() {
-        let registry = new_shared();
+        let registry = new_shared_for_tests();
         let idem_map = new_idempotency_map();
         // Capacity-1 channel so we can fill it easily.
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -522,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_routes_to_correct_phantom() {
-        let registry = new_shared();
+        let registry = new_shared_for_tests();
         let idem_map = new_idempotency_map();
         let mut rx_a = register_mock(&registry, "pa").await;
         let mut rx_b = register_mock(&registry, "pb").await;
@@ -551,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_rewrites_id_on_wire_and_restores_on_response() {
-        let registry = new_shared();
+        let registry = new_shared_for_tests();
         let idem_map = new_idempotency_map();
         let mut rx = register_mock(&registry, "id-test").await;
 

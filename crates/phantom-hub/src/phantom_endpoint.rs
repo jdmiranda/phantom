@@ -225,6 +225,40 @@ pub async fn register(
 
     let exp = state.jwt.verify(&token).map(|c| c.exp).unwrap_or(0);
 
+    // Persist the verifying key to the on-disk peer-key registry (issue #527).
+    // We do this after JWT issuance so a write failure does not strand a
+    // peer with no token, but before responding so the registry is always
+    // at least as up-to-date as the most recently issued token.
+    //
+    // pubkey_bytes already round-tripped through verify_registration_signature
+    // above, so VerifyingKey::from_bytes here cannot fail — but we surface
+    // the error rather than unwrap, defending against future refactors.
+    let vk = match ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes) {
+        Ok(vk) => vk,
+        Err(e) => {
+            warn!(phantom_id = %body.peer_id, "register: pubkey decoded twice but failed canonicalisation: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to canonicalise public key",
+            )
+                .into_response();
+        }
+    };
+    {
+        let reg = state.registry.read().await;
+        if let Err(e) = reg.insert_peer_key(PhantomId::new(body.peer_id.clone()), vk) {
+            // Non-fatal: a disk-write failure should not block JWT issuance,
+            // but we log loudly so operators can investigate.  The peer can
+            // still connect with the JWT we just issued; signature-checked
+            // operations that depend on the persisted key will fail until
+            // the underlying disk issue is resolved.
+            warn!(
+                phantom_id = %body.peer_id,
+                "register: persisting peer key failed: {e}"
+            );
+        }
+    }
+
     info!(phantom_id = %body.peer_id, "register: device token issued");
     Json(RegisterResponse {
         device_token: token,
@@ -795,7 +829,7 @@ mod tests {
             jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(ApiKeyStore::default()),
             nonce_cache: Arc::new(NonceCache::new()),
-            registry: crate::registry::new_shared(),
+            registry: crate::registry::new_shared_for_tests(),
         }
     }
 
