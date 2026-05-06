@@ -1665,16 +1665,14 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
         return None;
     }
 
-    // Resolve master key from the OS keychain. If the keyring isn't
-    // available (CI, sandboxed test runs), we fall back to a deterministic
-    // key derived from `$HOME`. The fallback isn't secure — bundles
-    // written under it are encrypted but with a key any process on the
-    // box can rederive — and we surface a clear log line so the user
-    // notices.
-    let master_key = match MasterKey::from_keyring() {
+    // Resolve master key from the on-disk store under `dirs::config_dir()`.
+    // First run generates a fresh key and persists it at mode 0600; later
+    // runs read it back. See `phantom-bundle-store::crypto` for the file
+    // layout and the `PHANTOM_BUNDLE_STORE_MASTER_KEY_FILE` test override.
+    let master_key = match MasterKey::load_or_generate() {
         Ok(k) => k,
         Err(e) => {
-            warn!("Bundle store keychain unavailable ({e}); skipping capture init");
+            warn!("Bundle store master-key load failed ({e}); skipping capture init");
             return None;
         }
     };
