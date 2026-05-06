@@ -431,6 +431,13 @@ pub struct App {
     //    jobs can hold their own handle without an extra clone-of-clone.
     pub(crate) bundle_store: Option<std::sync::Arc<phantom_bundle_store::BundleStore>>,
     pub(crate) capture_state: crate::capture::CaptureState,
+    /// GPT-4V analyzer. `None` when `OPENAI_API_KEY` is absent or the
+    /// capture pipeline is disabled. When present, frames that pass the
+    /// dHash+SAD dedup gate are forwarded to GPT-4V asynchronously.
+    ///
+    /// Stored behind `Arc` so the capture loop can clone a cheap handle
+    /// into each spawned tokio task without blocking the render thread.
+    pub(crate) vision_analyzer: Option<std::sync::Arc<phantom_vision::VisionAnalyzer>>,
 
     // -- Per-pane last-command tracking (issue #226).
     //    Populated from `Event::CommandStarted` so that the subsequent
@@ -1248,6 +1255,9 @@ impl App {
             settings_panel: crate::settings_ui::SettingsPanel::new(),
             bundle_store,
             capture_state: crate::capture::CaptureState::new(),
+            vision_analyzer: phantom_vision::VisionAnalyzer::from_env()
+                .ok()
+                .map(std::sync::Arc::new),
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
             shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),

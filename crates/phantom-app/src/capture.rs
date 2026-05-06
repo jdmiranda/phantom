@@ -529,6 +529,36 @@ impl crate::app::App {
                 self.coordinator.bus_mut().emit(msg);
             }
 
+            // GPT-4V analysis — best-effort, non-blocking.
+            //
+            // When a `VisionAnalyzer` is available (i.e. `OPENAI_API_KEY` is
+            // set), we clone the pixel buffer and dispatch analysis on a
+            // tokio task so the capture loop is never stalled by a network
+            // call. Results are logged at DEBUG level. Future work (issue #79)
+            // may route `Analysis` into `BrainAction::ScreenAnalysis`.
+            if let Some(analyzer) = self.vision_analyzer.as_ref() {
+                let pixels_for_task = pixels.clone();
+                let (w, h) = extent;
+                let ts = frame_timestamp_ms;
+                let pane_id_for_log = u64::from(app_id);
+                let analyzer_arc = std::sync::Arc::clone(analyzer);
+                let _task = tokio::spawn(async move {
+                    match analyzer_arc.analyze_frame(&pixels_for_task, w, h, ts).await {
+                        Ok(analysis) => {
+                            log::debug!(
+                                "GPT-4V analysis (pane {pane_id_for_log}): {}",
+                                analysis.summary()
+                            );
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "GPT-4V analysis failed (pane {pane_id_for_log}): {e}"
+                            );
+                        }
+                    }
+                });
+            }
+
             // Open a fresh bundle if we don't have one. Wall-clock is
             // captured here so frame offsets are relative to bundle start.
             if pane_state.open_bundle.is_none() {
@@ -1163,5 +1193,32 @@ mod tests {
         assert_eq!(pixels[0].len(), 16);
         assert_eq!(pixels[1].len(), 16);
         assert_eq!(state.open_frame_count(), 0, "no open frames after seal");
+    }
+
+    /// `capture_pipeline_skips_analysis_when_no_key`
+    ///
+    /// Verifies that `VisionAnalyzer::from_env()` returns `None`-equivalent
+    /// (via `.ok()`) when `OPENAI_API_KEY` is not set, so the capture pipeline
+    /// gracefully skips GPT-4V analysis rather than panicking.
+    #[test]
+    fn capture_pipeline_skips_analysis_when_no_key() {
+        // Remove the env var for this test scope.
+        let _guard = std::env::remove_var("OPENAI_API_KEY");
+
+        let result = phantom_vision::VisionAnalyzer::from_env();
+        assert!(
+            result.is_err(),
+            "from_env must fail without OPENAI_API_KEY"
+        );
+
+        // The capture pipeline stores `from_env().ok()` — verify it yields None.
+        let analyzer: Option<std::sync::Arc<phantom_vision::VisionAnalyzer>> =
+            phantom_vision::VisionAnalyzer::from_env()
+                .ok()
+                .map(std::sync::Arc::new);
+        assert!(
+            analyzer.is_none(),
+            "vision_analyzer field must be None when OPENAI_API_KEY is absent"
+        );
     }
 }
