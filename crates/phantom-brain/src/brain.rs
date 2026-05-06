@@ -809,6 +809,12 @@ fn brain_loop(
         if action_tx.send(action).is_err() {
             break; // render thread dropped its receiver
         }
+
+        // Yield to the OS scheduler after processing each event so that
+        // high-frequency event bursts do not pin the brain thread at 100% CPU.
+        // recv_timeout already blocks when the queue is empty, so this only
+        // matters during sustained event storms.
+        std::thread::yield_now();
     }
 
     log::info!("AI brain thread exiting");
