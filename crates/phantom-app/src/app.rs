@@ -44,6 +44,7 @@ use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
 use phantom_session::session::{PaneState, SessionManager, SessionState, is_session_restore};
 use phantom_session::{AgentStatePersister, GoalStatePersister};
+use phantom_session::{RestoredSession, SessionRestorer};
 
 use crate::boot::BootSequence;
 use crate::boot_order::ShutdownGuard;
@@ -206,6 +207,13 @@ pub struct App {
     //    when no session path could be determined (e.g. $HOME unset). --
     pub(crate) agent_persister: Option<AgentStatePersister>,
     pub(crate) goal_persister: Option<GoalStatePersister>,
+
+    // -- Snapshots loaded from the previous session's sidecar files.
+    //    Populated by `SessionRestorer::restore()` during `with_config_scaled`
+    //    and consumed (`.take()`'d) by `update.rs` on the first Terminal tick
+    //    to emit an `AiEvent::Interrupt` resume prompt when non-empty.
+    //    `None` after the prompt has been fired or when there is nothing to restore. --
+    pub(crate) restored_session: Option<RestoredSession>,
 
     // -- Shared queue that agent panes push an AgentSnapshot into whenever
     //    they reach a terminal state (Done / Failed). The App drains this at
@@ -939,6 +947,30 @@ impl App {
             }
         }
 
+        // -- Session restore: load agent + goal snapshots from sidecar files --
+        // Called after both persisters are initialised so the sidecar paths are
+        // known.  Partial failure (corrupt sidecar on one side) is handled
+        // gracefully inside `SessionRestorer::restore`.  The result is stored on
+        // `App` and consumed on the first Terminal-state OODA tick in `update.rs`.
+        let restored_session: Option<RestoredSession> = {
+            let agent_path = agent_persister.as_ref().map(|p| p.path().to_path_buf());
+            let goal_path = goal_persister.as_ref().map(|p| p.path().to_path_buf());
+            let session = SessionRestorer::restore(
+                agent_path.as_deref(),
+                goal_path.as_deref(),
+            );
+            if session.is_empty() {
+                None
+            } else {
+                info!(
+                    "RestoredSession ready: {} agent(s), {} goal(s)",
+                    session.agent_count(),
+                    session.goal_count(),
+                );
+                Some(session)
+            }
+        };
+
         // -- Event bus (single instance, will be handed to AppCoordinator) --
         let mut event_bus = EventBus::new();
         let topic_terminal_output =
@@ -1151,6 +1183,7 @@ impl App {
             session_manager,
             agent_persister,
             goal_persister,
+            restored_session,
             agent_snapshot_queue: crate::agent_pane::new_agent_snapshot_queue(),
             last_input_time: now,
             suggestion: None,
