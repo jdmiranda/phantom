@@ -251,6 +251,25 @@ mod tests {
         app
     }
 
+    /// Build a router without the /registry debug route — simulates the
+    /// production path when `HUB_REGISTRY_DEBUG` is absent, without needing
+    /// to mutate the environment.
+    fn build_router_without_debug(state: AppState) -> axum::Router {
+        axum::Router::new()
+            .route("/healthz", axum::routing::get(health::healthz))
+            .route(
+                "/auth/register",
+                axum::routing::post(phantom_endpoint::register),
+            )
+            .route(
+                "/phantom/connect",
+                axum::routing::get(phantom_endpoint::connect),
+            )
+            .route("/mcp", axum::routing::post(mcp_endpoint::handle_jsonrpc))
+            .route("/mcp/sse", axum::routing::get(mcp_endpoint::handle_sse))
+            .with_state(state)
+    }
+
     // -----------------------------------------------------------------------
     // /registry: valid key + env set → 200 (issue #502)
     // -----------------------------------------------------------------------
@@ -317,11 +336,9 @@ mod tests {
 
     #[tokio::test]
     async fn registry_debug_when_env_unset_returns_404() {
-        // Use the production build_router which checks the env var.
-        // SAFETY: test-only; test binary does not rely on HUB_REGISTRY_DEBUG.
-        unsafe { std::env::remove_var("HUB_REGISTRY_DEBUG") };
+        // Use the no-debug builder directly — no env mutation required.
         let state = test_state_with_key(TEST_API_KEY);
-        let app = build_router(state);
+        let app = build_router_without_debug(state);
 
         let resp = app
             .oneshot(

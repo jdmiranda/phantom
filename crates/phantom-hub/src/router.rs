@@ -204,9 +204,29 @@ fn forward_timeout() -> Duration {
 pub async fn forward(
     registry: &SharedRegistry,
     phantom_id: &PhantomId,
+    req: JsonRpcRequest,
+    idempotency_key: Option<&str>,
+    idem_map: &SharedIdempotencyMap,
+) -> Result<JsonRpcResponse, RouteError> {
+    forward_with_timeout(registry, phantom_id, req, idempotency_key, idem_map, forward_timeout()).await
+}
+
+/// Forward `req` to the Phantom identified by `phantom_id` with an explicit `timeout`.
+///
+/// This is the underlying implementation used by [`forward`].  Callers that need
+/// to inject a specific deadline (e.g. tests that want an instant timeout without
+/// mutating environment variables) should call this function directly.
+///
+/// # Errors
+///
+/// See [`RouteError`].
+pub async fn forward_with_timeout(
+    registry: &SharedRegistry,
+    phantom_id: &PhantomId,
     mut req: JsonRpcRequest,
     _idempotency_key: Option<&str>,
     _idem_map: &SharedIdempotencyMap,
+    timeout: Duration,
 ) -> Result<JsonRpcResponse, RouteError> {
     // Idempotency dedup deferred to issue #397 — see module-level doc.
 
@@ -236,7 +256,6 @@ pub async fn forward(
     };
 
     // --- Await the reply, racing against timeout ---
-    let timeout = forward_timeout();
     let result = tokio::time::timeout(timeout, reply_rx).await;
 
     // Clean up the pending entry on timeout (disconnect cleanup happens via
@@ -443,24 +462,22 @@ mod tests {
 
     #[tokio::test]
     async fn forward_times_out_when_phantom_does_not_reply() {
-        // Override timeout to 0s for the test.
-        // SAFETY: single-threaded test with no concurrent env reads.
-        unsafe {
-            std::env::set_var("HUB_FORWARD_TIMEOUT_SECS", "0");
-        }
-
         let registry = new_shared();
         let idem_map = new_idempotency_map();
         let _phantom_rx = register_mock(&registry, "phantom-slow").await;
         // Keep _phantom_rx alive so the channel is not closed (we want Timeout, not Disconnected).
 
         let req = make_request("tools/call");
-        let result = forward(&registry, &phantom_id("phantom-slow"), req, None, &idem_map).await;
-
-        // Restore env var.
-        unsafe {
-            std::env::remove_var("HUB_FORWARD_TIMEOUT_SECS");
-        }
+        // Inject a zero-duration timeout directly — no env mutation required.
+        let result = forward_with_timeout(
+            &registry,
+            &phantom_id("phantom-slow"),
+            req,
+            None,
+            &idem_map,
+            Duration::ZERO,
+        )
+        .await;
 
         assert!(
             matches!(result, Err(RouteError::Timeout(_))),
