@@ -718,6 +718,148 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 15. rebuild_index skips blank lines and keeps offsets correct
+    //
+    //     A JSONL file with blank lines (valid per spec) must produce an index
+    //     where every id resolves to the correct byte offset.  Before the fix,
+    //     blank lines that appeared between valid entries could cause the offset
+    //     accumulator to drift, so a subsequent get_by_id would seek to the
+    //     wrong position and either fail to parse or return the wrong entry.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rebuild_index_skips_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blank.jsonl");
+        let session = Uuid::new_v4();
+
+        let first = entry("first-cmd", session);
+        let first_id = first.id();
+        let second = entry("second-cmd", session);
+        let second_id = second.id();
+
+        // Write a file with a blank line between two valid entries, bypassing
+        // the store to reproduce what an external tool (or a bug) might produce.
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&first).unwrap();
+        }
+        {
+            // Inject a blank line directly after the first entry.
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(f).unwrap(); // one empty line
+        }
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&second).unwrap();
+        }
+
+        // Re-open so rebuild_index runs over the file with a blank line in it.
+        let store = HistoryStore::open_at(&path).unwrap();
+
+        // Both entries must be in the index.
+        assert_eq!(store.count(), 2, "both valid entries must be indexed");
+
+        // O(1) lookup must return the correct entries regardless of the blank.
+        let found_first = store.get_by_id(first_id).unwrap().unwrap();
+        assert_eq!(found_first.command(), "first-cmd");
+
+        let found_second = store.get_by_id(second_id).unwrap().unwrap();
+        assert_eq!(found_second.command(), "second-cmd");
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. Append after blank line writes at the correct offset
+    //
+    //     When a JSONL file has a blank line injected externally, the store
+    //     reopened on that file must still produce a valid next_offset so that
+    //     the subsequent append lands at the right position and the new entry
+    //     is fully readable.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_after_blank_line_writes_correct_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blank_append.jsonl");
+        let session = Uuid::new_v4();
+
+        let first = entry("cmd-before-blank", session);
+        let first_id = first.id();
+
+        // Write the first entry, then inject a blank line.
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&first).unwrap();
+        }
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(f).unwrap(); // blank line
+        }
+
+        // Re-open and append a new entry. The blank line must not corrupt
+        // next_offset, which would cause the new entry to overwrite earlier
+        // data or be written at a position that can't be round-tripped.
+        let third = entry("cmd-after-blank", session);
+        let third_id = third.id();
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&third).unwrap();
+        }
+
+        // Final re-open: all valid entries must be present and resolvable.
+        let store = HistoryStore::open_at(&path).unwrap();
+        assert_eq!(store.count(), 2, "both valid entries must survive across the blank line");
+
+        let found_first = store.get_by_id(first_id).unwrap().unwrap();
+        assert_eq!(found_first.command(), "cmd-before-blank");
+
+        let found_third = store.get_by_id(third_id).unwrap().unwrap();
+        assert_eq!(found_third.command(), "cmd-after-blank");
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. Multiple blank lines between valid entries
+    //
+    //     Guards against accumulated offset drift when multiple consecutive
+    //     blank lines appear in the JSONL file.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_blank_lines_between_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi_blank.jsonl");
+        let session = Uuid::new_v4();
+
+        // Write first entry.
+        let a = entry("cmd-a", session);
+        let a_id = a.id();
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&a).unwrap();
+        }
+        // Inject three consecutive blank lines.
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(f).unwrap();
+            writeln!(f).unwrap();
+            writeln!(f).unwrap();
+        }
+        // Write second entry.
+        let b = entry("cmd-b", session);
+        let b_id = b.id();
+        {
+            let mut store = HistoryStore::open_at(&path).unwrap();
+            store.append(&b).unwrap();
+        }
+
+        // Re-open and verify.
+        let store = HistoryStore::open_at(&path).unwrap();
+        assert_eq!(store.count(), 2);
+        assert_eq!(store.get_by_id(a_id).unwrap().unwrap().command(), "cmd-a");
+        assert_eq!(store.get_by_id(b_id).unwrap().unwrap().command(), "cmd-b");
+    }
+
+    // -----------------------------------------------------------------------
     // 14. Sequential stores write valid JSONL and every id resolves correctly
     //
     //     Verifies the "no index corruption" guarantee from #211 across the
