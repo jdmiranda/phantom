@@ -278,7 +278,7 @@ pub async fn deliver_response(registry: &SharedRegistry, phantom_id: &PhantomId,
             if let Some(u) = n.as_u64() {
                 HubId(u)
             } else {
-                log::warn!(
+                tracing::warn!(
                     "deliver_response: non-u64 response id from {}: {:?}",
                     phantom_id,
                     n
@@ -287,7 +287,7 @@ pub async fn deliver_response(registry: &SharedRegistry, phantom_id: &PhantomId,
             }
         }
         other => {
-            log::warn!(
+            tracing::warn!(
                 "deliver_response: unexpected response id from {}: {:?}",
                 phantom_id,
                 other
@@ -302,7 +302,7 @@ pub async fn deliver_response(registry: &SharedRegistry, phantom_id: &PhantomId,
         if let Some(tx) = state.pending.remove(&hub_id) {
             let _ = tx.send(resp);
         } else {
-            log::warn!(
+            tracing::warn!(
                 "deliver_response: hub_id {} not in pending table for {}",
                 hub_id.0,
                 phantom_id
