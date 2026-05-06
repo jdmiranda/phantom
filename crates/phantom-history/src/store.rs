@@ -31,6 +31,16 @@ use uuid::Uuid;
 use crate::jsonl::HistoryEntry;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum entries per JSONL file before rotation is triggered.
+pub const DEFAULT_MAX_HISTORY_ENTRIES: usize = 100_000;
+
+/// Maximum number of rotated backup files to keep (`.1`, `.2`, `.3`).
+pub const MAX_ROTATED_FILES: usize = 3;
+
+// ---------------------------------------------------------------------------
 // HistoryStore
 // ---------------------------------------------------------------------------
 
@@ -42,6 +52,11 @@ use crate::jsonl::HistoryEntry;
 /// The store holds an exclusive advisory flock on `<path>.lock` for its
 /// entire lifetime.  A second `HistoryStore` opened on the same path will
 /// fail with a "locked" error until the first is dropped.
+///
+/// When the number of entries reaches `max_entries`, the store rotates the
+/// active file: the current `.jsonl` is renamed to `.jsonl.1`, any existing
+/// `.jsonl.1` to `.jsonl.2`, etc., up to `MAX_ROTATED_FILES`.  Files beyond
+/// that limit are deleted.  The active path is then empty again.
 pub struct HistoryStore {
     /// Path to the `.jsonl` file.
     path: PathBuf,
@@ -49,6 +64,10 @@ pub struct HistoryStore {
     index: HashMap<Uuid, u64>,
     /// Byte offset where the next append will begin.
     next_offset: u64,
+    /// Number of entries appended since the store was last opened or rotated.
+    entry_count: usize,
+    /// Rotate when `entry_count` reaches this value.
+    max_entries: usize,
     /// Holds the exclusive flock on `<path>.lock` for the store's lifetime.
     /// Dropping this field releases the lock.
     _lock_file: File,
@@ -113,11 +132,22 @@ impl HistoryStore {
             path,
             index: HashMap::new(),
             next_offset: 0,
+            entry_count: 0,
+            max_entries: DEFAULT_MAX_HISTORY_ENTRIES,
             _lock_file: lock_file,
         };
 
         store.rebuild_index()?;
         Ok(store)
+    }
+
+    /// Override the rotation threshold (number of entries before rotation).
+    ///
+    /// Useful in tests to trigger rotation with a small dataset.
+    #[must_use]
+    pub fn with_max_entries(mut self, max: usize) -> Self {
+        self.max_entries = max;
+        self
     }
 
     // -----------------------------------------------------------------------
@@ -126,9 +156,17 @@ impl HistoryStore {
 
     /// Append `entry` to the JSONL file.
     ///
+    /// If the number of entries has reached `max_entries`, the store rotates
+    /// the active file before writing the new entry.  See [`Self::rotate`].
+    ///
     /// The in-memory index is updated so subsequent id-lookups reflect the new
     /// entry without a file rescan.
     pub fn append(&mut self, entry: &HistoryEntry) -> Result<()> {
+        // Rotate before writing if we've hit the threshold.
+        if self.entry_count >= self.max_entries {
+            self.rotate()?;
+        }
+
         let line = entry.to_jsonl_line()?;
 
         let mut file = OpenOptions::new()
@@ -144,6 +182,7 @@ impl HistoryStore {
         // line + '\n'
         self.next_offset += line.len() as u64 + 1;
         self.index.insert(entry.id(), offset);
+        self.entry_count += 1;
 
         Ok(())
     }
@@ -202,10 +241,20 @@ impl HistoryStore {
             .collect())
     }
 
-    /// Total number of (non-corrupt) entries recorded in the index.
+    /// Total number of (non-corrupt) entries appended since the last open or
+    /// rotation.  This reflects `entry_count`, not the raw line count in the
+    /// index (which is reset to zero after rotation clears the active file).
     #[must_use]
     pub fn count(&self) -> usize {
-        self.index.len()
+        self.entry_count
+    }
+
+    /// Return the most-recent `limit` entries in **reverse** chronological
+    /// order (newest first, oldest last).
+    pub fn query_recent(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
+        let mut entries = self.recent(limit)?;
+        entries.reverse();
+        Ok(entries)
     }
 
     /// Path to the backing JSONL file.
@@ -217,6 +266,46 @@ impl HistoryStore {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Rotate the active JSONL file.
+    ///
+    /// Algorithm:
+    /// 1. Delete the oldest rotated file if it would exceed `MAX_ROTATED_FILES`.
+    /// 2. Shift existing rotated files up by one (`.2` → `.3`, `.1` → `.2`).
+    /// 3. Rename the active file to `.1`.
+    /// 4. Reset the in-memory index and counters so the next append starts fresh.
+    fn rotate(&mut self) -> Result<()> {
+        // Step 1: remove the oldest file if it would overflow.
+        let oldest = rotated_path(&self.path, MAX_ROTATED_FILES);
+        if oldest.exists() {
+            fs::remove_file(&oldest)
+                .with_context(|| format!("cannot remove oldest rotation: {}", oldest.display()))?;
+        }
+
+        // Step 2: shift existing rotated files up by one.
+        for n in (1..MAX_ROTATED_FILES).rev() {
+            let from = rotated_path(&self.path, n);
+            let to = rotated_path(&self.path, n + 1);
+            if from.exists() {
+                fs::rename(&from, &to)
+                    .with_context(|| format!("cannot shift rotation {n} → {}", n + 1))?;
+            }
+        }
+
+        // Step 3: rename the active file to `.1`.
+        if self.path.exists() {
+            let backup = rotated_path(&self.path, 1);
+            fs::rename(&self.path, &backup)
+                .with_context(|| format!("cannot rotate active file to {}", backup.display()))?;
+        }
+
+        // Step 4: reset in-memory state.
+        self.index.clear();
+        self.next_offset = 0;
+        self.entry_count = 0;
+
+        Ok(())
+    }
 
     /// Read and deserialise all entries, skipping corrupt lines with a warning.
     fn read_all(&self) -> Result<Vec<HistoryEntry>> {
@@ -272,6 +361,7 @@ impl HistoryStore {
             offset += line_len;
         }
         self.next_offset = offset;
+        self.entry_count = self.index.len();
         Ok(())
     }
 }
@@ -292,6 +382,14 @@ fn lock_path_for(path: &Path) -> PathBuf {
     let mut lock = path.to_path_buf().into_os_string();
     lock.push(".lock");
     PathBuf::from(lock)
+}
+
+/// Return the path for rotated backup number `n` (1-based).
+/// E.g. `history.jsonl` → `history.jsonl.1`, `history.jsonl.2`, etc.
+pub(crate) fn rotated_path(path: &Path, n: usize) -> PathBuf {
+    let mut s = path.to_path_buf().into_os_string();
+    s.push(format!(".{n}"));
+    PathBuf::from(s)
 }
 
 /// Default data directory: `~/.local/share/phantom/history/`.
@@ -666,5 +764,77 @@ mod tests {
             let found = reader.get_by_id(*id).unwrap().unwrap();
             assert_eq!(found.command(), format!("wave2-cmd-{i}"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. history_store_append_writes_jsonl_record
+    //
+    //     Verifies that append() persists a complete HistoryEntry: command,
+    //     exit_code, duration_ms, and session_id all survive a write → read
+    //     round-trip through get_by_id().
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn history_store_append_writes_jsonl_record() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        let e = HistoryEntry::builder("cargo test", "/workspace", session)
+            .exit_code(0)
+            .duration_ms(1_234)
+            .build();
+        let id = e.id();
+        store.append(&e).unwrap();
+        let restored = store.get_by_id(id).unwrap().unwrap();
+        assert_eq!(restored.command(), "cargo test");
+        assert_eq!(restored.exit_code(), Some(0));
+        assert_eq!(restored.duration_ms(), Some(1_234));
+        assert_eq!(restored.session_id(), session);
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. history_store_query_recent_returns_newest_first
+    //
+    //     query_recent() must return entries in reverse chronological order
+    //     (newest first), unlike recent() which returns oldest first.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn history_store_query_recent_returns_newest_first() {
+        let (mut store, _dir) = temp_store();
+        let session = Uuid::new_v4();
+        for i in 0..5u32 {
+            store.append(&entry(&format!("cmd-{i}"), session)).unwrap();
+        }
+        let result = store.query_recent(3).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].command(), "cmd-4", "newest entry must be first");
+        assert_eq!(result[1].command(), "cmd-3");
+        assert_eq!(result[2].command(), "cmd-2", "oldest of the 3 must be last");
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. history_store_rotates_at_threshold
+    //
+    //     When max_entries is set to N and N entries are appended, the active
+    //     file must be renamed to <path>.1 and entry_count must reset to 0.
+    //     A subsequent append must write to a fresh active file.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn history_store_rotates_at_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let session = Uuid::new_v4();
+        let mut store = HistoryStore::open_at(&path).unwrap().with_max_entries(5);
+        for i in 0..5u32 {
+            store.append(&entry(&format!("cmd-{i}"), session)).unwrap();
+        }
+        // The 5th append fills the store; the NEXT append triggers rotation.
+        // Trigger it now:
+        store.append(&entry("post-rotation", session)).unwrap();
+        let backup = rotated_path(&path, 1);
+        assert!(backup.exists(), "history.jsonl.1 must exist after rotation");
+        assert_eq!(store.count(), 1, "entry_count must be 1 after first post-rotation append");
+        assert!(path.exists(), "new active file must exist after first post-rotation append");
     }
 }
