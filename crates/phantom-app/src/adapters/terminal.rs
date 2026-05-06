@@ -638,6 +638,52 @@ impl Commandable for TerminalAdapter {
                 self.terminal.update_selection(end, Side::Right);
                 Ok("all selected".into())
             }
+            "update_search" => {
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                self.terminal.update_search(query);
+                Ok(format!(
+                    "search updated: {} matches",
+                    self.terminal.search_index.total_matches()
+                ))
+            }
+            "search_info" => {
+                let total = self.terminal.search_index.total_matches();
+                let active = self.terminal.search_active;
+                Ok(serde_json::json!({ "total": total, "active": active }).to_string())
+            }
+            "scroll_to_search_match" => {
+                let idx = args
+                    .get("index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                if let Some((row, _col)) = self.terminal.search_index.nth_match(idx) {
+                    // Convert the signed row (Line) to a display offset.
+                    // Negative rows are above the viewport (in scrollback);
+                    // positive rows are within the viewport.
+                    // To centre the match we scroll so the row lands roughly
+                    // in the middle of the visible area.
+                    let rows = self.terminal.size().rows as i32;
+                    let margin = (rows / 2).max(1);
+                    if row < 0 {
+                        // row = -(distance from top of viewport), so we need
+                        // display_offset = |row| + margin to bring it into view.
+                        let target_offset = ((-row) + margin) as usize;
+                        let current = self.terminal.display_offset();
+                        if target_offset > current {
+                            self.terminal.scroll_up(target_offset - current);
+                        } else if target_offset < current {
+                            self.terminal.scroll_down(current - target_offset);
+                        }
+                    } else {
+                        // Row is within the viewport — scroll to bottom to show it.
+                        self.terminal.scroll_to_bottom();
+                    }
+                }
+                Ok("scrolled to match".into())
+            }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
     }

@@ -58,6 +58,10 @@ pub use focus_ring::{FADE_DURATION_MS, FocusRing};
 pub mod keybind_help;
 pub use keybind_help::KeybindHelp;
 
+// Find-in-terminal search bar (Cmd+F).
+pub mod search_bar;
+pub use search_bar::{SEARCH_BAR_HEIGHT, SearchBar, SearchBarAction, SearchKey};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------
