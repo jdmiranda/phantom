@@ -65,5 +65,8 @@ name = "frame_routing"
 [[test]]
 name = "registration_handshake"
 
+[[test]]
+name = "cross_surface_register_to_ws"
+
 [lints]
 workspace = true
