@@ -222,6 +222,11 @@ impl App {
                 self.build_context_menu_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
+            // -- Keybind help overlay (F1 / ?) — rendered above all other overlays --
+            if self.keybind_help.visible() {
+                self.build_keybind_help_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
+            }
+
             // -- Alt-screen bezier tether (issue #323) --
             if !self.alt_screen_secondaries.is_empty() {
                 self.build_alt_screen_tether(&mut chrome_quads);

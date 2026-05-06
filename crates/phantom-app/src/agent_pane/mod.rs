@@ -773,6 +773,26 @@ impl AgentPane {
         &self.task
     }
 
+    /// Return the agent's full conversation message history.
+    ///
+    /// Used by `AgentAdapter::render` to build `MessageBlock` widgets for
+    /// each turn instead of rendering raw cached output lines (Bug 4 fix).
+    pub(crate) fn messages(&self) -> &[AgentMessage] {
+        self.agent.messages()
+    }
+
+    /// Format a `ToolCall`'s args as a compact human-readable string.
+    ///
+    /// Delegates to `execute::format_tool_args`; exposed at `pub(crate)` so
+    /// `adapters/agent.rs` can use it when building `MessageBlock` widgets for
+    /// `ToolUse` messages without needing access to the private `execute` module.
+    pub(crate) fn format_tool_args_for_display(
+        tool: &phantom_agents::tools::ToolType,
+        args: &serde_json::Value,
+    ) -> String {
+        execute::format_tool_args(tool, args)
+    }
+
     /// Return the stable [`phantom_agents::AgentId`] assigned at spawn time.
     ///
     /// Used by `phantom.spawn_agent` (issue #399) to return a stable id to
