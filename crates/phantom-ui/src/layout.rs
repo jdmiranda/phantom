@@ -10,6 +10,32 @@ const TAB_BAR_HEIGHT_LOGICAL: f32 = 30.0;
 /// Logical height of the status bar in points (before DPI scaling).
 const STATUS_BAR_HEIGHT_LOGICAL: f32 = 28.0;
 
+/// Maximum allowed nesting depth for split panes.
+///
+/// Attempting to split a pane that would push any leaf beyond this depth
+/// returns [`LayoutError::MaxDepthExceeded`] so the caller can surface a
+/// notification instead of allowing unbounded recursion.
+const MAX_SPLIT_DEPTH: usize = 20;
+
+/// Errors that can be returned by the layout engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutError {
+    /// A split was requested but the target pane is already at the maximum
+    /// allowed nesting depth. Show a notification to the user instead of
+    /// creating an unboundedly deep tree.
+    MaxDepthExceeded,
+}
+
+impl std::fmt::Display for LayoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxDepthExceeded => write!(f, "maximum split depth ({MAX_SPLIT_DEPTH}) exceeded"),
+        }
+    }
+}
+
+impl std::error::Error for LayoutError {}
+
 /// A rectangle in pixel coordinates, representing the computed position
 /// and size of a layout region.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,7 +66,7 @@ pub struct PaneId(NodeId);
 
 impl PaneId {
     /// Returns the underlying taffy `NodeId`.
-    #[must_use] 
+    #[must_use]
     pub fn node_id(self) -> NodeId {
         self.0
     }
@@ -267,7 +293,7 @@ impl LayoutEngine {
     }
 
     /// Return the number of direct children of the content area.
-    #[must_use] 
+    #[must_use]
     pub fn pane_count(&self) -> usize {
         self.tree.child_count(self.content)
     }
@@ -324,13 +350,13 @@ impl LayoutEngine {
     /// status bar) as well as all live pane nodes. Use this to assert that
     /// spawn-close cycles do not permanently grow the tree.
     #[cfg(any(test, feature = "test-utils"))]
-    #[must_use] 
+    #[must_use]
     pub fn total_node_count(&self) -> usize {
         self.tree.total_node_count()
     }
 
     /// Return the root `NodeId` (useful for debugging / printing).
-    #[must_use] 
+    #[must_use]
     pub fn root(&self) -> NodeId {
         self.root
     }
@@ -339,10 +365,33 @@ impl LayoutEngine {
     // Internal helpers
     // ----------------------------------------------------------------
 
+    /// Walk up the Taffy parent chain from `node` and return the depth (number
+    /// of ancestors) not counting `node` itself.  Returns 0 when `node` has no
+    /// parent (i.e. it is the root).
+    fn node_depth(&self, node: NodeId) -> usize {
+        let mut depth = 0usize;
+        let mut current = node;
+        while let Some(parent) = self.tree.parent(current) {
+            depth += 1;
+            current = parent;
+        }
+        depth
+    }
+
     /// Perform a split on an existing pane, converting it into a flex container
     /// in the given direction with two equally-sized children.
+    ///
+    /// Returns [`LayoutError::MaxDepthExceeded`] (wrapped in an `anyhow` error)
+    /// if the pane is already at [`MAX_SPLIT_DEPTH`] and creating children would
+    /// push them past the limit.
     fn split(&mut self, pane: PaneId, direction: FlexDirection) -> Result<(PaneId, PaneId)> {
         let pane_node = pane.0;
+
+        // Guard: children of `pane` will sit one level deeper than `pane`.
+        let depth = self.node_depth(pane_node);
+        if depth >= MAX_SPLIT_DEPTH {
+            return Err(anyhow::Error::new(LayoutError::MaxDepthExceeded));
+        }
 
         // Create the two child panes that will live inside the split container.
         let child_style = Style {
@@ -393,16 +442,31 @@ impl LayoutEngine {
         Ok((PaneId(left), PaneId(right)))
     }
 
-    /// Recursively remove a node and all its descendants from the tree.
+    /// Iteratively remove a node and all its descendants from the tree.
+    ///
+    /// Uses an explicit stack instead of recursion so that a deeply nested
+    /// split tree (up to [`MAX_SPLIT_DEPTH`] levels) cannot overflow the call
+    /// stack.  Nodes are removed in a post-order fashion: each node's children
+    /// are enqueued before the node itself so the Taffy tree remains
+    /// structurally valid throughout.
     fn remove_subtree(&mut self, node: NodeId) -> Result<()> {
-        // Collect children first to avoid borrow issues.
-        let children: Vec<NodeId> = self.tree.children(node).unwrap_or_default();
-        for child in children {
-            self.remove_subtree(child)?;
+        // Build the full visit order iteratively (post-order: children first).
+        let mut to_visit = vec![node];
+        let mut removal_order: Vec<NodeId> = Vec::new();
+
+        while let Some(current) = to_visit.pop() {
+            removal_order.push(current);
+            let children = self.tree.children(current).unwrap_or_default();
+            to_visit.extend(children);
         }
-        self.tree
-            .remove(node)
-            .map_err(|e| anyhow::anyhow!("failed to remove node: {e}"))?;
+
+        // Remove in reverse order so leaves are removed before their parents.
+        for id in removal_order.into_iter().rev() {
+            self.tree
+                .remove(id)
+                .map_err(|e| anyhow::anyhow!("failed to remove node: {e}"))?;
+        }
+
         Ok(())
     }
 
@@ -825,6 +889,84 @@ mod tests {
             approx_eq(rect.height, expected_height),
             "cleared pane should fill content height; got {}",
             rect.height,
+        );
+    }
+
+    // ── Bug-fix: MAX_SPLIT_DEPTH guard ────────────────────────────────────────
+
+    /// Splitting a pane at the maximum allowed nesting depth must return
+    /// `LayoutError::MaxDepthExceeded` instead of creating a deeper tree.
+    #[test]
+    fn split_at_max_depth_returns_error() {
+        let mut engine = LayoutEngine::new().unwrap();
+
+        // Build a chain of single-child splits up to the depth limit.
+        // Each split_horizontal call promotes the current leaf and returns
+        // two children; we keep the left child and recurse into it.
+        let mut current = engine.add_pane().unwrap();
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+
+        // Drive the nesting to MAX_SPLIT_DEPTH.
+        //
+        // `add_pane` places the leaf at absolute depth 2 (root → content →
+        // pane).  Each `split_horizontal` promotes the current leaf and returns
+        // children one level deeper.  The guard fires when the current node's
+        // depth reaches MAX_SPLIT_DEPTH (≥ 20).  Starting from depth 2, we
+        // need MAX_SPLIT_DEPTH − 2 successful splits before hitting the limit.
+        for _ in 0..(MAX_SPLIT_DEPTH - 2) {
+            let (left, _right) = engine.split_horizontal(current).unwrap();
+            current = left;
+        }
+
+        // The next split must be rejected — `current` is now at depth MAX_SPLIT_DEPTH.
+        let result = engine.split_horizontal(current);
+        assert!(
+            result.is_err(),
+            "split beyond MAX_SPLIT_DEPTH must return an error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.downcast_ref::<LayoutError>()
+                .is_some_and(|e| *e == LayoutError::MaxDepthExceeded),
+            "error must be LayoutError::MaxDepthExceeded, got: {err}"
+        );
+    }
+
+    // ── Bug-fix: iterative remove_subtree ─────────────────────────────────────
+
+    /// Removing a deeply nested split subtree must succeed without stack
+    /// overflow.  We build a MAX_SPLIT_DEPTH-deep chain and then close the
+    /// deepest leaf, which triggers `remove_subtree` on the entire sub-chain.
+    #[test]
+    fn remove_subtree_iterative_no_stack_overflow() {
+        let mut engine = LayoutEngine::new().unwrap();
+        let baseline = engine.total_node_count();
+
+        let mut current = engine.add_pane().unwrap();
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+
+        // Build a chain split as deep as allowed.
+        // Same depth math as above: MAX_SPLIT_DEPTH − 2 successful splits.
+        let mut right_leaves: Vec<PaneId> = Vec::new();
+        for _ in 0..(MAX_SPLIT_DEPTH - 2) {
+            let (left, right) = engine.split_horizontal(current).unwrap();
+            right_leaves.push(right);
+            current = left;
+        }
+
+        // Close the right leaves from deepest to shallowest, then the deepest left leaf.
+        for r in right_leaves.into_iter().rev() {
+            engine.remove_pane(r).unwrap();
+        }
+        engine.remove_pane(current).unwrap();
+
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+
+        // All nodes must be pruned; tree returns to chrome-only baseline.
+        assert_eq!(
+            engine.total_node_count(),
+            baseline,
+            "deep split chain must not leak nodes"
         );
     }
 }
