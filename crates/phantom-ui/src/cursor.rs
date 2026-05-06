@@ -418,4 +418,121 @@ mod tests {
         let b = CursorBlink::new(200);
         assert_eq!(b.period_ms(), 200);
     }
+
+    // -- Issue #448: blink-gate ON/OFF across animation frames --
+    // These tests simulate real frame-loop behaviour: many small ticks,
+    // each representing one 16 ms vsync frame (≈60 fps).
+
+    #[test]
+    fn frame_loop_stays_visible_across_33_frames_before_period() {
+        // 33 frames × 16 ms = 528 ms, one ms short of the 530 ms period.
+        let mut b = CursorBlink::default();
+        let mut t = 0u64;
+        for _ in 0..33 {
+            t += 16;
+            assert!(b.tick(t), "cursor must remain visible before period elapses");
+        }
+    }
+
+    #[test]
+    fn frame_loop_toggles_off_at_period_boundary() {
+        // 34 frames × 16 ms = 544 ms → crosses the 530 ms boundary.
+        let mut b = CursorBlink::default();
+        let mut t = 0u64;
+        let mut last = true;
+        for _ in 0..34 {
+            t += 16;
+            last = b.tick(t);
+        }
+        assert!(!last, "cursor must be hidden once the first period is crossed");
+    }
+
+    #[test]
+    fn frame_loop_toggles_back_on_after_two_periods() {
+        // Full ON→OFF→ON cycle across ≈66 frames (2 × 530 / 16 ≈ 66.25 frames).
+        let mut b = CursorBlink::default();
+        let two_periods = DEFAULT_PERIOD_MS * 2; // 1060 ms
+        let vis = b.tick(two_periods);
+        assert!(vis, "after two periods the cursor must return to visible");
+    }
+
+    #[test]
+    fn blink_gate_off_when_not_blinking_cursor_always_visible() {
+        // When `cursor.blinking == false` the render path does not consult the
+        // blink timer at all — the cursor is always drawn.  Simulate that logic.
+        let cursor_blinking = false;
+        let mut b = CursorBlink::default();
+
+        for tick in [0u64, 530, 1060, 1590, 10_000] {
+            b.tick(tick);
+            let blink_visible = !cursor_blinking || b.is_visible();
+            assert!(
+                blink_visible,
+                "non-blinking cursor must always be visible (tick={tick})"
+            );
+        }
+    }
+
+    #[test]
+    fn blink_gate_on_when_blinking_cursor_follows_timer() {
+        // When `cursor.blinking == true` the render path uses `is_visible()`.
+        let cursor_blinking = true;
+        let mut b = CursorBlink::default();
+
+        // t=0: visible (true) → gate open
+        let gate_open = !cursor_blinking || b.is_visible();
+        assert!(gate_open);
+
+        // t=530: first period → hidden (false) → gate closed
+        b.tick(530);
+        let gate_closed = !cursor_blinking || b.is_visible();
+        assert!(!gate_closed);
+
+        // t=1060: second period → visible → gate open again
+        b.tick(1060);
+        let gate_open2 = !cursor_blinking || b.is_visible();
+        assert!(gate_open2);
+    }
+
+    #[test]
+    fn blink_gate_boundary_one_ms_before_period() {
+        let mut b = CursorBlink::default();
+        b.tick(DEFAULT_PERIOD_MS - 1); // 529 ms
+        assert!(b.is_visible(), "one ms before period: cursor must be visible");
+    }
+
+    #[test]
+    fn blink_gate_boundary_exactly_at_period() {
+        let mut b = CursorBlink::default();
+        b.tick(DEFAULT_PERIOD_MS); // 530 ms
+        assert!(!b.is_visible(), "exactly at period boundary: cursor must be hidden");
+    }
+
+    #[test]
+    fn blink_gate_boundary_one_ms_after_period() {
+        let mut b = CursorBlink::default();
+        b.tick(DEFAULT_PERIOD_MS + 1); // 531 ms
+        assert!(!b.is_visible(), "one ms past period boundary: cursor must still be hidden");
+    }
+
+    #[test]
+    fn blink_gate_after_reset_restarts_visible() {
+        let mut b = CursorBlink::default();
+        // Drive to hidden state.
+        b.tick(DEFAULT_PERIOD_MS);
+        assert!(!b.is_visible());
+
+        // User types → reset anchors to current timestamp.
+        let now = DEFAULT_PERIOD_MS + 100;
+        b.reset(now);
+        assert!(b.is_visible(), "reset must immediately restore visible");
+
+        // One ms before the next period boundary from `now` — still visible.
+        b.tick(now + DEFAULT_PERIOD_MS - 1);
+        assert!(b.is_visible());
+
+        // Exactly at the next period boundary — toggles to hidden.
+        b.tick(now + DEFAULT_PERIOD_MS);
+        assert!(!b.is_visible());
+    }
 }
