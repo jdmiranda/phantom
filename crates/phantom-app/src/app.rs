@@ -137,6 +137,15 @@ pub struct App {
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
+    /// Frame-dt safety clamp: prevents animation explosions caused by
+    /// abnormally long frames (debugger pauses, OS suspends, GC spikes).
+    /// When measured dt exceeds `max_dt` (100 ms), the clamp substitutes
+    /// `target_dt` (16.6 ms) so downstream animation math stays bounded.
+    pub(crate) dt_clamp: phantom_scene::DtClamp,
+    /// Centralized monotonic game clock (scene time).
+    /// Ticked once per frame with the clamped dt so all subsystems share a
+    /// single advancing time base that cannot jump on pause/resume.
+    pub(crate) scene_clock: phantom_scene::Clock,
 
     // -- Clock-driven terminal cursor blink timer.
     //    Ticked once per frame with wall-clock milliseconds.  The terminal
@@ -1117,6 +1126,8 @@ impl App {
             demo_post_boot_done: false,
             start_time: now,
             last_frame: now,
+            dt_clamp: phantom_scene::DtClamp::default_60fps(),
+            scene_clock: phantom_scene::Clock::new(),
             cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
