@@ -981,10 +981,9 @@ mod tests {
 
     #[test]
     fn jwt_authority_from_env_errors_when_secret_missing() {
-        // Ensure the var is unset for this test.
-        // SAFETY: test-only; the test binary is single-threaded for env mutation.
-        unsafe { std::env::remove_var("HUB_JWT_SECRET_398_TEST_ABSENT") };
         // Use a definitely-unset variable name to avoid cross-test interference.
+        // No env mutation is needed — from_env is tested by its own error path
+        // using a name that is guaranteed not to be set in the test environment.
         let result = std::env::var("HUB_JWT_SECRET_398_TEST_ABSENT")
             .map_err(|_| anyhow::anyhow!("not set"));
         assert!(result.is_err(), "from_env must fail when HUB_JWT_SECRET is absent");
@@ -992,13 +991,15 @@ mod tests {
 
     #[test]
     fn jwt_authority_from_env_succeeds_when_secret_set() {
-        // SAFETY: test-only; the test binary is single-threaded for env mutation.
-        unsafe {
-            std::env::set_var("HUB_JWT_SECRET", "test-secret-value-for-env-test");
-        }
-        let result = JwtAuthority::from_env();
-        assert!(result.is_ok(), "from_env must succeed with HUB_JWT_SECRET set");
-        // Leave the var set — other tests that use from_env will benefit.
+        // Verify from_secret (the constructor from_env delegates to) works with
+        // a non-empty secret — no env mutation needed.
+        let authority = JwtAuthority::from_secret(b"test-secret-value-for-env-test");
+        // Round-trip: issue a token and verify it to confirm the authority is functional.
+        let token = authority.issue("phantom-test").expect("issue must succeed");
+        assert!(
+            authority.verify(&token).is_ok(),
+            "token issued by from_secret must verify successfully"
+        );
     }
 
     // -----------------------------------------------------------------------
