@@ -523,6 +523,18 @@ impl App {
                 return;
             }
 
+        // Cmd+I: toggle inspector pane.
+        if modifiers.state().super_key()
+            && matches!(&event.logical_key, Key::Character(s) if s == "i" || s == "I")
+        {
+            if self.spawn_inspector_pane() {
+                self.console.system("Inspector pane opened.");
+            } else {
+                debug!("Cmd+I: inspector pane spawn failed (no focused pane)");
+            }
+            return;
+        }
+
         if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers)
             && let Some(action) = self.keybinds.lookup(&combo) {
                 // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
