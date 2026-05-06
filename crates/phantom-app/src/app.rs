@@ -450,6 +450,15 @@ pub struct App {
     /// into each spawned tokio task without blocking the render thread.
     pub(crate) vision_analyzer: Option<std::sync::Arc<phantom_vision::VisionAnalyzer>>,
 
+    // -- Embedding backend (optional, initialized from OPENAI_API_KEY).
+    //    `None` when `OPENAI_API_KEY` is absent or empty — the capture
+    //    pipeline persists bundles without vector indexing in that case.
+    //    Stored as `Arc<dyn EmbeddingBackend>` so it can be shared with
+    //    off-thread persistence jobs via `Arc::clone` without holding a
+    //    reference back to the `App`.
+    pub(crate) embedding_backend:
+        Option<std::sync::Arc<dyn phantom_embeddings::EmbeddingBackend>>,
+
     // -- Per-pane last-command tracking (issue #226).
     //    Populated from `Event::CommandStarted` so that the subsequent
     //    `Event::CommandComplete` handler in `drain_bus_to_brain` can feed
@@ -830,6 +839,28 @@ impl App {
         } else {
             info!("Bundle store unavailable — per-pane capture disabled");
         }
+
+        // -- Embedding backend (optional). Constructed from OPENAI_API_KEY when
+        //    present so the capture pipeline can vector-index sealed bundles.
+        //    When the key is absent we store None and log at debug level — bundles
+        //    still persist with metadata; only vector search is unavailable.
+        //    The client is cached inside the backend (not per-request) so the
+        //    Arc<dyn EmbeddingBackend> can be shared cheaply with job workers.
+        let embedding_backend: Option<std::sync::Arc<dyn phantom_embeddings::EmbeddingBackend>> =
+            match phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env() {
+                Ok(backend) => {
+                    info!("Embedding backend ready (OpenAI text-embedding-3-large)");
+                    Some(std::sync::Arc::new(backend))
+                }
+                Err(phantom_embeddings::EmbedError::NotConfigured(_)) => {
+                    debug!("OPENAI_API_KEY not set — embedding backend disabled");
+                    None
+                }
+                Err(e) => {
+                    warn!("Embedding backend init failed: {e} — vector indexing disabled");
+                    None
+                }
+            };
 
         // -- Scene graph --
         let mut scene = SceneTree::new();
@@ -1337,6 +1368,7 @@ impl App {
             vision_analyzer: phantom_vision::VisionAnalyzer::from_env()
                 .ok()
                 .map(std::sync::Arc::new),
+            embedding_backend,
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
             shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),
@@ -1804,6 +1836,66 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
 #[cfg(test)]
 mod tests {
     use super::open_bundle_store;
+
+    // -- Helpers for env-var mutation in tests --------------------------------
+
+    /// Serialize env-var mutations so parallel tests in the same binary
+    /// don't stomp on each other.
+    fn with_env_var<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var(key).ok();
+        // SAFETY: serialized by LOCK.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    // -- Embedding backend construction tests --------------------------------
+
+    /// `embedding_backend_created_when_key_present`
+    ///
+    /// When `OPENAI_API_KEY` is set to a non-empty value,
+    /// `OpenAiEmbeddingBackend::from_env()` must succeed and produce a
+    /// backend whose `name()` is `"openai-embedding"`.
+    #[test]
+    fn embedding_backend_created_when_key_present() {
+        use phantom_embeddings::EmbeddingBackend;
+        with_env_var("OPENAI_API_KEY", Some("sk-test-fixture"), || {
+            let backend = phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env()
+                .expect("from_env should succeed when key is set");
+            assert_eq!(backend.name(), "openai-embedding");
+        });
+    }
+
+    /// `embedding_backend_none_when_no_key`
+    ///
+    /// When `OPENAI_API_KEY` is absent, `OpenAiEmbeddingBackend::from_env()`
+    /// must return `Err(EmbedError::NotConfigured(_))` — the App then stores
+    /// `None` for `embedding_backend`.
+    #[test]
+    fn embedding_backend_none_when_no_key() {
+        with_env_var("OPENAI_API_KEY", None, || {
+            let result = phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env();
+            assert!(
+                matches!(result, Err(phantom_embeddings::EmbedError::NotConfigured(_))),
+                "expected NotConfigured, got {result:?}"
+            );
+        });
+    }
+
+    // -- Bundle store env guard test -----------------------------------------
 
     /// Setting `PHANTOM_DISABLE_BUNDLE_STORE=1` must short-circuit
     /// `open_bundle_store()` and return `None` WITHOUT touching the
