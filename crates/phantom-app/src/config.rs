@@ -46,6 +46,12 @@ pub struct PhantomConfig {
     /// or toggled at runtime with `offline on` / `offline off`.
     /// Can also be auto-enabled after 3 consecutive cloud backend failures.
     pub offline_mode: bool,
+    /// Start in borderless fullscreen mode.
+    ///
+    /// Set via `fullscreen = true` in `~/.config/phantom/config.toml` or
+    /// the `--fullscreen` CLI flag. Can be toggled at runtime with F11 /
+    /// Cmd+Enter regardless of this initial value.
+    pub fullscreen: bool,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -70,13 +76,14 @@ impl Default for PhantomConfig {
             nlp_llm_enabled: true,
             privacy_mode: false,
             offline_mode: false,
+            fullscreen: false,
         }
     }
 }
 
 impl PhantomConfig {
     /// Load config from the standard path, or return defaults if not found.
-    #[must_use] 
+    #[must_use]
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(config) => {
@@ -163,6 +170,9 @@ impl PhantomConfig {
                     "offline_mode" => {
                         config.offline_mode = matches!(value, "true" | "1" | "yes");
                     }
+                    "fullscreen" => {
+                        config.fullscreen = matches!(value, "true" | "1" | "yes");
+                    }
                     _ => {
                         warn!("Unknown config key: {key}");
                     }
@@ -174,7 +184,7 @@ impl PhantomConfig {
     }
 
     /// Resolve the theme: load the named built-in, then apply shader overrides.
-    #[must_use] 
+    #[must_use]
     pub fn resolve_theme(&self) -> Theme {
         let mut theme = themes::builtin_by_name(&self.theme_name).unwrap_or_else(|| {
             warn!(
@@ -212,19 +222,19 @@ impl PhantomConfig {
     ///
     /// Use this accessor instead of accessing `nlp_llm_enabled` directly from
     /// outside the crate.
-    #[must_use] 
+    #[must_use]
     pub fn nlp_llm_enabled(&self) -> bool {
         self.nlp_llm_enabled
     }
 
     /// Returns whether privacy mode is enabled.
-    #[must_use] 
+    #[must_use]
     pub fn privacy_mode(&self) -> bool {
         self.privacy_mode
     }
 
     /// Returns whether offline mode is enabled.
-    #[must_use] 
+    #[must_use]
     pub fn offline_mode(&self) -> bool {
         self.offline_mode
     }
@@ -284,6 +294,10 @@ font_size = 14.0
 # Cloud backends are filtered out at routing time.
 # Can also be toggled at runtime with `offline on` / `offline off`.
 # offline_mode = false
+
+# Start in borderless fullscreen mode.
+# Can be toggled at runtime with F11 / Cmd+Enter.
+# fullscreen = false
 "#;
 
 // ---------------------------------------------------------------------------
@@ -399,6 +413,45 @@ mod tests {
     fn parse_empty_config_privacy_mode_is_false() {
         let config = PhantomConfig::parse("").unwrap();
         assert!(!config.privacy_mode);
+    }
+
+    // -----------------------------------------------------------------------
+    // fullscreen
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_fullscreen_false_starts_windowed() {
+        // Default must be windowed (false) so existing users are not suddenly
+        // forced into fullscreen on upgrade.
+        let config = PhantomConfig::default();
+        assert!(
+            !config.fullscreen,
+            "fullscreen must default to false so the window starts in windowed mode"
+        );
+    }
+
+    #[test]
+    fn parse_fullscreen_true_enables_it() {
+        let config = PhantomConfig::parse("fullscreen = true").unwrap();
+        assert!(config.fullscreen);
+    }
+
+    #[test]
+    fn parse_fullscreen_one_enables_it() {
+        let config = PhantomConfig::parse("fullscreen = 1").unwrap();
+        assert!(config.fullscreen);
+    }
+
+    #[test]
+    fn parse_fullscreen_false_keeps_it_off() {
+        let config = PhantomConfig::parse("fullscreen = false").unwrap();
+        assert!(!config.fullscreen);
+    }
+
+    #[test]
+    fn parse_empty_config_fullscreen_is_false() {
+        let config = PhantomConfig::parse("").unwrap();
+        assert!(!config.fullscreen);
     }
 
     #[test]
