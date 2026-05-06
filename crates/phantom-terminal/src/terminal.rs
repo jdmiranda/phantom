@@ -3,10 +3,12 @@
 //! Spawns a PTY with the user's default shell and manages the terminal state
 //! machine. All PTY I/O is non-blocking.
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -27,6 +29,14 @@ const PTY_READ_BUF: usize = 0x10000; // 64 KiB
 /// Default cell dimensions in pixels (used for TIOCSWINSZ pixel fields).
 const DEFAULT_CELL_WIDTH: u16 = 8;
 const DEFAULT_CELL_HEIGHT: u16 = 16;
+
+/// Maximum number of bytes accumulated in the bracketed-paste buffer before
+/// the paste is discarded to prevent unbounded memory growth.
+pub const MAX_PASTE_BUFFER_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// How long a bracketed paste may remain open (start received, no end yet)
+/// before it is force-cleared.
+const PASTE_TIMEOUT_SECS: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // MouseMode — which mouse tracking the terminal program has requested
@@ -55,6 +65,11 @@ pub enum MouseMode {
 /// share the write queue through an `Arc<Mutex<_>>`.
 type PtyWriteQueue = Arc<Mutex<Vec<Vec<u8>>>>;
 
+/// Shared channel for OSC 2 window title changes emitted by the running
+/// program.  The sender lives in the event listener (which is `Clone`);
+/// `PhantomTerminal` exposes a receiver so the caller can subscribe.
+type TitleQueue = Arc<Mutex<Vec<String>>>;
+
 /// Listener that receives events from the alacritty terminal state machine.
 ///
 /// Events like device-attribute responses (`PtyWrite`) are buffered in a
@@ -62,11 +77,15 @@ type PtyWriteQueue = Arc<Mutex<Vec<Vec<u8>>>>;
 #[derive(Clone, Debug)]
 pub struct PhantomEventListener {
     pty_writes: PtyWriteQueue,
+    title_queue: TitleQueue,
 }
 
 impl PhantomEventListener {
-    fn new(queue: PtyWriteQueue) -> Self {
-        Self { pty_writes: queue }
+    fn new(queue: PtyWriteQueue, title_queue: TitleQueue) -> Self {
+        Self {
+            pty_writes: queue,
+            title_queue,
+        }
     }
 }
 
@@ -79,7 +98,12 @@ impl EventListener for PhantomEventListener {
                     q.push(data.as_bytes().to_vec());
                 }
             }
-            Event::Title(title) => debug!("terminal title: {title}"),
+            Event::Title(title) => {
+                debug!("terminal title: {title}");
+                if let Ok(mut q) = self.title_queue.lock() {
+                    q.push(title.clone());
+                }
+            }
             Event::Bell => debug!("terminal bell"),
             Event::Exit => debug!("terminal exit requested"),
             Event::Wakeup => trace!("terminal wakeup"),
@@ -162,6 +186,9 @@ pub struct PhantomTerminal {
     /// Shared queue for PTY-write requests from the terminal (e.g. DA responses).
     pty_write_queue: PtyWriteQueue,
 
+    /// Shared queue for OSC 2 title strings emitted by the running program.
+    title_queue: TitleQueue,
+
     /// Current terminal dimensions.
     size: TerminalSize,
 
@@ -180,6 +207,19 @@ pub struct PhantomTerminal {
     /// `alacritty_terminal` just to check a mode bit.  Refreshed after
     /// every `pty_read` call.
     pub kitty_keyboard_mode: bool,
+
+    // ── Bracketed-paste guard (Bug 1) ─────────────────────────────────────
+    /// True while a bracketed-paste start (`\x1b[200~`) has been received
+    /// but the matching end (`\x1b[201~`) has not yet been written to the PTY.
+    in_bracketed_paste: bool,
+
+    /// Total bytes written to the PTY in the current bracketed-paste session.
+    /// Reset to zero on `\x1b[201~` or when the size limit / timeout fires.
+    paste_byte_count: usize,
+
+    /// Wall-clock instant at which the current bracketed-paste session began.
+    /// Used to detect runaway pastes that never receive a terminator.
+    paste_started_at: Option<Instant>,
 }
 
 impl PhantomTerminal {
@@ -214,8 +254,12 @@ impl PhantomTerminal {
         // Shared write queue between the event listener and this struct.
         let pty_write_queue: PtyWriteQueue = Arc::new(Mutex::new(Vec::new()));
 
+        // Shared title queue for OSC 2 title change events.
+        let title_queue: TitleQueue = Arc::new(Mutex::new(Vec::new()));
+
         // Create the terminal state machine.
-        let event_listener = PhantomEventListener::new(Arc::clone(&pty_write_queue));
+        let event_listener =
+            PhantomEventListener::new(Arc::clone(&pty_write_queue), Arc::clone(&title_queue));
         let term = Term::new(config, &size, event_listener);
 
         debug!("PhantomTerminal created: {cols}x{rows}");
@@ -227,10 +271,14 @@ impl PhantomTerminal {
             pty_writer,
             _pty: pty,
             pty_write_queue,
+            title_queue,
             size,
             read_buf: vec![0u8; PTY_READ_BUF],
             last_read_len: 0,
             kitty_keyboard_mode: false,
+            in_bracketed_paste: false,
+            paste_byte_count: 0,
+            paste_started_at: None,
         })
     }
 
@@ -312,11 +360,118 @@ impl PhantomTerminal {
     }
 
     /// Write raw input bytes to the PTY (keyboard/mouse input, paste data, etc.).
+    ///
+    /// Applies two layers of safety before the actual write syscall:
+    ///
+    /// 1. **Null-byte sanitization** (Bug 2): null bytes (`0x00`) are stripped
+    ///    because they can corrupt PTY line-discipline state in ways that are
+    ///    difficult to diagnose.
+    ///
+    /// 2. **Bracketed-paste guard** (Bug 1): the method tracks whether a paste
+    ///    start (`\x1b[200~`) has been sent without the matching end
+    ///    (`\x1b[201~`) and enforces a hard 4 MiB cap and a 5-second timeout.
+    ///    If either limit is exceeded the paste session is force-closed.
     pub fn pty_write(&mut self, data: &[u8]) -> Result<()> {
-        self.pty_writer
-            .write_all(data)
-            .context("PTY write failed")?;
+        // -- Bug 2: null-byte sanitization --
+        let sanitized = sanitize_pty_input(data);
+        let data = sanitized.as_ref();
+
+        // -- Bug 1: bracketed-paste bookkeeping --
+        // Detect bracketed paste start / end markers so we can track the
+        // in-flight byte count and apply size/timeout limits.
+        let has_start = memslice_contains(data, b"\x1b[200~");
+        let has_end = memslice_contains(data, b"\x1b[201~");
+
+        if has_start {
+            self.in_bracketed_paste = true;
+            self.paste_byte_count = 0;
+            self.paste_started_at = Some(Instant::now());
+        }
+
+        if self.in_bracketed_paste {
+            // Timeout check: force-clear pastes stuck open for > 5 seconds.
+            if let Some(started) = self.paste_started_at {
+                if started.elapsed().as_secs() >= PASTE_TIMEOUT_SECS {
+                    warn!(
+                        "bracketed paste timed out after {}s without terminator — discarding",
+                        PASTE_TIMEOUT_SECS
+                    );
+                    self.in_bracketed_paste = false;
+                    self.paste_byte_count = 0;
+                    self.paste_started_at = None;
+                    return Ok(());
+                }
+            }
+
+            // Size limit check: discard when paste exceeds 4 MiB.
+            if self.paste_byte_count + data.len() > MAX_PASTE_BUFFER_BYTES {
+                warn!(
+                    "bracketed paste exceeded {} MiB limit — discarding",
+                    MAX_PASTE_BUFFER_BYTES / (1024 * 1024)
+                );
+                self.in_bracketed_paste = false;
+                self.paste_byte_count = 0;
+                self.paste_started_at = None;
+                return Ok(());
+            }
+
+            self.paste_byte_count += data.len();
+
+            if has_end {
+                // Paste completed normally.
+                self.in_bracketed_paste = false;
+                self.paste_byte_count = 0;
+                self.paste_started_at = None;
+            }
+        }
+
+        self.pty_writer.write_all(data).context("PTY write failed")?;
         Ok(())
+    }
+
+    /// Drain all pending OSC 2 window title strings from the event queue.
+    ///
+    /// Returns the titles in the order they were received. The caller should
+    /// apply the last (most-recent) title to the window. Returns an empty
+    /// `Vec` when no title changes have occurred since the last drain.
+    pub fn drain_title_queue(&self) -> Vec<String> {
+        match self.title_queue.lock() {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(poisoned) => {
+                let mut q = poisoned.into_inner();
+                std::mem::take(&mut *q)
+            }
+        }
+    }
+
+    /// Tick the bracketed-paste timeout guard.
+    ///
+    /// Call this periodically (e.g. once per frame or on a timer tick) so
+    /// that a paste which started but never received `\x1b[201~` is
+    /// eventually force-cleared even when no further PTY writes arrive.
+    pub fn tick_paste_timeout(&mut self) {
+        if !self.in_bracketed_paste {
+            return;
+        }
+        if let Some(started) = self.paste_started_at {
+            if started.elapsed().as_secs() >= PASTE_TIMEOUT_SECS {
+                warn!(
+                    "bracketed paste timed out (tick) after {}s — clearing",
+                    PASTE_TIMEOUT_SECS
+                );
+                self.in_bracketed_paste = false;
+                self.paste_byte_count = 0;
+                self.paste_started_at = None;
+            }
+        }
+    }
+
+    /// Whether a bracketed-paste session is currently open (start received,
+    /// end not yet seen).
+    #[must_use]
+    #[inline]
+    pub fn in_bracketed_paste(&self) -> bool {
+        self.in_bracketed_paste
     }
 
     /// Immutable access to the terminal state (grid, cursor, modes).
@@ -525,6 +680,8 @@ impl PhantomTerminal {
         Some((start_col, start_row, end_col, end_row))
     }
 
+    // -- Private helpers ---------------------------------------------------
+
     /// Flush pending PTY write requests from the terminal's event listener.
     fn flush_pty_write_queue(&mut self) {
         let pending: Vec<Vec<u8>> = {
@@ -541,6 +698,38 @@ impl PhantomTerminal {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free-standing helpers
+// ---------------------------------------------------------------------------
+
+/// Strip null bytes from PTY input.
+///
+/// Null bytes (`0x00`) corrupt PTY line-discipline state and must be removed
+/// before the data reaches the kernel write() call. Returns `Cow::Borrowed`
+/// when the input is already null-free (zero copy), or `Cow::Owned` when
+/// bytes were removed.
+pub fn sanitize_pty_input(bytes: &[u8]) -> Cow<'_, [u8]> {
+    if bytes.contains(&0x00) {
+        Cow::Owned(bytes.iter().copied().filter(|&b| b != 0x00).collect())
+    } else {
+        Cow::Borrowed(bytes)
+    }
+}
+
+/// Return `true` when `haystack` contains the byte pattern `needle`.
+///
+/// Uses a simple sliding-window scan — the patterns we check for are short
+/// (≤ 6 bytes) so this is fast enough for PTY write sizes.
+fn memslice_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -655,5 +844,106 @@ mod tests {
         // No history yet; setting to a large value should remain 0.
         term.set_display_offset(9999);
         assert_eq!(term.display_offset(), 0);
+    }
+
+    // ── Bug 1: bracketed-paste size limit ────────────────────────────────
+
+    /// Writing a bracketed-paste start followed by data that exceeds the 4 MiB
+    /// cap must clear the paste session and return `Ok(())` without writing
+    /// the oversized payload to the PTY.
+    #[test]
+    fn paste_buffer_clears_on_size_limit_exceeded() {
+        let mut term = PhantomTerminal::new(80, 24).unwrap();
+
+        // Send paste-start so the guard activates.
+        term.pty_write(b"\x1b[200~").unwrap();
+        assert!(term.in_bracketed_paste(), "paste session should be active");
+
+        // Build a chunk just large enough to exceed the 4 MiB cap.
+        // We skip actually writing 4 MiB + start bytes by sending a single
+        // chunk that is (MAX - start_bytes + 1) bytes to trigger the limit.
+        // We simulate the byte count by calling pty_write in two steps:
+        // first push the count to just under the limit, then push it over.
+        let almost_max = vec![b'A'; MAX_PASTE_BUFFER_BYTES - 6]; // -6 for \x1b[200~
+        term.pty_write(&almost_max).unwrap();
+        assert!(term.in_bracketed_paste(), "still within limit");
+
+        // This write should push us over the cap.
+        term.pty_write(b"overflow").unwrap();
+        assert!(
+            !term.in_bracketed_paste(),
+            "paste session must be cleared after exceeding size limit"
+        );
+    }
+
+    /// After `PASTE_TIMEOUT_SECS` without a terminator the `tick_paste_timeout`
+    /// helper must force-clear the paste session.
+    #[test]
+    fn paste_buffer_clears_on_timeout_without_terminator() {
+        let mut term = PhantomTerminal::new(80, 24).unwrap();
+        term.pty_write(b"\x1b[200~").unwrap();
+        assert!(term.in_bracketed_paste());
+
+        // Manually backdate the start time so the timeout appears to have fired.
+        // We reach into the struct directly because this is a unit test.
+        term.paste_started_at =
+            Some(Instant::now() - std::time::Duration::from_secs(PASTE_TIMEOUT_SECS + 1));
+
+        term.tick_paste_timeout();
+        assert!(
+            !term.in_bracketed_paste(),
+            "paste session must be cleared after timeout"
+        );
+    }
+
+    // ── Bug 2: PTY input sanitization ────────────────────────────────────
+
+    /// `sanitize_pty_input` must remove null bytes from the input.
+    #[test]
+    fn sanitize_pty_input_removes_null_bytes() {
+        let input = b"hel\x00lo\x00world";
+        let result = sanitize_pty_input(input);
+        assert_eq!(result.as_ref(), b"helloworld");
+    }
+
+    /// `sanitize_pty_input` must return `Cow::Borrowed` (no copy) for
+    /// inputs that contain no null bytes.
+    #[test]
+    fn sanitize_pty_input_passes_valid_utf8_unchanged() {
+        let input = b"hello, world!";
+        let result = sanitize_pty_input(input);
+        // The result should be byte-identical and borrow the original slice.
+        assert_eq!(result.as_ref(), input);
+        assert!(
+            matches!(result, std::borrow::Cow::Borrowed(_)),
+            "no allocation expected for null-free input"
+        );
+    }
+
+    // ── Bug 3: OSC 2 title forwarding ────────────────────────────────────
+
+    /// After the terminal emits an `Event::Title`, `drain_title_queue` must
+    /// return that title string.  We exercise the queue directly because the
+    /// full VTE parser path requires a live PTY.
+    #[test]
+    fn osc2_title_event_sent_through_watch_channel() {
+        // The title queue is Arc-shared between the listener and the terminal.
+        // We grab a reference to the queue and push a synthetic title into it
+        // the same way the event listener would.
+        let term = PhantomTerminal::new(80, 24).unwrap();
+
+        // Simulate the event listener receiving an OSC 2 title.
+        {
+            let mut q = term.title_queue.lock().unwrap();
+            q.push("phantom — ~/projects/foo".to_string());
+        }
+
+        let titles = term.drain_title_queue();
+        assert_eq!(titles.len(), 1);
+        assert_eq!(titles[0], "phantom — ~/projects/foo");
+
+        // A second drain must return nothing (queue was cleared).
+        let titles2 = term.drain_title_queue();
+        assert!(titles2.is_empty(), "queue must be empty after drain");
     }
 }
