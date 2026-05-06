@@ -3,6 +3,7 @@
 //! Reads `~/.config/phantom/config.toml` (or `$XDG_CONFIG_HOME/phantom/config.toml`)
 //! and applies overrides to the default theme and shader parameters.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -52,6 +53,25 @@ pub struct PhantomConfig {
     /// the `--fullscreen` CLI flag. Can be toggled at runtime with F11 /
     /// Cmd+Enter regardless of this initial value.
     pub fullscreen: bool,
+    /// Per-category notification sound paths.
+    ///
+    /// Keys correspond to [`crate::notifications::Severity`] names in lowercase:
+    /// `"info"`, `"warn"`, `"danger"`. Values are optional file paths to `.wav`
+    /// or `.mp3` audio files.
+    ///
+    /// - Missing key → use the default system sound for that category.
+    /// - `Some(path)` → play that audio file.
+    /// - `None` (or empty string `""` in TOML) → silent for that category.
+    ///
+    /// Configure in `~/.config/phantom/config.toml`:
+    ///
+    /// ```toml
+    /// [notification_sounds]
+    /// info = "/path/to/info.wav"
+    /// warn = "/path/to/warn.wav"
+    /// danger = ""  # empty string = silent
+    /// ```
+    pub notification_sounds: HashMap<String, Option<String>>,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -77,6 +97,7 @@ impl Default for PhantomConfig {
             privacy_mode: false,
             offline_mode: false,
             fullscreen: false,
+            notification_sounds: HashMap::new(),
         }
     }
 }
@@ -105,6 +126,8 @@ impl PhantomConfig {
 
     fn parse(toml_str: &str) -> Result<Self> {
         let mut config = Self::default();
+        // Track whether we're inside the [notification_sounds] section.
+        let mut in_notification_sounds = false;
 
         for line in toml_str.lines() {
             let line = line.trim();
@@ -112,9 +135,28 @@ impl PhantomConfig {
                 continue;
             }
 
+            // TOML section header — detect [notification_sounds] and any
+            // other section that would end it.
+            if line.starts_with('[') {
+                in_notification_sounds = line == "[notification_sounds]";
+                continue;
+            }
+
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
                 let value = value.trim().trim_matches('"');
+
+                if in_notification_sounds {
+                    // Keys: "info", "warn", "danger" (maps to Severity variants).
+                    // Empty string → None (silent); any other string → Some(path).
+                    let sound = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                    config.notification_sounds.insert(key.to_string(), sound);
+                    continue;
+                }
 
                 match key {
                     "theme" => config.theme_name = value.to_string(),
@@ -239,6 +281,22 @@ impl PhantomConfig {
         self.offline_mode
     }
 
+    /// Look up the configured sound path for a notification category.
+    ///
+    /// `category` should be `"info"`, `"warn"`, or `"danger"` — matching the
+    /// lowercase name of the [`crate::notifications::Severity`] variant.
+    ///
+    /// Returns:
+    /// - `None` if the category has no entry (use the default system sound).
+    /// - `None` if the entry is an empty string `""` in TOML (explicit silence).
+    /// - `Some(path)` if a custom sound file was configured.
+    #[must_use]
+    pub fn notification_sound_for(&self, category: &str) -> Option<&str> {
+        self.notification_sounds
+            .get(category)
+            .and_then(|v| v.as_deref())
+    }
+
     /// Write a default config file to the standard path.
     pub fn write_default() -> Result<PathBuf> {
         let path = config_path();
@@ -298,6 +356,15 @@ font_size = 14.0
 # Start in borderless fullscreen mode.
 # Can be toggled at runtime with F11 / Cmd+Enter.
 # fullscreen = false
+
+# Notification sounds (optional).
+# Map severity categories (info / warn / danger) to audio file paths.
+# Missing key = use the default system sound.
+# Empty string = silent for that category.
+# [notification_sounds]
+# info = "/path/to/info.wav"
+# warn = "/path/to/warn.wav"
+# danger = ""
 "#;
 
 // ---------------------------------------------------------------------------
@@ -487,5 +554,80 @@ mod tests {
     fn parse_offline_mode_false_keeps_it_off() {
         let config = PhantomConfig::parse("offline_mode = false").unwrap();
         assert!(!config.offline_mode);
+    }
+
+    // ------------------------------------------------------------------
+    // notification_sounds tests (issue #571)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn default_notification_sounds_is_empty() {
+        let config = PhantomConfig::default();
+        assert!(
+            config.notification_sounds.is_empty(),
+            "default config must have no notification_sounds entries"
+        );
+        assert_eq!(
+            config.notification_sound_for("info"),
+            None,
+            "missing key should return None (use default sound)"
+        );
+    }
+
+    #[test]
+    fn parse_notification_sounds_section() {
+        let toml = "\
+[notification_sounds]
+info = \"/sounds/info.wav\"
+warn = \"/sounds/warn.wav\"
+danger = \"/sounds/danger.mp3\"
+";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.notification_sound_for("info"),
+            Some("/sounds/info.wav"),
+        );
+        assert_eq!(
+            config.notification_sound_for("warn"),
+            Some("/sounds/warn.wav"),
+        );
+        assert_eq!(
+            config.notification_sound_for("danger"),
+            Some("/sounds/danger.mp3"),
+        );
+    }
+
+    #[test]
+    fn parse_notification_sounds_empty_string_is_silent() {
+        // An empty string in TOML means "silence this category".
+        // The accessor returns None to signal "no sound".
+        let toml = "\
+[notification_sounds]
+danger = \"\"
+";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(
+            config.notification_sound_for("danger"),
+            None,
+            "empty string in TOML must map to None (silent)"
+        );
+        // Other categories not listed → also None (use default).
+        assert_eq!(config.notification_sound_for("info"), None);
+    }
+
+    #[test]
+    fn parse_notification_sounds_does_not_affect_other_fields() {
+        let toml = "\
+skip_boot = true
+
+[notification_sounds]
+info = \"/sounds/ding.wav\"
+";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert!(config.skip_boot, "skip_boot before the section must parse");
+        assert_eq!(
+            config.notification_sound_for("info"),
+            Some("/sounds/ding.wav"),
+        );
     }
 }
