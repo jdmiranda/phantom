@@ -15,7 +15,7 @@ mod tests;
 
 use std::sync::{Arc, Mutex};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use phantom_agents::agent::{Agent, AgentMessage, allocate_agent_id};
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig};
@@ -303,6 +303,23 @@ pub(crate) struct AgentPane {
     /// richer message timeline instead of the raw `output` string.
     #[allow(dead_code)] // Read by the timeline adapter (Phase 2) and tests
     pub(super) pane_messages: Vec<PaneMessage>,
+
+    /// Optional TTS sender: when `Some`, every completed assistant message is
+    /// forwarded here for audio playback.  `None` when TTS is disabled or
+    /// unavailable.  The pipeline's background worker is the only consumer;
+    /// `try_send` is used (non-blocking) so a slow audio device never stalls
+    /// the agent pane's render loop.
+    pub(super) tts_tx: Option<tokio::sync::mpsc::Sender<String>>,
+
+    /// Shared MCP tool registry for external tool fallback.
+    ///
+    /// Set at spawn time by [`App::spawn_agent_pane_with_opts`] via
+    /// [`AgentPane::set_mcp_registry`]. When `Some`, `build_dispatch_context`
+    /// forwards it into [`phantom_agents::dispatch::DispatchContext::mcp_registry`]
+    /// so unknown tool names are routed to connected MCP servers.
+    /// `None` disables MCP fallback (legacy / test paths).
+    pub(super) mcp_registry:
+        Option<std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +381,8 @@ impl AgentPane {
             capture_tool_calls: Vec::new(),
             dag_explorer: None,
             pane_messages: Vec::new(),
+            tts_tx: None,
+            mcp_registry: None,
         }
     }
 
@@ -551,6 +570,8 @@ impl AgentPane {
                 PaneMessageRole::System,
                 "● Agent working...",
             )],
+            tts_tx: None,
+            mcp_registry: None,
         }
     }
 
@@ -586,6 +607,15 @@ impl AgentPane {
         self.snapshot_sink = Some(sink);
     }
 
+    /// Wire the TTS sender so completed assistant messages are spoken aloud.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` when a [`TtsPipeline`] is
+    /// active. When `None` (no TTS available) this is never called; the field
+    /// stays `None` and the TTS path is silently skipped on every `poll()`.
+    pub(crate) fn set_tts_tx(&mut self, tx: tokio::sync::mpsc::Sender<String>) {
+        self.tts_tx = Some(tx);
+    }
+
     /// Wire the shared [`GhTicketDispatcher`] handle for Dispatcher-role panes.
     ///
     /// Called by `App::spawn_agent_pane_with_opts` immediately after
@@ -619,6 +649,20 @@ impl AgentPane {
     }
 
     /// Wire the history capture sidecar into this pane.
+    /// Wire the shared MCP tool registry into this pane.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
+    /// When wired, unknown tool names in dispatch are forwarded to the
+    /// connected MCP servers instead of returning an immediate error.
+    /// `None` (the default) disables MCP fallback — correct for legacy / test
+    /// paths that have not connected any external servers.
+    pub(crate) fn set_mcp_registry(
+        &mut self,
+        registry: std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>,
+    ) {
+        self.mcp_registry = Some(registry);
+    }
+
     ///
     /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
     /// When `None` is held (legacy / test path), tool calls and output are
@@ -717,6 +761,15 @@ impl AgentPane {
                     // Flush accumulated assistant text into the conversation.
                     if !self.current_assistant_text.is_empty() {
                         let text = std::mem::take(&mut self.current_assistant_text);
+                        // Forward to TTS pipeline (non-blocking; drops silently
+                        // if the channel is full or TTS is disabled).
+                        if self
+                            .tts_tx
+                            .as_ref()
+                            .is_some_and(|tx| tx.try_send(text.clone()).is_err())
+                        {
+                            debug!("TTS channel full or closed — skipping speech");
+                        }
                         self.agent.push_message(AgentMessage::Assistant(text));
                     }
 

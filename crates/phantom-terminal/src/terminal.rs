@@ -20,6 +20,8 @@ use alacritty_terminal::Term;
 use anyhow::{Context, Result};
 use log::{debug, trace, warn};
 
+use crate::search::ScrollbackIndex;
+
 
 /// Default scrollback history in lines.
 const SCROLLBACK_LINES: usize = 10_000;
@@ -251,6 +253,16 @@ pub struct PhantomTerminal {
     /// Populated by the OSC-8 post-processor in `pty_read`. Consulted by
     /// `hit_test_hyperlink` on mouse-click events.
     hyperlink_map: HashMap<(usize, usize), Arc<str>>,
+
+    /// Cached scrollback search index. Rebuilt on every query change via
+    /// [`PhantomTerminal::update_search`]. Empty (no matches) until a search
+    /// is active.
+    pub search_index: ScrollbackIndex,
+
+    /// Whether find-in-terminal search is currently active. When `true`, the
+    /// renderer overlays match highlights from `search_index` on top of the
+    /// terminal cells.
+    pub search_active: bool,
 }
 
 impl PhantomTerminal {
@@ -320,6 +332,8 @@ impl PhantomTerminal {
             osc52_rx: Some(osc52_rx),
             current_hyperlink: None,
             hyperlink_map: HashMap::new(),
+            search_index: ScrollbackIndex::new(),
+            search_active: false,
         })
     }
 
@@ -605,6 +619,18 @@ impl PhantomTerminal {
     #[must_use]
     pub fn history_size(&self) -> usize {
         self.term.grid().history_size()
+    }
+
+    // -- Search API --------------------------------------------------------
+
+    /// Rebuild the scrollback search index for `query`.
+    ///
+    /// Sets `search_active` to `true` when the query is non-empty and `false`
+    /// when the query is cleared, so the renderer knows whether to draw
+    /// highlight quads.
+    pub fn update_search(&mut self, query: &str) {
+        self.search_active = !query.is_empty();
+        self.search_index.index(self.term.grid(), query);
     }
 
     // -- Mouse mode API ----------------------------------------------------

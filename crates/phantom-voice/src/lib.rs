@@ -28,6 +28,7 @@ use futures_core::Stream;
 use lru::LruCache;
 
 pub mod openai;
+pub mod player;
 
 // ── OpenAiVoice enum ──────────────────────────────────────────────────────────
 

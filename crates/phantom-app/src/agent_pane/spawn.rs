@@ -172,6 +172,11 @@ impl App {
         // at shutdown and persists the snapshots via AgentStatePersister.
         agent_pane.set_snapshot_sink(self.agent_snapshot_queue.clone());
 
+        // Wire the MCP tool registry so this pane can fall back to external
+        // MCP servers for tool names not in the built-in surface. The same
+        // Arc is shared across all panes spawned in this session.
+        agent_pane.set_mcp_registry(std::sync::Arc::clone(&self.mcp_registry));
+
         // Issue #235: inject the ticket dispatcher for Dispatcher-role panes.
         // `agent_pane.role` was just set by `set_substrate_handles` above.
         // For the current default (Conversational) this is a no-op. When a
@@ -203,6 +208,15 @@ impl App {
         // output are recorded in the session's agents.jsonl sidecar.
         if let Some(ref capture) = self.agent_capture {
             agent_pane.set_agent_capture(capture.clone(), self.session_uuid);
+        }
+
+        // Wire TTS: when a pipeline is active, hand the pane a clone of the
+        // sender so completed assistant messages are forwarded for speech
+        // playback. No-op when TTS is disabled (None).
+        if let Some(ref tts) = self.tts
+            && let Some(ref tx) = tts.tts_tx
+        {
+            agent_pane.set_tts_tx(tx.clone());
         }
 
         // Capture the stable AgentId BEFORE the pane is moved into the adapter.

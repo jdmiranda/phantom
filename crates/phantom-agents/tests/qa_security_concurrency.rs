@@ -66,6 +66,7 @@ fn build_dispatch_ctx<'a>(
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     }
 }
 

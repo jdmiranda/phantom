@@ -27,7 +27,7 @@ use phantom_terminal::terminal::PhantomTerminal;
 use phantom_ui::keybinds::KeybindRegistry;
 use phantom_ui::layout::LayoutEngine;
 use phantom_ui::themes::Theme;
-use phantom_ui::widgets::{KeybindHelp, StatusBar, TabBar};
+use phantom_ui::widgets::{KeybindHelp, SearchBar, StatusBar, TabBar};
 
 use phantom_adapter::{DataType, EventBus, TopicId};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
@@ -128,6 +128,9 @@ pub struct App {
     pub(crate) tab_bar: TabBar,
     /// Full-screen keybind help overlay (F1 / ?).
     pub(crate) keybind_help: KeybindHelp,
+
+    // -- Find-in-terminal search bar (Cmd+F) --
+    pub(crate) search_bar: SearchBar,
 
     // -- Boot sequence --
     pub(crate) boot: BootSequence,
@@ -512,6 +515,14 @@ pub struct App {
     // `tick_alt_screen_fade` into `collapse_alt_screen_pane`.
     pub(crate) alt_screen_pending_collapses: Vec<phantom_adapter::AppId>,
 
+    // -- TTS pipeline (optional: None when OPENAI_API_KEY is absent or TTS
+    //    is otherwise unavailable). Receives full assistant messages from
+    //    agent panes and speaks them aloud via the system audio device.
+    pub(crate) tts: Option<crate::tts::TtsPipeline>,
+    // Keeps the background worker task alive for the process lifetime.
+    #[allow(dead_code)]
+    pub(crate) _tts_handles: Option<crate::tts::TtsTaskHandles>,
+
     // -- Privacy mode: hard block on cloud API calls.
     //    Mirrors `PhantomConfig::privacy_mode`. Toggled at runtime by the
     //    `ghost privacy on/off` command. When `true`:
@@ -545,6 +556,19 @@ pub struct App {
     // `ooda_git_changed` — set to `true` when `GitStateChanged` is received;
     //   cleared after one OODA tick (same single-frame pulse pattern).
     pub(crate) ooda_git_changed: bool,
+
+    // -- MCP tool registry: shared across all agent panes for external tool
+    //    fallback. Populated by `mcp_discovery::discover_and_connect` running
+    //    in a background tokio task at startup. Handed to each new AgentPane
+    //    via `AgentPane::set_mcp_registry` so dispatch can route unknown tool
+    //    names to connected MCP servers.
+    pub(crate) mcp_registry:
+        std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>,
+
+    // -- Background MCP discovery task (kept alive for the App lifetime).
+    //    `None` when `config.mcp_servers` is empty (no work to do).
+    #[allow(dead_code)]
+    pub(crate) _mcp_discovery_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// An active suggestion from the AI brain.
@@ -1191,7 +1215,7 @@ impl App {
         // can self-correct.
         let ticket_dispatcher = build_ticket_dispatcher();
 
-        // -- MCP external-server discovery (Bug 3 fix).
+        // -- MCP external-server discovery (Bug 3 fix, env-var path).
         //
         // Spawn an async task that connects to each URL listed in
         // `$PHANTOM_MCP_SERVERS` (comma-separated), calls `tools/list` on each,
@@ -1257,6 +1281,38 @@ impl App {
             }
         }
 
+        // -- TTS pipeline (best-effort; no-op when OPENAI_API_KEY is absent) --
+        // Privacy mode blocks cloud API calls, so we skip TTS init to avoid
+        // a live network call on first synthesis.
+        let (tts, _tts_handles) = if config.privacy_mode {
+            debug!("TTS pipeline disabled (privacy mode)");
+            (None, None)
+        } else {
+            match crate::tts::build_tts_pipeline_from_env() {
+                Some((p, h)) => (Some(p), Some(h)),
+                None => (None, None),
+            }
+        };
+
+        // -- MCP config-driven tool registry (shared across agent panes).
+        // `discover_and_connect` is spawned as a background task so it does
+        // not block the GPU / render thread during startup. This complements
+        // the env-var discovery above; both populate registries used by agents.
+        let mcp_registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+            phantom_mcp::McpToolRegistry::new(),
+        ));
+        let mcp_discovery_task: Option<tokio::task::JoinHandle<()>> =
+            if config.mcp_servers.is_empty() {
+                None
+            } else {
+                let servers = config.mcp_servers.clone();
+                let registry = std::sync::Arc::clone(&mcp_registry);
+                let handle = tokio::spawn(async move {
+                    crate::mcp_discovery::discover_and_connect(&servers, registry).await;
+                });
+                Some(handle)
+            };
+
         let now = Instant::now();
 
         Ok(Self {
@@ -1274,6 +1330,7 @@ impl App {
             status_bar,
             tab_bar,
             keybind_help: KeybindHelp::new(),
+            search_bar: SearchBar::new(),
             boot,
             state: initial_state,
             demo_mode: config.demo_mode,
@@ -1382,10 +1439,14 @@ impl App {
             alt_screen_pending_collapses: Vec::new(),
             privacy_mode: config.privacy_mode,
             peer_grant_registry: crate::peer_grants::load_peer_grant_registry(),
+            tts,
+            _tts_handles,
             // OODA signal cache — all start zeroed; populated by drain_bus_to_brain.
             ooda_last_parsed: None,
             ooda_agent_just_completed: false,
             ooda_git_changed: false,
+            mcp_registry,
+            _mcp_discovery_task: mcp_discovery_task,
         })
     }
 

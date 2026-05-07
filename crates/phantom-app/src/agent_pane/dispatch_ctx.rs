@@ -117,6 +117,7 @@ impl AgentPane {
             ticket_dispatcher,
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             dag_explorer,
+            mcp_registry: self.mcp_registry.clone(),
         })
     }
 }

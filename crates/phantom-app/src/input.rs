@@ -541,6 +541,59 @@ impl App {
             return;
         }
 
+        // Cmd+F (super+f on macOS) — toggle find-in-terminal search bar.
+        if modifiers.state().super_key()
+            && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "f" || s.as_str() == "F")
+        {
+            self.search_bar.toggle();
+            debug!("Search bar toggled: visible={}", self.search_bar.visible);
+            return;
+        }
+
+        // Search bar captures keys when visible (before they reach the PTY).
+        if self.search_bar.visible {
+            use phantom_ui::widgets::SearchKey;
+            use phantom_ui::widgets::SearchBarAction;
+
+            let action = match &event.logical_key {
+                Key::Named(NamedKey::Escape) => self.search_bar.handle_key(SearchKey::Escape),
+                Key::Named(NamedKey::Enter) => self.search_bar.handle_key(SearchKey::Enter),
+                Key::Named(NamedKey::Backspace) => self.search_bar.handle_key(SearchKey::Backspace),
+                Key::Named(NamedKey::Delete) => self.search_bar.handle_key(SearchKey::Delete),
+                Key::Named(NamedKey::ArrowLeft) => self.search_bar.handle_key(SearchKey::Left),
+                Key::Named(NamedKey::ArrowRight) => self.search_bar.handle_key(SearchKey::Right),
+                Key::Named(NamedKey::ArrowUp) => self.search_bar.handle_key(SearchKey::Up),
+                Key::Named(NamedKey::ArrowDown) => self.search_bar.handle_key(SearchKey::Down),
+                Key::Named(NamedKey::Home) => self.search_bar.handle_key(SearchKey::Home),
+                Key::Named(NamedKey::End) => self.search_bar.handle_key(SearchKey::End),
+                Key::Character(s) => {
+                    if let Some(ch) = s.chars().next() {
+                        self.search_bar.handle_char(ch)
+                    } else {
+                        SearchBarAction::None
+                    }
+                }
+                _ => SearchBarAction::None,
+            };
+
+            match action {
+                SearchBarAction::QueryChanged(query) => {
+                    self.update_search_query(&query);
+                }
+                SearchBarAction::Next => {
+                    self.advance_search_match(1);
+                }
+                SearchBarAction::Prev => {
+                    self.advance_search_match(-1);
+                }
+                SearchBarAction::Close => {
+                    self.clear_search();
+                }
+                SearchBarAction::None => {}
+            }
+            return;
+        }
+
         if !modifiers.state().control_key()
             && !modifiers.state().alt_key()
             && !modifiers.state().super_key()
