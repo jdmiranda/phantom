@@ -5982,10 +5982,8 @@ dependencies = [
  "axum",
  "axum-test",
  "ed25519-dalek",
- "env_logger",
  "futures-util",
  "jsonwebtoken",
- "log",
  "lru",
  "rand 0.8.6",
  "serde",
@@ -6186,6 +6184,7 @@ dependencies = [
  "notify",
  "phantom-nlp",
  "phantom-semantic",
+ "serde_json",
  "tempfile",
 ]
 
