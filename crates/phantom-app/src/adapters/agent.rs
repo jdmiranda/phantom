@@ -145,6 +145,12 @@ impl AppCore for AgentAdapter {
                         success,
                         summary,
                         spawn_tag: self.spawn_tag,
+                        // Issue #646 spike: this adapter path bridges the
+                        // pane-status FSM (Working/Done/Failed) — it does not
+                        // see the agents-side `complete_task` result payload,
+                        // which is captured on `Agent` directly. Future PRs
+                        // will plumb the typed result through to this site.
+                        result: None,
                     },
                     frame: 0,
                     timestamp: 0,

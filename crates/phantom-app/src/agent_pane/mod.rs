@@ -757,6 +757,31 @@ impl AgentPane {
                     self.pending_tools.push((id, call));
                     got_content = true;
                 }
+                Some(ApiEvent::CompleteTask { id: _, result }) => {
+                    // Issue #646 spike: minimal lifecycle handler.
+                    //
+                    // The model emitted `complete_task(result)`; capture the
+                    // typed payload on the agent and end the loop. This is
+                    // enough to make the spike integration test pass and to
+                    // establish the wiring the broader implementation will
+                    // build on.
+                    //
+                    // OUT OF SCOPE FOR THE SPIKE — to be implemented in
+                    // follow-up PRs against #646:
+                    //   - Schema validation (must-be-object → flatline after
+                    //     `validation_failure_count` reaches 3).
+                    //   - `requires_complete_task` enforcement on
+                    //     `MAX_TOOL_ROUNDS` exit (transition to `Failed` with
+                    //     reason `"exited without complete_task"`).
+                    //   - Mirror the bookkeeping the `Done` arm performs:
+                    //     journal completion record, capture sidecar flush,
+                    //     conversation save, snapshot push, status transition
+                    //     to `AgentPaneStatus::Done`. The spike intentionally
+                    //     does the agents-side bit only.
+                    self.agent.complete_with_result(result);
+                    got_content = true;
+                    break;
+                }
                 Some(ApiEvent::Done) => {
                     // Flush accumulated assistant text into the conversation.
                     if !self.current_assistant_text.is_empty() {
