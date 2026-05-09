@@ -38,7 +38,7 @@ use phantom_agents::dispatch::Disposition;
 use phantom_agents::{AgentId, AgentTask};
 
 use crate::events::AiAction;
-use crate::orchestrator::{ReplanDecision, StepStatus, TaskLedger};
+use crate::orchestrator::{DispatchBlocked, ReplanDecision, TaskLedger};
 
 /// How long an agent can be active without completing before we consider it
 /// stalled. This is a safety valve — well-behaved agents finish via
@@ -236,16 +236,47 @@ impl ReconcilerState {
             .collect();
 
         for (idx, task, disposition, description) in eligible {
+            // Advance the step to Active via the guarded mutator (Issue #647)
+            // so the dependency contract on `PlanStep.depends_on` is enforced
+            // at the dispatch boundary. Direct `s.status = Active` mutation
+            // is forbidden in production.
+            match ledger.try_dispatch(idx) {
+                Ok(_) => { /* step is now Active; finish the dispatch below */ }
+                Err(DispatchBlocked::UnmetDeps { open, .. }) => {
+                    // `eligible_next()` already filtered for satisfied deps
+                    // above, so reaching this branch indicates the ledger
+                    // changed under us between snapshot and dispatch (e.g.
+                    // a step we depended on was reverted). Log the open
+                    // dep indices and skip this step for this tick — it
+                    // will be re-evaluated next tick.
+                    log::warn!(
+                        "Reconciler: step {idx} blocked by unmet deps {open:?} \
+                         (post-eligible_next race) — skipping this tick"
+                    );
+                    continue;
+                }
+                Err(other) => {
+                    log::warn!(
+                        "Reconciler: step {idx} dispatch rejected by guard: \
+                         {other:?} — skipping this tick"
+                    );
+                    continue;
+                }
+            }
+
+            // Allocate the synthetic agent ID only after the guard accepts
+            // the transition. This prevents wasted IDs when a dep race
+            // forces us to skip the step.
             let agent_id: AgentId = self.next_agent_id;
             self.next_agent_id = self
                 .next_agent_id
                 .checked_add(1)
                 .expect("reconciler next_agent_id overflowed u64 — unreachable in practice");
 
-            // Advance step to Active before emitting SpawnAgent so that a
-            // synchronous ledger inspection sees the correct state.
+            // try_dispatch only mutates `status`. The reconciler is the
+            // owner of `agent_id` and `attempts` so we update those here
+            // (after the guard succeeds).
             if let Some(s) = ledger.plan.get_mut(idx) {
-                s.status = StepStatus::Active;
                 s.agent_id = Some(agent_id);
                 s.attempts += 1;
             }
@@ -319,7 +350,7 @@ impl Default for ReconcilerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::PlanStep;
+    use crate::orchestrator::{PlanStep, StepStatus};
     use phantom_agents::AgentTask;
 
     fn free_task(prompt: &str) -> AgentTask {
