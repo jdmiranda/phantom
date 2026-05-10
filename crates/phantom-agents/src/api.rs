@@ -358,8 +358,29 @@ pub fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     .cloned()
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
+                // ---- Issue #646: lifecycle pre-parser filter --------------
+                //
+                // `complete_task` is a lifecycle signal, not a tool — it has
+                // no `ToolResult` round-trip. Diverting it ahead of both the
+                // non-object input guard AND `ToolType::from_api_name` keeps
+                // the 8-variant `ToolType` enum focused on file/git tools and
+                // gives the agent loop a dedicated
+                // `ApiEvent::CompleteTask { result }` to match on.
+                //
+                // The non-object guard is intentionally NOT applied here so
+                // the consumer-side validation gate in `phantom-app`
+                // (`agent_pane::poll`) can count schema-invalid calls toward
+                // the 3-strike `validation_failure_count` flatline. The
+                // file/git path below keeps the strict guard.
+                if name == "complete_task" {
+                    let _ = tx.send(ApiEvent::CompleteTask { id, result: raw_input });
+                    continue;
+                }
+
                 // Reject non-object `input` fields — the Claude API always
-                // sends an object here; a bare string or null is malformed.
+                // sends an object here for tool calls; a bare string or null
+                // is malformed. Lifecycle signals (`complete_task`) bypass
+                // this guard above so the consumer can validate.
                 if raw_input.as_object().is_none() {
                     let _ = tx.send(ApiEvent::Error(format!(
                         "tool_use block for '{name}' has non-object input: {raw_input}"
@@ -367,19 +388,7 @@ pub fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     continue;
                 }
 
-                // ---- Issue #646: lifecycle pre-parser filter --------------
-                //
-                // `complete_task` is a lifecycle signal, not a tool — it has
-                // no `ToolResult` round-trip. Diverting it ahead of
-                // `ToolType::from_api_name` keeps the 8-variant `ToolType`
-                // enum focused on file/git tools and gives the agent loop a
-                // dedicated `ApiEvent::CompleteTask { result }` to match on.
-                //
-                // Spike scope: only `complete_task` is wired here. `abort_task`
-                // is intentionally out of scope — see issue #646.
-                if name == "complete_task" {
-                    let _ = tx.send(ApiEvent::CompleteTask { id, result: raw_input });
-                } else if let Some(tool) = ToolType::from_api_name(name) {
+                if let Some(tool) = ToolType::from_api_name(name) {
                     let _ = tx.send(ApiEvent::ToolUse {
                         id,
                         call: ToolCall { tool, args: raw_input },
