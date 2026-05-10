@@ -311,6 +311,21 @@ pub struct Agent {
     /// until [`Agent::store_prompt`] (or [`SystemPromptBuilder::build_and_store`])
     /// is called.
     pub prompt_text: Option<String>,
+    /// Issue #646 spike: when `true`, the agent must call the lifecycle tool
+    /// `complete_task(result)` to terminate. Reaching `MAX_TOOL_ROUNDS`
+    /// without calling it should transition the pane to `Failed` with reason
+    /// `"exited without complete_task"`. The default `false` preserves the
+    /// current state-implicit termination behaviour for the legacy callers
+    /// that have not been updated yet.
+    requires_complete_task: bool,
+    /// Issue #646 spike: typed result payload captured from a successful
+    /// `complete_task` call.
+    ///
+    /// Set by [`Agent::complete_with_result`] when the agent loop receives an
+    /// [`crate::api::ApiEvent::CompleteTask`] event. Surfaced to consumers
+    /// (capture sidecar, parent-agent `wait_for_agent`, brain reconciler)
+    /// via [`Agent::completion_result`].
+    completion_result: Option<serde_json::Value>,
 }
 
 impl Agent {
@@ -335,6 +350,11 @@ impl Agent {
             semantic_ctx: SemanticContext::new(),
             policy: AgentPolicy::default(),
             prompt_text: None,
+            // Issue #646 spike: legacy callers default to opt-out; only the
+            // builder-driven path turned on by `AgentSpawnOpts::with_requires_complete_task`
+            // flips this to `true`.
+            requires_complete_task: false,
+            completion_result: None,
         }
     }
 
@@ -620,6 +640,47 @@ impl Agent {
         self.completed_at = Some(Instant::now());
     }
 
+    /// Issue #646 spike: terminate the agent with a typed result payload.
+    ///
+    /// Called by the agent loop on receipt of [`crate::api::ApiEvent::CompleteTask`].
+    /// Stores `result` for later retrieval via [`Self::completion_result`] and
+    /// transitions to [`AgentStatus::Done`].
+    ///
+    /// Spike scope: this is the success-path-only entry. Schema validation,
+    /// `validation_failure_count`, and `abort_task` are explicitly out of
+    /// scope and live in follow-up PRs against issue #646.
+    pub fn complete_with_result(&mut self, result: serde_json::Value) {
+        self.completion_result = Some(result);
+        self.complete(true);
+    }
+
+    /// Issue #646 spike: returns whether this agent must call `complete_task`
+    /// to terminate. `false` for legacy state-implicit terminations.
+    #[must_use]
+    pub fn requires_complete_task(&self) -> bool {
+        self.requires_complete_task
+    }
+
+    /// Issue #646 spike: marks this agent as requiring a `complete_task` call
+    /// to terminate.
+    ///
+    /// Called by the agent-pane spawn site when the matching
+    /// [`AgentSpawnOpts::requires_complete_task`] flag is set. Kept as a
+    /// dedicated setter so the storage layout (Decision #2 option (a):
+    /// direct field on `Agent`) is opaque to construction sites.
+    pub fn set_requires_complete_task(&mut self, required: bool) {
+        self.requires_complete_task = required;
+    }
+
+    /// Issue #646 spike: returns the typed result payload captured from
+    /// `complete_task`, if the agent has terminated through that path.
+    ///
+    /// `None` until [`Self::complete_with_result`] has been called.
+    #[must_use]
+    pub fn completion_result(&self) -> Option<&serde_json::Value> {
+        self.completion_result.as_ref()
+    }
+
     /// Transition to Flatline — terminal failure requiring manual retry.
     ///
     /// Flatline is intentionally terminal: unlike Failed, it does not
@@ -893,6 +954,10 @@ pub struct AgentSpawnOpts {
     ///
     /// Previously silently dropped from `SpawnSubagentRequest` — wired in for #224.
     label: Option<String>,
+    /// Issue #646 spike: when `true`, the spawned [`Agent`] must call
+    /// `complete_task(result)` to terminate. Default `false` preserves the
+    /// existing state-implicit termination behaviour.
+    requires_complete_task: bool,
 }
 
 impl AgentSpawnOpts {
@@ -907,6 +972,7 @@ impl AgentSpawnOpts {
             spawn_tag: None,
             role: None,
             label: None,
+            requires_complete_task: false,
         }
     }
 
@@ -945,6 +1011,19 @@ impl AgentSpawnOpts {
         self
     }
 
+    /// Issue #646 spike: opt the spawned agent into mandatory `complete_task`
+    /// termination. Default `false` preserves state-implicit termination for
+    /// every legacy caller that does not explicitly opt in.
+    ///
+    /// Spike scope: only the field is wired here. The `Failed` transition on
+    /// `MAX_TOOL_ROUNDS` and the schema-validation flatline path live in
+    /// follow-up PRs against issue #646.
+    #[must_use]
+    pub fn with_requires_complete_task(mut self, required: bool) -> Self {
+        self.requires_complete_task = required;
+        self
+    }
+
     /// Return the role override, if any.
     #[must_use]
     pub fn role(&self) -> Option<crate::role::AgentRole> {
@@ -955,6 +1034,13 @@ impl AgentSpawnOpts {
     #[must_use]
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
+    }
+
+    /// Issue #646 spike: returns whether the spawned agent must call
+    /// `complete_task` to terminate.
+    #[must_use]
+    pub fn requires_complete_task(&self) -> bool {
+        self.requires_complete_task
     }
 
 

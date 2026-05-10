@@ -695,7 +695,13 @@ impl App {
                         success,
                         summary,
                         spawn_tag,
+                        result: _,
                     } => Some(AiEvent::AgentComplete {
+                        // Issue #646 spike: `result` is the typed payload from
+                        // `complete_task`. The brain `AiEvent::AgentComplete`
+                        // shape predates this field; downstream PRs will widen
+                        // it. For the spike we ignore the payload here so
+                        // existing brain routing keeps working.
                         id: *agent_id,
                         success: *success,
                         summary: summary.clone(),

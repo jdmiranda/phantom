@@ -87,6 +87,23 @@ pub enum ApiEvent {
         id: String,
         call: ToolCall,
     },
+    /// The assistant called the lifecycle tool `complete_task(result)`.
+    ///
+    /// Issue #646 spike: lifecycle signals are routed pre-`from_api_name` and
+    /// emitted as a distinct event variant rather than a `ToolUse`, because
+    /// they have no `ToolResult` round-trip — they end the agent's loop. The
+    /// agent loop matches on this variant and transitions to `AgentStatus::Done`
+    /// while preserving `result` on the agent for downstream consumers
+    /// (capture sidecar, parent-agent `wait_for_agent`, brain reconciler).
+    CompleteTask {
+        /// API-assigned ID echoed back so the conversation history can record
+        /// the call site if a downstream PR widens `AgentMessage::ToolCall` to
+        /// cover lifecycle signals.
+        id: String,
+        /// The typed result payload. Phase 1 enforces "must be a JSON object";
+        /// Phase 2 binds this to a per-task JSON schema (issue #646).
+        result: Value,
+    },
     /// The response is complete.
     Done,
     /// An error occurred.
@@ -297,7 +314,13 @@ fn build_request_body(
 // ---------------------------------------------------------------------------
 
 /// Parse the API response JSON and send events over the channel.
-fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
+///
+/// Exposed (with `#[doc(hidden)]`) so the issue #646 spike integration test
+/// at `crates/phantom-agents/tests/complete_task_spike.rs` can drive it
+/// directly without standing up a full HTTPS round-trip. Production callers
+/// reach this through [`send_message`].
+#[doc(hidden)]
+pub fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
     // Check for API-level error.
     if let Some(err) = body.get("error") {
         let msg = err["message"]
@@ -344,7 +367,19 @@ fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     continue;
                 }
 
-                if let Some(tool) = ToolType::from_api_name(name) {
+                // ---- Issue #646: lifecycle pre-parser filter --------------
+                //
+                // `complete_task` is a lifecycle signal, not a tool — it has
+                // no `ToolResult` round-trip. Diverting it ahead of
+                // `ToolType::from_api_name` keeps the 8-variant `ToolType`
+                // enum focused on file/git tools and gives the agent loop a
+                // dedicated `ApiEvent::CompleteTask { result }` to match on.
+                //
+                // Spike scope: only `complete_task` is wired here. `abort_task`
+                // is intentionally out of scope — see issue #646.
+                if name == "complete_task" {
+                    let _ = tx.send(ApiEvent::CompleteTask { id, result: raw_input });
+                } else if let Some(tool) = ToolType::from_api_name(name) {
                     let _ = tx.send(ApiEvent::ToolUse {
                         id,
                         call: ToolCall { tool, args: raw_input },

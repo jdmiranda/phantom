@@ -5952,6 +5952,7 @@ dependencies = [
  "blake3",
  "glob",
  "log",
+ "phantom-mcp",
  "phantom-memory",
  "phantom-protocol",
  "phantom-semantic",
@@ -5976,6 +5977,7 @@ dependencies = [
  "arboard",
  "bitflags 2.11.1",
  "futures-core",
+ "futures-util",
  "image",
  "libc",
  "log",
@@ -6010,6 +6012,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "toml",
  "uuid",
  "wgpu",
@@ -6136,10 +6139,8 @@ dependencies = [
  "axum",
  "axum-test",
  "ed25519-dalek",
- "env_logger",
  "futures-util",
  "jsonwebtoken",
- "log",
  "lru",
  "rand 0.8.6",
  "serde",
@@ -6240,6 +6241,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "serde_json",
 ]
 
 [[package]]
@@ -6340,6 +6342,7 @@ dependencies = [
  "notify",
  "phantom-nlp",
  "phantom-semantic",
+ "serde_json",
  "tempfile",
 ]
 

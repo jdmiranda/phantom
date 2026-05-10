@@ -72,6 +72,17 @@ pub enum Event {
         /// Reconciler spawn tag echoed back so the brain can route the
         /// completion to the correct `active_dispatches` entry.
         spawn_tag: Option<u64>,
+        /// Issue #646 spike: typed result payload supplied by the agent
+        /// through `complete_task`, when the agent was spawned with
+        /// `requires_complete_task = true`.
+        ///
+        /// Phase 1 (this spike) preserves the JSON object end-to-end;
+        /// Phase 2 binds it to a per-task JSON schema.
+        ///
+        /// `None` for agents that do not opt into `requires_complete_task`,
+        /// for legacy state-implicit terminations, and for `AgentError` →
+        /// `AgentTaskComplete { success: false, .. }` synthesis paths.
+        result: Option<serde_json::Value>,
     },
     AgentError { agent_id: AgentId, error: String },
 
@@ -220,6 +231,7 @@ mod tests {
                 success: true,
                 summary: "done".into(),
                 spawn_tag: None,
+                result: None,
             },
             Event::AgentError { agent_id: 1, error: "oops".into() },
         ];
