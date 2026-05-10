@@ -271,14 +271,22 @@ impl LoopRunner {
     }
 
     async fn dispatch(&mut self, input: LoopInput) -> LoopState {
-        // Agentless path: no agent, just run effects with a null result.
+        // Agentless path: no agent, so the source's `LoopInput` *is* the
+        // iteration result. Synthesise a JSON object that exposes both
+        // `key` and `payload` to the effect runner so `EnqueueTo.fields`
+        // mappings like `from = "key"` or `from = "payload.<...>"` resolve
+        // against the input the source just produced. See issue #665.
         let Some(agent_spec) = self.spec.agent.as_ref() else {
             tracing::debug!(
                 loop_id = %self.spec.id,
                 key = %input.key,
-                "agentless dispatch; running effects with null result",
+                "agentless dispatch; running effects with synthesised input result",
             );
-            return self.run_effects_and_continue(&input, &Value::Null);
+            let synthetic_result = serde_json::json!({
+                "key": input.key,
+                "payload": input.payload,
+            });
+            return self.run_effects_and_continue(&input, &synthetic_result);
         };
 
         // Agent path: ask the dispatcher to spawn.
@@ -553,8 +561,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agentless_dispatch_runs_effects_with_null_result() {
-        // Build an agentless spec with one enqueue_to effect.
+    async fn agentless_dispatch_forwards_loop_input_to_effects() {
+        // Regression for issue #665. Agentless loops must surface the
+        // source-produced `LoopInput` as the effect-runner result so
+        // field maps like `from = "key"` or `from = "payload.<x>"`
+        // resolve. With an empty `fields` list the whole synthetic
+        // result is forwarded as the message payload.
         let mut spec = make_spec_with_agent(json!({"type": "object"}));
         spec.agent = None;
         spec.on_complete = vec![LoopEffect::EnqueueTo {
@@ -565,7 +577,7 @@ mod tests {
         let source = Box::new(OneShotSource {
             input: Some(LoopInput {
                 key: "k".to_string(),
-                payload: json!({"ignored": true}),
+                payload: json!({"surfaced": true}),
                 correlation_id: CorrelationId::new("c"),
             }),
         });
@@ -580,7 +592,8 @@ mod tests {
         let reason = runner.run().await;
         // After processing one input, source returns Done → stop.
         assert_eq!(reason, "source exhausted");
-        // The effect fired with a null payload — queue should have 1 message.
-        assert_eq!(queues.get_or_create("out").len(), 1);
+        // The synthetic result wraps the LoopInput verbatim.
+        let msg = queues.get_or_create("out").pop().expect("one enqueued message");
+        assert_eq!(msg.payload, json!({"key": "k", "payload": {"surfaced": true}}));
     }
 }
