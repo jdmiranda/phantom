@@ -481,6 +481,67 @@ pub fn available_tools() -> Vec<ToolDefinition> {
     ]
 }
 
+/// Return the lifecycle tool definitions (`complete_task`, `abort_task`).
+///
+/// Issue #646 broader implementation: when an [`crate::agent::Agent`] is spawned
+/// with [`crate::agent::AgentSpawnOpts::with_requires_complete_task`] set to
+/// `true`, the agent-pane dispatch loop must extend its LLM tool manifest with
+/// these definitions so the model can emit the terminal signal. Both Claude
+/// (`api.rs`) and OpenAI (`chat.rs`) parsers divert tool-name matches for
+/// `complete_task` ahead of [`ToolType::from_api_name`] into a dedicated
+/// [`crate::api::ApiEvent::CompleteTask`] event (decision #1 from the spike
+/// PR — option (b)).
+///
+/// `result` is required and must be a JSON object — the consumer-side
+/// validation gate in `phantom-app::agent_pane` enforces this and flatlines
+/// the pane after three consecutive schema-invalid calls.
+///
+/// Out of scope: full `abort_task` consumer wiring lives behind future work.
+/// The definition is exposed here so the model can call it; the consumer side
+/// is currently a no-op that lets the existing iteration-limit / error arms
+/// terminate the agent.
+#[must_use]
+pub fn lifecycle_tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "complete_task".into(),
+            description: "Signal that the task is complete. Call this once when you have finished \
+                          the work — the call ends the agent loop. `result` must be a JSON object \
+                          summarising the outcome (e.g. `{\"summary\": \"...\", \"artifacts\": [...]}`).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Short human-readable description of what was accomplished."
+                    },
+                    "artifacts": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of files, identifiers, or outputs produced."
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "abort_task".into(),
+            description: "Signal that the task cannot be completed. Call this once when you have \
+                          determined the work is infeasible or blocked — the call ends the agent \
+                          loop. `reason` must be a short string explaining why.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Short human-readable explanation of why the task was aborted."
+                    }
+                },
+                "required": ["reason"]
+            }),
+        },
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Path sandboxing
 // ---------------------------------------------------------------------------
