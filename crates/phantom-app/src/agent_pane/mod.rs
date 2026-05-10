@@ -1004,7 +1004,7 @@ impl AgentPane {
     /// millisecond-precision timestamp so adapters can render a rich timeline
     /// instead of scanning the raw `output` string.
     #[allow(dead_code)] // Called by the timeline adapter (Phase 2) and tests
-    pub(crate) fn messages(&self) -> &[PaneMessage] {
+    pub(crate) fn pane_messages(&self) -> &[PaneMessage] {
         &self.pane_messages
     }
 

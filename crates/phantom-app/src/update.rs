@@ -119,32 +119,32 @@ impl App {
         // when previous-session sidecar files contained live agents or goals.
         // We drain `restored_session` via `.take()` so this block runs at most
         // once per process lifetime (subsequent frames see `None`).
-        if self.state == AppState::Terminal {
-            if let Some(session) = self.restored_session.take() {
-                let n_agents = session.agent_count();
-                let n_goals = session.goal_count();
-                let msg = if n_agents > 0 && n_goals > 0 {
-                    format!(
-                        "Resume previous session? ({n_agents} agent{}, {n_goals} goal{})",
-                        if n_agents == 1 { "" } else { "s" },
-                        if n_goals == 1 { "" } else { "s" },
-                    )
-                } else if n_agents > 0 {
-                    format!(
-                        "Resume previous session? ({n_agents} agent{})",
-                        if n_agents == 1 { "" } else { "s" },
-                    )
-                } else {
-                    format!(
-                        "Resume previous session? ({n_goals} goal{})",
-                        if n_goals == 1 { "" } else { "s" },
-                    )
-                };
-                if let Some(ref brain) = self.brain {
-                    let _ = brain.send_event(AiEvent::Interrupt(msg));
-                }
-                // session is dropped here; self.restored_session is None for all future frames.
+        if self.state == AppState::Terminal
+            && let Some(session) = self.restored_session.take()
+        {
+            let n_agents = session.agent_count();
+            let n_goals = session.goal_count();
+            let msg = if n_agents > 0 && n_goals > 0 {
+                format!(
+                    "Resume previous session? ({n_agents} agent{}, {n_goals} goal{})",
+                    if n_agents == 1 { "" } else { "s" },
+                    if n_goals == 1 { "" } else { "s" },
+                )
+            } else if n_agents > 0 {
+                format!(
+                    "Resume previous session? ({n_agents} agent{})",
+                    if n_agents == 1 { "" } else { "s" },
+                )
+            } else {
+                format!(
+                    "Resume previous session? ({n_goals} goal{})",
+                    if n_goals == 1 { "" } else { "s" },
+                )
+            };
+            if let Some(ref brain) = self.brain {
+                let _ = brain.send_event(AiEvent::Interrupt(msg));
             }
+            // session is dropped here; self.restored_session is None for all future frames.
         }
 
         // Demo mode: spawn one example agent pane the first time we land in
@@ -624,14 +624,13 @@ impl App {
                         // Refresh the brain's history snapshot every 10 commands.
                         // This keeps the snapshot fresh without hammering the JSONL
                         // file on every single command.
-                        if store.count() % 10 == 0 {
-                            if let Ok(recent) = store.recent(20) {
-                                if let Some(ref brain) = self.brain {
-                                    let _ = brain.send_event(
-                                        phantom_brain::events::AiEvent::HistorySnapshot(recent),
-                                    );
-                                }
-                            }
+                        if store.count() % 10 == 0
+                            && let Ok(recent) = store.recent(20)
+                            && let Some(ref brain) = self.brain
+                        {
+                            let _ = brain.send_event(
+                                phantom_brain::events::AiEvent::HistorySnapshot(recent),
+                            );
                         }
                     }
                     // OODA cache (#358): store the parsed result so

@@ -421,10 +421,10 @@ impl SettingsPanel {
                         snap.shell = value.clone();
                     }
                     ("Agent Timeout", SettingsKind::IntSlider { value, .. }) => {
-                        snap.agent_timeout_seconds = value.clamp(10, 300);
+                        snap.agent_timeout_seconds = (*value).clamp(10, 300);
                     }
                     ("Max Agents", SettingsKind::IntSlider { value, .. }) => {
-                        snap.max_concurrent_agents = value.clamp(1, 10);
+                        snap.max_concurrent_agents = (*value).clamp(1, 10);
                     }
                     _ => {}
                 }
@@ -466,8 +466,8 @@ impl SettingsPanel {
             }
             SettingsKind::IntSlider { min, max, value } => {
                 let range = max - min;
-                if *range > 0 {
-                    Some((*value - *min) as f32 / *range as f32)
+                if range > 0 {
+                    Some((*value - *min) as f32 / range as f32)
                 } else {
                     Some(0.0)
                 }
