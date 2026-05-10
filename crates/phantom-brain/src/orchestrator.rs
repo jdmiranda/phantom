@@ -16,7 +16,7 @@
 //! | Task ledger            | `TaskLedger` struct                    |
 //! | Progress ledger        | `ProgressAssessment` (5-question eval) |
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use phantom_agents::AgentTask;
@@ -436,6 +436,95 @@ impl TaskLedger {
         }
     }
 
+    /// Returns `None` when the step at `idx` has every entry in its
+    /// `depends_on` list either out-of-bounds or already at
+    /// [`StepStatus::Done`]; returns `Some(open)` listing the in-bounds
+    /// dependency indices that are not yet `Done`.
+    ///
+    /// Out-of-bounds dependency indices are treated as satisfied, matching
+    /// the [`TaskLedger::eligible_next`] and [`TaskLedger::has_cycle`]
+    /// semantics. The returned `Vec` preserves the original order from
+    /// `depends_on` and contains only indices that are in range for the
+    /// current `plan`.
+    ///
+    /// This is the private helper that backs [`TaskLedger::eligible_next`]'s
+    /// dependency filter and [`TaskLedger::try_dispatch`]'s guard. Returns
+    /// `Some(vec![])` (empty `open` list) is never produced: an empty open
+    /// list always collapses to `None`.
+    ///
+    /// Panics if `idx` is out of bounds; callers must validate the index
+    /// before invoking this helper.
+    fn deps_satisfied(&self, idx: usize) -> Option<Vec<usize>> {
+        let plan_len = self.plan.len();
+        let open: Vec<usize> = self.plan[idx]
+            .depends_on
+            .iter()
+            .copied()
+            .filter(|dep| {
+                // Out-of-bounds indices are treated as satisfied.
+                *dep < plan_len && self.plan[*dep].status != StepStatus::Done
+            })
+            .collect();
+
+        if open.is_empty() { None } else { Some(open) }
+    }
+
+    /// Transition the step at `idx` from [`StepStatus::Pending`] to
+    /// [`StepStatus::Active`], enforcing every gating invariant in one
+    /// guarded mutator.
+    ///
+    /// This is the **only** path that production code may use to set a step
+    /// to `Active`. The reconciler calls it from `dispatch_pending`; direct
+    /// `plan[idx].status = StepStatus::Active` writes are reserved for
+    /// `#[cfg(test)]` fixtures only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DispatchBlocked`] when:
+    /// - `idx >= plan.len()` — [`DispatchBlocked::OutOfBounds`].
+    /// - The step is not [`StepStatus::Pending`] —
+    ///   [`DispatchBlocked::NotPending`] carries the current status so the
+    ///   caller can distinguish "already running" from "completed" without
+    ///   a second lookup.
+    /// - Any in-bounds entry in `depends_on` is not yet `Done` —
+    ///   [`DispatchBlocked::UnmetDeps`] carries the open indices.
+    ///
+    /// On success the step's `status` is set to `Active` and a reference
+    /// to the now-active step is returned so the caller can read its
+    /// description, task, and disposition without a second lookup.
+    /// Fields other than `status` (notably `agent_id` and `attempts`) are
+    /// **not** mutated by this method — the reconciler stamps those after
+    /// a successful dispatch.
+    pub fn try_dispatch(&mut self, idx: usize) -> Result<&PlanStep, DispatchBlocked> {
+        let plan_len = self.plan.len();
+        let Some(step) = self.plan.get(idx) else {
+            return Err(DispatchBlocked::OutOfBounds {
+                idx,
+                len: plan_len,
+            });
+        };
+
+        if step.status != StepStatus::Pending {
+            return Err(DispatchBlocked::NotPending {
+                idx,
+                current: step.status,
+            });
+        }
+
+        if let Some(open) = self.deps_satisfied(idx) {
+            return Err(DispatchBlocked::UnmetDeps { idx, open });
+        }
+
+        // All invariants hold — perform the single mutation. Unwrap is safe:
+        // we already validated `idx` is in bounds above.
+        let step = self
+            .plan
+            .get_mut(idx)
+            .expect("plan idx validated above");
+        step.status = StepStatus::Active;
+        Ok(&*step)
+    }
+
     /// Returns all `Pending` steps whose dependency constraints are satisfied.
     ///
     /// A step is *eligible* when:
@@ -455,28 +544,16 @@ impl TaskLedger {
     ///
     /// O(n × d) where n = number of plan steps and d = average dependency
     /// fan-in. For typical plans (n < 20, d < 5) this is negligible.
-    #[must_use] 
+    #[must_use]
     pub fn eligible_next(&self) -> Vec<(usize, &PlanStep)> {
-        // Collect the index set of all completed steps.
-        let done: HashSet<usize> = self
-            .plan
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.status == StepStatus::Done)
-            .map(|(i, _)| i)
-            .collect();
-
+        // NeedsApproval steps are explicitly excluded: they require a
+        // human to call approve_checkpoint before they become Pending.
+        // Dependency satisfaction is delegated to `deps_satisfied` so the
+        // same predicate backs both `eligible_next` and `try_dispatch`.
         self.plan
             .iter()
             .enumerate()
-            .filter(|(_, s)| {
-                // NeedsApproval steps are explicitly excluded: they require a
-                // human to call approve_checkpoint before they become Pending.
-                s.status == StepStatus::Pending
-                    && s.depends_on
-                        .iter()
-                        .all(|dep| *dep >= self.plan.len() || done.contains(dep))
-            })
+            .filter(|(idx, s)| s.status == StepStatus::Pending && self.deps_satisfied(*idx).is_none())
             .collect()
     }
 
@@ -1151,21 +1228,67 @@ impl Orchestrator {
         }
     }
 
-    /// Pull the next pending step from the task ledger without dispatching it.
+    /// Locate the first eligible pending step and atomically transition it
+    /// to [`StepStatus::Active`] via [`TaskLedger::try_dispatch`].
     ///
     /// Returns `None` when:
     /// - The plan is empty.
-    /// - All steps are `Active`, `Done`, `Failed`, or `Skipped` (no pending work).
+    /// - No step is eligible (all dependencies open, or every step is
+    ///   `Active`, `Done`, `Failed`, `Skipped`, or `NeedsApproval`).
+    /// - The guarded `try_dispatch` rejects the candidate (e.g. an
+    ///   intervening race left a dependency unmet).
     ///
-    /// The returned [`PlanStep`] is a **clone** of the ledger entry — the
-    /// caller is responsible for advancing the step's status to `Active` via
-    /// [`TaskLedger::plan`] after successfully dispatching the returned step.
-    #[must_use] 
-    pub fn dispatch_next_step(&self) -> Option<PlanStep> {
-        self.ledger
-            .next_pending_step()
-            .map(|(_, step)| step.clone())
+    /// The returned [`PlanStep`] is a **clone** of the ledger entry taken
+    /// **after** the dispatch transition, so its `status` is already
+    /// `Active`. This method had no production callers prior to runtime
+    /// dep enforcement; the reconciler calls [`TaskLedger::try_dispatch`]
+    /// directly. The signature is `&mut self` because the transition is
+    /// the very thing we wanted to make guarded.
+    pub fn dispatch_next_step(&mut self) -> Option<PlanStep> {
+        let idx = self.ledger.eligible_next().first().map(|(i, _)| *i)?;
+        match self.ledger.try_dispatch(idx) {
+            Ok(step) => Some(step.clone()),
+            Err(blocked) => {
+                log::warn!(
+                    "Orchestrator::dispatch_next_step: try_dispatch rejected step {idx}: {blocked:?}"
+                );
+                None
+            }
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DispatchBlocked
+// ---------------------------------------------------------------------------
+
+/// Why a [`TaskLedger::try_dispatch`] call refused to transition a step to
+/// [`StepStatus::Active`].
+///
+/// Each variant pins down exactly which invariant the guarded mutator
+/// enforced. Callers (the reconciler, today) match on the variant to log
+/// open dependency indices and skip the step for the current tick rather
+/// than rolling back partial state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchBlocked {
+    /// `idx` was out of bounds for the current plan (`len` reflects the
+    /// plan length at the time of the call).
+    OutOfBounds { idx: usize, len: usize },
+    /// The step exists but its current status is not
+    /// [`StepStatus::Pending`]. Includes the current status so callers can
+    /// distinguish "already running" (`Active`) from "completed" (`Done`)
+    /// without a second lookup.
+    NotPending { idx: usize, current: StepStatus },
+    /// One or more in-bounds dependency indices in `step.depends_on` are
+    /// not yet at [`StepStatus::Done`]. `open` lists those indices in the
+    /// order they appear in `depends_on`. Out-of-bounds dependency
+    /// indices are silently filtered out and never reported here.
+    UnmetDeps { idx: usize, open: Vec<usize> },
+    /// Reserved for the per-step quarantine flag tracked in issue #649.
+    /// `try_dispatch` does **not** emit this variant in the current
+    /// implementation; it exists so downstream callers can already
+    /// pattern-match exhaustively without an `_` arm.
+    Quarantined,
 }
 
 // ---------------------------------------------------------------------------
@@ -1650,11 +1773,12 @@ mod tests {
     /// Returns None when the plan is empty.
     #[test]
     fn dispatch_next_step_none_on_empty_plan() {
-        let orch = Orchestrator::new("goal with no plan");
+        let mut orch = Orchestrator::new("goal with no plan");
         assert!(orch.dispatch_next_step().is_none());
     }
 
-    /// Returns the first Pending step.
+    /// Returns the first Pending step and transitions it to `Active` in
+    /// the ledger (the guarded mutator semantics).
     #[test]
     fn dispatch_next_step_returns_first_pending() {
         let mut orch = Orchestrator::new("test");
@@ -1664,6 +1788,9 @@ mod tests {
         ]);
         let step = orch.dispatch_next_step().expect("should return step A");
         assert_eq!(step.description, "step A");
+        // The dispatcher is the *only* path to Active in production.
+        assert_eq!(orch.ledger().plan[0].status, StepStatus::Active);
+        assert_eq!(orch.ledger().plan[1].status, StepStatus::Pending);
     }
 
     /// Skips Done steps and returns the next Pending one.
@@ -1703,42 +1830,47 @@ mod tests {
         assert!(orch.dispatch_next_step().is_none());
     }
 
-    /// Dispatch is idempotent: calling it twice returns the same pending step
-    /// because it does not mutate ledger state.
+    /// Dispatch is the guarded mutator: a second call after a successful
+    /// dispatch returns `None` because the just-dispatched step is now
+    /// `Active` and no other step is eligible.
     #[test]
-    fn dispatch_next_step_is_idempotent() {
+    fn dispatch_next_step_is_not_idempotent() {
         let mut orch = Orchestrator::new("test");
         orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
 
-        let first = orch.dispatch_next_step();
+        let first = orch
+            .dispatch_next_step()
+            .expect("first dispatch returns the pending step");
+        assert_eq!(first.description, "s1");
+        assert_eq!(orch.ledger().plan[0].status, StepStatus::Active);
+
         let second = orch.dispatch_next_step();
-        assert!(first.is_some());
-        assert!(second.is_some());
-        assert_eq!(
-            first.unwrap().description,
-            second.unwrap().description,
-            "dispatch_next_step must not mutate ledger"
+        assert!(
+            second.is_none(),
+            "second dispatch must return None — step is already Active"
         );
     }
 
-    /// After the caller manually marks a step Active, dispatch_next_step moves
-    /// to the following Pending step — correct sequencing in the outer loop.
+    /// After step 1 is dispatched (marked Active by the guarded mutator),
+    /// `dispatch_next_step` advances to step 2 — correct sequencing in
+    /// the outer loop with no manual status manipulation required.
     #[test]
-    fn dispatch_next_step_sequences_correctly_after_activation() {
+    fn dispatch_next_step_advances_after_activation() {
         let mut orch = Orchestrator::new("test");
         orch.set_plan(vec![
             PlanStep::new("step 1", free_task("s1")),
             PlanStep::new("step 2", free_task("s2")),
         ]);
 
-        // Caller takes step 1 and marks it Active.
+        // First call dispatches step 1 — `try_dispatch` flips it to Active.
         let step1 = orch.dispatch_next_step().expect("step 1");
         assert_eq!(step1.description, "step 1");
-        orch.ledger_mut().plan[0].status = StepStatus::Active;
+        assert_eq!(orch.ledger().plan[0].status, StepStatus::Active);
 
-        // Now dispatch should return step 2.
+        // Now the only eligible Pending step is step 2.
         let step2 = orch.dispatch_next_step().expect("step 2");
         assert_eq!(step2.description, "step 2");
+        assert_eq!(orch.ledger().plan[1].status, StepStatus::Active);
     }
 
     // -- Issue #60: Task DAG + cycle detection --------------------------------
