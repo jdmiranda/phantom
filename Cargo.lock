@@ -6160,6 +6160,7 @@ dependencies = [
  "phantom-agents",
  "phantom-context",
  "phantom-history",
+ "phantom-loop",
  "phantom-memory",
  "phantom-semantic",
  "serde",

@@ -178,6 +178,29 @@ pub struct BrainConfig {
     /// Updated at runtime via [`crate::events::AiEvent::HistorySnapshot`] events
     /// so the brain always has the last N commands available for agent prompts.
     pub history_context: Vec<HistoryEntry>,
+
+    /// Optional pre-built self-improvement reconciler.
+    ///
+    /// When `Some`, the brain's 3-second timeout tick polls every registered
+    /// [`crate::goal_source::GoalSource`] (see [`Self::goal_sources`]) and
+    /// drives each candidate through
+    /// [`crate::self_improvement::SelfImprovementState::evaluate`]. Resulting
+    /// [`crate::events::AiAction::EnqueueLoopMessage`] actions are forwarded
+    /// to the action channel; the app handler is responsible for actually
+    /// pushing them onto a `phantom_loop::queue::LoopQueueRegistry`.
+    ///
+    /// `None` (the default) disables the feature entirely; see the
+    /// `enable_self_improvement` field on the config inside the state.
+    ///
+    /// Per design doc §5.1, defaults OFF — the operator must opt in.
+    pub self_improvement: Option<crate::self_improvement::SelfImprovementState>,
+
+    /// Goal sources polled by the self-improvement reconciler on every tick.
+    ///
+    /// Empty by default. Populated to a non-empty `Vec` enables auto-discovery
+    /// of candidate goals (e.g. `Box<GhIssueGoalSource>` for open issues,
+    /// `Box<GhCiFailureGoalSource>` for recent CI failures).
+    pub goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>>,
 }
 
 impl Default for BrainConfig {
@@ -192,6 +215,8 @@ impl Default for BrainConfig {
             catalog: None,
             relay_inbound_rx: None,
             history_context: Vec::new(),
+            self_improvement: None,
+            goal_sources: Vec::new(),
         }
     }
 }
@@ -280,6 +305,13 @@ fn brain_supervised(
     // events; restarts lose that incremental state but start from the same
     // seeded baseline.
     let history_context: Vec<HistoryEntry> = config.history_context;
+    // Self-improvement state and goal sources are non-Clone; consumed on
+    // first iteration only. On panic-restart iterations they are `None` —
+    // the brain skips the self-improvement tick. Matches the same pattern
+    // used for relay_inbound_rx above.
+    let mut self_improvement: Option<crate::self_improvement::SelfImprovementState> =
+        config.self_improvement;
+    let mut goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>> = config.goal_sources;
 
     // Shared slot: the supervisor writes a fresh `iter_tx` here after each
     // restart; the bridge thread reads it to redirect events.
@@ -335,6 +367,10 @@ fn brain_supervised(
             relay_inbound_rx: relay_inbound_rx.take(),
             // History snapshot is Clone; each restart gets the same seeded baseline.
             history_context: history_context.clone(),
+            // Self-improvement state and goal sources are taken on first
+            // iteration only — restart leaves the feature disabled.
+            self_improvement: self_improvement.take(),
+            goal_sources: std::mem::take(&mut goal_sources),
         };
 
         // Run brain_loop under catch_unwind.
@@ -436,6 +472,16 @@ fn brain_loop(
         config.relay_inbound_rx;
     // History snapshot: seeded from BrainConfig, refreshed by HistorySnapshot events.
     let mut history_snapshot: Vec<HistoryEntry> = config.history_context;
+    // Self-improvement reconciler — design doc §3–§5. Populated by the app
+    // when self-improvement is enabled; `None` keeps the feature dormant.
+    let mut self_improvement: Option<crate::self_improvement::SelfImprovementState> =
+        config.self_improvement;
+    let mut goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>> = config.goal_sources;
+    // Self-improvement tick interval (60 s per design doc §4.2) — uses
+    // Instant rather than the OODA timeout so the brain does not poll `gh`
+    // every 3 seconds.
+    let self_improvement_interval = std::time::Duration::from_secs(60);
+    let mut last_self_improvement_tick: Option<std::time::Instant> = None;
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -483,6 +529,27 @@ fn brain_loop(
                 }
                 if terminal {
                     active_ledger = None;
+                }
+
+                // SELF-IMPROVEMENT TICK: every `self_improvement_interval`,
+                // poll every registered GoalSource and feed candidates through
+                // the SelfImprovementState. Resulting `AiAction::EnqueueLoopMessage`
+                // actions are forwarded to the action channel. The whole branch
+                // is a no-op when the feature is disabled (state == None).
+                if let Some(ref mut state) = self_improvement
+                    && !goal_sources.is_empty()
+                    && !config.privacy_mode
+                    && last_self_improvement_tick
+                        .map(|t| t.elapsed() >= self_improvement_interval)
+                        .unwrap_or(true)
+                {
+                    last_self_improvement_tick = Some(std::time::Instant::now());
+                    let actions = state.tick(&mut goal_sources);
+                    for action in actions {
+                        if action_tx.send(action).is_err() {
+                            break;
+                        }
+                    }
                 }
 
                 // RELAY INBOUND: drain any pending cross-peer frames.
@@ -1340,6 +1407,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::UpdateConnectionState { .. } => "update_connection_state",
         AiAction::SetOfflineMode { .. } => "set_offline_mode",
         AiAction::DeliverInboundRelay { .. } => "deliver_inbound_relay",
+        AiAction::EnqueueLoopMessage { .. } => "enqueue_loop_message",
         AiAction::DoNothing => "quiet",
     }
 }
