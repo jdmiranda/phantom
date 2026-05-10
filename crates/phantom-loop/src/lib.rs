@@ -69,29 +69,37 @@
 //! The GitHub-backed `GhIssueQueueSource` / `GhPrReviewQueueSource` are
 //! deferred to C3, alongside the CLI wiring.
 
+pub mod dispatcher;
 pub mod effect;
 pub mod effect_runner;
 pub mod error;
 pub mod exit;
 pub mod id;
+pub mod preflight;
 pub mod queue;
+pub mod registry;
 pub mod runner;
 pub mod source;
 pub mod sources;
 pub mod spec;
 
+pub use dispatcher::{SubstrateAgentDispatcher, SubstrateCompletionRouter};
 pub use effect::{FieldMap, LoopEffect};
 pub use effect_runner::{EffectContext, EffectError, EffectOutcome, run_effects};
 pub use error::LoopSpecError;
 pub use exit::ExitSchema;
 pub use id::LoopId;
+pub use preflight::{PreflightError, RunLock, check_gh_auth, check_gh_binary, check_mcp_collisions};
 pub use queue::{LoopMessage, LoopQueue, LoopQueueRegistry};
+pub use registry::{LoopHandle, LoopRegistry, LoopRegistryError, LoopSnapshot, LoopStatus};
 pub use runner::{
     AgentDispatcher, CorrelationId, DispatchError, DispatchHandle, LoopContext, LoopInput,
     LoopPullResult, LoopRunner, LoopSource, LoopSourceError, LoopState,
 };
 pub use source::{GhPrPredicate, GhPrState, LoopSourceSpec};
-pub use sources::{CronSource, LoopMessageQueueSource};
+pub use sources::{
+    CronSource, GhIssueQueueSource, GhPrReviewQueueSource, LoopMessageQueueSource,
+};
 pub use spec::{
     LoopAgentSpec, LoopPolicy, LoopQuarantinePolicy, LoopSpec, load_spec, parse_spec_str,
 };

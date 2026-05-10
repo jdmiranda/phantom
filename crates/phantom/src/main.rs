@@ -16,6 +16,7 @@ use winit::{
 
 mod auth_cli;
 mod headless;
+mod loop_cli;
 mod path_resolver;
 
 struct Phantom {
@@ -657,6 +658,13 @@ fn main() -> Result<()> {
     // `auth`.
     if args.get(1).map(String::as_str) == Some("auth") {
         return run_auth_subcommand(&args);
+    }
+
+    // `phantom loop` subcommand routing (issue #650 C3). Mirrors the
+    // `auth` block above — we hand the full argv to the loop_cli module
+    // which owns its own clap parsing and runtime construction.
+    if args.get(1).map(String::as_str) == Some("loop") {
+        return loop_cli::run_loop_subcommand(&args);
     }
 
     // Quick exits

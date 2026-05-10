@@ -6,6 +6,13 @@ license.workspace = true
 
 [dependencies]
 phantom-agents = { path = "../phantom-agents" }
+# Event-bus subscription so the substrate-backed dispatcher can correlate
+# spawn-time `spawn_tag`s with later `AgentTaskComplete` events.
+phantom-protocol = { path = "../phantom-protocol" }
+# MCP tool name enumeration for the preflight collision check
+# (refuse to start a runner if a registered MCP tool shadows `complete_task` /
+# `abort_task`).
+phantom-mcp = { path = "../phantom-mcp" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,14 +27,16 @@ thiserror = "2"
 # Feature set mirrors `phantom-agents` (the C3 bind point) so the eventual
 # real dispatcher does not need to re-add anything: `sync` for `oneshot` /
 # `Mutex`, `rt`/`rt-multi-thread` so tests can spin a runtime, `time` for the
-# runner's idle backoff sleeps, and `macros` for `tokio::test`.
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+# runner's idle backoff sleeps, `macros` for `tokio::test`, and `process` for
+# the GH-CLI shelling sources.
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "process"] }
 tracing = "0.1"
 
 [dev-dependencies]
 # `tokio::time::pause` lives behind the `test-util` feature; the runner smoke
 # tests use it to fast-forward the idle-backoff sleep without wallclock waits.
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util", "process"] }
+tempfile = "3"
 
 [lints]
 workspace = true
