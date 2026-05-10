@@ -80,6 +80,106 @@ pub enum StepStatus {
     NeedsApproval,
 }
 
+// ---------------------------------------------------------------------------
+// StepFailureCause (issue #649)
+// ---------------------------------------------------------------------------
+
+/// Typed cause for a `PlanStep` that did not complete successfully.
+///
+/// Stored on [`PlanStep::failure_cause`] when a step transitions to
+/// [`StepStatus::Failed`] or [`StepStatus::Skipped`]. The variant pins down
+/// *why* the step terminated unsuccessfully so the reconciler (and downstream
+/// observers like the inspector pane) can render typed diagnostics instead of
+/// only the free-text `result_summary`.
+///
+/// # Variant semantics
+///
+/// - [`StepFailureCause::AgentFailed`] — the agent ran and reported failure
+///   via the normal completion path (the default cause set by
+///   [`PlanStep::record_failure`] when no quarantine flag is present).
+/// - [`StepFailureCause::AgentQuarantined`] — the agent's [`AgentId`] is in
+///   the `Quarantined` state in the registry at the moment its completion
+///   event arrives. Set by [`TaskLedger::record_quarantine_failure`].
+/// - [`StepFailureCause::DispatchTimedOut`] — the reconciler tripped the
+///   per-step stall timeout before the agent reported back.
+/// - [`StepFailureCause::DependencyFailed`] — applied to cascaded
+///   [`StepStatus::Skipped`] steps by the `FailAndCascade` quarantine policy.
+///   `dep_idx` is the prerequisite step (in the same plan) whose failure
+///   propagated.
+/// - [`StepFailureCause::CompleteTaskNotCalled`] — reserved for the issue
+///   #646 follow-up where the agent terminated without calling
+///   `complete_task` even though the spawn opted into the explicit
+///   termination contract. Not emitted by this crate today; downstream
+///   consumers may pattern-match on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepFailureCause {
+    /// The agent reported failure through the normal completion path.
+    AgentFailed,
+    /// The agent's [`phantom_agents::AgentId`] is in the `Quarantined`
+    /// state in the [`phantom_agents::quarantine::QuarantineRegistry`]. The
+    /// `since_ms` field carries the wall-clock millisecond timestamp at the
+    /// moment of quarantine, propagated from `QuarantineState::Quarantined`.
+    AgentQuarantined {
+        /// The quarantined agent's stable ID.
+        agent_id: u64,
+        /// Wall-clock milliseconds at the moment the agent was quarantined.
+        since_ms: u64,
+    },
+    /// The reconciler's per-step stall timeout fired before the agent
+    /// reported back (reserved for the timeout dispatch path; today it is
+    /// produced by the reconciler's stall path via `record_failure`).
+    DispatchTimedOut,
+    /// A prerequisite step in the same plan failed, causing this step to be
+    /// skipped under the `FailAndCascade` quarantine policy. `dep_idx` is
+    /// the index of the failing prerequisite.
+    DependencyFailed {
+        /// The plan index of the dependency that propagated failure here.
+        dep_idx: usize,
+    },
+    /// The agent terminated without calling the explicit `complete_task`
+    /// tool even though its spawn opted into that contract. Reserved for
+    /// the issue #646 follow-up; not emitted by this crate today.
+    CompleteTaskNotCalled,
+}
+
+// ---------------------------------------------------------------------------
+// QuarantinePolicy (issue #649)
+// ---------------------------------------------------------------------------
+
+/// What [`TaskLedger::record_quarantine_failure`] does when the agent
+/// assigned to a step is in the `Quarantined` state at completion time.
+///
+/// Stored per-step on [`PlanStep::quarantine_policy`] so different steps in
+/// the same plan can elect different recovery semantics (e.g. a read-only
+/// audit step might tolerate a quick retry while a write-side deploy step
+/// should cascade-fail downstream).
+///
+/// The default policy is [`QuarantinePolicy::FailAndAllowRetry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuarantinePolicy {
+    /// Mark the step `Failed`, set its `failure_cause` to
+    /// [`StepFailureCause::AgentQuarantined`], and clear its `agent_id` so
+    /// the next dispatch can spawn a fresh agent against the same step.
+    ///
+    /// The step is *not* re-queued automatically — callers that want a
+    /// retry must transition it back to `Pending` via the normal retry
+    /// machinery. This is the default policy.
+    #[default]
+    FailAndAllowRetry,
+    /// Apply the same per-step behaviour as `FailAndAllowRetry`, AND walk
+    /// the dependency graph: every step whose `depends_on` transitively
+    /// reaches the failing step is marked
+    /// [`StepStatus::Skipped`] with
+    /// [`StepFailureCause::DependencyFailed`] pointing back at the
+    /// originally failed step.
+    FailAndCascade,
+    /// Leave the step in its current status (typically `Active`) but stamp
+    /// `failure_cause` with [`StepFailureCause::AgentQuarantined`] for
+    /// diagnostics. The reconciler is expected to leave the step alone
+    /// until the quarantine clears externally.
+    Park,
+}
+
 /// A single step in the orchestrator's plan.
 ///
 /// From Magentic-One: "The plan is expressed in natural language and consists
@@ -143,6 +243,23 @@ pub struct PlanStep {
     /// [`TaskLedger::eligible_next`] until the human calls
     /// [`TaskLedger::approve_checkpoint`].
     requires_checkpoint: bool,
+    /// Typed cause for the most recent unsuccessful termination of this
+    /// step (issue #649).
+    ///
+    /// `None` while the step is in flight or has only seen successful
+    /// completions. Set to [`StepFailureCause::AgentFailed`] by
+    /// [`PlanStep::record_failure`] and to one of the quarantine-aware
+    /// variants by [`TaskLedger::record_quarantine_failure`].
+    pub failure_cause: Option<StepFailureCause>,
+    /// Per-step recovery policy applied when the agent assigned to this
+    /// step is quarantined at completion time (issue #649).
+    ///
+    /// Defaults to [`QuarantinePolicy::FailAndAllowRetry`] — see the policy
+    /// enum for the available variants. Existing call sites that build a
+    /// plan via `PlanStep::new` or `PlanStep::with_deps` get the default
+    /// policy automatically; opt in to a non-default policy through
+    /// [`PlanStep::with_quarantine_policy`].
+    pub quarantine_policy: QuarantinePolicy,
 }
 
 impl PlanStep {
@@ -164,6 +281,8 @@ impl PlanStep {
             preferred_provider: None,
             disposition: Disposition::default(),
             requires_checkpoint: false,
+            failure_cause: None,
+            quarantine_policy: QuarantinePolicy::default(),
         }
     }
 
@@ -256,10 +375,34 @@ impl PlanStep {
         self.preferred_provider.as_deref()
     }
 
+    /// Attach a [`QuarantinePolicy`] to this step (builder-style, issue #649).
+    ///
+    /// When the step's assigned agent is quarantined at completion time,
+    /// [`TaskLedger::record_quarantine_failure`] applies this policy.
+    /// Steps built without an explicit policy use
+    /// [`QuarantinePolicy::FailAndAllowRetry`].
+    ///
+    /// # Example
+    /// ```ignore
+    /// let step = PlanStep::new("deploy", task)
+    ///     .with_quarantine_policy(QuarantinePolicy::FailAndCascade);
+    /// ```
+    #[must_use]
+    pub fn with_quarantine_policy(mut self, policy: QuarantinePolicy) -> Self {
+        self.quarantine_policy = policy;
+        self
+    }
+
     /// Record a failed attempt. Returns true if retries remain.
+    ///
+    /// Sets [`PlanStep::failure_cause`] to
+    /// [`StepFailureCause::AgentFailed`] to distinguish ordinary agent
+    /// failures from the quarantine-coincident path handled by
+    /// [`TaskLedger::record_quarantine_failure`] (issue #649).
     pub fn record_failure(&mut self, summary: impl Into<String>) -> bool {
         self.attempts += 1;
         self.result_summary = Some(summary.into());
+        self.failure_cause = Some(StepFailureCause::AgentFailed);
         if self.attempts >= self.max_attempts {
             self.status = StepStatus::Failed;
             false
@@ -598,6 +741,163 @@ impl TaskLedger {
                 step.status = StepStatus::Pending;
                 Ok(())
             }
+        }
+    }
+
+    /// Apply the step's [`QuarantinePolicy`] to a failure that coincides
+    /// with the agent being in the `Quarantined` state (issue #649).
+    ///
+    /// Unlike [`PlanStep::record_failure`], this mutator stamps the
+    /// quarantine-aware [`StepFailureCause::AgentQuarantined`] cause and
+    /// honours the per-step [`PlanStep::quarantine_policy`]:
+    ///
+    /// - [`QuarantinePolicy::FailAndAllowRetry`] (default) — mark the
+    ///   step `Failed`, set the typed cause, and clear `agent_id` so a
+    ///   subsequent dispatch may spawn a fresh agent against the same
+    ///   step. Attempt counters are *not* incremented (this is not a
+    ///   normal failure budget consumer).
+    /// - [`QuarantinePolicy::FailAndCascade`] — perform the same per-step
+    ///   action as `FailAndAllowRetry`, then walk the dependency graph in
+    ///   topological-forward order and mark every transitive dependent
+    ///   step [`StepStatus::Skipped`] with
+    ///   [`StepFailureCause::DependencyFailed { dep_idx: idx }`].
+    ///   Dependents that are already in a terminal state
+    ///   (`Done` / `Failed` / `Skipped`) are left untouched.
+    /// - [`QuarantinePolicy::Park`] — leave the step's status as-is and
+    ///   stamp the typed cause for diagnostics. The reconciler is
+    ///   expected to ignore parked steps until the quarantine clears.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DispatchBlocked::OutOfBounds`] when `idx` is out of
+    /// bounds for the current plan. All other branches succeed.
+    ///
+    /// On success the returned reference points at the step at `idx` so
+    /// callers can inspect the resulting `status` / `failure_cause`
+    /// without a second lookup.
+    pub fn record_quarantine_failure(
+        &mut self,
+        idx: usize,
+        agent_id: u64,
+        since_ms: u64,
+    ) -> Result<&PlanStep, DispatchBlocked> {
+        let plan_len = self.plan.len();
+        if idx >= plan_len {
+            return Err(DispatchBlocked::OutOfBounds {
+                idx,
+                len: plan_len,
+            });
+        }
+
+        // Snapshot the policy before mutating so we can branch the
+        // dependency-cascade walk below without holding a mutable borrow
+        // across the loop.
+        let policy = self.plan[idx].quarantine_policy;
+        let cause = StepFailureCause::AgentQuarantined { agent_id, since_ms };
+
+        match policy {
+            QuarantinePolicy::FailAndAllowRetry | QuarantinePolicy::FailAndCascade => {
+                let step = &mut self.plan[idx];
+                step.status = StepStatus::Failed;
+                step.failure_cause = Some(cause);
+                // Clear `agent_id` so the next dispatch (if any) can spawn
+                // a fresh agent for this step. Attempt counters are left
+                // alone because a quarantine is not the agent's "fault" in
+                // the retry-budget sense.
+                step.agent_id = None;
+            }
+            QuarantinePolicy::Park => {
+                // Status is intentionally left alone. The reconciler
+                // observes the stamped `failure_cause` for diagnostics
+                // and leaves the step parked until the quarantine
+                // clears externally.
+                let step = &mut self.plan[idx];
+                step.failure_cause = Some(cause);
+            }
+        }
+
+        if matches!(policy, QuarantinePolicy::FailAndCascade) {
+            self.cascade_skip_dependents(idx);
+        }
+
+        Ok(&self.plan[idx])
+    }
+
+    /// Walk the dependency graph forward from `failed_idx` and mark every
+    /// transitive dependent step as [`StepStatus::Skipped`] with
+    /// [`StepFailureCause::DependencyFailed`] pointing at `failed_idx`.
+    ///
+    /// "Dependent" here means: any step `j` whose `depends_on` contains an
+    /// index `k` where `k == failed_idx` *or* `k` is itself transitively
+    /// skipped by this walk. Dependents that have already reached a
+    /// terminal status (`Done`, `Failed`, `Skipped`) are left untouched so
+    /// previously completed work is not silently reclassified.
+    ///
+    /// Uses an iterative breadth-first scan over `0..plan.len()` so the
+    /// walk is O(n × max_depends_on) and avoids the stack depth a naive
+    /// recursive variant would require on long plans.
+    fn cascade_skip_dependents(&mut self, failed_idx: usize) {
+        let plan_len = self.plan.len();
+        // `failed_set` tracks indices whose failure should propagate. We
+        // start with the originating failure and grow the set as we
+        // discover transitive dependents.
+        let mut failed_set: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        failed_set.insert(failed_idx);
+
+        // BFS-style scan: re-iterate over the plan until no new dependent
+        // is added to `failed_set`. Each iteration costs O(n × d); the
+        // outer loop runs at most O(n) times in the worst case (a linear
+        // chain), giving O(n² × d) total. For typical plans (n < 20)
+        // this is fine.
+        loop {
+            let mut grew = false;
+            for j in 0..plan_len {
+                if failed_set.contains(&j) {
+                    continue;
+                }
+                // Only propagate into steps that are still in a
+                // non-terminal status; previously completed work stays
+                // as it was.
+                let cur_status = self.plan[j].status;
+                if matches!(
+                    cur_status,
+                    StepStatus::Done | StepStatus::Failed | StepStatus::Skipped
+                ) {
+                    continue;
+                }
+                let deps = &self.plan[j].depends_on;
+                if deps.iter().any(|d| failed_set.contains(d)) {
+                    failed_set.insert(j);
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        // Apply the cascade — every transitively-failed step that is not
+        // the origin gets marked `Skipped` with the origin recorded as
+        // the propagating dependency.
+        for j in failed_set {
+            if j == failed_idx {
+                continue;
+            }
+            let step = &mut self.plan[j];
+            // Defensive: skip terminal statuses (the scan above already
+            // filtered them, but a future caller might mutate state
+            // between scan and application).
+            if matches!(
+                step.status,
+                StepStatus::Done | StepStatus::Failed | StepStatus::Skipped
+            ) {
+                continue;
+            }
+            step.status = StepStatus::Skipped;
+            step.failure_cause = Some(StepFailureCause::DependencyFailed {
+                dep_idx: failed_idx,
+            });
         }
     }
 

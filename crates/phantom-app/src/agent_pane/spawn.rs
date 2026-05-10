@@ -223,7 +223,12 @@ impl App {
         // This is the value returned to MCP callers (issue #399).
         let agent_id = agent_pane.agent_id();
 
-        let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
+        // Thread the substrate-owned QuarantineRegistry into the adapter
+        // (issue #649) so it can detect quarantine-coincident failures on
+        // the `AgentPane::Failed → AgentTaskComplete` emit and annotate
+        // the summary for the brain reconciler.
+        let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag)
+            .with_quarantine_registry(self.quarantine_registry.clone());
 
         let scene_node = self
             .scene

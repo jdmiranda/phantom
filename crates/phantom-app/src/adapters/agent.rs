@@ -5,6 +5,7 @@
 //! dispatch alongside terminals and other adapters.
 
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
@@ -15,6 +16,7 @@ use phantom_adapter::{
 };
 
 use phantom_agents::agent::AgentMessage;
+use phantom_agents::quarantine::{QuarantineRegistry, QuarantineState};
 use phantom_ui::render_ctx::RenderCtx;
 use phantom_ui::widgets::message_block::{MessageBlock, MessageRole};
 use phantom_ui::widgets::Widget;
@@ -61,6 +63,23 @@ pub struct AgentAdapter {
     /// Uses `Cell` because `render()` takes `&self` (required by the trait) but
     /// needs to update this value so command handlers stay consistent with it.
     cached_output_max_lines: Cell<usize>,
+    /// Substrate-owned [`QuarantineRegistry`] handle, threaded through from
+    /// `App::quarantine_registry` at adapter construction time (issue #649).
+    ///
+    /// `None` for test-only adapters and any future construction path that
+    /// has not yet wired the registry. When `Some`, the
+    /// `AgentPane::Failed → AgentTaskComplete { success: false }` emission
+    /// in [`Lifecycled::update`] queries this registry to detect a
+    /// quarantine-coincident failure and tags the emitted bus event's
+    /// summary with a typed marker so the brain reconciler can route the
+    /// completion to [`TaskLedger::record_quarantine_failure`] (the typed
+    /// recovery mutator defined in `phantom-brain`).
+    ///
+    /// Carrying the field as `Option` keeps existing constructor
+    /// signatures stable (test callers and the unmigrated production
+    /// `with_spawn_tag` path) while the typed mutator and the registry
+    /// wiring land together.
+    quarantine: Option<Arc<Mutex<QuarantineRegistry>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +101,7 @@ impl AgentAdapter {
             scroll_offset: 0,
             // Default to 20 until the first render() call provides the real value.
             cached_output_max_lines: Cell::new(20),
+            quarantine: None,
         }
     }
 
@@ -91,6 +111,58 @@ impl AgentAdapter {
         let mut adapter = Self::new(pane);
         adapter.spawn_tag = spawn_tag;
         adapter
+    }
+
+    /// Thread the substrate-owned [`QuarantineRegistry`] handle into the
+    /// adapter (issue #649).
+    ///
+    /// When set, the adapter consults the registry whenever the inner
+    /// pane transitions to [`AgentPaneStatus::Failed`] so a
+    /// quarantine-coincident failure can be flagged for the brain
+    /// reconciler (which then routes through the typed recovery mutator
+    /// `TaskLedger::record_quarantine_failure`). The registry is held as
+    /// `Arc<Mutex<…>>` so the substrate (`App`) keeps ownership and any
+    /// number of adapters share the same handle.
+    ///
+    /// The setter is builder-style so the production boot caller in
+    /// `agent_pane::spawn` can chain it after
+    /// [`AgentAdapter::with_spawn_tag`] without forcing a constructor
+    /// signature break for the existing test callers.
+    #[must_use]
+    pub(crate) fn with_quarantine_registry(
+        mut self,
+        quarantine: Arc<Mutex<QuarantineRegistry>>,
+    ) -> Self {
+        self.quarantine = Some(quarantine);
+        self
+    }
+
+    /// Returns `true` if the agent backing this adapter is in the
+    /// [`QuarantineState::Quarantined`] state, along with the
+    /// `since_ms` timestamp from the registry. Returns `None` when the
+    /// registry is unwired (test path) or the agent is not quarantined.
+    ///
+    /// Used by [`Lifecycled::update`] on the
+    /// `AgentPaneStatus::Failed` transition to flag quarantine-coincident
+    /// failures.
+    fn quarantined_since_ms(&self, agent_id: u64) -> Option<u64> {
+        let registry = self.quarantine.as_ref()?;
+        match registry.lock() {
+            Ok(guard) => match guard.state_of(agent_id) {
+                QuarantineState::Quarantined { since_ms, .. } => Some(since_ms),
+                _ => None,
+            },
+            Err(poisoned) => {
+                // A poisoned lock means another thread panicked while
+                // holding it; the data is still readable for our purpose
+                // (single-field state machine).
+                let guard = poisoned.into_inner();
+                match guard.state_of(agent_id) {
+                    QuarantineState::Quarantined { since_ms, .. } => Some(since_ms),
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// Immutable access to the inner agent pane.
@@ -132,7 +204,33 @@ impl AppCore for AgentAdapter {
         if self.pane.status() != self.prev_status {
             let event = match self.pane.status() {
                 AgentPaneStatus::Done => Some((true, "Agent finished successfully".to_string())),
-                AgentPaneStatus::Failed => Some((false, "Agent failed".to_string())),
+                AgentPaneStatus::Failed => {
+                    // Issue #649: detect quarantine-coincident failures so
+                    // the brain reconciler can route to the typed
+                    // recovery mutator `TaskLedger::record_quarantine_failure`
+                    // instead of the generic `PlanStep::record_failure`.
+                    //
+                    // The protocol's `AgentTaskComplete` event currently
+                    // carries only a free-text `summary`; we annotate the
+                    // summary with a stable, machine-parseable marker
+                    // (`"[quarantined since_ms=<u64>]"`) so the brain can
+                    // disambiguate without a protocol break. When the
+                    // protocol grows a typed `failure_cause` field
+                    // downstream, this annotation can be dropped.
+                    let stable_agent_id = self.pane.agent_id();
+                    let summary = match self.quarantined_since_ms(stable_agent_id) {
+                        Some(since_ms) => {
+                            log::warn!(
+                                "AgentAdapter: agent {stable_agent_id} failed while \
+                                 quarantined (since_ms={since_ms}); summary will carry \
+                                 the typed marker"
+                            );
+                            format!("Agent failed [quarantined since_ms={since_ms}]")
+                        }
+                        None => "Agent failed".to_string(),
+                    };
+                    Some((false, summary))
+                }
                 AgentPaneStatus::Working => None, // Not a completion event
             };
 
