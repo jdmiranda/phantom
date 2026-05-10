@@ -59,6 +59,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         privacy_mode: false,
         // Headless mode has no relay connection by default.
         relay_inbound_rx: None,
+        // Headless boot has no prior history snapshot to seed the brain with.
         history_context: Vec::new(),
         // Self-improvement defaults to OFF per design doc §5.1; the operator
         // opts in by supplying a `SelfImprovementState` and `goal_sources`.
@@ -450,6 +451,16 @@ fn run_agent_loop(
                     }
                     break;
                 }
+                Some(ApiEvent::CompleteTask { id: _, result }) => {
+                    // Headless REPL does not yet propagate complete_task
+                    // payloads. Treat the lifecycle signal as a normal
+                    // completion and continue.
+                    println!("\n[AGENT #{}]: complete_task: {result}", agent_id);
+                    if let Some(a) = agents.get_mut(agent_id) {
+                        a.complete_with_result(result);
+                    }
+                    break;
+                }
                 None => {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
@@ -783,6 +794,13 @@ fn run_chat(
             }
             Some(ApiEvent::Error(e)) => {
                 println!("\n[ERROR]: {e}");
+                break;
+            }
+            Some(ApiEvent::CompleteTask { id: _, result }) => {
+                // Chat-level complete_task: surface the payload and end
+                // the conversation turn. The headless REPL does not
+                // distinguish complete_task from a normal Done.
+                println!("\n[PHANTOM]: complete_task: {result}");
                 break;
             }
             None => {

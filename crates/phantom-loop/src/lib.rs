@@ -83,7 +83,10 @@ pub mod source;
 pub mod sources;
 pub mod spec;
 
-pub use dispatcher::{SubstrateAgentDispatcher, SubstrateCompletionRouter};
+pub use dispatcher::{
+    ChatBackedSubstrateBackend, DEFAULT_MAX_ROUNDS, DEFAULT_TICK_INTERVAL, MockSubstrateBackend,
+    SubstrateAgentDispatcher, SubstrateBackend, SubstrateCompletionRouter, SubstrateDriver,
+};
 pub use effect::{FieldMap, LoopEffect};
 pub use effect_runner::{EffectContext, EffectError, EffectOutcome, run_effects};
 pub use error::LoopSpecError;
