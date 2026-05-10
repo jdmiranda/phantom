@@ -59,6 +59,11 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         privacy_mode: false,
         // Headless mode has no relay connection by default.
         relay_inbound_rx: None,
+        history_context: Vec::new(),
+        // Self-improvement defaults to OFF per design doc §5.1; the operator
+        // opts in by supplying a `SelfImprovementState` and `goal_sources`.
+        self_improvement: None,
+        goal_sources: Vec::new(),
     });
 
     // Agent manager (max 5 concurrent agents).

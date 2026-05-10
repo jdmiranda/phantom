@@ -791,6 +791,12 @@ impl App {
             // via AiEvent::RelayConnected. None in standalone (non-relay) mode.
             relay_inbound_rx: None,
             history_context: initial_history_context,
+            // Self-improvement defaults to OFF per design doc §5.1; the
+            // operator opts in by setting `BrainConfig::self_improvement` and
+            // `BrainConfig::goal_sources` (typically via a future PR that
+            // adds the `ghost self-improve on` command).
+            self_improvement: None,
+            goal_sources: Vec::new(),
         });
         if config.privacy_mode {
             info!("Privacy mode enabled — cloud API calls blocked");
