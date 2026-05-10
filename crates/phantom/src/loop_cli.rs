@@ -29,21 +29,24 @@
 //! 6. Block on `tokio::signal::ctrl_c()`. On Ctrl-C, abort every
 //!    registered loop, drop the runlock, and exit.
 //!
-//! # Why this is *not* wired to a real App
+//! # Headless agent driver
 //!
-//! Running real Claude-backed loop agents requires the full `phantom-app`
-//! event loop — `App::update` drains the spawn queue, GPU resources are
-//! allocated for agent panes, and so on. That is far heavier than the
-//! "CLI" the user expects from `phantom loop run`. C3 therefore ships
-//! the structural wire-up (specs → runners → dispatcher → CLI) but the
-//! dispatcher's spawn queue is *not* drained inside `phantom loop run`.
-//! In production, this CLI is expected to be invoked from a context that
-//! also runs the substrate App; alternatively the dispatcher's
-//! `completion_router` can be fed directly from a test harness.
+//! Running real Claude-backed loop agents in the GUI app requires
+//! `phantom-app::App::update` to drain
+//! [`phantom_agents::composer_tools::SpawnSubagentQueue`] every frame and
+//! materialise each request into an agent pane backed by a real chat
+//! backend. That path requires winit, wgpu, layout, and scene state — far
+//! heavier than the CLI surface the user expects from `phantom loop run`.
 //!
-//! Wiring `phantom loop run` to a headless agent driver — so the CLI
-//! actually runs Claude requests against the configured API key — is
-//! tracked as a follow-up to this slice.
+//! Instead, the CLI boots a headless [`phantom_loop::SubstrateDriver`]
+//! that drains the same queue from an async tick loop, drives each request
+//! through a pluggable [`phantom_loop::SubstrateBackend`] (the production
+//! [`phantom_loop::ChatBackedSubstrateBackend`] wraps the real Claude /
+//! OpenAI API; tests substitute a mock), and emits
+//! `phantom_protocol::Event::AgentTaskComplete` onto a tokio mpsc bus the
+//! [`phantom_loop::SubstrateCompletionRouter`] subscribes to. This closes
+//! the substrate loop without any GUI dependencies — the same `LoopRunner`
+//! FSM that runs in the App now runs end-to-end from the CLI.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,8 +56,9 @@ use std::time::SystemTime;
 use anyhow::{Result, bail};
 use phantom_agents::composer_tools::new_spawn_subagent_queue;
 use phantom_loop::{
-    LoopHandle, LoopId, LoopQueueRegistry, LoopRegistry, LoopRunner, LoopSource, LoopSourceSpec,
-    LoopSpec, LoopStatus, SubstrateAgentDispatcher,
+    ChatBackedSubstrateBackend, LoopHandle, LoopId, LoopQueueRegistry, LoopRegistry, LoopRunner,
+    LoopSource, LoopSourceSpec, LoopSpec, LoopStatus, SubstrateAgentDispatcher, SubstrateBackend,
+    SubstrateDriver,
 };
 
 /// Top-level dispatcher: `phantom loop <subcommand> ...`
@@ -184,11 +188,32 @@ fn run_command(args: &[String]) -> Result<()> {
         spawn_queue.clone(),
     ));
 
+    // Headless substrate driver: drains the spawn queue and runs each
+    // request through a real chat backend, mirroring what
+    // `phantom-app::App::update` does inside the GUI app. The driver emits
+    // `Event::AgentTaskComplete` onto an in-process tokio mpsc bus; a
+    // forwarder task pipes each event into the dispatcher's completion
+    // router so the runner's pending oneshot resolves.
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::channel::<phantom_protocol::Event>(64);
+    let backend: Arc<dyn SubstrateBackend> = Arc::new(ChatBackedSubstrateBackend::default());
+    let driver = SubstrateDriver::new(spawn_queue.clone(), backend, event_tx);
+    let router = dispatcher.completion_router();
+
     // Stamp every requested loop as a tokio task on the runtime.
     let registry_clone = Arc::clone(&registry);
     let queues_clone = Arc::clone(&queues);
     let dispatcher_clone: Arc<dyn phantom_loop::AgentDispatcher> = dispatcher.clone();
-    runtime.block_on(async move {
+    let driver_handle = runtime.block_on(async move {
+        // Spawn the driver tick loop and the event-forwarder task on the
+        // same runtime as the runners.
+        let driver_join = driver.run();
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                router.on_completion(event);
+            }
+        });
+
         for (spec, schema) in targeted {
             let id = registry_clone.alloc_id();
             let status = Arc::new(std::sync::Mutex::new(LoopStatus::Idle));
@@ -223,12 +248,13 @@ fn run_command(args: &[String]) -> Result<()> {
             );
             eprintln!("  started {id} (spec_id ↑ above)");
         }
-        anyhow::Ok(())
+        anyhow::Ok(driver_join)
     })?;
 
     eprintln!("phantom loop run: all loops started. Press Ctrl-C to stop.");
 
-    // Block on ctrl-c. When it fires, abort every registered loop and exit.
+    // Block on ctrl-c. When it fires, abort every registered loop, abort
+    // the substrate driver, and exit.
     runtime.block_on(async move {
         if let Err(e) = tokio::signal::ctrl_c().await {
             eprintln!("phantom loop run: ctrl-c handler error: {e}");
@@ -237,6 +263,7 @@ fn run_command(args: &[String]) -> Result<()> {
         for snap in registry.list() {
             let _ = registry.stop(snap.id);
         }
+        driver_handle.abort();
     });
 
     // Drop the lock explicitly so the message lines up after the loop teardown.
