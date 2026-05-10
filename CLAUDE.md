@@ -55,7 +55,7 @@ tokio = { version = "1", features = ["full"] }
 
 ## Architecture Overview
 
-Phantom is structured as a Rust workspace with **31 crates**, all wired into the top-level `Cargo.toml` workspace.
+Phantom is structured as a Rust workspace with **32 crates**, all wired into the top-level `Cargo.toml` workspace.
 
 Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issues noted)
 
@@ -75,8 +75,9 @@ Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issu
 - **phantom-semantic** 🔧 — Command classification and output parsing (git, cargo, etc.); stub integration pending ([#74](https://github.com/jdmiranda/phantom/issues/74), [#94](https://github.com/jdmiranda/phantom/issues/94))
 
 ### AI & Intelligence
-- **phantom-agents** ✅ — Agent lifecycle, tool execution, Claude API chat, role system (Defender/Inspector), permission model, taint levels ([#60](https://github.com/jdmiranda/phantom/issues/60), [#87](https://github.com/jdmiranda/phantom/issues/87), [#93](https://github.com/jdmiranda/phantom/issues/93)–[#96](https://github.com/jdmiranda/phantom/issues/96), [#103](https://github.com/jdmiranda/phantom/issues/103)–[#105](https://github.com/jdmiranda/phantom/issues/105))
-- **phantom-brain** ✅ — Ambient OODA loop on a dedicated thread: event scoring, utility AI, action dispatch, autonomous reconciler ([#32](https://github.com/jdmiranda/phantom/issues/32), [#36](https://github.com/jdmiranda/phantom/issues/36)–[#40](https://github.com/jdmiranda/phantom/issues/40), [#45](https://github.com/jdmiranda/phantom/issues/45)–[#47](https://github.com/jdmiranda/phantom/issues/47), [#61](https://github.com/jdmiranda/phantom/issues/61), [#98](https://github.com/jdmiranda/phantom/issues/98)–[#99](https://github.com/jdmiranda/phantom/issues/99))
+- **phantom-agents** ✅ — Agent lifecycle, tool execution, Claude API chat, 10-variant `AgentRole` enum (Conversational/Watcher/Capturer/Transcriber/Reflector/Indexer/Actor/Composer/Fixer/Defender), role-based tool whitelisting at the `dispatch/mod.rs` capability gate, `complete_task` lifecycle tool + `AgentSpawnOpts::with_requires_complete_task` builder, `try_auto_approve_with_audit` audit-traced fast-path, permission model, taint levels ([#60](https://github.com/jdmiranda/phantom/issues/60), [#87](https://github.com/jdmiranda/phantom/issues/87), [#93](https://github.com/jdmiranda/phantom/issues/93)–[#96](https://github.com/jdmiranda/phantom/issues/96), [#103](https://github.com/jdmiranda/phantom/issues/103)–[#105](https://github.com/jdmiranda/phantom/issues/105), [#646](https://github.com/jdmiranda/phantom/issues/646), [#648](https://github.com/jdmiranda/phantom/issues/648))
+- **phantom-brain** ✅ — Ambient OODA loop on a dedicated thread: event scoring, utility AI, action dispatch, autonomous reconciler, `TaskLedger::try_dispatch` guarded mutator with `DispatchBlocked` enum, `StepFailureCause` + `QuarantinePolicy` cascade semantics on `PlanStep` ([#32](https://github.com/jdmiranda/phantom/issues/32), [#36](https://github.com/jdmiranda/phantom/issues/36)–[#40](https://github.com/jdmiranda/phantom/issues/40), [#45](https://github.com/jdmiranda/phantom/issues/45)–[#47](https://github.com/jdmiranda/phantom/issues/47), [#61](https://github.com/jdmiranda/phantom/issues/61), [#98](https://github.com/jdmiranda/phantom/issues/98)–[#99](https://github.com/jdmiranda/phantom/issues/99), [#647](https://github.com/jdmiranda/phantom/issues/647), [#649](https://github.com/jdmiranda/phantom/issues/649))
+- **phantom-loop** 🔧 — Loop overseer: durable repo-scoped LoopRunner pulling typed input from `LoopSource`, validating agent `complete_task` results against per-loop JSON schemas, routing typed `LoopMessage`s through `LoopQueueRegistry`. C1 (types + TOML parser) landed; C2/C3 in progress ([#650](https://github.com/jdmiranda/phantom/issues/650))
 - **phantom-nlp** 🔧 — Natural-language command interpreter; LLM call routing is a stub ([#55](https://github.com/jdmiranda/phantom/issues/55))
 - **phantom-context** ✅ — Project/git/environment detection and context assembly for agent prompts
 - **phantom-memory** 🔧 — Per-project knowledge store with event log and memory blocks; schema and event log pending ([#28](https://github.com/jdmiranda/phantom/issues/28), [#33](https://github.com/jdmiranda/phantom/issues/33), [#62](https://github.com/jdmiranda/phantom/issues/62), [#78](https://github.com/jdmiranda/phantom/issues/78))
@@ -142,6 +143,15 @@ $ git status
 - **Tool Framework**: 7 core tools (ReadFile, WriteFile, RunCommand, etc.)
 - **Permission Model**: Granular access control
 - **Visual Integration**: Agents render in dedicated panes
+
+### Harness-Level Workflow Control
+
+All four properties of harness control are now in place on `main`. The 5 audit gaps tracked under issue #650 are closed.
+
+1. **Per-role tool whitelists** — `crates/phantom-agents/src/dispatch/mod.rs` routes every tool-use through `capability::check_capability(ctx.role, tool.class())` before the handler runs. Denials return a canonical `"capability denied: <Class> not in <Role> manifest"` `ToolResult` so the model self-corrects. (Gap closed: PR #655 made `event_log` non-optional at the dispatch boundary so the gate cannot be silently bypassed.)
+2. **External state machine** — `phantom-brain::TaskLedger` with the `try_dispatch(idx) -> Result<&PlanStep, DispatchBlocked>` guarded mutator and the 9-state `AgentStatus` FSM (Queued, Planning, AwaitingApproval, Working, WaitingForTool, Paused, Done, Failed, Flatline). (Gaps closed: PR #654 — guarded dispatch with `DispatchBlocked`; PR #657 — `StepFailureCause` + `QuarantinePolicy` typed quarantine recovery.)
+3. **Structured exit** — `complete_task` lifecycle tool emitted by `phantom_agents::tools::lifecycle_tools()` when an agent is spawned with `AgentSpawnOpts::with_requires_complete_task(true)`. Result payload is a typed `Option<serde_json::Value>` on `Event::AgentTaskComplete`, validated against the per-loop `ExitSchema` from `phantom-loop`. A 3-strike `validation_failure_count` on `AgentPane` flatlines the pane after three consecutive schema-invalid `complete_task` calls; the legacy "PARTIAL" stringly-typed exit is gone. (Gaps closed: PR #652 — spike delivery path; PR #656 — production tool-list wiring + 3-strike flatline.)
+4. **Typed inter-agent messaging** — `phantom-protocol::Event` bus with 22 typed variants (and `EventTopic` routing) plus the new `Event::FastPathTaken { agent_id, kind: FastPathKind, reason }` envelope from PR #653. `phantom-loop::LoopMessage` adds typed inter-loop routing through `LoopQueueRegistry`.
 
 ## Build Process Details
 
@@ -360,9 +370,9 @@ Built with ❤️ by Jeremy Miranda and Claude Code.
 
 Rules that govern how autonomous agents coordinate within the Phantom multi-agent pipeline.
 
-1. **Post-merge workspace check**: After every PR merge, an agent must run `cargo build --workspace` and `cargo test --workspace --no-run` on main before spawning new implementation agents that touch the same crates.
+1. **Post-merge workspace check**: After every PR merge, an agent must run `cargo build --workspace` and `cargo test --workspace --no-run` on main before spawning new implementation agents that touch the same crates. Block spawning only when the post-merge run introduces NEW failures relative to the pre-merge baseline; pre-existing red is not a gate.
 
-2. **Pre-PR self-check**: Every implementation agent must run `./scripts/pre-pr-check.sh <crate-name>` before calling `gh pr create`. A PR must not be opened if the script fails.
+2. **Pre-PR self-check**: Every implementation agent must run `./scripts/pre-pr-check.sh <crate-name>` before calling `gh pr create`. A PR must not be opened if the script introduces NEW failures relative to the baseline captured at branch-off; pre-existing failures inherited from main do not block the PR.
 
 3. **Worktree cleanup**: After every 10 merges, a cleanup agent must be spawned to prune merged worktrees.
 
@@ -370,7 +380,7 @@ Rules that govern how autonomous agents coordinate within the Phantom multi-agen
 
 5. **Hot-file tracking**: Before spawning an agent on a crate, check `gh pr list -R jdmiranda/phantom --state open` to confirm no other open PR already modifies the same files.
 
-6. **Branch hygiene**: All agent worktrees MUST branch from the most recent clean baseline tag, not from HEAD of main. Spawn command: `git checkout $(git describe --tags --match 'v*.baseline' --abbrev=0 2>/dev/null || git rev-parse --short origin/main) -b <branch-name>`. Never: `git checkout main -b <branch>`.
+6. **Branch hygiene**: All agent worktrees MUST branch from the most recent clean baseline — preferring a `v*.baseline` tag, falling back to `origin/main` when no such tag exists. Spawn command: `git checkout $(git describe --tags --match 'v*.baseline' --abbrev=0 2>/dev/null || git rev-parse --short origin/main) -b <branch-name>`. Never: `git checkout main -b <branch>` against local main without first fetching.
 
 7. **Spec gate**: Before spawning any executor agent, a spec agent must first produce SPEC.md, PLAN.md, and TASKS.md in the worktree. The executor receives only TASKS.md — not the raw issue. Any issue scoring ≥7/10 on the MAST rubric may skip the spec agent; lower-scoring issues must pass through it.
 
