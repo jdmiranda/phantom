@@ -338,6 +338,7 @@ impl Renderable for AgentAdapter {
         let messages = self.pane.messages();
 
         let scroll;
+        let visible_count: usize;
         if !messages.is_empty() {
             // Build a MessageBlock per message, stack them top-down inside the
             // output area, and honour scroll_offset.
@@ -375,6 +376,7 @@ impl Renderable for AgentAdapter {
             } else {
                 None
             };
+            visible_count = total_virtual_lines.min(output_max_lines);
 
             // Render each block that intersects the visible viewport.
             let mut cursor_y = rect.y + pad - offset_px;
@@ -431,6 +433,7 @@ impl Renderable for AgentAdapter {
             let window_end = total_lines.saturating_sub(clamped_offset);
             let window_start = window_end.saturating_sub(output_max_lines);
             let visible = &lines[window_start..window_end];
+            visible_count = visible.len();
 
             for (i, line) in visible.iter().enumerate() {
                 text_segments.push(TextData {
@@ -455,7 +458,7 @@ impl Renderable for AgentAdapter {
         // Working indicator: a dim "▶ working..." line below the last visible
         // output line, only shown while the agent is still streaming.
         if self.pane.status() == AgentPaneStatus::Working {
-            let indicator_y = rect.y + pad + (visible.len() as f32) * LINE_HEIGHT;
+            let indicator_y = rect.y + pad + (visible_count as f32) * LINE_HEIGHT;
             if indicator_y + LINE_HEIGHT <= rect.y + output_height + pad {
                 text_segments.push(TextData {
                     text: "▶ working...".to_string(),

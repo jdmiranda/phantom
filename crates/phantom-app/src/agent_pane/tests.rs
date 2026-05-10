@@ -1791,7 +1791,7 @@ fn messages_vec_captures_role_transitions() {
 
     pane.poll();
 
-    let msgs = pane.messages();
+    let msgs = pane.pane_messages();
 
     let has_assistant = msgs
         .iter()
@@ -1987,6 +1987,11 @@ fn complete_task_schema_invalid_increments_validation_failure_count() {
     // A single schema-invalid `complete_task` must increment the counter to
     // 1 (sub-threshold) and keep the pane in Working state so the agent loop
     // can retry on a later turn.
+    //
+    // Do not send `ApiEvent::Done` in this test: the sub-threshold validation
+    // arm uses `continue` to keep the poll loop alive for a follow-up
+    // `complete_task`, and a synthetic `Done` would transition the pane to
+    // `Done` (since `pending_tools` is empty) before the model could retry.
     let (mut pane, tx) = agent_with_handle();
     pane.agent.set_requires_complete_task(true);
 
@@ -1995,7 +2000,6 @@ fn complete_task_schema_invalid_increments_validation_failure_count() {
         result: serde_json::json!("not an object"),
     })
     .unwrap();
-    tx.send(ApiEvent::Done).unwrap();
 
     pane.poll();
 
@@ -2017,17 +2021,21 @@ fn three_consecutive_complete_task_schema_failures_flatline_pane() {
     // The 3-strike consumer gate. Three back-to-back schema-invalid
     // `complete_task` calls transition the pane to Failed with the canonical
     // reason text.
+    //
+    // Do not send `ApiEvent::Done` between iterations: the validation arm
+    // uses `continue`, so a synthetic `Done` after a sub-threshold failure
+    // would prematurely transition the pane to `Done` (empty `pending_tools`)
+    // and short-circuit the strike counter.
     let (mut pane, tx) = agent_with_handle();
     pane.agent.set_requires_complete_task(true);
 
-    // Three poll() cycles, each with one bad CompleteTask + Done.
+    // Three poll() cycles, each with one bad CompleteTask.
     for n in 1..=3 {
         tx.send(ApiEvent::CompleteTask {
             id: format!("toolu_bad_{n}"),
             result: serde_json::json!(format!("not an object #{n}")),
         })
         .unwrap();
-        tx.send(ApiEvent::Done).unwrap();
         pane.poll();
     }
 
@@ -2048,6 +2056,10 @@ fn three_consecutive_complete_task_schema_failures_flatline_pane() {
 #[test]
 fn complete_task_validation_count_resets_on_successful_call() {
     // Counter resets to 0 on a successful schema-valid `complete_task` call.
+    //
+    // Do not send `ApiEvent::Done` between sub-threshold failures: see the
+    // sibling `three_consecutive_complete_task_schema_failures_flatline_pane`
+    // for the rationale.
     let (mut pane, tx) = agent_with_handle();
     pane.agent.set_requires_complete_task(true);
 
@@ -2058,7 +2070,6 @@ fn complete_task_validation_count_resets_on_successful_call() {
             result: serde_json::json!("not an object"),
         })
         .unwrap();
-        tx.send(ApiEvent::Done).unwrap();
         pane.poll();
     }
     assert_eq!(pane.validation_failure_count, 2);
@@ -2090,6 +2101,10 @@ fn complete_task_validation_count_resets_on_non_complete_task_tool_call() {
     // Consecutive-failure semantics: a non-`complete_task` tool call between
     // two bad complete_tasks resets the counter so the streak does NOT
     // accumulate across the intervening tool use.
+    //
+    // Do not send `ApiEvent::Done` between sub-threshold failures: see the
+    // sibling `three_consecutive_complete_task_schema_failures_flatline_pane`
+    // for the rationale.
     let (mut pane, tx) = agent_with_handle();
     pane.agent.set_requires_complete_task(true);
 
@@ -2100,7 +2115,6 @@ fn complete_task_validation_count_resets_on_non_complete_task_tool_call() {
             result: serde_json::json!("not an object"),
         })
         .unwrap();
-        tx.send(ApiEvent::Done).unwrap();
         pane.poll();
     }
     assert_eq!(pane.validation_failure_count, 2);

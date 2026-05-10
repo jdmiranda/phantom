@@ -1220,7 +1220,10 @@ mod tests {
     #[test]
     fn capture_pipeline_skips_analysis_when_no_key() {
         // Remove the env var for this test scope.
-        let _guard = std::env::remove_var("OPENAI_API_KEY");
+        // SAFETY: tests are single-threaded by default in cargo test; mutating
+        // process env vars in this scope is safe within Rust 2024's
+        // `std::env::remove_var` unsafe contract.
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
 
         let result = phantom_vision::VisionAnalyzer::from_env();
         assert!(
