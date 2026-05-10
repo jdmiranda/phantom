@@ -39,11 +39,17 @@ pub struct DispatchContext<'a> {
     /// Live agent directory used by chat tools (`send_to_agent`,
     /// `broadcast_to_role`) and `request_critique`.
     pub registry: Arc<Mutex<AgentRegistry>>,
-    /// Shared append-only log. `None` is permitted for legacy / test paths
-    /// that haven't opened a log file; chat-tool log emission becomes a
-    /// no-op and `read_from_agent` / `wait_for_agent` / `event_log_query`
-    /// return a structured error.
-    pub event_log: Option<Arc<Mutex<EventLog>>>,
+    /// Shared append-only log.
+    ///
+    /// Issue #645: this is **non-optional** at the dispatch boundary so the
+    /// causality guarantee — every `agent.speak` / `agent.challenge` /
+    /// `tool.invoked` envelope is durably recorded — cannot be silently
+    /// elided. Production callers wire the runtime's log via the App's
+    /// `AgentPane::set_substrate_handles` before the pane is allowed to
+    /// dispatch (`AgentPane::build_dispatch_context` returns `None` until
+    /// the handle is present). Tests construct an isolated fixture via
+    /// [`crate::test_support::fresh_log`].
+    pub event_log: Arc<Mutex<EventLog>>,
     /// Queue the Composer's `spawn_subagent` tool pushes into. The App
     /// drains this once per frame in `update.rs`.
     pub pending_spawn: Arc<Mutex<VecDeque<SpawnSubagentRequest>>>,

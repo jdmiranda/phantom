@@ -106,14 +106,19 @@ impl DefenderTool {
 /// - `registry` is the live agent directory used for id lookup of the
 ///   denied target.
 /// - `event_log` is the shared append-only log; the `agent.challenge`
-///   envelope is appended best-effort so the Inspector can correlate the
-///   challenge with the source denial. `None` skips log emission — useful
-///   for tests and legacy paths that haven't opened a log file yet.
+///   envelope is appended so the Inspector can correlate the challenge
+///   with the source denial.
+///
+/// Issue #645: `event_log` is **non-optional**. Production callers wire
+/// the runtime's log via `AgentPane::set_substrate_handles` before the
+/// pane is allowed to dispatch (`AgentPane::build_dispatch_context`
+/// returns `None` until the handle is present). Tests construct an
+/// isolated fixture via [`crate::test_support::fresh_log`].
 #[derive(Clone)]
 pub struct DefenderToolContext {
     pub self_ref: AgentRef,
     pub registry: Arc<Mutex<AgentRegistry>>,
-    pub event_log: Option<Arc<Mutex<EventLog>>>,
+    pub event_log: Arc<Mutex<EventLog>>,
 }
 
 impl DefenderToolContext {
@@ -122,7 +127,7 @@ impl DefenderToolContext {
     pub fn new(
         self_ref: AgentRef,
         registry: Arc<Mutex<AgentRegistry>>,
-        event_log: Option<Arc<Mutex<EventLog>>>,
+        event_log: Arc<Mutex<EventLog>>,
     ) -> Self {
         Self {
             self_ref,
@@ -169,20 +174,24 @@ fn format_challenge_body(denial_event_id: u64, question: &str) -> String {
     format!("[defender challenge re: denial #{denial_event_id}] {question}")
 }
 
-/// Best-effort append of a challenge envelope to the shared event log.
+/// Append a challenge envelope to the shared event log, surfacing failure
+/// as an error.
 ///
-/// Any failure (no log configured, poisoned mutex, I/O error) is swallowed —
-/// the challenge delivery itself must not stall on log persistence. Mirrors
-/// [`crate::chat_tools::append_speak_to_log`]'s contract.
+/// Issue #645 made the log non-`Option` at the dispatch boundary and
+/// required these emitters to propagate I/O errors instead of silently
+/// no-op'ing. Two failure modes are surfaced:
+///
+/// - `Err("event log poisoned")` when the shared `Mutex` is poisoned.
+/// - `Err("event log append failed: <io-error>")` when [`EventLog::append`]
+///   itself fails (e.g. ENOSPC).
 fn append_challenge_to_log(
-    log: &Option<Arc<Mutex<EventLog>>>,
+    log: &Arc<Mutex<EventLog>>,
     defender: &AgentRef,
     target_id: AgentId,
     denial_event_id: u64,
     question: &str,
-) -> Option<u64> {
-    let log = log.as_ref()?;
-    let mut g = log.lock().ok()?;
+) -> Result<u64, String> {
+    let mut g = log.lock().map_err(|_| "event log poisoned".to_string())?;
     let payload = serde_json::json!({
         "from": {
             "id": defender.id,
@@ -201,8 +210,8 @@ fn append_challenge_to_log(
         AGENT_CHALLENGE_EVENT_KIND,
         payload,
     )
-    .ok()
     .map(|env| env.id)
+    .map_err(|e| format!("event log append failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,13 +264,16 @@ pub fn challenge_agent(
         })
         .map_err(|_| format!("agent inbox closed: {target_id}"))?;
 
-    let _ = append_challenge_to_log(
+    // #645: log emission is load-bearing for inter-agent causality —
+    // the challenge is in flight via the inbox already, but the audit
+    // envelope must surface its append failure if the log is broken.
+    append_challenge_to_log(
         &ctx.event_log,
         &ctx.self_ref,
         target_id,
         parsed.denial_event_id,
         &parsed.question,
-    );
+    )?;
 
     Ok(format!("delivered challenge to agent {target_id}"))
 }
@@ -343,7 +355,14 @@ mod tests {
 
         let defender_ref =
             AgentRef::new(99, AgentRole::Defender, "defender-on-denial", SpawnSource::Substrate);
-        let ctx = DefenderToolContext::new(defender_ref, registry, None);
+        let ctx = DefenderToolContext::new(
+            defender_ref,
+            registry,
+            // #645: log handle is mandatory now; this test cares only
+            // about inbox delivery, so the log is allowed to receive an
+            // envelope it never asserts against.
+            crate::test_support::fresh_log(),
+        );
 
         let result = challenge_agent(
             &json!({
@@ -389,7 +408,8 @@ mod tests {
         let registry = Arc::new(Mutex::new(AgentRegistry::new()));
         let defender_ref =
             AgentRef::new(99, AgentRole::Defender, "defender", SpawnSource::Substrate);
-        let ctx = DefenderToolContext::new(defender_ref, registry, None);
+        let ctx =
+            DefenderToolContext::new(defender_ref, registry, crate::test_support::fresh_log());
 
         let err = challenge_agent(
             &json!({
@@ -428,15 +448,16 @@ mod tests {
             role: AgentRole::Watcher,
             working_dir: Path::new(&target_dir),
             registry,
-            event_log: None,
+            // #645: every DispatchContext now carries a real event log.
+            event_log: crate::test_support::fresh_log(),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        dag_explorer: None,
-        mcp_registry: None,
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,
+            mcp_registry: None,
         };
 
         let result = dispatch_tool(
@@ -490,7 +511,7 @@ mod tests {
 
         let defender_ref =
             AgentRef::new(99, AgentRole::Defender, "defender", SpawnSource::Substrate);
-        let ctx = DefenderToolContext::new(defender_ref, registry, Some(log.clone()));
+        let ctx = DefenderToolContext::new(defender_ref, registry, log.clone());
 
         challenge_agent(
             &json!({
@@ -544,7 +565,11 @@ mod tests {
 
         let defender_ref =
             AgentRef::new(99, AgentRole::Defender, "defender", SpawnSource::Substrate);
-        let ctx = DefenderToolContext::new(defender_ref.clone(), registry.clone(), None);
+        let ctx = DefenderToolContext::new(
+            defender_ref.clone(),
+            registry.clone(),
+            crate::test_support::fresh_log(),
+        );
 
         // Forward leg: Defender challenges the target.
         let result = challenge_agent(
@@ -631,7 +656,8 @@ mod tests {
 
         let defender_ref =
             AgentRef::new(1, AgentRole::Defender, "defender", SpawnSource::Substrate);
-        let ctx = DefenderToolContext::new(defender_ref, registry, None);
+        let ctx =
+            DefenderToolContext::new(defender_ref, registry, crate::test_support::fresh_log());
 
         let err = challenge_agent(
             &json!({

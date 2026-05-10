@@ -5952,6 +5952,7 @@ dependencies = [
  "blake3",
  "glob",
  "log",
+ "phantom-agents",
  "phantom-mcp",
  "phantom-memory",
  "phantom-protocol",

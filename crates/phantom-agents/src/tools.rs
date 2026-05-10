@@ -1814,15 +1814,16 @@ mod tests {
             role: AgentRole::Watcher,
             working_dir: tmp.path(),
             registry,
-            event_log: None,
+            // #645: every DispatchContext now carries a real event log.
+            event_log: crate::test_support::fresh_log(),
             pending_spawn,
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        dag_explorer: None,
-        mcp_registry: None,
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,
+            mcp_registry: None,
         };
 
         // One call → must produce exactly one denial result.
