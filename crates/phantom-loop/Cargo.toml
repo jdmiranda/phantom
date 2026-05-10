@@ -16,6 +16,18 @@ toml = "0.8"
 # so future major-version bumps stay localised.
 jsonschema = "0.20"
 thiserror = "2"
+# Async runtime for the runner FSM and the dispatcher trait's oneshot wiring.
+# Feature set mirrors `phantom-agents` (the C3 bind point) so the eventual
+# real dispatcher does not need to re-add anything: `sync` for `oneshot` /
+# `Mutex`, `rt`/`rt-multi-thread` so tests can spin a runtime, `time` for the
+# runner's idle backoff sleeps, and `macros` for `tokio::test`.
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# `tokio::time::pause` lives behind the `test-util` feature; the runner smoke
+# tests use it to fast-forward the idle-backoff sleep without wallclock waits.
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
 
 [lints]
 workspace = true

@@ -1,12 +1,14 @@
-//! Loop overseer crate — types and spec parsing for repo-scoped autonomous loops.
+//! Loop overseer crate — types, spec parsing, and runtime engine for
+//! repo-scoped autonomous loops.
 //!
-//! This is the C1 slice of issue [#650](https://github.com/jdmiranda/phantom/issues/650):
-//! the type-system foundation for repo-pointable loops (PR-finder, Reviewer,
-//! Implementer). Subsequent slices add:
+//! This crate is delivered in three slices against issue
+//! [#650](https://github.com/jdmiranda/phantom/issues/650):
 //!
-//! - **C2** — `LoopRunner` state machine, `LoopSource` trait implementations,
-//!   `LoopQueueRegistry`, and `LoopEffect` execution.
-//! - **C3** — `phantom loop` CLI subcommand.
+//! - **C1** (PR #658) — types + TOML parsing.
+//! - **C2** (this PR) — `LoopRunner` state machine, `LoopSource` trait
+//!   implementations, `LoopQueueRegistry`, and `LoopEffect` execution.
+//! - **C3** — the `phantom loop` CLI subcommand and the real
+//!   substrate-backed [`runner::AgentDispatcher`].
 //!
 //! # Spec format
 //!
@@ -40,21 +42,56 @@
 //! review_required = true
 //! ```
 //!
-//! Use [`load_spec`] (or [`parse_spec_str`] for in-memory specs) to obtain a
-//! [`LoopSpec`] paired with its compiled [`ExitSchema`].
+//! Use [`load_spec`] (or [`parse_spec_str`] for in-memory specs) to obtain
+//! a [`LoopSpec`] paired with its compiled [`ExitSchema`].
+//!
+//! # Runtime
+//!
+//! The C2 runtime exposes:
+//!
+//! - [`runner::LoopRunner`] — async state machine that drives one spec.
+//! - [`runner::LoopSource`] — pluggable input-side abstraction.
+//! - [`runner::AgentDispatcher`] — pluggable agent-spawning abstraction.
+//!   C2 ships only stub implementations; the real
+//!   [`phantom_agents::composer_tools::new_spawn_subagent_queue`]-backed
+//!   dispatcher lands in C3.
+//! - [`queue::LoopQueueRegistry`] — in-process directory of named queues
+//!   for cross-loop messaging.
+//! - [`effect_runner::run_effects`] — the dispatcher for
+//!   [`LoopEffect::EnqueueTo`], [`LoopEffect::LogToBus`], and
+//!   [`LoopEffect::StopLoop`].
+//!
+//! And two concrete source implementations under [`sources`]:
+//!
+//! - [`sources::CronSource`] — interval-driven for agentless poll loops.
+//! - [`sources::LoopMessageQueueSource`] — drains a named cross-loop queue.
+//!
+//! The GitHub-backed `GhIssueQueueSource` / `GhPrReviewQueueSource` are
+//! deferred to C3, alongside the CLI wiring.
 
 pub mod effect;
+pub mod effect_runner;
 pub mod error;
 pub mod exit;
 pub mod id;
+pub mod queue;
+pub mod runner;
 pub mod source;
+pub mod sources;
 pub mod spec;
 
 pub use effect::{FieldMap, LoopEffect};
+pub use effect_runner::{EffectContext, EffectError, EffectOutcome, run_effects};
 pub use error::LoopSpecError;
 pub use exit::ExitSchema;
 pub use id::LoopId;
+pub use queue::{LoopMessage, LoopQueue, LoopQueueRegistry};
+pub use runner::{
+    AgentDispatcher, CorrelationId, DispatchError, DispatchHandle, LoopContext, LoopInput,
+    LoopPullResult, LoopRunner, LoopSource, LoopSourceError, LoopState,
+};
 pub use source::{GhPrPredicate, GhPrState, LoopSourceSpec};
+pub use sources::{CronSource, LoopMessageQueueSource};
 pub use spec::{
     LoopAgentSpec, LoopPolicy, LoopQuarantinePolicy, LoopSpec, load_spec, parse_spec_str,
 };
