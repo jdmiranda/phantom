@@ -5,8 +5,12 @@
 //! and a visible output log that the renderer streams into the pane.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use phantom_memory::event_log::{EventLog, EventSource as LogEventSource};
 
 use crate::correlation::CorrelationId;
 use crate::dispatch::Disposition;
@@ -43,6 +47,48 @@ static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 /// globally unique regardless of which spawn path is used.
 pub fn allocate_agent_id() -> AgentId {
     NEXT_AGENT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
+// AutoApproveOutcome — issue #648
+// ---------------------------------------------------------------------------
+
+/// The kind name we use for `agent.auto_approve` envelopes in the
+/// [`EventLog`] (issue #648).
+///
+/// Pinned as a constant so producers
+/// ([`Agent::try_auto_approve_with_audit`]) and downstream consumers
+/// (inspector pane, brain reconciler, future policy auditors) stay in
+/// lockstep. Tests assert on this exact string.
+pub const AUTO_APPROVE_EVENT_KIND: &str = "agent.auto_approve";
+
+/// Result of [`Agent::try_auto_approve_with_audit`] (issue #648).
+///
+/// Carries the full audit context — `agent_id`, the fast-path decision
+/// (`approved`), the originating `disposition`, and a human-readable
+/// `reason` — so the caller can both react in code and emit a
+/// `phantom_protocol::Event::FastPathTaken` onto its bus without
+/// re-deriving the explanation string.
+///
+/// Equality / hashing are intentionally absent: this is a one-shot
+/// decision report, not a key.
+#[derive(Debug, Clone)]
+pub struct AutoApproveOutcome {
+    /// The agent the decision was made for.
+    pub agent_id: AgentId,
+    /// `true` iff the FSM transitioned `Queued → Working` via the
+    /// auto-approve fast path. `false` covers two cases: (a) the
+    /// disposition is not auto-approvable, and (b) the disposition is
+    /// auto-approvable but the FSM refused the transition (e.g. the
+    /// agent was not in `Queued`).
+    pub approved: bool,
+    /// The disposition that drove the decision. Recorded so audit
+    /// consumers can group by intent class without re-reading the agent.
+    pub disposition: Disposition,
+    /// Human-readable explanation. Used both as the audit envelope's
+    /// `reason` field and as the `reason` on a forwarded
+    /// `Event::FastPathTaken`.
+    pub reason: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -569,13 +615,114 @@ impl Agent {
     ///
     /// Returns `true` if the agent is now `Working`, `false` if the
     /// disposition is not auto-approvable or the FSM transition failed.
+    ///
+    /// # Deprecation (issue #648)
+    ///
+    /// This method emits no audit trail. Production callers must use
+    /// [`Agent::try_auto_approve_with_audit`] so the fast-path decision is
+    /// recorded in the [`EventLog`]. Tests and legacy paths that genuinely
+    /// have no log handle may keep calling this shim — it delegates to the
+    /// same FSM transition without logging.
     #[must_use]
+    #[deprecated(
+        since = "0.0.0",
+        note = "use try_auto_approve_with_audit so the fast-path decision is recorded; \
+                this shim emits no audit envelope and no Event::FastPathTaken"
+    )]
     pub fn try_auto_approve(&mut self) -> bool {
+        self.try_auto_approve_inner()
+    }
+
+    /// Internal FSM driver shared by [`Agent::try_auto_approve`] and
+    /// [`Agent::try_auto_approve_with_audit`].
+    ///
+    /// Carries no audit side-effect — that wrapping lives in the
+    /// `_with_audit` variant.
+    fn try_auto_approve_inner(&mut self) -> bool {
         if !self.disposition.auto_approve() {
             return false;
         }
         // Queued → Working is a valid FSM transition (the no-gate fast path).
         self.approve_plan()
+    }
+
+    /// Audited fast-path entry from `Queued` → `Working` (issue #648).
+    ///
+    /// Wraps [`Agent::try_auto_approve_inner`] and unconditionally appends
+    /// an `agent.auto_approve` envelope to the supplied [`EventLog`]
+    /// describing the decision:
+    ///
+    /// ```json
+    /// {
+    ///   "agent_id":    <u64>,
+    ///   "approved":    <bool>,
+    ///   "disposition": "Chat" | "Feature" | "BugFix" | ...,
+    ///   "reason":      "<human-readable explanation>"
+    /// }
+    /// ```
+    ///
+    /// The envelope is written even when the fast path is *refused*
+    /// (non-auto-approvable disposition, or FSM transition rejected) so an
+    /// auditor can see attempted bypasses, not just successful ones.
+    ///
+    /// # Bus emission
+    ///
+    /// The issue body asks the audit helper to also emit
+    /// `phantom_protocol::Event::FastPathTaken` to the bus. The
+    /// [`Agent`] struct holds no bus handle today — production wiring of a
+    /// caller (the reconciler, per the issue) will route the
+    /// [`AutoApproveOutcome`] returned here through whatever bus channel
+    /// exists at the call site. Returning the disposition + approved
+    /// boolean (rather than emitting from inside `agent.rs`) keeps this
+    /// helper free of a `phantom-adapter` dependency cycle.
+    ///
+    /// # Log-failure behaviour
+    ///
+    /// A poisoned or full event log is best-effort: the FSM transition
+    /// still happens and the outcome is still returned. Audit drops are
+    /// surfaced only via the `EventLog`'s own poison state — they do not
+    /// alter the lifecycle decision.
+    pub fn try_auto_approve_with_audit(
+        &mut self,
+        log: &Arc<Mutex<EventLog>>,
+    ) -> AutoApproveOutcome {
+        let disposition = self.disposition;
+        let approved = self.try_auto_approve_inner();
+
+        let reason = if !disposition.auto_approve() {
+            format!("disposition {disposition:?} is not auto-approvable")
+        } else if approved {
+            format!("disposition {disposition:?} is auto-approvable; FSM transitioned Queued -> Working")
+        } else {
+            format!(
+                "disposition {disposition:?} is auto-approvable but FSM refused the transition (current status {:?})",
+                self.status
+            )
+        };
+
+        // Best-effort log append. Poisoned mutex / I/O failure must not
+        // alter the lifecycle outcome — the audit miss is the EventLog's
+        // own poison state to surface elsewhere.
+        if let Ok(mut g) = log.lock() {
+            let payload = serde_json::json!({
+                "agent_id": self.id,
+                "approved": approved,
+                "disposition": disposition,
+                "reason": reason,
+            });
+            let _ = g.append(
+                LogEventSource::Agent { id: self.id },
+                AUTO_APPROVE_EVENT_KIND,
+                payload,
+            );
+        }
+
+        AutoApproveOutcome {
+            agent_id: self.id,
+            approved,
+            disposition,
+            reason,
+        }
     }
 
     /// Transition into the `Planning` state.
@@ -1888,6 +2035,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     // ---- Disposition wiring (#38 / #49) ------------------------------------
 
     #[test]
+    #[allow(deprecated)] // exercising the deprecated shim is the point of the test
     fn try_auto_approve_chat_goes_queued_to_working_directly() {
         let mut agent = Agent::with_disposition(
             1,
@@ -1903,6 +2051,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     #[test]
+    #[allow(deprecated)] // exercising the deprecated shim is the point of the test
     fn try_auto_approve_synthesize_decompose_audit_go_to_working() {
         for disposition in [Disposition::Synthesize, Disposition::Decompose, Disposition::Audit] {
             let mut agent = Agent::with_disposition(
@@ -1916,6 +2065,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     #[test]
+    #[allow(deprecated)] // exercising the deprecated shim is the point of the test
     fn try_auto_approve_returns_false_for_write_dispositions() {
         for disposition in [
             Disposition::Feature,
@@ -1931,6 +2081,102 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             assert!(!agent.try_auto_approve(), "{disposition:?} must not auto-approve");
             assert_eq!(agent.status(), AgentStatus::Queued);
         }
+    }
+
+    // ---- try_auto_approve_with_audit (#648) --------------------------------
+
+    fn open_event_log() -> (Arc<Mutex<EventLog>>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("events.jsonl");
+        let log = EventLog::open(&path).expect("open event log");
+        (Arc::new(Mutex::new(log)), tmp)
+    }
+
+    #[test]
+    fn try_auto_approve_with_audit_chat_approves_and_logs_envelope() {
+        let (log, _tmp) = open_event_log();
+        let mut agent = Agent::with_disposition(
+            1,
+            AgentTask::FreeForm { prompt: "summarise".into() },
+            Disposition::Chat,
+        );
+
+        let outcome = agent.try_auto_approve_with_audit(&log);
+
+        assert!(outcome.approved);
+        assert_eq!(outcome.agent_id, 1);
+        assert_eq!(outcome.disposition, Disposition::Chat);
+        assert_eq!(agent.status(), AgentStatus::Working);
+
+        let g = log.lock().expect("lock event log");
+        let tail = g.tail(16);
+        let env = tail.last().expect("at least one envelope appended");
+        assert_eq!(env.kind, AUTO_APPROVE_EVENT_KIND);
+        assert_eq!(env.payload["agent_id"], 1);
+        assert_eq!(env.payload["approved"], true);
+        // Disposition serializes by variant name.
+        assert_eq!(env.payload["disposition"], "Chat");
+        assert!(env.payload["reason"].as_str().unwrap().contains("auto-approvable"));
+    }
+
+    #[test]
+    fn try_auto_approve_with_audit_feature_refuses_and_logs_envelope() {
+        let (log, _tmp) = open_event_log();
+        let mut agent = Agent::with_disposition(
+            2,
+            AgentTask::FreeForm { prompt: "implement X".into() },
+            Disposition::Feature,
+        );
+
+        let outcome = agent.try_auto_approve_with_audit(&log);
+
+        assert!(!outcome.approved);
+        assert_eq!(outcome.disposition, Disposition::Feature);
+        assert_eq!(agent.status(), AgentStatus::Queued);
+
+        let g = log.lock().expect("lock event log");
+        let tail = g.tail(16);
+        let env = tail.last().expect("envelope appended even on refusal");
+        assert_eq!(env.kind, AUTO_APPROVE_EVENT_KIND);
+        assert_eq!(env.payload["approved"], false);
+        assert_eq!(env.payload["disposition"], "Feature");
+        assert!(
+            env.payload["reason"]
+                .as_str()
+                .unwrap()
+                .contains("not auto-approvable"),
+            "refusal reason must explain why",
+        );
+    }
+
+    #[test]
+    fn try_auto_approve_with_audit_writes_one_envelope_per_call() {
+        let (log, _tmp) = open_event_log();
+        let mut a1 = Agent::with_disposition(
+            10,
+            AgentTask::FreeForm { prompt: "a".into() },
+            Disposition::Chat,
+        );
+        let mut a2 = Agent::with_disposition(
+            11,
+            AgentTask::FreeForm { prompt: "b".into() },
+            Disposition::Feature,
+        );
+
+        let _ = a1.try_auto_approve_with_audit(&log);
+        let _ = a2.try_auto_approve_with_audit(&log);
+
+        let g = log.lock().expect("lock event log");
+        let tail = g.tail(16);
+        let appended: Vec<_> = tail
+            .iter()
+            .filter(|env| env.kind == AUTO_APPROVE_EVENT_KIND)
+            .collect();
+        assert_eq!(appended.len(), 2, "one envelope per call");
+        assert_eq!(appended[0].payload["agent_id"], 10);
+        assert_eq!(appended[0].payload["approved"], true);
+        assert_eq!(appended[1].payload["agent_id"], 11);
+        assert_eq!(appended[1].payload["approved"], false);
     }
 
     // ---- prompt persistence (#42) ------------------------------------------
