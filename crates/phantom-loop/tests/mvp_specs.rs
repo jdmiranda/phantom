@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use phantom_loop::{LoopEffect, LoopQuarantinePolicy, LoopSourceSpec, load_spec};
+use phantom_loop::{GhPrState, LoopEffect, LoopQuarantinePolicy, LoopSourceSpec, load_spec};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -37,60 +37,131 @@ fn spec_path(name: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// pr_finder.toml — agentless cron-driven router
+// pr_finder split — `pr_finder_review.toml` + `pr_finder_impl.toml`
 // ---------------------------------------------------------------------------
+//
+// The original `pr_finder.toml` was an agentless cron loop that
+// fan-routed PRs to two queues based on per-PR state. That design hit
+// three C1 schema gaps (no `Poll` effect, no predicate on `EnqueueTo`,
+// no `exit_schema` on agentless loops). The split below replaces it with
+// two single-source-single-destination loops driven by the `gh_pr`
+// source — which post-#664 owns its own `gh pr list` poll and dedup, so
+// no cron + no conditional routing is needed.
 
 #[test]
-fn pr_finder_spec_parses_as_agentless_cron() {
-    let path = spec_path("pr_finder");
+fn pr_finder_review_spec_parses() {
+    let path = spec_path("pr_finder_review");
     assert!(
         path.exists(),
-        "missing fixture: {} — the C1 MVP specs live at .phantom/loops/",
+        "missing fixture: {} — the MVP specs live at .phantom/loops/",
         path.display()
     );
 
-    let (spec, schema) = load_spec(&path).expect("pr_finder.toml must parse against C1 schema");
+    let (spec, schema) =
+        load_spec(&path).expect("pr_finder_review.toml must parse against the schema");
 
-    assert_eq!(spec.id, "pr-finder");
+    assert_eq!(spec.id, "pr_finder_review");
     assert!(
         spec.agent.is_none(),
-        "pr_finder is agentless — no [agent] table expected"
+        "pr_finder_review is agentless — no [agent] table expected"
     );
     assert!(
         schema.is_none(),
         "agentless specs return no compiled exit schema"
     );
 
-    // Source must be Cron at 5-minute cadence.
+    // Source must be the `gh_pr` variant with `review_required = true`.
     match &spec.source {
-        LoopSourceSpec::Cron { interval_seconds } => {
-            assert_eq!(*interval_seconds, 300, "expected 5-minute tick");
+        LoopSourceSpec::GhPr { repo, predicate } => {
+            assert_eq!(repo, "jdmiranda/phantom");
+            assert_eq!(predicate.state, GhPrState::Open);
+            assert!(
+                predicate.review_required,
+                "pr_finder_review predicate must set review_required = true"
+            );
+            assert!(
+                !predicate.failing_ci,
+                "pr_finder_review predicate must not also gate on failing_ci"
+            );
         }
-        other => panic!("expected Cron source, got {other:?}"),
+        other => panic!("expected GhPr source, got {other:?}"),
     }
 
-    // Two enqueue effects — one per downstream queue.
+    // One enqueue effect targeting `review-queue`.
     assert_eq!(
         spec.on_complete.len(),
-        2,
-        "pr_finder fans out to review-queue and implementer-queue"
+        1,
+        "pr_finder_review forwards to exactly one queue"
     );
-    let queues: Vec<&str> = spec
-        .on_complete
-        .iter()
-        .filter_map(|e| match e {
-            LoopEffect::EnqueueTo { queue, .. } => Some(queue.as_str()),
-            _ => None,
-        })
-        .collect();
+    match &spec.on_complete[0] {
+        LoopEffect::EnqueueTo { queue, .. } => {
+            assert_eq!(
+                queue, "review-queue",
+                "pr_finder_review must route to review-queue"
+            );
+        }
+        other => panic!("expected EnqueueTo, got {other:?}"),
+    }
+
+    // Sequential by default; skip-and-continue on quarantine.
+    assert_eq!(spec.max_concurrent, 1);
+    assert_eq!(spec.on_quarantine, LoopQuarantinePolicy::SkipAndContinue);
+}
+
+#[test]
+fn pr_finder_impl_spec_parses() {
+    let path = spec_path("pr_finder_impl");
     assert!(
-        queues.contains(&"review-queue"),
-        "pr_finder must route to review-queue, got {queues:?}"
+        path.exists(),
+        "missing fixture: {} — the MVP specs live at .phantom/loops/",
+        path.display()
+    );
+
+    let (spec, schema) =
+        load_spec(&path).expect("pr_finder_impl.toml must parse against the schema");
+
+    assert_eq!(spec.id, "pr_finder_impl");
+    assert!(
+        spec.agent.is_none(),
+        "pr_finder_impl is agentless — no [agent] table expected"
     );
     assert!(
-        queues.contains(&"implementer-queue"),
-        "pr_finder must route to implementer-queue, got {queues:?}"
+        schema.is_none(),
+        "agentless specs return no compiled exit schema"
     );
+
+    // Source must be the `gh_pr` variant with `failing_ci = true`.
+    match &spec.source {
+        LoopSourceSpec::GhPr { repo, predicate } => {
+            assert_eq!(repo, "jdmiranda/phantom");
+            assert_eq!(predicate.state, GhPrState::Open);
+            assert!(
+                predicate.failing_ci,
+                "pr_finder_impl predicate must set failing_ci = true"
+            );
+            assert!(
+                !predicate.review_required,
+                "pr_finder_impl predicate must not also gate on review_required"
+            );
+        }
+        other => panic!("expected GhPr source, got {other:?}"),
+    }
+
+    // One enqueue effect targeting `implementer-queue`.
+    assert_eq!(
+        spec.on_complete.len(),
+        1,
+        "pr_finder_impl forwards to exactly one queue"
+    );
+    match &spec.on_complete[0] {
+        LoopEffect::EnqueueTo { queue, .. } => {
+            assert_eq!(
+                queue, "implementer-queue",
+                "pr_finder_impl must route to implementer-queue"
+            );
+        }
+        other => panic!("expected EnqueueTo, got {other:?}"),
+    }
 
     // Sequential by default; skip-and-continue on quarantine.
     assert_eq!(spec.max_concurrent, 1);
