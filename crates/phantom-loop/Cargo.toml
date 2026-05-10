@@ -1,0 +1,21 @@
+[package]
+name = "phantom-loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+phantom-agents = { path = "../phantom-agents" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# JSON Schema validation. The `jsonschema` crate at 0.20 deprecates the old
+# `JSONSchema` type in favour of `Validator`/`validator_for`; we use the
+# `Validator` API and re-export it under our own [`crate::ExitSchema`] wrapper
+# so future major-version bumps stay localised.
+jsonschema = "0.20"
+thiserror = "2"
+
+[lints]
+workspace = true
