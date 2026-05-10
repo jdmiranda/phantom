@@ -249,9 +249,20 @@ impl McpToolRegistry {
     }
 
     /// Number of indexed tools across all servers.
-    #[must_use] 
+    #[must_use]
     pub fn tool_count(&self) -> usize {
         self.tool_index.len()
+    }
+
+    /// Iterate over every indexed tool name across all registered servers.
+    ///
+    /// Used by external callers — for example
+    /// [`phantom_loop::preflight::check_mcp_collisions`] — that need to refuse
+    /// to start when an MCP server has shadowed a reserved tool name. Order
+    /// is not stable; callers that need a stable comparison should collect
+    /// into a `BTreeSet`.
+    pub fn tool_names(&self) -> impl Iterator<Item = &str> {
+        self.tool_index.keys().map(String::as_str)
     }
 }
 
@@ -592,5 +603,25 @@ mod tests {
         let reg = McpToolRegistry::new();
         let err = reg.invoke("any.tool", json!({})).await.unwrap_err();
         assert!(matches!(err, McpError::UnknownTool { .. }));
+    }
+
+    // ---- tool_names enumeration (used by phantom-loop preflight collision check) -
+
+    #[test]
+    fn tool_names_enumerates_every_indexed_tool() {
+        let mut reg = McpToolRegistry::new();
+        register_test_server(&mut reg, "fs", &["fs.read_file", "fs.write_file"]);
+        register_test_server(&mut reg, "db", &["db.query"]);
+
+        let names: std::collections::BTreeSet<&str> = reg.tool_names().collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["fs.read_file", "fs.write_file", "db.query"].into_iter().collect();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn tool_names_empty_registry_yields_nothing() {
+        let reg = McpToolRegistry::new();
+        assert_eq!(reg.tool_names().count(), 0);
     }
 }

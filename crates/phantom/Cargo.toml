@@ -27,6 +27,8 @@ phantom-history = { path = "../phantom-history" }
 phantom-agents = { path = "../phantom-agents" }
 phantom-semantic = { path = "../phantom-semantic" }
 phantom-nlp = { path = "../phantom-nlp" }
+# Loop overseer for `phantom loop run` subcommand (issue #650 C3).
+phantom-loop = { path = "../phantom-loop" }
 
 # Hub registration: identity + credentials persistence (issue #563).
 phantom-net = { path = "../phantom-net" }
@@ -61,6 +63,13 @@ chrono = { workspace = true }
 # the resolver used inside `phantom_net::credentials` so the printed path
 # matches the actual storage location.
 dirs = "5"
+
+# Tokio runtime for the `phantom loop run` subcommand. The loop runner is
+# async (it `.await`s on the dispatcher's oneshot and on the source's idle
+# backoff); the CLI builds a multi-thread runtime and drives every loop
+# task on it. Features mirror what phantom-loop itself uses plus `signal`
+# so the CLI can shut down cleanly on Ctrl-C.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 
 [dev-dependencies]
 tempfile = "3"
