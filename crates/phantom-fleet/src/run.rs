@@ -465,44 +465,138 @@ fn spawn_brain_forwarder(
 // AppKind::Builder integration shim
 // ---------------------------------------------------------------------------
 //
-// NOTE: the actual `phantom_builder` import lives behind `cfg(feature =
-// "builder-apps")` so the workspace compiles even before the sibling
-// agent's crate is added. The expected merge-time API is:
+// Wires a `phantom_builder::Builder` per `AppKind::Builder` entry when the
+// `builder-apps` feature is on. The actual import lives behind
+// `cfg(feature = "builder-apps")` so the default-feature build does not
+// link in `phantom-builder` at all.
 //
-//     pub struct BuilderConfig {
-//         pub slug: String,
-//         pub trust_band: u8,
-//         pub loops: Vec<String>,
-//         pub max_prs_per_hour: Option<u32>,
-//         pub dry_run: bool,
-//         pub queues: Arc<LoopQueueRegistry>,
-//         pub dispatcher: Arc<SubstrateAgentDispatcher>,
-//     }
+// API translation from `BuilderSpec` (fleet TOML) to `BuilderConfig`
+// (phantom-builder public surface):
 //
-//     impl Builder {
-//         pub fn new(config: BuilderConfig) -> Result<Builder, Error>;
-//     }
+// - `slug`              -> `target_slug`
+// - `trust_band: u8`    -> `TrustBandConfig` enum (0=SuggestionOnly,
+//                          1=Conservative, 2=Standard, 3+=Aggressive)
+// - `loops`             -> `loops` (empty -> the canonical four-loop default)
+// - `max_prs_per_hour`  -> `safety.max_prs_per_hour` (None -> default)
+// - `dry_run`           -> `safety.dry_run`
+// - `extra["repo_path"]` (optional, forward-compat) -> `repo_path`
 //
-//     impl phantom_adapter::AppAdapter for Builder { ... }
+// `phantom_builder::Builder` does NOT implement `AppAdapter` — it is a
+// one-shot orchestrator with a synchronous `run()` that owns its own
+// multi-thread tokio runtime. We wrap it in a headless adapter and drive
+// it from a dedicated OS thread inside the fleet lifecycle. The OS thread
+// is required because spawning a multi-thread runtime from inside another
+// tokio task panics with "Cannot start a runtime from within a runtime".
 //
-// If the sibling agent's surface diverges, only this function needs to
-// change at merge time.
+// Shutdown is best-effort: on Ctrl-C the builder's internal
+// `tokio::signal::ctrl_c()` handler fires at the same time as the fleet's
+// outer one, so both runtimes wind down together. For non-SIGINT
+// shutdowns the builder thread detaches and exits when the process does.
 
 #[cfg(feature = "builder-apps")]
 fn build_builder_app(
     b: &crate::app_kind::BuilderSpec,
-    ctx: &FleetContext,
+    _ctx: &FleetContext,
 ) -> AppFactoryResult {
-    // Suppress unused-warning for `ctx` if the placeholder body below is
-    // active. The merge-time fixup will use it.
-    let _ = ctx;
-    Err(FleetError::Unsupported(format!(
-        "builder app `{}` requested with --features builder-apps enabled, but \
-         the phantom-builder dependency has not yet been wired in. Re-read the \
-         phantom-fleet Cargo.toml `phantom-builder` integration note and add \
-         the dep + flip the feature payload before re-enabling.",
-        b.slug
-    )))
+    use phantom_builder::{Builder, BuilderConfig, BuilderSafetyConfig, TrustBandConfig};
+
+    // Map `BuilderSpec.trust_band` (u8) onto the typed band the builder
+    // expects. Values above 3 are clamped to Aggressive — `BuilderSpec`
+    // declares this as an operator-chosen knob and the brain's TrustBudget
+    // upstream caps at band 3 anyway.
+    let trust_band = match b.trust_band {
+        0 => TrustBandConfig::SuggestionOnly,
+        1 => TrustBandConfig::Conservative,
+        2 => TrustBandConfig::Standard,
+        _ => TrustBandConfig::Aggressive,
+    };
+
+    // `BuilderSpec` exposes only a subset of `BuilderSafetyConfig`'s knobs.
+    // The remaining fields stay at the production default (5 PRs/h cap,
+    // 2 concurrent agents, dry-run off) and are overridden per the spec.
+    let mut safety = BuilderSafetyConfig::default();
+    if let Some(cap) = b.max_prs_per_hour {
+        safety.max_prs_per_hour = cap;
+    }
+    safety.dry_run = b.dry_run;
+
+    // Forward-compat: `BuilderSpec.extra` is the flatten bag for fields
+    // the current schema does not surface explicitly. Operators can pass
+    // `repo_path = "/some/path"` in the TOML entry to point the builder
+    // at a pre-existing checkout instead of cloning.
+    let repo_path = b
+        .extra
+        .get("repo_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from);
+
+    // Empty `loops` means "run the canonical four-loop pipeline" — the
+    // builder's own default. Anything non-empty is honoured verbatim.
+    let loops = if b.loops.is_empty() {
+        vec![
+            "pr_finder_review".to_string(),
+            "pr_finder_impl".to_string(),
+            "reviewer".to_string(),
+            "implementer".to_string(),
+        ]
+    } else {
+        b.loops.clone()
+    };
+
+    let cfg = BuilderConfig {
+        target_slug: b.slug.clone(),
+        repo_path,
+        trust_band,
+        label_filter: None,
+        safety,
+        loops,
+    };
+
+    let builder = Builder::new(cfg);
+
+    let slug = b.slug.clone();
+    let adapter: Box<dyn AppAdapter> =
+        Box::new(BuilderHeadlessAdapter::new(format!("builder:{slug}")));
+
+    let lifecycle_slug = slug.clone();
+    let lifecycle: BoxedLifecycle = Box::new(move |sd: AppShutdown| {
+        Box::pin(async move {
+            // Spawn the builder on a dedicated OS thread — `Builder::run()`
+            // builds its own multi-thread tokio runtime, which panics when
+            // called from inside an existing tokio context.
+            let thread_slug = lifecycle_slug.clone();
+            let join_res = std::thread::Builder::new()
+                .name(format!("phantom-fleet-builder-{thread_slug}"))
+                .spawn(move || {
+                    if let Err(e) = builder.run() {
+                        tracing::error!(
+                            slug = %thread_slug,
+                            error = %e,
+                            "phantom-fleet: builder exited with error"
+                        );
+                    }
+                });
+
+            let _join = match join_res {
+                Ok(j) => j,
+                Err(e) => {
+                    return format!("builder:{lifecycle_slug} thread spawn failed: {e}");
+                }
+            };
+
+            // Poll AppShutdown so the lifecycle exits when the fleet wants
+            // to wind down. The builder's own runtime traps `ctrl_c` so
+            // SIGINT shuts both runtimes down together; non-SIGINT
+            // shutdowns leave the builder thread to exit on process drop.
+            while !sd.is_cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+
+            format!("builder:{lifecycle_slug} signalled to stop")
+        })
+    });
+
+    Ok((adapter, lifecycle))
 }
 
 #[cfg(not(feature = "builder-apps"))]
@@ -735,6 +829,89 @@ impl phantom_adapter::Lifecycled for LoopHeadlessAdapter {}
 impl phantom_adapter::Permissioned for LoopHeadlessAdapter {}
 
 // ---------------------------------------------------------------------------
+// Headless builder adapter
+// ---------------------------------------------------------------------------
+//
+// Mirrors `LoopHeadlessAdapter`. The actual builder runtime lives on its
+// own OS thread (see `build_builder_app`); the adapter exists only to
+// satisfy the "everything is an app" contract so future visual hosts can
+// look this fleet entry up by id.
+
+#[cfg(feature = "builder-apps")]
+struct BuilderHeadlessAdapter {
+    app_type: String,
+    alive: bool,
+}
+
+#[cfg(feature = "builder-apps")]
+impl BuilderHeadlessAdapter {
+    fn new(app_type: String) -> Self {
+        Self {
+            app_type,
+            alive: true,
+        }
+    }
+}
+
+#[cfg(feature = "builder-apps")]
+impl phantom_adapter::AppCore for BuilderHeadlessAdapter {
+    fn app_type(&self) -> &str {
+        &self.app_type
+    }
+    fn is_alive(&self) -> bool {
+        self.alive
+    }
+    fn update(&mut self, _dt: f32) {}
+    fn get_state(&self) -> serde_json::Value {
+        serde_json::json!({ "type": self.app_type, "alive": self.alive })
+    }
+}
+
+#[cfg(feature = "builder-apps")]
+impl phantom_adapter::Renderable for BuilderHeadlessAdapter {
+    fn render(&self, _rect: &phantom_adapter::Rect) -> phantom_adapter::RenderOutput {
+        phantom_adapter::RenderOutput::default()
+    }
+    fn is_visual(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "builder-apps")]
+impl phantom_adapter::InputHandler for BuilderHeadlessAdapter {
+    fn handle_input(&mut self, _key: &str) -> bool {
+        false
+    }
+    fn accepts_input(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "builder-apps")]
+impl phantom_adapter::Commandable for BuilderHeadlessAdapter {
+    fn accept_command(
+        &mut self,
+        cmd: &str,
+        _args: &serde_json::Value,
+    ) -> anyhow::Result<String> {
+        if cmd == "stop" {
+            self.alive = false;
+        }
+        Ok(format!("executed:{cmd}"))
+    }
+    fn accepts_commands(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "builder-apps")]
+impl phantom_adapter::BusParticipant for BuilderHeadlessAdapter {}
+#[cfg(feature = "builder-apps")]
+impl phantom_adapter::Lifecycled for BuilderHeadlessAdapter {}
+#[cfg(feature = "builder-apps")]
+impl phantom_adapter::Permissioned for BuilderHeadlessAdapter {}
+
+// ---------------------------------------------------------------------------
 // Convenience: top-level `run_fleet`
 // ---------------------------------------------------------------------------
 
@@ -831,6 +1008,67 @@ mod tests {
             assert_eq!(errors.len(), 1);
             assert!(errors[0].contains("builder-apps"));
         }
+    }
+
+    #[cfg(feature = "builder-apps")]
+    #[test]
+    fn validate_builder_entry_with_feature_flag_passes() {
+        let spec = FleetSpec {
+            apps: vec![AppKind::Builder(BuilderSpec {
+                slug: "test/x".to_string(),
+                trust_band: 1,
+                loops: vec![],
+                max_prs_per_hour: None,
+                dry_run: true,
+                extra: serde_json::Map::new(),
+            })],
+            shared: Default::default(),
+        };
+        let runner = FleetRunner::new(spec);
+        let errors = runner.validate();
+        assert!(
+            errors.is_empty(),
+            "expected no validation errors with builder-apps on, got {errors:?}"
+        );
+    }
+
+    #[cfg(feature = "builder-apps")]
+    #[test]
+    fn build_builder_app_constructs_a_real_adapter() {
+        // Exercise the shim end-to-end: the factory must return Ok with an
+        // adapter whose app_type carries the slug. We do NOT invoke the
+        // lifecycle — that would trigger real clone + preflight (gh CLI).
+        use phantom_loop::{LoopQueueRegistry, SubstrateAgentDispatcher};
+        use std::sync::mpsc;
+
+        let queues = Arc::new(LoopQueueRegistry::new());
+        let spawn_queue = phantom_agents::composer_tools::new_spawn_subagent_queue();
+        let dispatcher = Arc::new(SubstrateAgentDispatcher::with_default_parent(spawn_queue));
+        let (brain_event_tx, _rx) = mpsc::channel();
+        let ctx = FleetContext {
+            queues,
+            dispatcher,
+            brain_event_tx,
+        };
+
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "repo_path".to_string(),
+            serde_json::Value::String("/tmp/phantom-fleet-builder-noop".to_string()),
+        );
+        let b = BuilderSpec {
+            slug: "test/repo".to_string(),
+            trust_band: 1,
+            loops: vec!["pr_finder_review".to_string()],
+            max_prs_per_hour: Some(3),
+            dry_run: true,
+            extra,
+        };
+
+        let (adapter, _lifecycle) =
+            build_builder_app(&b, &ctx).expect("builder shim must succeed");
+        assert_eq!(adapter.app_type(), "builder:test/repo");
+        // Lifecycle dropped without awaiting — no clone/preflight runs.
     }
 
     #[test]

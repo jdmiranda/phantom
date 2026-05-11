@@ -6277,6 +6277,7 @@ dependencies = [
  "phantom-adapter",
  "phantom-agents",
  "phantom-brain",
+ "phantom-builder",
  "phantom-loop",
  "phantom-protocol",
  "serde",
