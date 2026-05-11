@@ -44,6 +44,8 @@ members = [
     "crates/phantom-loop",
     # App-of-apps meta-orchestrator hosting multiple builders + loops.
     "crates/phantom-fleet",
+    # Higher-level builder orchestration on top of phantom-loop + phantom-brain.
+    "crates/phantom-builder",
 ]
 resolver = "2"
 

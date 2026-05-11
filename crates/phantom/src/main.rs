@@ -15,6 +15,7 @@ use winit::{
 };
 
 mod auth_cli;
+mod builder_cli;
 mod fleet_cli;
 mod headless;
 mod loop_cli;
@@ -666,6 +667,14 @@ fn main() -> Result<()> {
     // which owns its own clap parsing and runtime construction.
     if args.get(1).map(String::as_str) == Some("loop") {
         return loop_cli::run_loop_subcommand(&args);
+    }
+
+    // `phantom builder` subcommand routing — higher-level orchestration
+    // that points the loop pipeline at any GitHub repo. The CLI surface
+    // mirrors `phantom loop run` but adds clone-or-attach, default-spec
+    // seeding, and an aggressive brain config.
+    if args.get(1).map(String::as_str) == Some("builder") {
+        return builder_cli::run_builder_subcommand(&args);
     }
 
     // `phantom fleet` subcommand routing — the "app of apps" meta-

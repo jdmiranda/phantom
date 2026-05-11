@@ -6041,6 +6041,7 @@ dependencies = [
  "phantom-agents",
  "phantom-app",
  "phantom-brain",
+ "phantom-builder",
  "phantom-context",
  "phantom-fleet",
  "phantom-history",
@@ -6171,6 +6172,25 @@ dependencies = [
  "tokio",
  "ureq",
  "uuid",
+]
+
+[[package]]
+name = "phantom-builder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "phantom-agents",
+ "phantom-brain",
+ "phantom-loop",
+ "phantom-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
