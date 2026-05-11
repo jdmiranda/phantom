@@ -29,6 +29,8 @@ phantom-semantic = { path = "../phantom-semantic" }
 phantom-nlp = { path = "../phantom-nlp" }
 # Loop overseer for `phantom loop run` subcommand (issue #650 C3).
 phantom-loop = { path = "../phantom-loop" }
+# Fleet meta-orchestrator for the `phantom fleet ...` subcommand surface.
+phantom-fleet = { path = "../phantom-fleet" }
 
 # Hub registration: identity + credentials persistence (issue #563).
 phantom-net = { path = "../phantom-net" }

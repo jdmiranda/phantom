@@ -6042,6 +6042,7 @@ dependencies = [
  "phantom-app",
  "phantom-brain",
  "phantom-context",
+ "phantom-fleet",
  "phantom-history",
  "phantom-hub",
  "phantom-loop",
@@ -6246,6 +6247,25 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "phantom-fleet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "phantom-adapter",
+ "phantom-agents",
+ "phantom-brain",
+ "phantom-loop",
+ "phantom-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

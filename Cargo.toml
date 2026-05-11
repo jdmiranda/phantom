@@ -42,6 +42,8 @@ members = [
     "crates/phantom-skill-host",
     # Loop overseer — types and TOML spec parsing (C1 of issue #650).
     "crates/phantom-loop",
+    # App-of-apps meta-orchestrator hosting multiple builders + loops.
+    "crates/phantom-fleet",
 ]
 resolver = "2"
 

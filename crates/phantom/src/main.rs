@@ -15,6 +15,7 @@ use winit::{
 };
 
 mod auth_cli;
+mod fleet_cli;
 mod headless;
 mod loop_cli;
 mod path_resolver;
@@ -665,6 +666,12 @@ fn main() -> Result<()> {
     // which owns its own clap parsing and runtime construction.
     if args.get(1).map(String::as_str) == Some("loop") {
         return loop_cli::run_loop_subcommand(&args);
+    }
+
+    // `phantom fleet` subcommand routing — the "app of apps" meta-
+    // orchestrator. Same shape as the `loop` block above.
+    if args.get(1).map(String::as_str) == Some("fleet") {
+        return fleet_cli::run_fleet_subcommand(&args);
     }
 
     // Quick exits
