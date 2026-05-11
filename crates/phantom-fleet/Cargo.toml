@@ -28,21 +28,11 @@ phantom-agents  = { path = "../phantom-agents" }
 # the bus construction directly.
 phantom-protocol = { path = "../phantom-protocol" }
 
-# NOTE on `phantom-builder` integration:
-#
-# The sibling agent's `phantom-builder` crate is intentionally NOT declared
-# as a dependency here. Cargo's `optional = true` for a path dep still
-# requires the path to exist at workspace load time, which would break the
-# workspace before the sibling agent's PR merges. The integration is
-# instead handled via `cfg(feature = "builder-apps")` blocks in `run.rs`
-# that import `phantom_builder::*` only when the feature is enabled.
-#
-# To enable the integration once `phantom-builder` lands:
-#   1. Add `phantom-builder = { path = "../phantom-builder", optional = true }`
-#      to this `[dependencies]` table.
-#   2. Change the `builder-apps` feature below to:
-#      `builder-apps = ["dep:phantom-builder"]`.
-#   3. Rebuild with `cargo build -p phantom-fleet --features builder-apps`.
+# Optional per-repo autonomous builder. Gated behind the `builder-apps`
+# feature so the fleet stays buildable with default features. The actual
+# `AppKind::Builder` wiring lives in `src/run.rs` behind matching
+# `#[cfg(feature = "builder-apps")]` blocks.
+phantom-builder = { path = "../phantom-builder", optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,10 +44,11 @@ tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "m
 
 [features]
 # Wire `AppKind::Builder` to the real `phantom-builder` crate. Default OFF so
-# the workspace compiles even when the sibling agent's PR has not yet merged.
-# See the `phantom-builder` note above for the post-merge wiring steps.
+# operators opt in explicitly. When enabled, the fleet links in the
+# `phantom-builder` dep and the shim in `run.rs` constructs a real
+# `phantom_builder::Builder` per `AppKind::Builder` entry.
 default = []
-builder-apps = []
+builder-apps = ["dep:phantom-builder"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
