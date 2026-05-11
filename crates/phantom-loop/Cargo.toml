@@ -13,6 +13,11 @@ phantom-protocol = { path = "../phantom-protocol" }
 # (refuse to start a runner if a registered MCP tool shadows `complete_task` /
 # `abort_task`).
 phantom-mcp = { path = "../phantom-mcp" }
+# `ActionHandler` trait implementation for the brain → loop bridge
+# (`LoopQueueActionHandler`). Brain emits `AiAction::EnqueueLoopMessage` and
+# this crate provides the sink that pushes those messages onto a
+# `LoopQueueRegistry` so the implementer-queue source picks them up.
+phantom-brain = { path = "../phantom-brain" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

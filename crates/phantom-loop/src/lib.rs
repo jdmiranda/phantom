@@ -69,6 +69,7 @@
 //! The GitHub-backed `GhIssueQueueSource` / `GhPrReviewQueueSource` are
 //! deferred to C3, alongside the CLI wiring.
 
+pub mod action_handler;
 pub mod dispatcher;
 pub mod effect;
 pub mod effect_runner;
@@ -83,6 +84,7 @@ pub mod source;
 pub mod sources;
 pub mod spec;
 
+pub use action_handler::{LoopQueueActionHandler, NoopInner};
 pub use dispatcher::{
     ChatBackedSubstrateBackend, DEFAULT_MAX_ROUNDS, DEFAULT_TICK_INTERVAL, MockSubstrateBackend,
     SubstrateAgentDispatcher, SubstrateBackend, SubstrateCompletionRouter, SubstrateDriver,
