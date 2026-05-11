@@ -31,6 +31,9 @@ phantom-nlp = { path = "../phantom-nlp" }
 phantom-loop = { path = "../phantom-loop" }
 # Fleet meta-orchestrator for the `phantom fleet ...` subcommand surface.
 phantom-fleet = { path = "../phantom-fleet" }
+# Builder orchestrator for `phantom builder run` subcommand — generalises
+# the self-improvement loop to any GitHub repo.
+phantom-builder = { path = "../phantom-builder" }
 
 # Hub registration: identity + credentials persistence (issue #563).
 phantom-net = { path = "../phantom-net" }

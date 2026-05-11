@@ -599,7 +599,19 @@ impl SelfImprovementState {
     /// [`TRUST_BUDGET_START`].
     #[must_use]
     pub fn new(config: SelfImprovementConfig) -> Self {
-        let budget = TrustBudget::new();
+        Self::with_trust_budget(config, TrustBudget::new())
+    }
+
+    /// Construct with the given config and an explicit starting trust budget.
+    ///
+    /// The standard [`Self::new`] always opens at [`TRUST_BUDGET_START`] (4 =
+    /// standard band). Callers that need to begin at a different band — most
+    /// notably the `phantom-builder` crate, which exposes a `--trust-band`
+    /// CLI flag — use this constructor to seed the budget directly. The
+    /// per-hour cap on the rate limiter is recomputed against the supplied
+    /// budget so the operator's choice takes effect immediately.
+    #[must_use]
+    pub fn with_trust_budget(config: SelfImprovementConfig, budget: TrustBudget) -> Self {
         let rate_limit = RateLimiter::with_caps(
             budget.per_hour_cap(config.per_hour),
             config.per_day,
