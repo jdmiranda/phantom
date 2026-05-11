@@ -1239,7 +1239,15 @@ mod tests {
     #[test]
     fn dedupe_does_not_rescore_same_external_id() {
         let mut state = enabled_state();
-        let c = mk_candidate("gh-issue:777", 4.0, vec![], &[("age_hours", 1.0)]);
+        // Use the `priority:critical` label so the critical-floor (§7.1)
+        // pushes the score above the default 0.75 threshold; the dedupe
+        // path is what we are testing here, not the scoring weights.
+        let c = mk_candidate(
+            "gh-issue:777",
+            4.0,
+            vec!["priority:critical"],
+            &[("age_hours", 1.0)],
+        );
         let r1 = state.evaluate(&c, Instant::now());
         let r2 = state.evaluate(&c, Instant::now());
         assert_eq!(r1.audit.decision, AuditDecision::Enqueued);

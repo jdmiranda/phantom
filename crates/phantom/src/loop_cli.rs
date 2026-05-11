@@ -47,6 +47,26 @@
 //! [`phantom_loop::SubstrateCompletionRouter`] subscribes to. This closes
 //! the substrate loop without any GUI dependencies — the same `LoopRunner`
 //! FSM that runs in the App now runs end-to-end from the CLI.
+//!
+//! # Headless brain
+//!
+//! `phantom loop run` also boots the [`phantom_brain`] ambient OODA loop
+//! alongside the substrate driver. The brain's self-improvement reconciler
+//! polls a default set of [`phantom_brain::goal_source::GoalSource`]s
+//! (`GhIssueGoalSource` against `jdmiranda/phantom` plus a CI-failure source)
+//! every 60 s and, on a candidate clearing all gates, emits
+//! [`phantom_brain::events::AiAction::EnqueueLoopMessage`]. A small forwarder
+//! thread drains the brain's action receiver and hands every action to a
+//! [`phantom_loop::LoopQueueActionHandler`] — the bridge that pushes
+//! `EnqueueLoopMessage` payloads onto the shared `LoopQueueRegistry`. The
+//! `implementer-queue` consumer loop then pops each message, the
+//! `SubstrateAgentDispatcher` spawns the agent, and the substrate driver
+//! drives it to completion.
+//!
+//! The brain boot defaults to ON. Pass `--no-self-improve` to disable the
+//! reconciler entirely (no goal sources polled, no auto-enqueue) — useful
+//! when running pure cross-loop pipelines that do not want the brain to
+//! second-source the queue.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,10 +75,13 @@ use std::time::SystemTime;
 
 use anyhow::{Result, bail};
 use phantom_agents::composer_tools::new_spawn_subagent_queue;
+use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
+use phantom_brain::goal_source::{GhCiFailureGoalSource, GhIssueGoalSource, GoalSource};
+use phantom_brain::self_improvement::{SelfImprovementConfig, SelfImprovementState};
 use phantom_loop::{
-    ChatBackedSubstrateBackend, LoopHandle, LoopId, LoopQueueRegistry, LoopRegistry, LoopRunner,
-    LoopSource, LoopSourceSpec, LoopSpec, LoopStatus, SubstrateAgentDispatcher, SubstrateBackend,
-    SubstrateDriver,
+    ChatBackedSubstrateBackend, LoopHandle, LoopId, LoopQueueActionHandler, LoopQueueRegistry,
+    LoopRegistry, LoopRunner, LoopSource, LoopSourceSpec, LoopSpec, LoopStatus,
+    SubstrateAgentDispatcher, SubstrateBackend, SubstrateDriver,
 };
 
 /// Top-level dispatcher: `phantom loop <subcommand> ...`
@@ -109,6 +132,20 @@ struct RunArgs {
     /// Comma-separated list of loop names (by `id` field) to start.
     #[arg(long)]
     loops: String,
+
+    /// Disable the brain's self-improvement reconciler. Default is ON: the
+    /// brain polls `gh issue list` and `gh run list` against
+    /// `jdmiranda/phantom` every 60 s and auto-enqueues candidate goals onto
+    /// the `implementer-queue`. Pass this flag to run only the loop pipeline
+    /// without any brain-driven goal injection.
+    #[arg(long)]
+    no_self_improve: bool,
+
+    /// Override the GitHub repo the brain's self-improvement sources query.
+    /// Defaults to `jdmiranda/phantom`. Ignored when `--no-self-improve`
+    /// is set.
+    #[arg(long, default_value = "jdmiranda/phantom")]
+    self_improve_repo: String,
 }
 
 fn run_command(args: &[String]) -> Result<()> {
@@ -251,6 +288,77 @@ fn run_command(args: &[String]) -> Result<()> {
         anyhow::Ok(driver_join)
     })?;
 
+    // -- Brain boot ------------------------------------------------------
+    //
+    // The brain runs on its own OS thread (`spawn_brain` builds a
+    // `std::thread`, not a tokio task) and emits actions onto a
+    // `std::sync::mpsc` channel. We pair it with a long-running
+    // `tokio::task::spawn_blocking` forwarder that pulls actions off the
+    // channel and dispatches each one through
+    // `AiAction::execute(&mut LoopQueueActionHandler)`. The handler pushes
+    // every `EnqueueLoopMessage` onto the shared `LoopQueueRegistry` — the
+    // same registry the `implementer` loop's `LoopMessageQueueSource` pops
+    // from. That closes the brain ↔ loop bridge end-to-end without GUI deps.
+    let brain_state = if parsed.no_self_improve {
+        eprintln!("phantom loop run: self-improvement disabled (--no-self-improve)");
+        None
+    } else {
+        eprintln!(
+            "phantom loop run: booting brain with self-improvement against {}",
+            parsed.self_improve_repo
+        );
+        let project_dir = repo.to_string_lossy().to_string();
+        // Master kill switch defaults to OFF in the brain crate; the CLI is
+        // the operator's explicit opt-in surface so flip it on here.
+        let state = SelfImprovementState::new(SelfImprovementConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let goal_sources: Vec<Box<dyn GoalSource>> = vec![
+            Box::new(GhIssueGoalSource::new(parsed.self_improve_repo.clone(), None)),
+            Box::new(GhCiFailureGoalSource::new(
+                parsed.self_improve_repo.clone(),
+                None,
+            )),
+        ];
+        let brain: BrainHandle = spawn_brain(BrainConfig {
+            project_dir,
+            enable_suggestions: true,
+            enable_memory: true,
+            quiet_threshold: 0.5,
+            router: None,
+            catalog: None,
+            privacy_mode: false,
+            relay_inbound_rx: None,
+            history_context: Vec::new(),
+            self_improvement: Some(state),
+            goal_sources,
+        });
+
+        // Forwarder: drain brain actions on a blocking thread and route
+        // every one through the `LoopQueueActionHandler`. The thread owns
+        // the `BrainHandle` for its lifetime, so the handle's `Drop` (which
+        // sends `AiEvent::Shutdown` and joins the brain OS thread) runs
+        // only at process teardown. That keeps the brain alive for the
+        // full `phantom loop run` session without further plumbing.
+        //
+        // We spawn this as a tokio blocking task rather than a bare
+        // `std::thread` so the runtime knows about it; tokio's runtime
+        // drop sequence then waits for it on Ctrl-C teardown alongside the
+        // other tasks.
+        let queues_for_brain = Arc::clone(&queues);
+        let _forwarder_handle = runtime.spawn_blocking(move || {
+            let mut handler = LoopQueueActionHandler::new(queues_for_brain);
+            loop {
+                match brain.try_recv_action() {
+                    Some(action) => action.execute(&mut handler),
+                    None => std::thread::sleep(std::time::Duration::from_millis(100)),
+                }
+            }
+        });
+        Some(())
+    };
+
     eprintln!("phantom loop run: all loops started. Press Ctrl-C to stop.");
 
     // Block on ctrl-c. When it fires, abort every registered loop, abort
@@ -264,6 +372,9 @@ fn run_command(args: &[String]) -> Result<()> {
             let _ = registry.stop(snap.id);
         }
         driver_handle.abort();
+        if brain_state.is_some() {
+            eprintln!("phantom loop run: brain forwarder will exit on process teardown");
+        }
     });
 
     // Drop the lock explicitly so the message lines up after the loop teardown.

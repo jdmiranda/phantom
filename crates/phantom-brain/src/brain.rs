@@ -120,13 +120,13 @@ impl Drop for BrainHandle {
     /// A log message is emitted instead.
     fn drop(&mut self) {
         let _ = self.event_tx.send(AiEvent::Shutdown);
-        if let Some(handle) = self.brain_handle.take() {
-            if let Err(_payload) = handle.join() {
-                log::error!(
-                    "phantom-brain supervisor thread panicked during Drop; \
-                     the panic payload is suppressed to avoid a double-panic abort"
-                );
-            }
+        if let Some(handle) = self.brain_handle.take()
+            && let Err(_payload) = handle.join()
+        {
+            log::error!(
+                "phantom-brain supervisor thread panicked during Drop; \
+                 the panic payload is suppressed to avoid a double-panic abort"
+            );
         }
     }
 }

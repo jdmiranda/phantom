@@ -655,6 +655,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
 
         // Send an event.
@@ -681,6 +682,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
 
         assert!(handle.try_recv_action().is_none());
@@ -753,6 +755,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
         let sender_clone = handle.event_sender();
 
