@@ -161,10 +161,17 @@ fn run_permissive(
     // The ulimit built-in is POSIX and available in both bash and sh.
     //
     // Limits applied:
-    //   -t 60  CPU seconds
-    //   -u 64  max user processes (fork-bomb mitigation)
+    //   -t 60   CPU seconds
+    //   -u 512  max user processes (fork-bomb mitigation)
+    //
+    // `ulimit -u` is PER USER, not per shell. With multiple parallel
+    // agent runs each invoking gh / git / cargo (which themselves fork
+    // helper processes), 64 was hit during normal triage and produced
+    // `sh: fork: Resource temporarily unavailable`. 512 is a comfortable
+    // headroom while still aborting an actual fork bomb (macOS default
+    // is typically 2000-5000+).
     let wrapped = format!(
-        "ulimit -t 60; ulimit -u 64 2>/dev/null || true; {command_str}"
+        "ulimit -t 60; ulimit -u 512 2>/dev/null || true; {command_str}"
     );
 
     let mut cmd = Command::new("sh");
