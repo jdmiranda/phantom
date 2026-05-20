@@ -472,36 +472,90 @@ pub fn send_message(
 
         let body_str = serde_json::to_string(&request_body).unwrap_or_default();
 
-        let result = agent
-            .post(API_URL)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .send(body_str.as_bytes());
+        // Retry-with-backoff for transient Anthropic overload (529) and
+        // rate-limit (429). The autonomous loop runs many requests through
+        // here; without retry, a brief API congestion burst kills an
+        // entire 8-min daemon iteration. Backoff: 2s, 6s, 18s — total
+        // ~26 s worst case before giving up, which still fits in one
+        // triager iteration.
+        const RETRY_DELAYS_SEC: [u64; 3] = [2, 6, 18];
+        let mut final_result: Option<Result<ureq::http::Response<ureq::Body>, String>> = None;
+        for (attempt, delay_secs) in
+            std::iter::once(0u64).chain(RETRY_DELAYS_SEC.iter().copied()).enumerate()
+        {
+            if delay_secs > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+            }
+            let result = agent
+                .post(API_URL)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .send(body_str.as_bytes());
 
-        match result {
-            Ok(mut response) => {
-                match response.body_mut().read_to_string() {
-                    Ok(text) => {
-                        match serde_json::from_str::<Value>(&text) {
-                            Ok(json) => parse_response(&json, &tx),
-                            Err(e) => {
-                                let _ = tx.send(ApiEvent::Error(format!(
-                                    "failed to parse response: {e}"
-                                )));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ApiEvent::Error(format!(
-                            "failed to read response body: {e}"
-                        )));
+            match &result {
+                Ok(response) => {
+                    // 5xx (especially 529 overloaded) and 429 are retryable.
+                    let code = response.status().as_u16();
+                    if (code == 429 || (500..600).contains(&code))
+                        && attempt < RETRY_DELAYS_SEC.len()
+                    {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            status = code,
+                            "Anthropic API transient error — retrying after backoff"
+                        );
+                        continue;
                     }
                 }
+                Err(e) => {
+                    // ureq returns HTTP errors as Err. Match on the status
+                    // string for the same retryable classes. ureq's error
+                    // Debug looks like `http_status(529)`.
+                    let es = format!("{e}");
+                    let retryable = es.contains("status: 529")
+                        || es.contains("status: 503")
+                        || es.contains("status: 502")
+                        || es.contains("status: 429");
+                    if retryable && attempt < RETRY_DELAYS_SEC.len() {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            error = %es,
+                            "Anthropic API transient error — retrying after backoff"
+                        );
+                        continue;
+                    }
+                    final_result = Some(Err(es));
+                    break;
+                }
             }
-            Err(e) => {
-                // ureq returns HTTP errors (4xx, 5xx) as Err variants.
+            final_result = Some(result.map_err(|e| format!("{e}")));
+            break;
+        }
+
+        match final_result {
+            Some(Ok(mut response)) => match response.body_mut().read_to_string() {
+                Ok(text) => match serde_json::from_str::<Value>(&text) {
+                    Ok(json) => parse_response(&json, &tx),
+                    Err(e) => {
+                        let _ = tx.send(ApiEvent::Error(format!(
+                            "failed to parse response: {e}"
+                        )));
+                    }
+                },
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!(
+                        "failed to read response body: {e}"
+                    )));
+                }
+            },
+            Some(Err(e)) => {
                 let _ = tx.send(ApiEvent::Error(format!("request failed: {e}")));
+            }
+            None => {
+                let _ = tx.send(ApiEvent::Error(
+                    "request failed: no result after retry loop (bug)".into(),
+                ));
             }
         }
     });
