@@ -505,22 +505,18 @@ pub fn lifecycle_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "complete_task".into(),
-            description: "Signal that the task is complete. Call this once when you have finished \
-                          the work — the call ends the agent loop. `result` must be a JSON object \
-                          summarising the outcome (e.g. `{\"summary\": \"...\", \"artifacts\": [...]}`).".into(),
+            description: "Signal that the task is complete. Call this ONCE when you have \
+                          finished the work — the call ends the agent loop. The argument \
+                          object's required shape is defined by your loop's `exit_schema` \
+                          and is documented in your system prompt under \"You MUST call \
+                          complete_task with ...\". Do NOT default to `summary`/`artifacts` \
+                          fields unless your system prompt explicitly demands them — the \
+                          loop validator will reject mismatched shapes. Mismatched shapes \
+                          flatline the loop after three consecutive failures."
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "Short human-readable description of what was accomplished."
-                    },
-                    "artifacts": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional list of files, identifiers, or outputs produced."
-                    }
-                }
+                "additionalProperties": true,
             }),
         },
         ToolDefinition {

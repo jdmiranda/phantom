@@ -155,6 +155,15 @@ struct RunArgs {
     #[arg(long, default_value = "implementer-queue")]
     brain_queue: String,
 
+    /// Path for the brain's per-decision JSONL audit log. Every
+    /// `score_candidate` + `evaluate` pass appends one envelope with the
+    /// candidate id, score breakdown, and decision (enqueued / skipped /
+    /// rate-limited / hard-excluded). Defaults to
+    /// `<repo>/.phantom/brain-audit.jsonl`. Tail it to see what the brain
+    /// is actually deciding, especially under `--dry-run`.
+    #[arg(long)]
+    audit_log: Option<PathBuf>,
+
     /// Bounded-mode: shut the daemon down after the brain has enqueued
     /// `N` loop messages. Counts increments at the
     /// `LoopQueueActionHandler::enqueue_loop_message` boundary — every
@@ -361,14 +370,26 @@ fn run_command(args: &[String]) -> Result<()> {
         let project_dir = repo.to_string_lossy().to_string();
         // Master kill switch defaults to OFF in the brain crate; the CLI is
         // the operator's explicit opt-in surface so flip it on here.
+        let audit_log_path = parsed
+            .audit_log
+            .clone()
+            .unwrap_or_else(|| repo.join(".phantom").join("brain-audit.jsonl"));
+        if let Some(parent) = audit_log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let state = SelfImprovementState::new(SelfImprovementConfig {
             enabled: true,
             queue_name: parsed.brain_queue.clone(),
+            audit_log_path: Some(audit_log_path.clone()),
             ..Default::default()
         });
         eprintln!(
             "phantom loop run: brain will enqueue to `{}`",
             parsed.brain_queue
+        );
+        eprintln!(
+            "phantom loop run: brain audit log at {}",
+            audit_log_path.display()
         );
         let goal_sources: Vec<Box<dyn GoalSource>> = vec![
             Box::new(GhIssueGoalSource::new(parsed.self_improve_repo.clone(), None)),
@@ -407,18 +428,24 @@ fn run_command(args: &[String]) -> Result<()> {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter_for_handler = std::sync::Arc::clone(&enqueue_counter);
         let dry_run = parsed.dry_run;
+        let forwarder_shutdown =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let forwarder_shutdown_for_thread = std::sync::Arc::clone(&forwarder_shutdown);
         let _forwarder_handle = runtime.spawn_blocking(move || {
             let mut handler = LoopQueueActionHandler::new(queues_for_brain)
                 .with_dry_run(dry_run)
                 .with_enqueue_counter(counter_for_handler);
-            loop {
+            while !forwarder_shutdown_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
                 match brain.try_recv_action() {
                     Some(action) => action.execute(&mut handler),
                     None => std::thread::sleep(std::time::Duration::from_millis(100)),
                 }
             }
+            // Drop the handle so the brain OS thread joins on its own.
+            drop(brain);
+            eprintln!("phantom loop run: brain forwarder exited cleanly");
         });
-        Some(enqueue_counter)
+        Some((enqueue_counter, forwarder_shutdown))
     };
 
     if parsed.dry_run {
@@ -439,7 +466,8 @@ fn run_command(args: &[String]) -> Result<()> {
     // in the same order as before.
     let max_iterations = parsed.max_iterations;
     let max_runtime_min = parsed.max_runtime_min;
-    let counter_for_watcher = brain_state.clone();
+    let counter_for_watcher = brain_state.as_ref().map(|(c, _)| Arc::clone(c));
+    let forwarder_shutdown_for_teardown = brain_state.as_ref().map(|(_, s)| Arc::clone(s));
     runtime.block_on(async move {
         let ctrl_c = tokio::signal::ctrl_c();
         // Wall-clock timer: resolves into a non-firing future when the flag
@@ -488,8 +516,9 @@ fn run_command(args: &[String]) -> Result<()> {
             let _ = registry.stop(snap.id);
         }
         driver_handle.abort();
-        if brain_state.is_some() {
-            eprintln!("phantom loop run: brain forwarder will exit on process teardown");
+        if let Some(shutdown) = forwarder_shutdown_for_teardown {
+            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("phantom loop run: brain forwarder signalled — process exit imminent");
         }
     });
 
