@@ -147,6 +147,14 @@ struct RunArgs {
     #[arg(long, default_value = "jdmiranda/phantom")]
     self_improve_repo: String,
 
+    /// Override the queue name the brain enqueues candidates to. Default
+    /// `implementer-queue` (legacy direct-to-implementer routing). Set to
+    /// `triage-queue` to route through the triager loop, which classifies
+    /// each candidate (close / comment / research / refine / implement)
+    /// before paying for an implementer agent.
+    #[arg(long, default_value = "implementer-queue")]
+    brain_queue: String,
+
     /// Bounded-mode: shut the daemon down after the brain has enqueued
     /// `N` loop messages. Counts increments at the
     /// `LoopQueueActionHandler::enqueue_loop_message` boundary — every
@@ -175,6 +183,24 @@ struct RunArgs {
 
 fn run_command(args: &[String]) -> Result<()> {
     use clap::Parser;
+
+    // Initialise structured logging early so brain ticks, dispatch decisions,
+    // and effect runs all surface to stderr under the user's RUST_LOG filter.
+    // `try_init` swallows the "already initialised" path so re-running the
+    // subcommand in the same process (tests) is a no-op rather than a panic.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .try_init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
 
     // We expect args[0] == "run"; strip it before clap sees the slice so
     // clap's positional handling matches the documented usage.
@@ -337,8 +363,13 @@ fn run_command(args: &[String]) -> Result<()> {
         // the operator's explicit opt-in surface so flip it on here.
         let state = SelfImprovementState::new(SelfImprovementConfig {
             enabled: true,
+            queue_name: parsed.brain_queue.clone(),
             ..Default::default()
         });
+        eprintln!(
+            "phantom loop run: brain will enqueue to `{}`",
+            parsed.brain_queue
+        );
         let goal_sources: Vec<Box<dyn GoalSource>> = vec![
             Box::new(GhIssueGoalSource::new(parsed.self_improve_repo.clone(), None)),
             Box::new(GhCiFailureGoalSource::new(
