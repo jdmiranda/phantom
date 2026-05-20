@@ -21,7 +21,9 @@
 set -u
 
 REPO="${PHANTOM_FOREVER_REPO:-$(pwd)}"
-LOOPS="${PHANTOM_FOREVER_LOOPS:-implementer,reviewer,pr_finder_review,pr_finder_impl}"
+LOOPS="${PHANTOM_FOREVER_LOOPS:-triager,implementer,reviewer}"
+BRAIN_QUEUE="${PHANTOM_FOREVER_BRAIN_QUEUE:-triage-queue}"
+MAX_RUNTIME_MIN="${PHANTOM_FOREVER_MAX_RUNTIME_MIN:-10}"
 POLL_SECS="${PHANTOM_FOREVER_POLL_SECS:-300}"
 LOG_DIR="$REPO/.phantom/forever-logs"
 
@@ -61,8 +63,13 @@ while true; do
     fi
     log "build ok"
 
-    log "launching: phantom loop run --repo $REPO --loops $LOOPS"
-    ./target/release/phantom loop run --repo "$REPO" --loops "$LOOPS" 2>&1 &
+    log "launching: phantom loop run --repo $REPO --loops $LOOPS --brain-queue $BRAIN_QUEUE --max-runtime-min $MAX_RUNTIME_MIN"
+    ./target/release/phantom loop run \
+        --repo "$REPO" \
+        --loops "$LOOPS" \
+        --brain-queue "$BRAIN_QUEUE" \
+        --max-runtime-min "$MAX_RUNTIME_MIN" \
+        2>&1 &
     DAEMON_PID=$!
     log "daemon PID=$DAEMON_PID"
 
