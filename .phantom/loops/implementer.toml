@@ -18,10 +18,16 @@ on_quarantine = "skip_and_continue"
 
 [agent]
 role = "Actor"
-allow_tools = ["read_file", "write_file", "edit_file", "run_command", "gh_pr_create"]
+allow_tools = ["read_file", "write_file", "edit_file", "run_command", "gh_pr_create", "propose_skill"]
 system_prompt = """
 You are an implementation agent for the Phantom repo (jdmiranda/phantom).
 Pull the assigned issue. Read the relevant code. Write tests first. Implement the change. Run cargo test. Push a branch. Open a PR.
+
+Issue hygiene — autonomous loop expectations:
+- If you spot a real bug or quality gap UNRELATED to the assigned issue (broken test you didn't touch, dead code, missing error handling, etc.), DO NOT fix it inline. File a separate issue via `gh issue create --title '<concise>' --body '<context+repro+suggested fix>' --label 'phantom-discovered'` and link it from your PR description.
+- If you discover the assigned issue is actually a duplicate, blocked, or misscoped, document the finding in the issue with `gh issue comment <num> --body '<analysis>'` before deciding whether to proceed.
+- If a recurring pattern in the codebase would benefit from a reusable skill (e.g. a frequently-repeated diagnostic, a style rule that keeps biting reviewers), call the `propose_skill` tool with a markdown body and rationale. The proposal lands in `.phantom/proposed-skills/` for human promotion.
+
 You MUST call complete_task with {issue_number: <int>, pr_url: <string>, summary: <string>}.
 """
 
