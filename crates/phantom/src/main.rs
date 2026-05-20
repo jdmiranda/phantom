@@ -916,6 +916,17 @@ fn main() -> Result<()> {
         log::info!("Supervisor mode: socket at {}", sock.display());
     }
 
+    // Build and enter a multi-thread tokio runtime before constructing the App.
+    // phantom-app calls `tokio::spawn` from inside winit's `resumed` callback
+    // (TTS pipeline, MCP discovery), which panics without an entered runtime.
+    // `_tokio_guard` must outlive `event_loop.run_app` — it does, since both
+    // are dropped at the end of `main`.
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build tokio runtime: {e}"))?;
+    let _tokio_guard = tokio_rt.enter();
+
     let event_loop = EventLoop::new()?;
     let mut app = Phantom::new(config, supervisor_socket);
 

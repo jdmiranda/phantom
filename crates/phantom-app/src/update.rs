@@ -158,6 +158,17 @@ impl App {
             });
         }
 
+        // Default to agent space: on the first normal (non-demo) Terminal frame,
+        // open an agent pane so the user lands in a conversation, not a raw shell.
+        if !self.demo_mode && self.state == AppState::Terminal && !self.post_boot_agent_spawned {
+            self.post_boot_agent_spawned = true;
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+                prompt: "Welcome. I'm your Phantom agent — ready to help you build, debug, \
+                    or explore. What would you like to work on?"
+                    .to_owned(),
+            });
+        }
+
         // Supervisor command polling (drain all pending; heartbeats are on a dedicated thread).
         while let Some(cmd) = self.supervisor.as_mut().and_then(|sv| sv.try_recv()) {
             self.handle_supervisor_command(cmd);
@@ -541,19 +552,31 @@ impl App {
         self.watchdog_frame += 1;
         if now.duration_since(self.watchdog_last).as_secs() >= 10 {
             let uptime = now.duration_since(self.start_time).as_secs();
+            let adapter_count = self.coordinator.adapter_count();
+            let agent_count = self
+                .coordinator
+                .registry()
+                .all_running()
+                .into_iter()
+                .filter_map(|id| self.coordinator.registry().get(id))
+                .filter(|e| e.app_type == "agent")
+                .count();
             info!(
                 "watchdog: alive frame={} uptime={}s adapters={} agents={}",
-                self.watchdog_frame,
-                uptime,
-                self.coordinator.adapter_count(),
-                self.coordinator
-                    .registry()
-                    .all_running()
-                    .into_iter()
-                    .filter_map(|id| self.coordinator.registry().get(id))
-                    .filter(|e| e.app_type == "agent")
-                    .count(),
+                self.watchdog_frame, uptime, adapter_count, agent_count,
             );
+
+            // Record an activity frame into the supervisor client's ring buffer
+            // so that if the supervisor-silence detector fires, the last N
+            // watchdog snapshots are available for diagnosis.
+            if let Some(ref mut sv) = self.supervisor {
+                let state = format!(
+                    "frame={} uptime={}s adapters={} agents={} state={:?}",
+                    self.watchdog_frame, uptime, adapter_count, agent_count, self.state,
+                );
+                sv.record_activity(state);
+            }
+
             self.watchdog_last = now;
         }
     }

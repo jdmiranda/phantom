@@ -355,12 +355,29 @@ impl Renderable for AgentAdapter {
                 .collect();
             let total_content_h: f32 = block_heights.iter().sum();
 
-            // scroll_offset is in "lines" for the legacy path; here we convert
-            // it to pixels using LINE_HEIGHT so the scrollbar command keeps
-            // working without a deeper refactor.
-            let offset_px = (self.scroll_offset as f32 * LINE_HEIGHT).min(
-                (total_content_h - output_height).max(0.0),
-            );
+            // Output viewport bounds — text and quads emitted by a block
+            // are clipped against this rectangle so a message taller than
+            // the visible area cannot leak past the input bar (Bug 2).
+            let viewport_top = rect.y;
+            let viewport_bottom = rect.y + output_height;
+
+            // Maximum scroll offset in pixels: how much of the content
+            // history is *above* the viewport when fully scrolled up.
+            let max_offset_px = (total_content_h - output_height).max(0.0);
+
+            // Bug-2 fix: when `scroll_offset == 0` we want the LIVE view
+            // (newest messages anchored to the BOTTOM of the output area),
+            // matching the fallback cached-lines path below. The legacy
+            // code anchored to the top regardless of offset, which made
+            // long conversations always overflow past the input bar.
+            //
+            // `scroll_offset` is in "lines" (positive = scroll up away
+            // from live). Convert to pixels and treat the live tail as
+            // `offset_px = max_offset_px`; each line of upward scroll
+            // subtracts one `LINE_HEIGHT`.
+            let scroll_up_px = (self.scroll_offset as f32 * LINE_HEIGHT)
+                .min(max_offset_px);
+            let offset_px = max_offset_px - scroll_up_px;
 
             // Derive `history_size` in scroll units (lines) for ScrollState.
             let total_virtual_lines =
@@ -379,16 +396,18 @@ impl Renderable for AgentAdapter {
             visible_count = total_virtual_lines.min(output_max_lines);
 
             // Render each block that intersects the visible viewport.
+            // `cursor_y` starts above the viewport when content is taller
+            // than the output area (live tail anchored to bottom).
             let mut cursor_y = rect.y + pad - offset_px;
             for (block, block_h) in blocks.iter_mut().zip(block_heights.iter()) {
                 let block_bottom = cursor_y + block_h;
                 // Skip blocks entirely above the viewport.
-                if block_bottom < rect.y {
+                if block_bottom < viewport_top {
                     cursor_y += block_h;
                     continue;
                 }
                 // Stop once we're below the output area.
-                if cursor_y > rect.y + output_height {
+                if cursor_y > viewport_bottom {
                     break;
                 }
 
@@ -399,19 +418,38 @@ impl Renderable for AgentAdapter {
                     height: *block_h,
                 };
 
-                // Quads (background).
+                // Quads (background) — clip to the output viewport so a
+                // tall message that straddles the bottom does not paint
+                // over the input bar.
                 for q in block.render_quads(&ui_rect) {
+                    let qx = q.pos[0];
+                    let qy = q.pos[1];
+                    let qw = q.size[0];
+                    let qh = q.size[1];
+                    let clipped_top = qy.max(viewport_top);
+                    let clipped_bottom = (qy + qh).min(viewport_bottom);
+                    if clipped_bottom <= clipped_top {
+                        continue;
+                    }
                     quads.push(QuadData {
-                        x: q.pos[0],
-                        y: q.pos[1],
-                        w: q.size[0],
-                        h: q.size[1],
+                        x: qx,
+                        y: clipped_top,
+                        w: qw,
+                        h: clipped_bottom - clipped_top,
                         color: q.color,
                     });
                 }
 
-                // Text segments.
+                // Text segments — drop any line whose baseline falls
+                // outside the output viewport. Without this clamp, long
+                // messages emitted text into the input bar area and below
+                // (Bug 2: "scrolled past its window").
                 for seg in block.render_text(&ui_rect) {
+                    if seg.y + LINE_HEIGHT <= viewport_top
+                        || seg.y >= viewport_bottom
+                    {
+                        continue;
+                    }
                     text_segments.push(TextData {
                         text: seg.text,
                         x: seg.x,
@@ -529,10 +567,23 @@ impl InputHandler for AgentAdapter {
     fn handle_input(&mut self, key: &str) -> bool {
         match key {
             "\r" | "\n" => {
+                // Bug-1 fix: refuse to dispatch a follow-up while the previous
+                // turn is still in flight. Without this, `send_followup` used
+                // to overwrite `api_handle` (silently leaking the running
+                // background thread) and push a fresh User message after an
+                // assistant turn that still had pending tool calls — Claude
+                // then rejected the malformed conversation and Phantom
+                // crashed deep in the response parser. We KEEP the input
+                // buffer so the user can hit Enter again once the agent
+                // finishes; this is friendlier than silently dropping their
+                // typed message.
+                if self.pane.is_busy() {
+                    return true;
+                }
                 let input = std::mem::take(&mut self.input_buffer);
                 let trimmed = input.trim().to_string();
                 if !trimmed.is_empty() {
-                    self.pane.send_followup(trimmed);
+                    let _ = self.pane.send_followup(trimmed);
                 }
                 true
             }

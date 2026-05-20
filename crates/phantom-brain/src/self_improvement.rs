@@ -732,8 +732,16 @@ impl SelfImprovementState {
             );
         }
 
-        // 5. Threshold (§5.4 per-band).
-        let threshold = self.trust_budget.threshold();
+        // 5. Threshold (§5.4 per-band). The env var
+        // `PHANTOM_SCORE_THRESHOLD` overrides the band threshold for live
+        // testing — useful when phantom's own issue board has no signals
+        // that the scorer rewards (no priority labels, no recent CI fails,
+        // no comments) and every candidate scores ~0.25, which can't cross
+        // any band's default threshold.
+        let threshold = std::env::var("PHANTOM_SCORE_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or_else(|| self.trust_budget.threshold());
         if score < threshold {
             return self.record(
                 candidate,

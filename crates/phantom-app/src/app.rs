@@ -140,6 +140,12 @@ pub struct App {
     pub(crate) demo_mode: bool,
     pub(crate) demo_post_boot_done: bool,
 
+    // -- Post-boot agent spawn --
+    /// Set to `true` the first time we enter AppState::Terminal so we spawn
+    /// one agent pane as the default view instead of leaving the user staring
+    /// at a raw terminal.
+    pub(crate) post_boot_agent_spawned: bool,
+
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
@@ -1341,6 +1347,7 @@ impl App {
             state: initial_state,
             demo_mode: config.demo_mode,
             demo_post_boot_done: false,
+            post_boot_agent_spawned: false,
             start_time: now,
             last_frame: now,
             dt_clamp: phantom_scene::DtClamp::default_60fps(),

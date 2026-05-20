@@ -64,6 +64,14 @@ use crate::spec::{LoopQuarantinePolicy, LoopSpec};
 /// available work. C3's CLI can promote this to a config knob if needed.
 const IDLE_BACKOFF: Duration = Duration::from_millis(100);
 
+/// Max consecutive transient source errors before the loop gives up.
+/// GitHub's GraphQL search occasionally returns HTTP 504; we don't want one
+/// flaky poll to kill a long-running discovery loop.
+const MAX_SOURCE_ERROR_STREAK: u32 = 5;
+
+/// Exponential backoff cap when retrying after a source error.
+const SOURCE_ERROR_BACKOFF_CAP: Duration = Duration::from_secs(60);
+
 // ---------------------------------------------------------------------------
 // LoopState
 // ---------------------------------------------------------------------------
@@ -140,6 +148,9 @@ pub struct LoopRunner {
     /// the `Awaiting → Validating` edge.
     pending_completion:
         Option<tokio::sync::oneshot::Receiver<Result<serde_json::Value, DispatchError>>>,
+    /// Consecutive transient source errors. Reset on any non-error pull.
+    /// When this exceeds [`MAX_SOURCE_ERROR_STREAK`] the loop stops.
+    pull_error_streak: u32,
 }
 
 impl LoopRunner {
@@ -164,6 +175,7 @@ impl LoopRunner {
                 since: Instant::now(),
             },
             pending_completion: None,
+            pull_error_streak: 0,
         }
     }
 
@@ -242,6 +254,7 @@ impl LoopRunner {
         let ctx = self.ctx();
         match self.source.next(&ctx) {
             LoopPullResult::Available(input) => {
+                self.pull_error_streak = 0;
                 tracing::debug!(
                     loop_id = %self.spec.id,
                     key = %input.key,
@@ -251,6 +264,7 @@ impl LoopRunner {
                 LoopState::Dispatching { input }
             }
             LoopPullResult::Empty => {
+                self.pull_error_streak = 0;
                 tracing::trace!(loop_id = %self.spec.id, "source empty; backing off");
                 tokio::time::sleep(IDLE_BACKOFF).await;
                 LoopState::Pulling
@@ -262,10 +276,31 @@ impl LoopRunner {
                 }
             }
             LoopPullResult::Error(e) => {
-                tracing::warn!(loop_id = %self.spec.id, error = %e, "source error; stopping");
-                LoopState::Stopped {
-                    reason: format!("source error: {e}"),
+                self.pull_error_streak += 1;
+                if self.pull_error_streak > MAX_SOURCE_ERROR_STREAK {
+                    tracing::warn!(
+                        loop_id = %self.spec.id,
+                        error = %e,
+                        streak = self.pull_error_streak,
+                        "source error streak exceeded; stopping",
+                    );
+                    return LoopState::Stopped {
+                        reason: format!("source error: {e}"),
+                    };
                 }
+                let backoff = std::cmp::min(
+                    Duration::from_secs(1u64 << (self.pull_error_streak - 1).min(6)),
+                    SOURCE_ERROR_BACKOFF_CAP,
+                );
+                tracing::warn!(
+                    loop_id = %self.spec.id,
+                    error = %e,
+                    streak = self.pull_error_streak,
+                    backoff_secs = backoff.as_secs(),
+                    "source error; retrying after backoff",
+                );
+                tokio::time::sleep(backoff).await;
+                LoopState::Pulling
             }
         }
     }
