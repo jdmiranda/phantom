@@ -421,9 +421,21 @@ impl LoopRunner {
         }
     }
 
-    /// Translate a [`DispatchError`] into the runner's stop reason. All
-    /// three variants are terminal: a failed dispatch indicates a broken
-    /// substrate, which we don't retry-around in MVP.
+    /// Translate a [`DispatchError`] into the runner's next state.
+    ///
+    /// `DispatchError::Execution` (agent thrashed past iteration limit,
+    /// agent timed out, agent panicked on a tool) is a PER-ITERATION
+    /// failure, not substrate breakage — under
+    /// [`LoopQuarantinePolicy::SkipAndContinue`] we log it, skip the
+    /// iteration, and resume pulling. Without that, a single bad agent
+    /// prompt kills the whole loop and the autonomous chain dies (the
+    /// 2026-05-20 triager → implementer chain hit this exactly once and
+    /// took the implementer down).
+    ///
+    /// `DispatchError::Spawn` and `DispatchError::Cancelled` remain
+    /// terminal — those indicate the substrate itself is broken (queue
+    /// poisoned, completion channel closed prematurely) and retrying
+    /// past them is futile until the substrate is rebuilt.
     fn handle_dispatch_failure(
         &self,
         input: LoopInput,
@@ -433,10 +445,21 @@ impl LoopRunner {
             loop_id = %self.spec.id,
             key = %input.key,
             error = %err,
-            "dispatch/await failed; stopping",
+            on_quarantine = ?self.spec.on_quarantine,
+            "dispatch/await failed",
         );
-        LoopState::Stopped {
-            reason: format!("dispatch failure: {err}"),
+        match (&err, self.spec.on_quarantine) {
+            (DispatchError::Execution(_), LoopQuarantinePolicy::SkipAndContinue) => {
+                tracing::warn!(
+                    loop_id = %self.spec.id,
+                    key = %input.key,
+                    "agent execution failure — skipping iteration under SkipAndContinue policy",
+                );
+                LoopState::Pulling
+            }
+            _ => LoopState::Stopped {
+                reason: format!("dispatch failure: {err}"),
+            },
         }
     }
 
