@@ -90,8 +90,13 @@ Step 2 — decide using this rubric (FIRST match wins):
                implementer loop.
 
   skip       — fallback. Use when no decision fits and any action would be
-               harmful. Post no comment, take no labels. Complete with
-               decision="skip" and rationale.
+               harmful (tracking epics, issues already coordinated by humans,
+               meta-discussion threads). Before completing, apply the
+               `auto-triage-skip` label via
+               `gh issue edit <num> -R jdmiranda/phantom --add-label
+               auto-triage-skip` so the brain's HardExclusion catches this
+               issue on future ticks and the autonomous loop doesn't waste
+               tokens re-evaluating it. Do NOT post a comment.
 
 Step 3 — emit. You MUST call `complete_task` with this exact shape:
 

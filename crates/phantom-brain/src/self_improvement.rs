@@ -275,9 +275,16 @@ impl HardExclusions {
             }
         }
         // Labels that explicitly opt out (§5.3 #4).
+        // `auto-triage-skip` is applied by the triager loop when it decides
+        // the issue is not directly actionable (tracking epics, meta-work).
+        // Without this exclusion the brain re-enqueues the same epic every
+        // daemon restart and the triager bills another agent run to make
+        // the same skip decision again.
         if candidate.has_label("do-not-auto-implement")
             || candidate.has_label("needs-discussion")
             || candidate.has_label("needs-spec")
+            || candidate.has_label("auto-triage-skip")
+            || candidate.has_label("auto-triage-close")
         {
             return Some("opt-out label present");
         }
