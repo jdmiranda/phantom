@@ -467,6 +467,16 @@ impl LoopRunner {
     /// produced `result`, then decide whether to continue or stop based on
     /// the presence of [`LoopEffect::StopLoop`].
     fn run_effects_and_continue(&self, input: &LoopInput, result: &Value) -> LoopState {
+        // Visibility: every successful complete_task payload is logged at
+        // INFO so operators can trace what each agent decided (the
+        // log_to_bus effect is still a C2 stub). The triager loop's
+        // refine/close/comment decisions are otherwise invisible.
+        tracing::info!(
+            loop_id = %self.spec.id,
+            key = %input.key,
+            result = %result,
+            "iteration completed; result payload",
+        );
         let effects: &[LoopEffect] = &self.spec.on_complete;
         let ctx = EffectContext {
             result,
