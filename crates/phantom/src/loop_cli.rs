@@ -470,6 +470,21 @@ fn run_command(args: &[String]) -> Result<()> {
     let forwarder_shutdown_for_teardown = brain_state.as_ref().map(|(_, s)| Arc::clone(s));
     runtime.block_on(async move {
         let ctrl_c = tokio::signal::ctrl_c();
+        // SIGTERM: the watchdog (`scripts/phantom-loop-forever.sh`) sends this
+        // when it detects origin/main moved and wants to rebuild on the new
+        // code. Without explicit SIGTERM handling the process would zombie
+        // until SIGKILL because tokio::signal::ctrl_c() only catches SIGINT.
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .ok();
+        let sigterm_future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match sigterm.as_mut() {
+                Some(s) => Box::pin(async move {
+                    s.recv().await;
+                }),
+                None => Box::pin(std::future::pending::<()>()),
+            };
         // Wall-clock timer: resolves into a non-firing future when the flag
         // is absent, so the select! arm never wins in that case.
         let runtime_timer: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
@@ -502,6 +517,9 @@ fn run_command(args: &[String]) -> Result<()> {
                 } else {
                     eprintln!("phantom loop run: Ctrl-C received");
                 }
+            }
+            _ = sigterm_future => {
+                eprintln!("phantom loop run: SIGTERM received (watchdog restart?)");
             }
             _ = runtime_timer => {
                 eprintln!("phantom loop run: max-runtime reached, stopping");
