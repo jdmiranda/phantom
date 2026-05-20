@@ -160,18 +160,21 @@ fn run_permissive(
     // Wrap the user command with rlimit preamble applied via `sh -c`.
     // The ulimit built-in is POSIX and available in both bash and sh.
     //
-    // Limits applied:
+    // Limit applied:
     //   -t 60   CPU seconds
-    //   -u 512  max user processes (fork-bomb mitigation)
     //
-    // `ulimit -u` is PER USER, not per shell. With multiple parallel
-    // agent runs each invoking gh / git / cargo (which themselves fork
-    // helper processes), 64 was hit during normal triage and produced
-    // `sh: fork: Resource temporarily unavailable`. 512 is a comfortable
-    // headroom while still aborting an actual fork bomb (macOS default
-    // is typically 2000-5000+).
+    // `ulimit -u` was removed because it's PER USER, not per shell.
+    // The user's existing process count (Phantom + Claude Code + IDE +
+    // other shells) routinely exceeds the limit even before the agent
+    // forks anything. Setting it to a value smaller than the current
+    // count causes immediate `fork: Resource temporarily unavailable`
+    // from the wrapping `sh -c` itself — the very thing we're trying
+    // to protect against. The macOS / Linux defaults (`maxproc` 6000+)
+    // are the right blast-radius bound here; an actual fork-bomb agent
+    // would saturate the host long before we'd want to kill it, so the
+    // CPU-time cap is the more useful axis.
     let wrapped = format!(
-        "ulimit -t 60; ulimit -u 512 2>/dev/null || true; {command_str}"
+        "ulimit -t 60; {command_str}"
     );
 
     let mut cmd = Command::new("sh");
