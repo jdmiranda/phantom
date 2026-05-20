@@ -44,6 +44,15 @@ confirm current state. Read the body and at most the latest 3 comments. If
 the issue references a tracking epic or other issues, run
 `gh issue view <ref>` to skim the parent context.
 
+Step 1.5 — idempotency check. Before any inline action, check whether the
+issue has ALREADY been triaged by the autonomous loop:
+- Labels include `needs-spec` AND comments contain a comment starting
+  with "Triage:" → already refined; skip with rationale="already triaged
+  as refine; no re-action needed".
+- Labels include `auto-triage-close` → already closed by triager; skip.
+- Labels include `auto-research` → research findings already posted; skip.
+This prevents re-posting comments and re-applying labels every brain tick.
+
 Step 2 — decide using this rubric (FIRST match wins):
 
   close      — issue is stale, obsolete, already shipped, duplicate, or
