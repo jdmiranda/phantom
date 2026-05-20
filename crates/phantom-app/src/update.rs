@@ -170,37 +170,16 @@ impl App {
         // pane — which the layout engine then resizes to fill the window.
         if !self.demo_mode && self.state == AppState::Terminal && !self.post_boot_agent_spawned {
             self.post_boot_agent_spawned = true;
-            let terminal_app_id = self.coordinator.focused();
-            let spawned = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+            // spawn_agent_pane internally takes the `replace_focused` path
+            // when adapter_count == 1 (post-boot single-terminal case), so
+            // the agent inherits the terminal's pane slot directly — no
+            // split, no half-window agent. See `feedback_agent_is_primary`
+            // memory + the branch in `agent_pane::spawn`.
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
                 prompt: "Welcome. I'm your Phantom agent — ready to help you build, debug, \
                     or explore. What would you like to work on?"
                     .to_owned(),
             });
-            if spawned {
-                if let Some(term_id) = terminal_app_id {
-                    // Remove the original terminal so the agent occupies the
-                    // whole window. Mirrors `pane::close_focused_pane` but
-                    // closes a specific app_id instead of the focused one.
-                    self.coordinator
-                        .remove_adapter(term_id, &mut self.layout, &mut self.scene);
-                    let width = self.gpu.surface_config.width;
-                    let height = self.gpu.surface_config.height;
-                    let _ = self.layout.resize(width as f32, height as f32);
-                    // Resize the agent pane to the now-full window.
-                    for app_id in self.coordinator.all_app_ids() {
-                        if let Some(pane_id) = self.coordinator.pane_id_for(app_id)
-                            && let Ok(rect) = self.layout.get_pane_rect(pane_id) {
-                                let (cols, rows) =
-                                    crate::pane::pane_cols_rows(self.cell_size, rect);
-                                let _ = self.coordinator.send_command(
-                                    app_id,
-                                    "resize",
-                                    &serde_json::json!({"cols": cols, "rows": rows}),
-                                );
-                            }
-                    }
-                }
-            }
         }
 
         // Supervisor command polling (drain all pending; heartbeats are on a dedicated thread).

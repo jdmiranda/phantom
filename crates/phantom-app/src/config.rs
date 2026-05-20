@@ -127,7 +127,9 @@ impl Default for PhantomConfig {
             nlp_llm_enabled: true,
             privacy_mode: false,
             offline_mode: false,
-            fullscreen: false,
+            // Phantom IS the AI; the AI deserves the whole screen. Changed
+            // 2026-05-20 — see `feedback_agent_is_primary` memory entry.
+            fullscreen: true,
             notification_sounds: HashMap::new(),
             mcp_servers: Vec::new(),
         }

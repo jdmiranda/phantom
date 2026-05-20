@@ -271,6 +271,47 @@ impl AppCoordinator {
         id
     }
 
+    /// Kill an adapter and free its pane / scene slot for re-use by a
+    /// replacement adapter. Unlike [`remove_adapter`], this does NOT remove
+    /// the underlying layout pane or scene node — the caller is expected to
+    /// re-register a new adapter at the returned `(PaneId, NodeId)` via
+    /// [`register_adapter_at_pane`].
+    ///
+    /// Returns `None` if the adapter has no pane mapping (should not happen
+    /// in normal flow).
+    ///
+    /// Used by the post-boot agent-full-size path to swap the terminal out
+    /// for an agent at the same pane slot without going through a
+    /// split-then-collapse layout dance (which left the agent pane half
+    /// the window height — see `feedback_agent_is_primary` memory).
+    pub fn kill_keeping_pane(
+        &mut self,
+        app_id: AppId,
+    ) -> Option<(PaneId, NodeId)> {
+        self.registry.kill(app_id);
+
+        let pane_id = self.app_pane_map.remove(&app_id)?;
+        // Detach from pane_map so a fresh register_adapter_at_pane can claim
+        // the same PaneId without collision.
+        self.pane_map.remove(&pane_id);
+
+        let scene_node = self.scene_map.remove(&app_id)?;
+
+        self.cadences.remove(&app_id);
+        self.render_cache.remove(&app_id);
+        self.dirty_adapters.remove(&app_id);
+        self.floating.remove(&app_id);
+        self.float_rects.remove(&app_id);
+        self.lineage.remove(app_id);
+
+        // The replacement will set its own focus; clear the old.
+        if self.focused == Some(app_id) {
+            self.focused = None;
+        }
+
+        Some((pane_id, scene_node))
+    }
+
     /// Remove an adapter: kill it, strip layout pane and scene node,
     /// shift focus if the removed adapter was focused.
     ///
