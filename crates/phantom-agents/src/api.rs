@@ -377,6 +377,30 @@ pub fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     continue;
                 }
 
+                // `abort_task` is the second lifecycle signal (see
+                // `lifecycle_tools()` in tools.rs). It tells the runner the
+                // agent has decided the task is infeasible. We map it to a
+                // synthetic `complete_task` payload with `{aborted: true,
+                // reason: "..."}` so the existing exit_schema validation
+                // path treats it as a structured completion. Without this
+                // intercept the parser falls through to
+                // `ToolType::from_api_name` which fails with "unknown tool
+                // in response: abort_task" — the very escape hatch the
+                // agent was trying to use to avoid thrashing.
+                if name == "abort_task" {
+                    let reason = raw_input
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no reason supplied)")
+                        .to_string();
+                    let payload = serde_json::json!({
+                        "aborted": true,
+                        "reason": reason,
+                    });
+                    let _ = tx.send(ApiEvent::CompleteTask { id, result: payload });
+                    continue;
+                }
+
                 // Reject non-object `input` fields — the Claude API always
                 // sends an object here for tool calls; a bare string or null
                 // is malformed. Lifecycle signals (`complete_task`) bypass
