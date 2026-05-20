@@ -849,7 +849,18 @@ fn execute_edit_file(root: &Path, args: &serde_json::Value) -> ToolResult {
 }
 
 fn execute_run_command(root: &Path, args: &serde_json::Value) -> ToolResult {
-    execute_run_command_with_policy(root, args, SandboxPolicy::Strict)
+    // Permissive (rlimits + cwd-bound writes, network ALLOWED) is the right
+    // default for autonomous loops: every agent role that holds Act needs
+    // to call `gh` / `git` / `cargo` (network for both gh and crates.io).
+    // Strict blocked network and triggered cascading false diagnoses — the
+    // triager's 2026-05-20 audit captured "gh API unreachable from sandbox
+    // (api.github.com connection error)" after multiple rounds of retries.
+    //
+    // Rlimits and cwd-bound writes still cap blast radius. A future
+    // refinement: per-loop sandbox policy in the TOML spec so an operator
+    // can downgrade to Strict for non-gh loops or upgrade to None for
+    // local-only test rigs.
+    execute_run_command_with_policy(root, args, SandboxPolicy::Permissive)
 }
 
 /// Execute `run_command` under the given [`SandboxPolicy`].
