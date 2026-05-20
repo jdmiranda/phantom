@@ -17,5 +17,14 @@
 # Claude Code worktrees and local state
 .claude/
 
+# Phantom runtime artefacts (loop specs in .phantom/loops/ ARE checked in;
+# everything else under .phantom/ is per-run state and must not pollute git)
+.phantom/brain-audit.jsonl
+.phantom/forever-logs/
+.phantom/loops/.runlock
+.phantom/proposed-skills/
+.phantom/tmp/
+docs/html/
+
 # Reference material (copyrighted / bulky)
 docs/references/*.pdf
