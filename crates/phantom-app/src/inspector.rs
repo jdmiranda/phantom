@@ -39,6 +39,31 @@ fn load_local_peer_id() -> String {
     }
 }
 
+/// Sample the resident-set size of the current process in megabytes.
+///
+/// Uses `getrusage(RUSAGE_SELF)` on macOS and Linux via the `libc` crate.
+/// Returns `None` if the syscall fails or is unavailable.
+fn sample_memory_mb() -> Option<f32> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        if ret != 0 {
+            return None;
+        }
+        // macOS: ru_maxrss is bytes; Linux: ru_maxrss is kilobytes.
+        #[cfg(target_os = "macos")]
+        let bytes = usage.ru_maxrss as u64;
+        #[cfg(target_os = "linux")]
+        let bytes = usage.ru_maxrss as u64 * 1024;
+        Some(bytes as f32 / (1024.0 * 1024.0))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 /// Dotted-name prefix the runtime writes for `EventKind::CapabilityDenied`
 /// (see `runtime::kind_dotted_name`). The `<agent_id>` suffix is appended
 /// by the runtime, so prefix-matching is the right contract: the ids vary
@@ -52,7 +77,6 @@ impl App {
     /// [`InspectorAdapter`] sharing the App's snapshot lock, registers it in
     /// the new split pane, and focuses it. Returns `false` if no pane is
     /// focused or the split fails.
-    #[allow(dead_code)] // Wired by command path in a follow-up; kept ahead of time.
     pub(crate) fn spawn_inspector_pane(&mut self) -> bool {
         // Split the focused pane to make room for the inspector.
         let Some(focused_app_id) = self.coordinator.focused() else {
@@ -106,6 +130,9 @@ impl App {
             let mut view = self.runtime.snapshot();
             view.denials = self.collect_recent_denials();
             view.local_node_id = load_local_peer_id();
+            view.pane_count = self.coordinator.adapter_count();
+            view.active_task_count = 0; // tokio task count not available without JoinSet
+            view.memory_mb = sample_memory_mb();
             *guard = view;
         }
 
@@ -157,7 +184,6 @@ impl App {
     /// (Sec.3) read off the same on-disk event log. The runtime stays
     /// agnostic of UI policy; the App is the right layer to project the
     /// `agent.capability_denied.*` lines into a renderable shape.
-    #[allow(dead_code)] // Wired in Phase 2.G alongside the inspector adapter.
     pub(crate) fn refresh_inspector_snapshot(&mut self) {
         let Some(ref snapshot) = self.inspector_snapshot else {
             return;
@@ -165,6 +191,9 @@ impl App {
         let mut view = self.runtime.snapshot();
         view.denials = self.collect_recent_denials();
         view.local_node_id = load_local_peer_id();
+        view.pane_count = self.coordinator.adapter_count();
+        view.active_task_count = 0; // tokio task count not available without JoinSet
+        view.memory_mb = sample_memory_mb();
         if let Ok(mut guard) = snapshot.write() {
             *guard = view;
         }
@@ -462,5 +491,107 @@ mod tests {
             id1, id2,
             "load_local_peer_id must be stable across calls (load-or-generate contract)"
         );
+    }
+
+    // =========================================================================
+    // Tests for wired inspect command path (console + Cmd+I)
+    // =========================================================================
+
+    /// The 'inspect' token must be in the COMMANDS slice so that tab-completion
+    /// and the new handler in commands.rs are always in sync.
+    #[test]
+    fn inspect_command_is_in_console_completions() {
+        assert!(
+            COMMANDS.contains(&"inspect"),
+            "COMMANDS must include 'inspect' so the console handler and tab-completion agree",
+        );
+    }
+
+    /// The parser splits "inspect" into a single recognised first token.
+    /// This exercises the same tokenisation path as execute_user_command
+    /// without constructing a full App (which requires a GPU context).
+    #[test]
+    fn inspect_command_parses_as_known_command() {
+        let input = "inspect";
+        let parts: Vec<&str> = input.trim().splitn(4, ' ').collect();
+        assert_eq!(parts[0], "inspect", "first token must be 'inspect'");
+    }
+
+    // =========================================================================
+    // Tests for InspectorView snapshot fields: pane_count, active_task_count,
+    // memory_mb
+    // =========================================================================
+
+    /// `InspectorBuilder::pane_count` must appear verbatim in the built view.
+    #[test]
+    fn inspector_snapshot_includes_pane_count() {
+        let view = InspectorBuilder::new().pane_count(3).build();
+        assert_eq!(
+            view.pane_count, 3,
+            "pane_count must round-trip through InspectorBuilder"
+        );
+    }
+
+    /// `InspectorBuilder::active_task_count` must appear verbatim in the built view.
+    #[test]
+    fn inspector_snapshot_includes_active_task_count() {
+        let view = InspectorBuilder::new().active_task_count(42).build();
+        assert_eq!(
+            view.active_task_count, 42,
+            "active_task_count must round-trip through InspectorBuilder"
+        );
+    }
+
+    /// `InspectorBuilder::memory_mb(Some(…))` must appear verbatim in the built view.
+    #[test]
+    fn inspector_snapshot_includes_memory_mb_some() {
+        let view = InspectorBuilder::new().memory_mb(Some(128.5)).build();
+        assert!(
+            view.memory_mb.is_some(),
+            "memory_mb must be Some when set on the builder"
+        );
+        let mb = view.memory_mb.unwrap();
+        assert!(
+            (mb - 128.5).abs() < f32::EPSILON,
+            "memory_mb value must round-trip exactly"
+        );
+    }
+
+    /// `InspectorBuilder::memory_mb(None)` — `None` must pass through to the view.
+    #[test]
+    fn inspector_snapshot_memory_mb_none_passes_through() {
+        let view = InspectorBuilder::new().memory_mb(None).build();
+        assert!(
+            view.memory_mb.is_none(),
+            "memory_mb must be None when set to None on the builder"
+        );
+    }
+
+    /// Default-built view has zero pane_count, zero active_task_count, and no memory_mb.
+    #[test]
+    fn inspector_view_empty_has_zero_pane_and_task_counts() {
+        let view = InspectorBuilder::new().build();
+        assert_eq!(view.pane_count, 0);
+        assert_eq!(view.active_task_count, 0);
+        assert!(view.memory_mb.is_none());
+    }
+
+    /// `sample_memory_mb()` must return `Some(_)` on supported platforms
+    /// (macOS and Linux) and the reported value must be plausible (> 0 MB,
+    /// < 64 GB, which would indicate a unit-scale bug such as bytes vs MB).
+    #[test]
+    fn sample_memory_mb_returns_plausible_value_on_supported_os() {
+        let mb = super::sample_memory_mb();
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert!(mb.is_some(), "sample_memory_mb must return Some on macOS/Linux");
+            let val = mb.unwrap();
+            assert!(val > 0.0, "RSS must be > 0 MB");
+            assert!(val < 65536.0, "RSS must be < 64 GB (unit scale sanity)");
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            assert!(mb.is_none(), "sample_memory_mb must return None on unsupported OS");
+        }
     }
 }

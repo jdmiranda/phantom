@@ -10,6 +10,7 @@ use std::sync::mpsc;
 use phantom_agents::peer_routing::{AgentRouter, PeerId, decode_inbound};
 use phantom_agents::AgentId;
 use phantom_context::ProjectContext;
+use phantom_history::HistoryEntry;
 use phantom_memory::MemoryStore;
 
 use crate::attention::Attention;
@@ -43,6 +44,13 @@ const BRAIN_DENIAL_THRESHOLD: usize = phantom_agents::DEFAULT_QUARANTINE_THRESHO
 pub struct BrainHandle {
     pub(crate) event_tx: mpsc::Sender<AiEvent>,
     pub(crate) action_rx: mpsc::Receiver<AiAction>,
+    /// `JoinHandle` for the supervisor thread spawned by [`spawn_brain`].
+    ///
+    /// Retained so callers can drive a clean shutdown via [`BrainHandle::shutdown`]
+    /// rather than abandoning the OS thread. Wrapped in `Option` so `shutdown()`
+    /// can `take()` it (making the call idempotent) without requiring the caller
+    /// to give up ownership of `BrainHandle`.
+    pub(crate) brain_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl BrainHandle {
@@ -62,9 +70,64 @@ impl BrainHandle {
     }
 
     /// Get a clone of the event sender (for fan-in from multiple threads).
-    #[must_use] 
+    #[must_use]
     pub fn event_sender(&self) -> mpsc::Sender<AiEvent> {
         self.event_tx.clone()
+    }
+
+    /// Shut down the brain cleanly and wait for the supervisor thread to exit.
+    ///
+    /// Sends [`AiEvent::Shutdown`] to the brain's event channel, then joins the
+    /// supervisor thread. After this call returns the OS thread is guaranteed to
+    /// have exited.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supervisor thread itself panicked (propagates the payload).
+    /// In practice `brain_supervised` catches all inner panics via `catch_unwind`,
+    /// so this should never trigger under normal operation.
+    ///
+    /// # Notes
+    ///
+    /// This method is idempotent: calling it a second time is a no-op because
+    /// `brain_handle` is `take()`-d on the first call.
+    pub fn shutdown(&mut self) {
+        // Best-effort send — the receiver may already be gone if the brain
+        // thread exited on its own (e.g., channel closed from the other side).
+        let _ = self.event_tx.send(AiEvent::Shutdown);
+        if let Some(handle) = self.brain_handle.take() {
+            // join() only returns Err if the thread panicked. brain_supervised
+            // uses catch_unwind internally so this path is reachable only for
+            // panics *in the supervisor itself* (extremely unlikely).
+            if let Err(payload) = handle.join() {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
+impl Drop for BrainHandle {
+    /// On drop, attempt a graceful shutdown so we do not leave a zombie
+    /// supervisor thread running after the handle goes out of scope.
+    ///
+    /// Per §7.3 of the project rubric: every spawned thread whose lifetime is
+    /// bounded by a struct must be joined (or explicitly detached with
+    /// documentation) on `Drop`.
+    ///
+    /// We send `Shutdown` and then join. If the send fails the brain is already
+    /// gone; if `join` returns `Err` the panic payload is *not* re-raised (we are
+    /// inside `Drop` and propagating a panic from `Drop` causes an abort).
+    /// A log message is emitted instead.
+    fn drop(&mut self) {
+        let _ = self.event_tx.send(AiEvent::Shutdown);
+        if let Some(handle) = self.brain_handle.take()
+            && let Err(_payload) = handle.join()
+        {
+            log::error!(
+                "phantom-brain supervisor thread panicked during Drop; \
+                 the panic payload is suppressed to avoid a double-panic abort"
+            );
+        }
     }
 }
 
@@ -114,6 +177,36 @@ pub struct BrainConfig {
     ///
     /// `None` disables recall-augmented prompt injection.
     pub recall_context: Option<crate::recall::BrainRecallContext>,
+
+    /// Initial history snapshot to seed the brain's in-memory context.
+    ///
+    /// Populated from [`phantom_history::HistoryStore::recent`] at startup.
+    /// Updated at runtime via [`crate::events::AiEvent::HistorySnapshot`] events
+    /// so the brain always has the last N commands available for agent prompts.
+    pub history_context: Vec<HistoryEntry>,
+
+    /// Optional pre-built self-improvement reconciler.
+    ///
+    /// When `Some`, the brain's 3-second timeout tick polls every registered
+    /// [`crate::goal_source::GoalSource`] (see [`Self::goal_sources`]) and
+    /// drives each candidate through
+    /// [`crate::self_improvement::SelfImprovementState::evaluate`]. Resulting
+    /// [`crate::events::AiAction::EnqueueLoopMessage`] actions are forwarded
+    /// to the action channel; the app handler is responsible for actually
+    /// pushing them onto a `phantom_loop::queue::LoopQueueRegistry`.
+    ///
+    /// `None` (the default) disables the feature entirely; see the
+    /// `enable_self_improvement` field on the config inside the state.
+    ///
+    /// Per design doc §5.1, defaults OFF — the operator must opt in.
+    pub self_improvement: Option<crate::self_improvement::SelfImprovementState>,
+
+    /// Goal sources polled by the self-improvement reconciler on every tick.
+    ///
+    /// Empty by default. Populated to a non-empty `Vec` enables auto-discovery
+    /// of candidate goals (e.g. `Box<GhIssueGoalSource>` for open issues,
+    /// `Box<GhCiFailureGoalSource>` for recent CI failures).
+    pub goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>>,
 }
 
 impl Default for BrainConfig {
@@ -128,6 +221,9 @@ impl Default for BrainConfig {
             catalog: None,
             relay_inbound_rx: None,
             recall_context: Some(crate::recall::BrainRecallContext::new()),
+            history_context: Vec::new(),
+            self_improvement: None,
+            goal_sources: Vec::new(),
         }
     }
 }
@@ -153,7 +249,7 @@ pub fn spawn_brain(config: BrainConfig) -> BrainHandle {
     let (event_tx, event_rx) = mpsc::channel::<AiEvent>();
     let (action_tx, action_rx) = mpsc::channel::<AiAction>();
 
-    std::thread::Builder::new()
+    let brain_handle = std::thread::Builder::new()
         .name("phantom-brain".into())
         .spawn(move || {
             brain_supervised(config, event_rx, action_tx);
@@ -163,6 +259,7 @@ pub fn spawn_brain(config: BrainConfig) -> BrainHandle {
     BrainHandle {
         event_tx,
         action_rx,
+        brain_handle: Some(brain_handle),
     }
 }
 
@@ -215,6 +312,18 @@ fn brain_supervised(
     // is used — history is observable via the output accumulation path.
     let mut recall_context: Option<crate::recall::BrainRecallContext> =
         config.recall_context;
+    // History snapshot: Vec<HistoryEntry> is Clone, so each restart iteration
+    // gets the same initial snapshot. The brain updates it via HistorySnapshot
+    // events; restarts lose that incremental state but start from the same
+    // seeded baseline.
+    let history_context: Vec<HistoryEntry> = config.history_context;
+    // Self-improvement state and goal sources are non-Clone; consumed on
+    // first iteration only. On panic-restart iterations they are `None` —
+    // the brain skips the self-improvement tick. Matches the same pattern
+    // used for relay_inbound_rx above.
+    let mut self_improvement: Option<crate::self_improvement::SelfImprovementState> =
+        config.self_improvement;
+    let mut goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>> = config.goal_sources;
 
     // Shared slot: the supervisor writes a fresh `iter_tx` here after each
     // restart; the bridge thread reads it to redirect events.
@@ -271,6 +380,12 @@ fn brain_supervised(
             // recall_context is not Clone; taken on the first iteration only.
             // Subsequent restarts start with an empty recall context.
             recall_context: recall_context.take(),
+            // History snapshot is Clone; each restart gets the same seeded baseline.
+            history_context: history_context.clone(),
+            // Self-improvement state and goal sources are taken on first
+            // iteration only — restart leaves the feature disabled.
+            self_improvement: self_improvement.take(),
+            goal_sources: std::mem::take(&mut goal_sources),
         };
 
         // Run brain_loop under catch_unwind.
@@ -372,6 +487,18 @@ fn brain_loop(
         config.relay_inbound_rx;
     // Recall context: index commands and inject relevant hits into prompts.
     let mut recall_ctx: Option<crate::recall::BrainRecallContext> = config.recall_context;
+    // History snapshot: seeded from BrainConfig, refreshed by HistorySnapshot events.
+    let mut history_snapshot: Vec<HistoryEntry> = config.history_context;
+    // Self-improvement reconciler — design doc §3–§5. Populated by the app
+    // when self-improvement is enabled; `None` keeps the feature dormant.
+    let mut self_improvement: Option<crate::self_improvement::SelfImprovementState> =
+        config.self_improvement;
+    let mut goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>> = config.goal_sources;
+    // Self-improvement tick interval (60 s per design doc §4.2) — uses
+    // Instant rather than the OODA timeout so the brain does not poll `gh`
+    // every 3 seconds.
+    let self_improvement_interval = std::time::Duration::from_secs(60);
+    let mut last_self_improvement_tick: Option<std::time::Instant> = None;
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -406,7 +533,7 @@ fn brain_loop(
                 // time has passed, send it to Claude for commentary.
                 if !output_buffer.is_empty() && last_output_time.elapsed().as_secs() >= 2 {
                     let batch = std::mem::take(&mut output_buffer);
-                    let reply = observe_terminal_output(&batch, &context, &mut router);
+                    let reply = observe_terminal_output(&batch, &context, &mut router, &history_snapshot);
                     if let Some(action) = reply
                         && action_tx.send(action).is_err() {
                             break;
@@ -419,6 +546,27 @@ fn brain_loop(
                 }
                 if terminal {
                     active_ledger = None;
+                }
+
+                // SELF-IMPROVEMENT TICK: every `self_improvement_interval`,
+                // poll every registered GoalSource and feed candidates through
+                // the SelfImprovementState. Resulting `AiAction::EnqueueLoopMessage`
+                // actions are forwarded to the action channel. The whole branch
+                // is a no-op when the feature is disabled (state == None).
+                if let Some(ref mut state) = self_improvement
+                    && !goal_sources.is_empty()
+                    && !config.privacy_mode
+                    && last_self_improvement_tick
+                        .map(|t| t.elapsed() >= self_improvement_interval)
+                        .unwrap_or(true)
+                {
+                    last_self_improvement_tick = Some(std::time::Instant::now());
+                    let actions = state.tick(&mut goal_sources);
+                    for action in actions {
+                        if action_tx.send(action).is_err() {
+                            break;
+                        }
+                    }
                 }
 
                 // RELAY INBOUND: drain any pending cross-peer frames.
@@ -623,6 +771,13 @@ fn brain_loop(
             continue; // SetOfflineMode is handled here; skip OODA for it.
         }
 
+        // Handle history snapshot refresh.
+        if let AiEvent::HistorySnapshot(entries) = event {
+            log::debug!("Brain: history snapshot updated ({} entries)", entries.len());
+            history_snapshot = entries;
+            continue;
+        }
+
         // ACCUMULATE: OutputChunk events are batched — don't process each one
         // individually. Accumulate and let the timeout tick flush them.
         if let AiEvent::OutputChunk(ref text) = event {
@@ -641,7 +796,7 @@ fn brain_loop(
         // always respond. Try Claude first, fall back to heuristic acknowledgement.
         if let AiEvent::Interrupt(ref query) = event
             && !query.is_empty() {
-                let reply = handle_console_query(query, &context, &mut router, &recall_ctx);
+                let reply = handle_console_query(query, &context, &mut router, &recall_ctx, &history_snapshot);
                 if action_tx.send(reply).is_err() {
                     break;
                 }
@@ -746,6 +901,12 @@ fn brain_loop(
         if action_tx.send(action).is_err() {
             break; // render thread dropped its receiver
         }
+
+        // Yield to the OS scheduler after processing each event so that
+        // high-frequency event bursts do not pin the brain thread at 100% CPU.
+        // recv_timeout already blocks when the queue is empty, so this only
+        // matters during sustained event storms.
+        std::thread::yield_now();
     }
 
     log::info!("AI brain thread exiting");
@@ -1049,6 +1210,7 @@ fn observe_terminal_output(
     output: &str,
     context: &ProjectContext,
     router: &mut BrainRouter,
+    history: &[HistoryEntry],
 ) -> Option<AiAction> {
     let trimmed = output.trim();
 
@@ -1125,9 +1287,10 @@ fn observe_terminal_output(
     };
 
     let project_type = format!("{:?}", context.project_type);
+    let history_section = history_context(history);
     let prompt = format!(
         "You are Phantom, an AI brain embedded in a terminal emulator. \
-         You are observing a developer working in a {} project ({}).\n\n\
+         You are observing a developer working in a {} project ({}).{}\n\n\
          Here is the latest terminal output:\n```\n{}\n```\n\n\
          If there's something noteworthy (an error, a warning, an interesting result, \
          a potential issue), comment briefly (1 sentence). \
@@ -1135,6 +1298,7 @@ fn observe_terminal_output(
          exactly the word QUIET and nothing else.",
         project_type,
         context.name,
+        history_section,
         obs,
     );
 
@@ -1171,6 +1335,7 @@ fn handle_console_query(
     context: &ProjectContext,
     router: &mut BrainRouter,
     recall: &Option<crate::recall::BrainRecallContext>,
+    history: &[HistoryEntry],
 ) -> AiAction {
     // Try to find a Claude backend.
     let claude_backend: Option<ModelBackend> = router
@@ -1193,13 +1358,15 @@ fn handle_console_query(
             .unwrap_or_default();
 
         let project_type = format!("{:?}", context.project_type);
+        let history_section = history_context(history);
         let prompt = format!(
             "You are Phantom, an AI-native terminal emulator's brain. \
-             The user is working in a {} project ({}) and typed this in the console:\n\n\
+             The user is working in a {} project ({}) and typed this in the console:{}\n\n\
              \"{}\"\n{}\n\
              Respond concisely (1-3 sentences). Be helpful and direct.",
             project_type,
             context.name,
+            history_section,
             query,
             recall_section,
         );
@@ -1221,6 +1388,32 @@ fn handle_console_query(
     AiAction::ConsoleReply(format!(
         "Received: \"{query}\" (no LLM backend available for query)"
     ))
+}
+
+// ---------------------------------------------------------------------------
+// history_context — format recent command history for agent prompts
+// ---------------------------------------------------------------------------
+
+/// Format recent history entries as a Markdown prompt section.
+///
+/// Returns an empty string when `entries` is empty so callers can safely
+/// append the result to a prompt without a guard. Non-empty slices produce a
+/// `## Recent Command History` section with one bullet per entry, prefixed by
+/// a `✓` (exit 0), `✗` (non-zero exit), or `?` (no exit code recorded).
+pub(crate) fn history_context(entries: &[HistoryEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\n## Recent Command History\n");
+    for entry in entries {
+        let status = match entry.exit_code() {
+            Some(0) => "✓",
+            Some(_) => "✗",
+            None => "?",
+        };
+        out.push_str(&format!("- [{status}] {}\n", entry.command()));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,6 +1440,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::UpdateConnectionState { .. } => "update_connection_state",
         AiAction::SetOfflineMode { .. } => "set_offline_mode",
         AiAction::DeliverInboundRelay { .. } => "deliver_inbound_relay",
+        AiAction::EnqueueLoopMessage { .. } => "enqueue_loop_message",
         AiAction::DoNothing => "quiet",
     }
 }
@@ -1822,5 +2016,82 @@ mod tests {
             }
             other => panic!("expected DeliverInboundRelay, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // history_context tests
+    // -----------------------------------------------------------------------
+
+    /// Empty slice produces an empty string — callers can append unconditionally.
+    #[test]
+    fn history_context_returns_empty_on_no_history() {
+        let result = history_context(&[]);
+        assert!(result.is_empty(), "empty slice must produce empty string, got: {result:?}");
+    }
+
+    /// Three entries produce a formatted section with correct bullet lines.
+    #[test]
+    fn history_context_formats_recent_commands() {
+        use uuid::Uuid;
+
+        let session = Uuid::new_v4();
+        let entries = vec![
+            phantom_history::HistoryEntry::builder("cargo build", "/tmp", session)
+                .exit_code(0)
+                .build(),
+            phantom_history::HistoryEntry::builder("cargo test", "/tmp", session)
+                .exit_code(0)
+                .build(),
+            phantom_history::HistoryEntry::builder("git status", "/tmp", session)
+                .build(), // no exit code
+        ];
+
+        let result = history_context(&entries);
+
+        assert!(
+            result.contains("## Recent Command History"),
+            "output must contain the section header"
+        );
+        assert!(result.contains("cargo build"), "output must include first command");
+        assert!(result.contains("cargo test"), "output must include second command");
+        assert!(result.contains("git status"), "output must include third command");
+    }
+
+    /// Exit code != 0 is marked with the ✗ symbol.
+    #[test]
+    fn history_context_marks_failed_commands() {
+        use uuid::Uuid;
+
+        let session = Uuid::new_v4();
+        let entries = vec![
+            phantom_history::HistoryEntry::builder("cargo build", "/tmp", session)
+                .exit_code(1)
+                .build(),
+        ];
+
+        let result = history_context(&entries);
+        assert!(result.contains("✗"), "failed command must be marked with ✗, got: {result:?}");
+        assert!(!result.contains("✓"), "failed command must NOT be marked with ✓");
+    }
+
+    /// BrainConfig accepts a non-empty history_context without type errors.
+    #[test]
+    fn brain_config_accepts_history_context() {
+        use uuid::Uuid;
+
+        let session = Uuid::new_v4();
+        let entry = phantom_history::HistoryEntry::builder("ls -la", "/tmp", session)
+            .exit_code(0)
+            .build();
+
+        let config = BrainConfig {
+            history_context: vec![entry],
+            enable_suggestions: false,
+            enable_memory: false,
+            ..Default::default()
+        };
+
+        assert_eq!(config.history_context.len(), 1);
+        assert_eq!(config.history_context[0].command(), "ls -la");
     }
 }

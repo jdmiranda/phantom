@@ -14,6 +14,38 @@ use crate::agent::{Agent, AgentId, AgentStatus, AgentTask, allocate_agent_id};
 use crate::peer_routing::{AgentRouter, AnyAgentRef, RemoteAgentInfo};
 
 // ---------------------------------------------------------------------------
+// AgentError
+// ---------------------------------------------------------------------------
+
+/// Errors that the agent lifecycle layer can report to callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentError {
+    /// An agent waited in the queue longer than the configured
+    /// `queue_timeout` without being promoted to `Working`. The agent
+    /// is removed from the queue by [`AgentManager::expire_stale_queued`]
+    /// and the caller receives this error so it can log or surface it.
+    QueueTimeout { agent_id: AgentId, waited: Duration },
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueueTimeout { agent_id, waited } => {
+                write!(
+                    f,
+                    "agent {agent_id} timed out in queue after {waited:?}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AgentError {}
+
+/// Default time a queued agent may wait before it is considered stale.
+pub const DEFAULT_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
+
+// ---------------------------------------------------------------------------
 // AgentManager
 // ---------------------------------------------------------------------------
 
@@ -30,19 +62,38 @@ use crate::peer_routing::{AgentRouter, AnyAgentRef, RemoteAgentInfo};
 pub struct AgentManager {
     agents: Vec<Agent>,
     max_concurrent: usize,
+    /// Maximum time a `Queued` agent may wait before it is considered stale.
+    ///
+    /// Checked by [`Self::expire_stale_queued`]. Defaults to
+    /// [`DEFAULT_QUEUE_TIMEOUT`] (60 seconds). A stuck `Working` agent that
+    /// never completes can starve queued agents indefinitely; this field
+    /// provides a safety valve so the queue does not grow without bound.
+    pub queue_timeout: Duration,
     /// Cross-peer routing state (optional relay connection + remote agent cache).
     pub(crate) router: AgentRouter,
 }
 
 impl AgentManager {
     /// Create a new manager with the given concurrency limit.
+    ///
+    /// Queue timeout defaults to [`DEFAULT_QUEUE_TIMEOUT`] (60 s).
+    /// Override via [`Self::with_queue_timeout`] when a shorter or longer
+    /// residence time is appropriate.
     #[must_use]
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             agents: Vec::new(),
             max_concurrent,
+            queue_timeout: DEFAULT_QUEUE_TIMEOUT,
             router: AgentRouter::new(),
         }
+    }
+
+    /// Override the queue residence timeout.
+    #[must_use]
+    pub fn with_queue_timeout(mut self, timeout: Duration) -> Self {
+        self.queue_timeout = timeout;
+        self
     }
 
     /// Resolve an [`AnyAgentRef`] to a local agent.
@@ -179,6 +230,47 @@ impl AgentManager {
             }
         }
         count
+    }
+
+    /// Expire agents that have been `Queued` longer than [`Self::queue_timeout`].
+    ///
+    /// Iterates over all `Queued` agents, removes those whose queue-residence
+    /// time (approximated by [`Agent::elapsed`] from creation) exceeds the
+    /// configured `queue_timeout`, marks each expired agent as `Failed`, and
+    /// returns an [`AgentError::QueueTimeout`] for each one.
+    ///
+    /// Callers (e.g. the brain's reconciler) should call this periodically
+    /// (e.g. every tick) and log or surface any returned errors so operators
+    /// can see that agents are being starved.
+    ///
+    /// After expiry the capacity freed by removing each stale agent is NOT
+    /// automatically granted to remaining queued agents — the next call to
+    /// any method that invokes [`Self::promote_queued`] (e.g. [`Self::cleanup`]
+    /// or [`Self::kill`]) will do that naturally.
+    pub fn expire_stale_queued(&mut self) -> Vec<AgentError> {
+        let timeout = self.queue_timeout;
+        let mut errors = Vec::new();
+
+        for agent in &mut self.agents {
+            if agent.status() != AgentStatus::Queued {
+                continue;
+            }
+            let waited = agent.elapsed();
+            if waited >= timeout {
+                let id = agent.id();
+                log::warn!(
+                    "agent {id} timed out waiting in queue after {waited:?} \
+                     (limit {timeout:?}); marking Failed"
+                );
+                agent.complete(false);
+                agent.log(&format!(
+                    "[queue timeout: waited {waited:?}, limit {timeout:?}]"
+                ));
+                errors.push(AgentError::QueueTimeout { agent_id: id, waited });
+            }
+        }
+
+        errors
     }
 
     /// Promote queued agents to working if capacity is available.
@@ -420,5 +512,86 @@ mod tests {
         let killed = mgr.kill(id);
         assert!(!killed, "kill() must not affect a Done agent");
         assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Done);
+    }
+
+    // -- Bug 3: queue starvation — expire_stale_queued -----------------------
+
+    /// An agent that has been queued longer than `queue_timeout` must be
+    /// expired (marked Failed) by `expire_stale_queued`, which returns an
+    /// `AgentError::QueueTimeout` for that agent.
+    #[test]
+    fn agent_queue_timeout_removes_stale_entry() {
+        // Capacity 0 so the spawned agent stays Queued.
+        let mut mgr = AgentManager::new(0).with_queue_timeout(Duration::ZERO);
+        let id = mgr.spawn(free_task("stale"));
+
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Queued);
+
+        // With a zero-duration timeout every queued agent is immediately stale.
+        let errors = mgr.expire_stale_queued();
+
+        assert_eq!(errors.len(), 1, "expected exactly one timeout error");
+        assert!(
+            matches!(&errors[0], AgentError::QueueTimeout { agent_id, .. } if *agent_id == id),
+            "error must reference the timed-out agent id; got {:?}",
+            errors[0],
+        );
+        // Agent must be Failed (removed from Queued).
+        assert_eq!(
+            mgr.get(id).unwrap().status(),
+            AgentStatus::Failed,
+            "expired queued agent must be marked Failed",
+        );
+    }
+
+    /// After a stale agent is expired, the next queued agent can be promoted
+    /// once capacity frees up (i.e. `expire_stale_queued` does not leave the
+    /// pool in a broken state).
+    #[test]
+    fn agent_queue_timeout_allows_next_agent_to_proceed() {
+        // Capacity 1: first agent works, second is queued.
+        let mut mgr = AgentManager::new(1).with_queue_timeout(Duration::ZERO);
+        let id_working = mgr.spawn(free_task("working"));
+        let id_queued = mgr.spawn(free_task("queued — will time out"));
+
+        assert_eq!(mgr.get(id_working).unwrap().status(), AgentStatus::Working);
+        assert_eq!(mgr.get(id_queued).unwrap().status(), AgentStatus::Queued);
+
+        // Expire stale queued agents (queue_timeout == ZERO → immediate).
+        let errors = mgr.expire_stale_queued();
+        assert_eq!(errors.len(), 1, "queued agent must time out");
+        assert_eq!(
+            mgr.get(id_queued).unwrap().status(),
+            AgentStatus::Failed,
+        );
+
+        // Now finish the working agent and clean up.
+        mgr.get_mut(id_working).unwrap().complete(true);
+        mgr.cleanup(Duration::ZERO);
+
+        // Spawn a fresh agent — capacity is now available and it starts Working.
+        let id_fresh = mgr.spawn(free_task("fresh"));
+        assert_eq!(
+            mgr.get(id_fresh).unwrap().status(),
+            AgentStatus::Working,
+            "after the stale agent expired and the working agent finished, \
+             the next agent must start Working immediately",
+        );
+    }
+
+    /// Working agents must never be expired by `expire_stale_queued`.
+    #[test]
+    fn expire_stale_queued_ignores_non_queued_agents() {
+        let mut mgr = AgentManager::new(4).with_queue_timeout(Duration::ZERO);
+        let id = mgr.spawn(free_task("working"));
+        assert_eq!(mgr.get(id).unwrap().status(), AgentStatus::Working);
+
+        let errors = mgr.expire_stale_queued();
+        assert!(errors.is_empty(), "Working agent must not be expired");
+        assert_eq!(
+            mgr.get(id).unwrap().status(),
+            AgentStatus::Working,
+            "Working agent must remain Working after expire_stale_queued",
+        );
     }
 }

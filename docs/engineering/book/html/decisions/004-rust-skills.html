@@ -1,0 +1,422 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>ADR-004 · Rust skills audit - Phantom · Engineering Reference</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-0392ca55.css">
+        <link rel="stylesheet" href="../css/chrome-fc474251.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/custom-e80a0705.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "navy";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-48060c05.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-639e9fac.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Phantom · Engineering Reference</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/jdmiranda/phantom" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/jdmiranda/phantom/edit/main/docs/engineering/src/decisions/004-rust-skills.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <blockquote>
+<p>Canonical source: <a href="../../../ARD-004-rust-skills-audit.html"><code>docs/ARD-004-rust-skills-audit.md</code></a>. Edits go there, not here.</p>
+</blockquote>
+<h1 id="ard-004-rust-skills-integration--codebase-audit"><a class="header" href="#ard-004-rust-skills-integration--codebase-audit">ARD-004: Rust Skills Integration &amp; Codebase Audit</a></h1>
+<p><strong>Status</strong>: Accepted
+<strong>Date</strong>: 2026-04-22
+<strong>Authors</strong>: Jeremy Miranda, Claude</p>
+<hr>
+<h2 id="decision"><a class="header" href="#decision">Decision</a></h2>
+<p>Adopt community Rust skills for Claude Code as persistent development guardrails. Run a full codebase audit against the skill rule sets to establish a baseline of technical debt and prioritize fixes.</p>
+<h2 id="context"><a class="header" href="#context">Context</a></h2>
+<p>Phantom is 31K lines across 19 crates. The codebase was built rapidly through AI-assisted sessions. A recurring crash (<code>assertion failed: self.is_char_boundary(end)</code> in <code>update.rs</code>) exposed that previous sessions were papering over bugs with <code>catch_unwind(AssertUnwindSafe(...))</code> instead of fixing root causes. This pointed to a broader pattern: the codebase needed systematic quality enforcement, not ad-hoc hardening.</p>
+<h2 id="skills-installed"><a class="header" href="#skills-installed">Skills Installed</a></h2>
+<p>All installed globally at <code>~/.claude/skills/</code> (available across all Rust projects).</p>
+<h3 id="source-davidbarsky-github-gist"><a class="header" href="#source-davidbarsky-github-gist">Source: davidbarsky (GitHub Gist)</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Skill</th><th>Scope</th><th>Mode</th></tr>
+</thead>
+<tbody>
+<tr><td><code>rustdoc</code></td><td>RFC 1574 doc conventions</td><td>Auto on doc comments</td></tr>
+<tr><td><code>rust-style</code></td><td>for-loops, let-else, shadowing, newtypes, explicit matching</td><td>Auto on Rust code</td></tr>
+<tr><td><code>rust-analyzer-ssr</code></td><td>Structural search &amp; replace for semantic refactoring</td><td>On demand</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Reference</strong>: https://gist.github.com/davidbarsky/8fae6dc45c294297db582378284bd1f2</p>
+<h3 id="source-leonardomsorust-skills"><a class="header" href="#source-leonardomsorust-skills">Source: leonardomso/rust-skills</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Skill</th><th>Scope</th><th>Mode</th></tr>
+</thead>
+<tbody>
+<tr><td><code>rust-skills</code></td><td>179 rules across 14 categories (ownership, errors, memory, API, async, optimization, naming, types, testing, docs, perf, project structure, clippy, anti-patterns)</td><td>Auto on Rust code</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Reference</strong>: https://github.com/leonardomso/rust-skills</p>
+<h3 id="source-actionbookrust-skills"><a class="header" href="#source-actionbookrust-skills">Source: actionbook/rust-skills</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Skill</th><th>Scope</th><th>Mode</th></tr>
+</thead>
+<tbody>
+<tr><td><code>rust-coding-guidelines</code></td><td>50 core rules quick reference</td><td>Auto on style questions</td></tr>
+<tr><td><code>rust-m01-ownership</code></td><td>Ownership/borrow/lifetime with error-to-design-question mapping</td><td>Auto on E0382, E0597, etc.</td></tr>
+<tr><td><code>rust-m04-zero-cost</code></td><td>Generics, traits, static vs dynamic dispatch</td><td>Auto on E0277, E0308, etc.</td></tr>
+<tr><td><code>rust-m06-error-handling</code></td><td>Result vs panic decision flowcharts, thiserror vs anyhow</td><td>Auto on error handling</td></tr>
+<tr><td><code>rust-m07-concurrency</code></td><td>Send/Sync, thread safety, async, deadlock prevention</td><td>Auto on concurrency code</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Reference</strong>: https://github.com/actionbook/rust-skills</p>
+<hr>
+<h2 id="audit-findings"><a class="header" href="#audit-findings">Audit Findings</a></h2>
+<p>Scan performed 2026-04-22 against all 19 crates. Findings categorized by skill rule violations.</p>
+<h3 id="critical-error-handling"><a class="header" href="#critical-error-handling">CRITICAL: Error Handling</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Violation</th><th>Location</th><th>Rule</th><th>Impact</th></tr>
+</thead>
+<tbody>
+<tr><td>E1</td><td><code>.unwrap()</code> on 8 agent index lookups</td><td><code>headless.rs:336,361,379,401,411,417,427,434</code></td><td><code>err-no-unwrap-prod</code></td><td>Panic if agent ID invalid</td></tr>
+<tr><td>E2</td><td><code>.unwrap()</code> on channel send in GPU callback</td><td><code>screenshot.rs:96</code></td><td><code>err-no-unwrap-prod</code></td><td>Panic if receiver dropped</td></tr>
+<tr><td>E3</td><td>Double-panic: <code>recv().unwrap().expect()</code></td><td><code>screenshot.rs:99</code></td><td><code>err-result-over-panic</code></td><td>Unrecoverable on GPU buffer map failure</td></tr>
+<tr><td>E4</td><td><code>.unwrap()</code> on PNG encode</td><td><code>screenshot.rs:130-131</code></td><td><code>err-no-unwrap-prod</code></td><td>Panic on encode failure</td></tr>
+<tr><td>E5</td><td><code>.unwrap()</code> on <code>log_path.parent()</code></td><td><code>main.rs:206</code></td><td><code>err-no-unwrap-prod</code></td><td>Panic if path has no parent</td></tr>
+<tr><td>E6</td><td><code>.expect()</code> on window creation</td><td><code>main.rs:50</code></td><td><code>err-expect-bugs-only</code></td><td>Crash on display server failure</td></tr>
+<tr><td>E7</td><td><code>panic!()</code> in plugin registry fallback</td><td><code>app.rs:413</code></td><td><code>err-result-over-panic</code></td><td>Crash if /tmp inaccessible</td></tr>
+<tr><td>E8</td><td>Silent <code>let _ =</code> on crash report write</td><td><code>main.rs:266</code></td><td><code>anti-empty-catch</code></td><td>Lost crash data</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="high-memory--performance"><a class="header" href="#high-memory--performance">HIGH: Memory &amp; Performance</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Violation</th><th>Location</th><th>Rule</th><th>Impact</th></tr>
+</thead>
+<tbody>
+<tr><td>M1</td><td><code>format!()</code> in render loop (per-frame)</td><td><code>render.rs:424,550</code></td><td><code>anti-format-hot-path</code></td><td>Allocation every frame</td></tr>
+<tr><td>M2</td><td>Vec alloc per text segment in render</td><td><code>render.rs:601-608</code></td><td><code>mem-reuse-collections</code></td><td>N allocations per frame</td></tr>
+<tr><td>M3</td><td>Missing <code>with_capacity()</code> on per-frame Vecs</td><td><code>render.rs:298-299</code></td><td><code>mem-with-capacity</code></td><td>Reallocation growth per frame</td></tr>
+<tr><td>M4</td><td>Pixel buffer <code>.clone()</code> in screenshot</td><td><code>update.rs:382</code></td><td><code>anti-clone-excessive</code></td><td>Full framebuffer copy</td></tr>
+<tr><td>M5</td><td>Image data <code>.clone()</code> in glyph atlas</td><td><code>atlas.rs:206</code></td><td><code>anti-clone-excessive</code></td><td>Unnecessary data duplication</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="high-concurrency"><a class="header" href="#high-concurrency">HIGH: Concurrency</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Violation</th><th>Location</th><th>Rule</th><th>Impact</th></tr>
+</thead>
+<tbody>
+<tr><td>C1</td><td>9 thread spawns with discarded JoinHandle</td><td><code>api.rs:369</code>, <code>main.rs:80,579</code>, <code>listener.rs:720+</code>, <code>update.rs:250</code></td><td>fire-and-forget</td><td>Silent thread panics</td></tr>
+<tr><td>C2</td><td>13 blocking <code>.recv()</code> without timeout</td><td><code>listener.rs:333-648</code> (8x), <code>brain.rs:146</code></td><td>deadlock risk</td><td>MCP/brain threads hang forever if app crashes</td></tr>
+<tr><td>C3</td><td><code>Arc&lt;Mutex&lt;Vec&gt;&gt;</code> PTY write queue</td><td><code>terminal.rs:37-38</code></td><td>channel &gt; shared state</td><td>Synchronous blocking on writes</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="medium-api-design"><a class="header" href="#medium-api-design">MEDIUM: API Design</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Violation</th><th>Location</th><th>Rule</th><th>Impact</th></tr>
+</thead>
+<tbody>
+<tr><td>A1</td><td>6 bool params where enums clearer</td><td><code>sysmon.rs:72</code>, <code>agent.rs:131</code>, <code>router.rs:224,267</code>, <code>registry.rs:260</code>, <code>tree.rs:174</code></td><td><code>type-enum-states</code></td><td>Caller confusion</td></tr>
+<tr><td>A2</td><td>4 stringly-typed APIs</td><td><code>host.rs:78,111</code>, <code>protocol.rs:257</code>, <code>marketplace.rs:86</code></td><td><code>type-no-stringly</code></td><td>Type safety gap</td></tr>
+<tr><td>A3</td><td>0 <code>#[must_use]</code> on 59+ Result functions</td><td>workspace-wide</td><td><code>api-must-use</code></td><td>Silently ignored errors</td></tr>
+<tr><td>A4</td><td>35+ wildcard <code>_ =&gt;</code> matches on enums</td><td>12+ files</td><td>explicit matching</td><td>Missing future variants</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="clean"><a class="header" href="#clean">CLEAN</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Area</th><th>Result</th></tr>
+</thead>
+<tbody>
+<tr><td><code>unsafe</code> blocks (9 total)</td><td>All correct and necessary (libc FFI)</td></tr>
+<tr><td><code>&amp;String</code> / <code>&amp;Vec&lt;T&gt;</code> parameters</td><td>None found — correctly uses <code>&amp;str</code> / <code>&amp;[T]</code></td></tr>
+<tr><td>Lifetime annotations</td><td>Appropriate elision used throughout</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="remediation-priority"><a class="header" href="#remediation-priority">Remediation Priority</a></h2>
+<h3 id="phase-1-crash-prevention-immediate"><a class="header" href="#phase-1-crash-prevention-immediate">Phase 1: Crash Prevention (immediate)</a></h3>
+<ul>
+<li>Fix E1-E7: Replace all production <code>unwrap()</code>/<code>expect()</code>/<code>panic!()</code> with <code>?</code>, <code>let-else</code>, or graceful degradation</li>
+<li>Already done: <code>update.rs:46</code> char boundary fix + <code>catch_unwind</code> removal (this session)</li>
+</ul>
+<h3 id="phase-2-render-performance-next"><a class="header" href="#phase-2-render-performance-next">Phase 2: Render Performance (next)</a></h3>
+<ul>
+<li>Fix M1-M3: Pre-allocate buffers, use <code>write!()</code> instead of <code>format!()</code>, reuse Vecs with <code>clear()</code></li>
+<li>Fix M4-M5: Move instead of clone where possible</li>
+</ul>
+<h3 id="phase-3-concurrency-safety-next"><a class="header" href="#phase-3-concurrency-safety-next">Phase 3: Concurrency Safety (next)</a></h3>
+<ul>
+<li>Fix C2: Add <code>recv_timeout()</code> to all MCP listener and brain channel reads</li>
+<li>Fix C1: Collect JoinHandles or use scoped threads for error propagation</li>
+</ul>
+<h3 id="phase-4-api-hardening-ongoing"><a class="header" href="#phase-4-api-hardening-ongoing">Phase 4: API Hardening (ongoing)</a></h3>
+<ul>
+<li>Fix A3: Add <code>#[must_use]</code> to all Result-returning public functions (zero-risk, high-value)</li>
+<li>Fix A4: Replace wildcard matches with explicit variants</li>
+<li>Fix A1-A2: Introduce enums and newtypes at API boundaries</li>
+</ul>
+<hr>
+<h2 id="alternatives-considered"><a class="header" href="#alternatives-considered">Alternatives Considered</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Option</th><th>Pros</th><th>Cons</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>No skills, manual review</strong></td><td>No dependencies</td><td>Inconsistent enforcement, bugs slip through between sessions</td></tr>
+<tr><td><strong>Clippy only</strong></td><td>Built-in, fast</td><td>Doesn’t cover API design, architecture, concurrency patterns</td></tr>
+<tr><td><strong>Skills (chosen)</strong></td><td>Persistent across sessions, covers full spectrum (179 rules), auto-triggers on relevant code</td><td>Adds prompt weight, some rules may conflict with project conventions</td></tr>
+<tr><td><strong>Project-specific CLAUDE.md only</strong></td><td>Tailored to Phantom</td><td>Doesn’t benefit from community knowledge, must be maintained manually</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="decision-rationale"><a class="header" href="#decision-rationale">Decision Rationale</a></h2>
+<p>Skills are complementary to project-specific instructions. They encode community-proven Rust patterns that apply universally. The auto-trigger mechanism means they activate when relevant (ownership errors, error handling, concurrency) without manual invocation. The audit baseline lets us track improvement over time.</p>
+<hr>
+<h2 id="components-affected"><a class="header" href="#components-affected">Components affected</a></h2>
+<p>Project-wide convention. Every crate writes Rust against these guidelines.</p>
+<h2 id="flows-that-honour-this"><a class="header" href="#flows-that-honour-this">Flows that honour this</a></h2>
+<p>Project-wide. Every flow’s source-file refs land in code that’s expected
+to follow the audit’s recommendations.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../decisions/003-pubsub.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../decisions/005-keystroke-fx.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../decisions/003-pubsub.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../decisions/005-keystroke-fx.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-c22b7243.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/theme-switch-eeb7a585.js"></script>
+        <script src="../mermaid-eefea253.min.js"></script>
+        <script src="../mermaid-init-ccf746f1.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

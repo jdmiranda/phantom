@@ -327,6 +327,7 @@ mod tests {
                 success: true,
                 summary: "fix the bug".into(),
                 spawn_tag: None,
+                result: None,
             },
             frame: 0,
             timestamp: 100,

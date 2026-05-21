@@ -16,7 +16,7 @@
 //! | Task ledger            | `TaskLedger` struct                    |
 //! | Progress ledger        | `ProgressAssessment` (5-question eval) |
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use phantom_agents::AgentTask;
@@ -78,6 +78,106 @@ pub enum StepStatus {
     /// paused until [`TaskLedger::approve_checkpoint`] transitions the step
     /// back to [`StepStatus::Pending`], making it eligible for dispatch.
     NeedsApproval,
+}
+
+// ---------------------------------------------------------------------------
+// StepFailureCause (issue #649)
+// ---------------------------------------------------------------------------
+
+/// Typed cause for a `PlanStep` that did not complete successfully.
+///
+/// Stored on [`PlanStep::failure_cause`] when a step transitions to
+/// [`StepStatus::Failed`] or [`StepStatus::Skipped`]. The variant pins down
+/// *why* the step terminated unsuccessfully so the reconciler (and downstream
+/// observers like the inspector pane) can render typed diagnostics instead of
+/// only the free-text `result_summary`.
+///
+/// # Variant semantics
+///
+/// - [`StepFailureCause::AgentFailed`] — the agent ran and reported failure
+///   via the normal completion path (the default cause set by
+///   [`PlanStep::record_failure`] when no quarantine flag is present).
+/// - [`StepFailureCause::AgentQuarantined`] — the agent's [`AgentId`] is in
+///   the `Quarantined` state in the registry at the moment its completion
+///   event arrives. Set by [`TaskLedger::record_quarantine_failure`].
+/// - [`StepFailureCause::DispatchTimedOut`] — the reconciler tripped the
+///   per-step stall timeout before the agent reported back.
+/// - [`StepFailureCause::DependencyFailed`] — applied to cascaded
+///   [`StepStatus::Skipped`] steps by the `FailAndCascade` quarantine policy.
+///   `dep_idx` is the prerequisite step (in the same plan) whose failure
+///   propagated.
+/// - [`StepFailureCause::CompleteTaskNotCalled`] — reserved for the issue
+///   #646 follow-up where the agent terminated without calling
+///   `complete_task` even though the spawn opted into the explicit
+///   termination contract. Not emitted by this crate today; downstream
+///   consumers may pattern-match on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepFailureCause {
+    /// The agent reported failure through the normal completion path.
+    AgentFailed,
+    /// The agent's [`phantom_agents::AgentId`] is in the `Quarantined`
+    /// state in the [`phantom_agents::quarantine::QuarantineRegistry`]. The
+    /// `since_ms` field carries the wall-clock millisecond timestamp at the
+    /// moment of quarantine, propagated from `QuarantineState::Quarantined`.
+    AgentQuarantined {
+        /// The quarantined agent's stable ID.
+        agent_id: u64,
+        /// Wall-clock milliseconds at the moment the agent was quarantined.
+        since_ms: u64,
+    },
+    /// The reconciler's per-step stall timeout fired before the agent
+    /// reported back (reserved for the timeout dispatch path; today it is
+    /// produced by the reconciler's stall path via `record_failure`).
+    DispatchTimedOut,
+    /// A prerequisite step in the same plan failed, causing this step to be
+    /// skipped under the `FailAndCascade` quarantine policy. `dep_idx` is
+    /// the index of the failing prerequisite.
+    DependencyFailed {
+        /// The plan index of the dependency that propagated failure here.
+        dep_idx: usize,
+    },
+    /// The agent terminated without calling the explicit `complete_task`
+    /// tool even though its spawn opted into that contract. Reserved for
+    /// the issue #646 follow-up; not emitted by this crate today.
+    CompleteTaskNotCalled,
+}
+
+// ---------------------------------------------------------------------------
+// QuarantinePolicy (issue #649)
+// ---------------------------------------------------------------------------
+
+/// What [`TaskLedger::record_quarantine_failure`] does when the agent
+/// assigned to a step is in the `Quarantined` state at completion time.
+///
+/// Stored per-step on [`PlanStep::quarantine_policy`] so different steps in
+/// the same plan can elect different recovery semantics (e.g. a read-only
+/// audit step might tolerate a quick retry while a write-side deploy step
+/// should cascade-fail downstream).
+///
+/// The default policy is [`QuarantinePolicy::FailAndAllowRetry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuarantinePolicy {
+    /// Mark the step `Failed`, set its `failure_cause` to
+    /// [`StepFailureCause::AgentQuarantined`], and clear its `agent_id` so
+    /// the next dispatch can spawn a fresh agent against the same step.
+    ///
+    /// The step is *not* re-queued automatically — callers that want a
+    /// retry must transition it back to `Pending` via the normal retry
+    /// machinery. This is the default policy.
+    #[default]
+    FailAndAllowRetry,
+    /// Apply the same per-step behaviour as `FailAndAllowRetry`, AND walk
+    /// the dependency graph: every step whose `depends_on` transitively
+    /// reaches the failing step is marked
+    /// [`StepStatus::Skipped`] with
+    /// [`StepFailureCause::DependencyFailed`] pointing back at the
+    /// originally failed step.
+    FailAndCascade,
+    /// Leave the step in its current status (typically `Active`) but stamp
+    /// `failure_cause` with [`StepFailureCause::AgentQuarantined`] for
+    /// diagnostics. The reconciler is expected to leave the step alone
+    /// until the quarantine clears externally.
+    Park,
 }
 
 /// A single step in the orchestrator's plan.
@@ -143,6 +243,23 @@ pub struct PlanStep {
     /// [`TaskLedger::eligible_next`] until the human calls
     /// [`TaskLedger::approve_checkpoint`].
     requires_checkpoint: bool,
+    /// Typed cause for the most recent unsuccessful termination of this
+    /// step (issue #649).
+    ///
+    /// `None` while the step is in flight or has only seen successful
+    /// completions. Set to [`StepFailureCause::AgentFailed`] by
+    /// [`PlanStep::record_failure`] and to one of the quarantine-aware
+    /// variants by [`TaskLedger::record_quarantine_failure`].
+    pub failure_cause: Option<StepFailureCause>,
+    /// Per-step recovery policy applied when the agent assigned to this
+    /// step is quarantined at completion time (issue #649).
+    ///
+    /// Defaults to [`QuarantinePolicy::FailAndAllowRetry`] — see the policy
+    /// enum for the available variants. Existing call sites that build a
+    /// plan via `PlanStep::new` or `PlanStep::with_deps` get the default
+    /// policy automatically; opt in to a non-default policy through
+    /// [`PlanStep::with_quarantine_policy`].
+    pub quarantine_policy: QuarantinePolicy,
 }
 
 impl PlanStep {
@@ -164,6 +281,8 @@ impl PlanStep {
             preferred_provider: None,
             disposition: Disposition::default(),
             requires_checkpoint: false,
+            failure_cause: None,
+            quarantine_policy: QuarantinePolicy::default(),
         }
     }
 
@@ -256,10 +375,34 @@ impl PlanStep {
         self.preferred_provider.as_deref()
     }
 
+    /// Attach a [`QuarantinePolicy`] to this step (builder-style, issue #649).
+    ///
+    /// When the step's assigned agent is quarantined at completion time,
+    /// [`TaskLedger::record_quarantine_failure`] applies this policy.
+    /// Steps built without an explicit policy use
+    /// [`QuarantinePolicy::FailAndAllowRetry`].
+    ///
+    /// # Example
+    /// ```ignore
+    /// let step = PlanStep::new("deploy", task)
+    ///     .with_quarantine_policy(QuarantinePolicy::FailAndCascade);
+    /// ```
+    #[must_use]
+    pub fn with_quarantine_policy(mut self, policy: QuarantinePolicy) -> Self {
+        self.quarantine_policy = policy;
+        self
+    }
+
     /// Record a failed attempt. Returns true if retries remain.
+    ///
+    /// Sets [`PlanStep::failure_cause`] to
+    /// [`StepFailureCause::AgentFailed`] to distinguish ordinary agent
+    /// failures from the quarantine-coincident path handled by
+    /// [`TaskLedger::record_quarantine_failure`] (issue #649).
     pub fn record_failure(&mut self, summary: impl Into<String>) -> bool {
         self.attempts += 1;
         self.result_summary = Some(summary.into());
+        self.failure_cause = Some(StepFailureCause::AgentFailed);
         if self.attempts >= self.max_attempts {
             self.status = StepStatus::Failed;
             false
@@ -436,6 +579,95 @@ impl TaskLedger {
         }
     }
 
+    /// Returns `None` when the step at `idx` has every entry in its
+    /// `depends_on` list either out-of-bounds or already at
+    /// [`StepStatus::Done`]; returns `Some(open)` listing the in-bounds
+    /// dependency indices that are not yet `Done`.
+    ///
+    /// Out-of-bounds dependency indices are treated as satisfied, matching
+    /// the [`TaskLedger::eligible_next`] and [`TaskLedger::has_cycle`]
+    /// semantics. The returned `Vec` preserves the original order from
+    /// `depends_on` and contains only indices that are in range for the
+    /// current `plan`.
+    ///
+    /// This is the private helper that backs [`TaskLedger::eligible_next`]'s
+    /// dependency filter and [`TaskLedger::try_dispatch`]'s guard. Returns
+    /// `Some(vec![])` (empty `open` list) is never produced: an empty open
+    /// list always collapses to `None`.
+    ///
+    /// Panics if `idx` is out of bounds; callers must validate the index
+    /// before invoking this helper.
+    fn deps_satisfied(&self, idx: usize) -> Option<Vec<usize>> {
+        let plan_len = self.plan.len();
+        let open: Vec<usize> = self.plan[idx]
+            .depends_on
+            .iter()
+            .copied()
+            .filter(|dep| {
+                // Out-of-bounds indices are treated as satisfied.
+                *dep < plan_len && self.plan[*dep].status != StepStatus::Done
+            })
+            .collect();
+
+        if open.is_empty() { None } else { Some(open) }
+    }
+
+    /// Transition the step at `idx` from [`StepStatus::Pending`] to
+    /// [`StepStatus::Active`], enforcing every gating invariant in one
+    /// guarded mutator.
+    ///
+    /// This is the **only** path that production code may use to set a step
+    /// to `Active`. The reconciler calls it from `dispatch_pending`; direct
+    /// `plan[idx].status = StepStatus::Active` writes are reserved for
+    /// `#[cfg(test)]` fixtures only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DispatchBlocked`] when:
+    /// - `idx >= plan.len()` — [`DispatchBlocked::OutOfBounds`].
+    /// - The step is not [`StepStatus::Pending`] —
+    ///   [`DispatchBlocked::NotPending`] carries the current status so the
+    ///   caller can distinguish "already running" from "completed" without
+    ///   a second lookup.
+    /// - Any in-bounds entry in `depends_on` is not yet `Done` —
+    ///   [`DispatchBlocked::UnmetDeps`] carries the open indices.
+    ///
+    /// On success the step's `status` is set to `Active` and a reference
+    /// to the now-active step is returned so the caller can read its
+    /// description, task, and disposition without a second lookup.
+    /// Fields other than `status` (notably `agent_id` and `attempts`) are
+    /// **not** mutated by this method — the reconciler stamps those after
+    /// a successful dispatch.
+    pub fn try_dispatch(&mut self, idx: usize) -> Result<&PlanStep, DispatchBlocked> {
+        let plan_len = self.plan.len();
+        let Some(step) = self.plan.get(idx) else {
+            return Err(DispatchBlocked::OutOfBounds {
+                idx,
+                len: plan_len,
+            });
+        };
+
+        if step.status != StepStatus::Pending {
+            return Err(DispatchBlocked::NotPending {
+                idx,
+                current: step.status,
+            });
+        }
+
+        if let Some(open) = self.deps_satisfied(idx) {
+            return Err(DispatchBlocked::UnmetDeps { idx, open });
+        }
+
+        // All invariants hold — perform the single mutation. Unwrap is safe:
+        // we already validated `idx` is in bounds above.
+        let step = self
+            .plan
+            .get_mut(idx)
+            .expect("plan idx validated above");
+        step.status = StepStatus::Active;
+        Ok(&*step)
+    }
+
     /// Returns all `Pending` steps whose dependency constraints are satisfied.
     ///
     /// A step is *eligible* when:
@@ -455,28 +687,16 @@ impl TaskLedger {
     ///
     /// O(n × d) where n = number of plan steps and d = average dependency
     /// fan-in. For typical plans (n < 20, d < 5) this is negligible.
-    #[must_use] 
+    #[must_use]
     pub fn eligible_next(&self) -> Vec<(usize, &PlanStep)> {
-        // Collect the index set of all completed steps.
-        let done: HashSet<usize> = self
-            .plan
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.status == StepStatus::Done)
-            .map(|(i, _)| i)
-            .collect();
-
+        // NeedsApproval steps are explicitly excluded: they require a
+        // human to call approve_checkpoint before they become Pending.
+        // Dependency satisfaction is delegated to `deps_satisfied` so the
+        // same predicate backs both `eligible_next` and `try_dispatch`.
         self.plan
             .iter()
             .enumerate()
-            .filter(|(_, s)| {
-                // NeedsApproval steps are explicitly excluded: they require a
-                // human to call approve_checkpoint before they become Pending.
-                s.status == StepStatus::Pending
-                    && s.depends_on
-                        .iter()
-                        .all(|dep| *dep >= self.plan.len() || done.contains(dep))
-            })
+            .filter(|(idx, s)| s.status == StepStatus::Pending && self.deps_satisfied(*idx).is_none())
             .collect()
     }
 
@@ -521,6 +741,163 @@ impl TaskLedger {
                 step.status = StepStatus::Pending;
                 Ok(())
             }
+        }
+    }
+
+    /// Apply the step's [`QuarantinePolicy`] to a failure that coincides
+    /// with the agent being in the `Quarantined` state (issue #649).
+    ///
+    /// Unlike [`PlanStep::record_failure`], this mutator stamps the
+    /// quarantine-aware [`StepFailureCause::AgentQuarantined`] cause and
+    /// honours the per-step [`PlanStep::quarantine_policy`]:
+    ///
+    /// - [`QuarantinePolicy::FailAndAllowRetry`] (default) — mark the
+    ///   step `Failed`, set the typed cause, and clear `agent_id` so a
+    ///   subsequent dispatch may spawn a fresh agent against the same
+    ///   step. Attempt counters are *not* incremented (this is not a
+    ///   normal failure budget consumer).
+    /// - [`QuarantinePolicy::FailAndCascade`] — perform the same per-step
+    ///   action as `FailAndAllowRetry`, then walk the dependency graph in
+    ///   topological-forward order and mark every transitive dependent
+    ///   step [`StepStatus::Skipped`] with
+    ///   [`StepFailureCause::DependencyFailed { dep_idx: idx }`].
+    ///   Dependents that are already in a terminal state
+    ///   (`Done` / `Failed` / `Skipped`) are left untouched.
+    /// - [`QuarantinePolicy::Park`] — leave the step's status as-is and
+    ///   stamp the typed cause for diagnostics. The reconciler is
+    ///   expected to ignore parked steps until the quarantine clears.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DispatchBlocked::OutOfBounds`] when `idx` is out of
+    /// bounds for the current plan. All other branches succeed.
+    ///
+    /// On success the returned reference points at the step at `idx` so
+    /// callers can inspect the resulting `status` / `failure_cause`
+    /// without a second lookup.
+    pub fn record_quarantine_failure(
+        &mut self,
+        idx: usize,
+        agent_id: u64,
+        since_ms: u64,
+    ) -> Result<&PlanStep, DispatchBlocked> {
+        let plan_len = self.plan.len();
+        if idx >= plan_len {
+            return Err(DispatchBlocked::OutOfBounds {
+                idx,
+                len: plan_len,
+            });
+        }
+
+        // Snapshot the policy before mutating so we can branch the
+        // dependency-cascade walk below without holding a mutable borrow
+        // across the loop.
+        let policy = self.plan[idx].quarantine_policy;
+        let cause = StepFailureCause::AgentQuarantined { agent_id, since_ms };
+
+        match policy {
+            QuarantinePolicy::FailAndAllowRetry | QuarantinePolicy::FailAndCascade => {
+                let step = &mut self.plan[idx];
+                step.status = StepStatus::Failed;
+                step.failure_cause = Some(cause);
+                // Clear `agent_id` so the next dispatch (if any) can spawn
+                // a fresh agent for this step. Attempt counters are left
+                // alone because a quarantine is not the agent's "fault" in
+                // the retry-budget sense.
+                step.agent_id = None;
+            }
+            QuarantinePolicy::Park => {
+                // Status is intentionally left alone. The reconciler
+                // observes the stamped `failure_cause` for diagnostics
+                // and leaves the step parked until the quarantine
+                // clears externally.
+                let step = &mut self.plan[idx];
+                step.failure_cause = Some(cause);
+            }
+        }
+
+        if matches!(policy, QuarantinePolicy::FailAndCascade) {
+            self.cascade_skip_dependents(idx);
+        }
+
+        Ok(&self.plan[idx])
+    }
+
+    /// Walk the dependency graph forward from `failed_idx` and mark every
+    /// transitive dependent step as [`StepStatus::Skipped`] with
+    /// [`StepFailureCause::DependencyFailed`] pointing at `failed_idx`.
+    ///
+    /// "Dependent" here means: any step `j` whose `depends_on` contains an
+    /// index `k` where `k == failed_idx` *or* `k` is itself transitively
+    /// skipped by this walk. Dependents that have already reached a
+    /// terminal status (`Done`, `Failed`, `Skipped`) are left untouched so
+    /// previously completed work is not silently reclassified.
+    ///
+    /// Uses an iterative breadth-first scan over `0..plan.len()` so the
+    /// walk is O(n × max_depends_on) and avoids the stack depth a naive
+    /// recursive variant would require on long plans.
+    fn cascade_skip_dependents(&mut self, failed_idx: usize) {
+        let plan_len = self.plan.len();
+        // `failed_set` tracks indices whose failure should propagate. We
+        // start with the originating failure and grow the set as we
+        // discover transitive dependents.
+        let mut failed_set: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        failed_set.insert(failed_idx);
+
+        // BFS-style scan: re-iterate over the plan until no new dependent
+        // is added to `failed_set`. Each iteration costs O(n × d); the
+        // outer loop runs at most O(n) times in the worst case (a linear
+        // chain), giving O(n² × d) total. For typical plans (n < 20)
+        // this is fine.
+        loop {
+            let mut grew = false;
+            for j in 0..plan_len {
+                if failed_set.contains(&j) {
+                    continue;
+                }
+                // Only propagate into steps that are still in a
+                // non-terminal status; previously completed work stays
+                // as it was.
+                let cur_status = self.plan[j].status;
+                if matches!(
+                    cur_status,
+                    StepStatus::Done | StepStatus::Failed | StepStatus::Skipped
+                ) {
+                    continue;
+                }
+                let deps = &self.plan[j].depends_on;
+                if deps.iter().any(|d| failed_set.contains(d)) {
+                    failed_set.insert(j);
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        // Apply the cascade — every transitively-failed step that is not
+        // the origin gets marked `Skipped` with the origin recorded as
+        // the propagating dependency.
+        for j in failed_set {
+            if j == failed_idx {
+                continue;
+            }
+            let step = &mut self.plan[j];
+            // Defensive: skip terminal statuses (the scan above already
+            // filtered them, but a future caller might mutate state
+            // between scan and application).
+            if matches!(
+                step.status,
+                StepStatus::Done | StepStatus::Failed | StepStatus::Skipped
+            ) {
+                continue;
+            }
+            step.status = StepStatus::Skipped;
+            step.failure_cause = Some(StepFailureCause::DependencyFailed {
+                dep_idx: failed_idx,
+            });
         }
     }
 
@@ -1151,21 +1528,67 @@ impl Orchestrator {
         }
     }
 
-    /// Pull the next pending step from the task ledger without dispatching it.
+    /// Locate the first eligible pending step and atomically transition it
+    /// to [`StepStatus::Active`] via [`TaskLedger::try_dispatch`].
     ///
     /// Returns `None` when:
     /// - The plan is empty.
-    /// - All steps are `Active`, `Done`, `Failed`, or `Skipped` (no pending work).
+    /// - No step is eligible (all dependencies open, or every step is
+    ///   `Active`, `Done`, `Failed`, `Skipped`, or `NeedsApproval`).
+    /// - The guarded `try_dispatch` rejects the candidate (e.g. an
+    ///   intervening race left a dependency unmet).
     ///
-    /// The returned [`PlanStep`] is a **clone** of the ledger entry — the
-    /// caller is responsible for advancing the step's status to `Active` via
-    /// [`TaskLedger::plan`] after successfully dispatching the returned step.
-    #[must_use] 
-    pub fn dispatch_next_step(&self) -> Option<PlanStep> {
-        self.ledger
-            .next_pending_step()
-            .map(|(_, step)| step.clone())
+    /// The returned [`PlanStep`] is a **clone** of the ledger entry taken
+    /// **after** the dispatch transition, so its `status` is already
+    /// `Active`. This method had no production callers prior to runtime
+    /// dep enforcement; the reconciler calls [`TaskLedger::try_dispatch`]
+    /// directly. The signature is `&mut self` because the transition is
+    /// the very thing we wanted to make guarded.
+    pub fn dispatch_next_step(&mut self) -> Option<PlanStep> {
+        let idx = self.ledger.eligible_next().first().map(|(i, _)| *i)?;
+        match self.ledger.try_dispatch(idx) {
+            Ok(step) => Some(step.clone()),
+            Err(blocked) => {
+                log::warn!(
+                    "Orchestrator::dispatch_next_step: try_dispatch rejected step {idx}: {blocked:?}"
+                );
+                None
+            }
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DispatchBlocked
+// ---------------------------------------------------------------------------
+
+/// Why a [`TaskLedger::try_dispatch`] call refused to transition a step to
+/// [`StepStatus::Active`].
+///
+/// Each variant pins down exactly which invariant the guarded mutator
+/// enforced. Callers (the reconciler, today) match on the variant to log
+/// open dependency indices and skip the step for the current tick rather
+/// than rolling back partial state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchBlocked {
+    /// `idx` was out of bounds for the current plan (`len` reflects the
+    /// plan length at the time of the call).
+    OutOfBounds { idx: usize, len: usize },
+    /// The step exists but its current status is not
+    /// [`StepStatus::Pending`]. Includes the current status so callers can
+    /// distinguish "already running" (`Active`) from "completed" (`Done`)
+    /// without a second lookup.
+    NotPending { idx: usize, current: StepStatus },
+    /// One or more in-bounds dependency indices in `step.depends_on` are
+    /// not yet at [`StepStatus::Done`]. `open` lists those indices in the
+    /// order they appear in `depends_on`. Out-of-bounds dependency
+    /// indices are silently filtered out and never reported here.
+    UnmetDeps { idx: usize, open: Vec<usize> },
+    /// Reserved for the per-step quarantine flag tracked in issue #649.
+    /// `try_dispatch` does **not** emit this variant in the current
+    /// implementation; it exists so downstream callers can already
+    /// pattern-match exhaustively without an `_` arm.
+    Quarantined,
 }
 
 // ---------------------------------------------------------------------------
@@ -1650,11 +2073,12 @@ mod tests {
     /// Returns None when the plan is empty.
     #[test]
     fn dispatch_next_step_none_on_empty_plan() {
-        let orch = Orchestrator::new("goal with no plan");
+        let mut orch = Orchestrator::new("goal with no plan");
         assert!(orch.dispatch_next_step().is_none());
     }
 
-    /// Returns the first Pending step.
+    /// Returns the first Pending step and transitions it to `Active` in
+    /// the ledger (the guarded mutator semantics).
     #[test]
     fn dispatch_next_step_returns_first_pending() {
         let mut orch = Orchestrator::new("test");
@@ -1664,6 +2088,9 @@ mod tests {
         ]);
         let step = orch.dispatch_next_step().expect("should return step A");
         assert_eq!(step.description, "step A");
+        // The dispatcher is the *only* path to Active in production.
+        assert_eq!(orch.ledger().plan[0].status, StepStatus::Active);
+        assert_eq!(orch.ledger().plan[1].status, StepStatus::Pending);
     }
 
     /// Skips Done steps and returns the next Pending one.
@@ -1703,42 +2130,47 @@ mod tests {
         assert!(orch.dispatch_next_step().is_none());
     }
 
-    /// Dispatch is idempotent: calling it twice returns the same pending step
-    /// because it does not mutate ledger state.
+    /// Dispatch is the guarded mutator: a second call after a successful
+    /// dispatch returns `None` because the just-dispatched step is now
+    /// `Active` and no other step is eligible.
     #[test]
-    fn dispatch_next_step_is_idempotent() {
+    fn dispatch_next_step_is_not_idempotent() {
         let mut orch = Orchestrator::new("test");
         orch.set_plan(vec![PlanStep::new("s1", free_task("s1"))]);
 
-        let first = orch.dispatch_next_step();
+        let first = orch
+            .dispatch_next_step()
+            .expect("first dispatch returns the pending step");
+        assert_eq!(first.description, "s1");
+        assert_eq!(orch.ledger().plan[0].status, StepStatus::Active);
+
         let second = orch.dispatch_next_step();
-        assert!(first.is_some());
-        assert!(second.is_some());
-        assert_eq!(
-            first.unwrap().description,
-            second.unwrap().description,
-            "dispatch_next_step must not mutate ledger"
+        assert!(
+            second.is_none(),
+            "second dispatch must return None — step is already Active"
         );
     }
 
-    /// After the caller manually marks a step Active, dispatch_next_step moves
-    /// to the following Pending step — correct sequencing in the outer loop.
+    /// After step 1 is dispatched (marked Active by the guarded mutator),
+    /// `dispatch_next_step` advances to step 2 — correct sequencing in
+    /// the outer loop with no manual status manipulation required.
     #[test]
-    fn dispatch_next_step_sequences_correctly_after_activation() {
+    fn dispatch_next_step_advances_after_activation() {
         let mut orch = Orchestrator::new("test");
         orch.set_plan(vec![
             PlanStep::new("step 1", free_task("s1")),
             PlanStep::new("step 2", free_task("s2")),
         ]);
 
-        // Caller takes step 1 and marks it Active.
+        // First call dispatches step 1 — `try_dispatch` flips it to Active.
         let step1 = orch.dispatch_next_step().expect("step 1");
         assert_eq!(step1.description, "step 1");
-        orch.ledger_mut().plan[0].status = StepStatus::Active;
+        assert_eq!(orch.ledger().plan[0].status, StepStatus::Active);
 
-        // Now dispatch should return step 2.
+        // Now the only eligible Pending step is step 2.
         let step2 = orch.dispatch_next_step().expect("step 2");
         assert_eq!(step2.description, "step 2");
+        assert_eq!(orch.ledger().plan[1].status, StepStatus::Active);
     }
 
     // -- Issue #60: Task DAG + cycle detection --------------------------------

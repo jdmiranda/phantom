@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · rendering stack</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 03 · GPU RENDERING · wgpu PIPELINE</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html" class="active">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 03 · GPU RENDERING STACK</span>
+    <span class="sysid">SYS://render.0</span>
+  </div>
+  <h1 class="page-title">Rendering Stack</h1>
+  <p class="page-lede">
+    Phantom is GPU-first. Every pixel is composed by <code>wgpu</code> on whichever backend the host
+    provides — Metal on macOS, Vulkan on Linux, D3D12 on Windows. A two-stage pipeline renders the scene
+    to an offscreen texture, then composites it through a CRT post-fx pass with six physically-inspired
+    effects.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">GPU API</div><div class="value">wgpu 25</div></div>
+    <div class="status-cell"><div class="label">Backends</div><div class="value">Metal/Vulkan/D3D12</div></div>
+    <div class="status-cell"><div class="label">Shaders</div><div class="value">3 · WGSL</div></div>
+    <div class="status-cell"><div class="label">CRT effects</div><div class="value">6 composited</div></div>
+    <div class="status-cell"><div class="label">Hot reload</div><div class="value">PHANTOM_HOT_SHADERS=1</div></div>
+  </div>
+
+  <h2>Two-stage pipeline</h2>
+
+<pre class="ascii">
+   +------------------- STAGE 1: SCENE PASS ------------------+
+   |                                                          |
+   |   QuadRenderer  -->                                      |
+   |   GridRenderer  -->   offscreen texture                  |
+   |   TextRenderer  -->   (RENDER_ATTACHMENT | TEXTURE_      |
+   |   VideoRenderer -->    BINDING | COPY_SRC)               |
+   |   ColorGlyphAtlas ->                                     |
+   |                                                          |
+   +----------------------+-----------------------------------+
+                          |
+                          v
+   +------------------- STAGE 2: POSTFX PASS -----------------+
+   |                                                          |
+   |   PostFxPipeline      barrel distortion (CRT curve)      |
+   |     fs_main()    -->  chromatic aberration               |
+   |                       phosphor bloom (8-tap box)         |
+   |                       scanlines                          |
+   |                       vignette                           |
+   |                       film grain                         |
+   |                                                          |
+   +----------------------+-----------------------------------+
+                          |
+                          v
+                    surface present (vsync)
+</pre>
+
+  <h2>Core types</h2>
+  <p>
+    The renderer is organized around <code>GpuContext</code> as the single owner of device, queue, surface, and
+    surface configuration. Every renderer is constructed once and recycles per-frame state.
+  </p>
+
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">GpuContext</span><span class="card-sub">gpu.rs:11</span></div>
+      <div class="card-body">Owns <code>wgpu::Device</code>, <code>Queue</code>, <code>Surface</code>, <code>SurfaceConfiguration</code>. Initializes with <code>Backends::PRIMARY</code> and <code>PowerPreference::HighPerformance</code>. Selects sRGB surface format.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">PostFxPipeline</span><span class="card-sub">postfx.rs:166-327</span></div>
+      <div class="card-body">Full-screen triangle CRT composite. Vertices computed from <code>vertex_index</code> in WGSL — no vertex buffer. Owns the offscreen render target.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">PostFxThemeParams</span><span class="card-sub">postfx.rs:82-93</span></div>
+      <div class="card-body">10 per-frame CRT uniforms: scanline_intensity, bloom_intensity, chromatic_aberration, curvature, vignette_intensity, noise_intensity, glow_color, time, width, height.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">GlyphAtlas</span><span class="card-sub">glyph_atlas/*</span></div>
+      <div class="card-body">Monochrome glyph cache for terminal text. <code>etagere</code> bin-packing. Grows on demand.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">ColorGlyphAtlas</span><span class="card-sub">glyph_atlas/color.rs</span></div>
+      <div class="card-body"><code>Rgba8UnormSrgb</code> atlas for emoji and color glyphs. Routed via <code>color_grid_renderer</code> for untinted output.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">TextRenderer · GridRenderer</span><span class="card-sub">renderer/*</span></div>
+      <div class="card-body">Two text pipelines: terminal grid (fixed cell width) and freeform widget text.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">QuadRenderer</span><span class="card-sub">renderer/*</span></div>
+      <div class="card-body">UI rectangles, borders, dividers, status pills, panel chrome — every non-text surface.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">VideoRenderer</span><span class="card-sub">renderer/*</span></div>
+      <div class="card-body">In-pane video playback for capture review.</div></div>
+  </div>
+
+  <h2>The CRT post-fx pass</h2>
+  <p>
+    The composite shader is <code>shaders/crt.wgsl</code>. Six effects are evaluated in order. Each effect
+    samples the offscreen texture (warped UV from the previous step). The full-screen triangle is the only
+    geometry the post-fx pass draws.
+  </p>
+
+<pre class="code-wgsl"><code><span class="c">// crt.wgsl :: composite order</span>
+<span class="k">fn</span> <span class="fn">fs_main</span>(in: <span class="t">VertexOut</span>) -> <span class="t">vec4</span>&lt;<span class="t">f32</span>&gt; {
+    <span class="k">let</span> uv         = <span class="fn">barrel_distort</span>(in.uv, params.curvature);
+    <span class="k">if</span> (<span class="fn">out_of_bezel</span>(uv)) { <span class="k">return</span> <span class="t">vec4</span>&lt;<span class="t">f32</span>&gt;(<span class="lit">0.0</span>); }
+    <span class="k">let</span> aberrated  = <span class="fn">chromatic_aberration</span>(uv);
+    <span class="k">let</span> bloomed    = <span class="fn">phosphor_bloom</span>(aberrated, params.glow_color);
+    <span class="k">let</span> scanned   = <span class="fn">scanlines</span>(bloomed, in.pos.y);
+    <span class="k">let</span> vignetted = <span class="fn">vignette</span>(scanned, uv);
+    <span class="k">let</span> grained   = <span class="fn">film_grain</span>(vignetted, params.time);
+    <span class="k">return</span> grained;
+}</code></pre>
+
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">Barrel distortion</span><span class="card-sub">crt.wgsl:97-141</span></div>
+      <div class="card-body">Warps UVs outward from center by <code>1.0 + strength · r²</code>, simulating CRT tube curvature. Pixels outside the bezel return pure black.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Chromatic aberration</span><span class="card-sub">crt.wgsl:152-163</span></div>
+      <div class="card-body">Splits R/G/B channels radially. Offset scales with distance from center, capped at <code>0.02 · aberration</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Phosphor bloom</span><span class="card-sub">crt.wgsl:172-190</span></div>
+      <div class="card-body">8-tap box blur tinted by <code>glow_color</code>, blended additively at <code>0.7 · bloom_intensity</code>. The signature look.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Scanlines</span><span class="card-sub">crt.wgsl:199-204</span></div>
+      <div class="card-body">Sinusoidal darkening: <code>1.0 − intensity · 0.3 · (1 + sin(y · 2π)) · 0.5</code>. Per-pixel-row modulation.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Vignette</span><span class="card-sub">crt.wgsl:213-219</span></div>
+      <div class="card-body"><code>smoothstep(0.2, 0.7071)</code> radial fade. Multiplies edges by <code>0.85</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Film grain</span><span class="card-sub">crt.wgsl:228-233</span></div>
+      <div class="card-body">Animated hash-based noise. Temporal variation via the <code>time</code> uniform; grain = <code>(hash − 0.5) · 0.12 · intensity</code>.</div></div>
+  </div>
+
+  <h2>Six themes ship in <code>phantom-ui</code></h2>
+  <p class="muted">
+    Each theme is a <code>Theme</code> struct combining <code>TerminalColors</code> (16-color ANSI palette + cursor + selection),
+    <code>ShaderParams</code> (the 10 CRT uniforms above), and <code>UiColors</code> (chrome). The CRT effect strengths
+    are tuned <em>per theme</em> — Phosphor is restrained, Amber is aggressive, Vapor leans into chromatic split.
+  </p>
+
+  <div class="swatch-grid">
+    <div class="swatch" style="color:#33ff00">
+      <div class="swatch-bar">
+        <div class="seg" style="background:#33ff00"></div>
+        <div class="seg" style="background:#0a0e14"></div>
+        <div class="seg" style="background:#b8ffb8"></div>
+      </div>
+      <div class="swatch-info">
+        <div class="name">phosphor</div>
+        <div class="desc">classic green · #33FF00 on #0A0E14<br>scan=0.08 · bloom=0.10 · chroma=0.01</div>
+      </div>
+    </div>
+    <div class="swatch" style="color:#ffb000">
+      <div class="swatch-bar">
+        <div class="seg" style="background:#ffb000"></div>
+        <div class="seg" style="background:#0c0904"></div>
+        <div class="seg" style="background:#ffd980"></div>
+      </div>
+      <div class="swatch-info">
+        <div class="name">amber</div>
+        <div class="desc">warm amber · #FFB000 on #0C0904<br>scan=0.20 · bloom=0.25 · chroma=0.04</div>
+      </div>
+    </div>
+    <div class="swatch" style="color:#66ddff">
+      <div class="swatch-bar">
+        <div class="seg" style="background:#66ddff"></div>
+        <div class="seg" style="background:#040812"></div>
+        <div class="seg" style="background:#a8e8ff"></div>
+      </div>
+      <div class="swatch-info">
+        <div class="name">ice</div>
+        <div class="desc">cool blue · cyan accents<br>scan=0.10 · bloom=0.15</div>
+      </div>
+    </div>
+    <div class="swatch" style="color:#ff3344">
+      <div class="swatch-bar">
+        <div class="seg" style="background:#ff3344"></div>
+        <div class="seg" style="background:#0a0203"></div>
+        <div class="seg" style="background:#ff8088"></div>
+      </div>
+      <div class="swatch-info">
+        <div class="name">blood</div>
+        <div class="desc">deep red · alarming<br>scan=0.18 · bloom=0.20</div>
+      </div>
+    </div>
+    <div class="swatch" style="color:#ff44dd">
+      <div class="swatch-bar">
+        <div class="seg" style="background:#ff44dd"></div>
+        <div class="seg" style="background:#080012"></div>
+        <div class="seg" style="background:#66ddff"></div>
+      </div>
+      <div class="swatch-info">
+        <div class="name">vapor</div>
+        <div class="desc">synthwave magenta/cyan<br>scan=0.12 · bloom=0.30 · chroma=0.06</div>
+      </div>
+    </div>
+    <div class="swatch" style="color:#4dff80">
+      <div class="swatch-bar">
+        <div class="seg" style="background:#4dff80"></div>
+        <div class="seg" style="background:#001a08"></div>
+        <div class="seg" style="background:#a8ffc8"></div>
+      </div>
+      <div class="swatch-info">
+        <div class="name">verdant</div>
+        <div class="desc">chunky utility CRT, deep phosphor<br>scan=0.14 · bloom=0.18</div>
+      </div>
+    </div>
+  </div>
+
+  <p class="muted">Run with any theme:</p>
+<pre class="code-bash"><code>cargo run -- --theme amber
+cargo run -- --theme vapor
+cargo run -- --theme verdant
+cargo run -- --theme plain   <span class="c"># disables all CRT effects</span></code></pre>
+
+  <h2>Hot shader reload</h2>
+  <p>
+    During development, recompile and re-bind a shader without restarting:
+  </p>
+<pre class="code-bash"><code>PHANTOM_HOT_SHADERS=1 cargo run --bin phantom-supervisor</code></pre>
+  <p>
+    The PostFx pipeline polls <code>shaders/crt.wgsl</code> on mtime change and calls
+    <code>reload_shader()</code> at <code>postfx.rs:51-68</code>. The pipeline rebuilds, the next frame uses
+    the new shader. Useful for tuning the bloom radius or grain noise live.
+  </p>
+
+  <h2>Mixed content</h2>
+  <p>
+    Every Phantom pane composes <em>terminal text + rich widgets + inline images + shader FX</em> in the same
+    pass. The renderer doesn't distinguish "terminal mode" from "widget mode" — it draws a sequence of
+    primitives (<code>Quad</code>, <code>Glyph</code>, <code>ColorGlyph</code>, <code>VideoFrame</code>) into
+    the offscreen buffer, then the post-fx pass tonemaps and CRT-warps the whole thing. An agent's progress
+    bar lives next to your <code>ls</code> output and they both phosphor-bloom together.
+  </p>
+
+  <div class="callout callout-info">
+    <div class="callout-title">Window occlusion</div>
+    When the window is minimized or hidden, <code>WindowEvent::Occluded</code> suppresses the render loop entirely
+    (<code>phantom/src/main.rs:186-197</code>). Idle Phantom does not burn GPU.
+  </div>
+
+  <footer class="footer">
+    <span>SEC 03 · RENDERING</span>
+    <span><a href="boot.html">↩ SEC 02 · BOOT</a> · <a href="supervisor.html">next → SEC 04 · SUPERVISOR</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>
