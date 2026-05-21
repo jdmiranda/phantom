@@ -304,9 +304,14 @@ impl AppCoordinator {
         self.float_rects.remove(&app_id);
         self.lineage.remove(app_id);
 
-        // The replacement will set its own focus; clear the old.
+        // The caller will typically `register_adapter_at_pane` immediately
+        // and set focus on the replacement. If there is no replacement (or
+        // a second adapter already existed — possible in tests and
+        // multi-pane scenarios), fall back to the first remaining adapter
+        // so focus does not silently disappear. Mirrors `remove_adapter`'s
+        // `validate_focus()` policy.
         if self.focused == Some(app_id) {
-            self.focused = None;
+            self.focused = self.registry.all_running().into_iter().next();
         }
 
         Some((pane_id, scene_node))

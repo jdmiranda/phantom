@@ -477,14 +477,26 @@ pub fn send_message(
         // here; without retry, a brief API congestion burst kills an
         // entire 8-min daemon iteration. Backoff: 2s, 6s, 18s — total
         // ~26 s worst case before giving up, which still fits in one
-        // triager iteration.
+        // triager iteration. A small random jitter (+0..30 % of the
+        // base delay) is added so a fleet of agents hitting a 429
+        // simultaneously does not re-synchronise on the next attempt.
         const RETRY_DELAYS_SEC: [u64; 3] = [2, 6, 18];
         let mut final_result: Option<Result<ureq::http::Response<ureq::Body>, String>> = None;
         for (attempt, delay_secs) in
             std::iter::once(0u64).chain(RETRY_DELAYS_SEC.iter().copied()).enumerate()
         {
             if delay_secs > 0 {
-                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+                // Add jitter: 0..30 % of the base delay, derived from the
+                // system clock's nanos. No `rand` dependency; the goal is
+                // de-synchronisation across processes, not crypto-grade
+                // randomness.
+                let jitter_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64)
+                    .unwrap_or(0)
+                    % (delay_secs * 300).max(1); // up to 30 % of base in ms
+                let total_ms = delay_secs * 1000 + jitter_ms;
+                std::thread::sleep(std::time::Duration::from_millis(total_ms));
             }
             let result = agent
                 .post(API_URL)

@@ -54,7 +54,18 @@ pub struct SetupAdapter {
     /// Latched once an API key has been seen at least once so the panel
     /// can drop the "waiting" subtitle while the agent spawn is in flight.
     key_ever_seen: bool,
+    /// Accumulator (seconds) used to debounce the env-var poll. Without this
+    /// we'd call `std::env::var` twice per GPU frame (60–120 Hz); on macOS
+    /// `getenv` is a serialised syscall under the render lock and not free.
+    /// Polling every [`POLL_INTERVAL`] is plenty for what is effectively a
+    /// human-in-the-loop "did the user set an env var yet" check.
+    poll_accum_secs: f32,
 }
+
+/// Throttle env-var probing to once every two seconds. The env is a slow
+/// signal (user pastes a key into a shell rc, then restarts), so a 2 s
+/// debounce is invisible to the user and removes the per-frame syscalls.
+const POLL_INTERVAL: f32 = 2.0;
 
 impl SetupAdapter {
     /// Build a SetupAdapter that shares the `upgrade_requested` flag with the App.
@@ -68,6 +79,9 @@ impl SetupAdapter {
             upgrade_requested,
             last_key_present: initial,
             key_ever_seen: initial,
+            // Initialize at the poll interval so the first `update` call
+            // probes immediately, matching previous behaviour.
+            poll_accum_secs: POLL_INTERVAL,
         }
     }
 }
@@ -93,7 +107,17 @@ impl AppCore for SetupAdapter {
         true
     }
 
-    fn update(&mut self, _dt: f32) {
+    fn update(&mut self, dt: f32) {
+        // Debounce: only probe the env every POLL_INTERVAL seconds. At 60 Hz
+        // this turns ~120 getenv syscalls/s into ~1/s. The `Commandable`
+        // probe path stays unthrottled so a user-driven "check again" still
+        // triggers an immediate read.
+        self.poll_accum_secs += dt;
+        if self.poll_accum_secs < POLL_INTERVAL {
+            return;
+        }
+        self.poll_accum_secs = 0.0;
+
         let present = api_key_present();
         if present && !self.last_key_present {
             self.upgrade_requested.store(true, Ordering::Release);
@@ -291,23 +315,63 @@ mod tests {
         let mut a = SetupAdapter::new(Arc::clone(&flag));
         assert!(!flag.load(Ordering::Acquire));
 
+        // SetupAdapter::new initialises `poll_accum_secs` at the poll
+        // interval so the first update probes immediately; subsequent
+        // updates must accumulate dt past POLL_INTERVAL to re-probe.
         a.update(0.0);
         assert!(!flag.load(Ordering::Acquire));
 
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-test"); }
-        a.update(0.0);
+        // First update after env change: accumulator is 0 from the prior
+        // probe, so feed a large dt to force the throttled probe.
+        a.update(POLL_INTERVAL + 0.1);
         assert!(flag.load(Ordering::Acquire), "flag must flip on NONE->SOME");
 
         // Subsequent ticks with the key still present do NOT re-flip
         // (we only edge-trigger so the App doesn't get duplicate work).
         flag.store(false, Ordering::Release);
-        a.update(0.0);
+        a.update(POLL_INTERVAL + 0.1);
         assert!(
             !flag.load(Ordering::Acquire),
             "flag must NOT re-flip while key remains present"
         );
 
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+    }
+
+    #[test]
+    fn update_is_throttled_to_poll_interval() {
+        // Regression: env-var probing must not run on every frame. Two
+        // sub-interval ticks should not consult env (verified indirectly
+        // via the upgrade flag staying low even when a key is present).
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut a = SetupAdapter::new(Arc::clone(&flag));
+        // Burn through the initial-probe quota so the next probe is gated
+        // by the poll throttle.
+        a.update(POLL_INTERVAL + 0.1);
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-test"); }
+
+        // Two sub-interval frames must NOT re-probe (and so must NOT see
+        // the env transition).
+        a.update(POLL_INTERVAL * 0.4);
+        a.update(POLL_INTERVAL * 0.4);
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "sub-interval frames must not probe env"
+        );
+
+        // Crossing the interval triggers the probe and the upgrade.
+        a.update(POLL_INTERVAL * 0.4);
+        assert!(
+            flag.load(Ordering::Acquire),
+            "probe must run after POLL_INTERVAL accumulates"
+        );
+
+        unsafe { std::env::remove_var("OPENAI_API_KEY"); }
     }
 
     #[test]

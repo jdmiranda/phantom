@@ -385,6 +385,29 @@ impl LoopRunner {
     }
 
     async fn validate(&mut self, input: LoopInput, result: Value) -> LoopState {
+        // `abort_task` short-circuit. The agent emits the `abort_task`
+        // lifecycle tool when it has decided the task is infeasible. The
+        // api.rs parser converts that into a synthetic complete_task payload
+        // `{aborted: true, reason: "..."}`. Without this short-circuit the
+        // payload would be schema-checked against the loop's exit_schema —
+        // which it never satisfies — and the quarantine policy would either
+        // park the loop or silently drop the abort signal. Treat the abort
+        // as a clean terminal state for this iteration: skip effects, log
+        // the reason, and resume pulling.
+        if result.get("aborted").and_then(|v| v.as_bool()) == Some(true) {
+            let reason = result
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no reason supplied)");
+            tracing::info!(
+                loop_id = %self.spec.id,
+                key = %input.key,
+                reason = %reason,
+                "agent emitted abort_task — skipping iteration cleanly",
+            );
+            return LoopState::Pulling;
+        }
+
         // Validate against the compiled schema if present.
         if let Some(schema) = self.exit_schema.as_ref()
             && let Err(errors) = schema.validate(&result)
@@ -663,5 +686,64 @@ mod tests {
         // The synthetic result wraps the LoopInput verbatim.
         let msg = queues.get_or_create("out").pop().expect("one enqueued message");
         assert_eq!(msg.payload, json!({"key": "k", "payload": {"surfaced": true}}));
+    }
+
+    #[tokio::test]
+    async fn abort_task_short_circuits_schema_validation() {
+        // Regression: the agent's `abort_task` lifecycle signal is mapped by
+        // api.rs to a synthetic `complete_task` payload `{aborted: true,
+        // reason: "..."}`. That payload should NOT be schema-checked against
+        // the loop's exit_schema (which the abort payload never satisfies);
+        // it should resume pulling cleanly. Without this short-circuit a
+        // strict schema like the triager's would quarantine on every abort.
+        let strict_schema = json!({
+            "type": "object",
+            "required": ["issue_number", "decision"],
+            "properties": {
+                "issue_number": {"type": "integer"},
+                "decision": {"type": "string"}
+            }
+        });
+        let mut spec = make_spec_with_agent(strict_schema);
+        // Quarantine policy that WOULD stop the loop if schema validation
+        // ran. The short-circuit must skip the validator entirely.
+        spec.on_quarantine = LoopQuarantinePolicy::FailAndStop;
+        // Sanity: enqueue effect — must NOT fire under abort_task.
+        spec.on_complete = vec![LoopEffect::EnqueueTo {
+            queue: "downstream".to_string(),
+            fields: vec![],
+        }];
+
+        let schema = ExitSchema::compile(&spec.agent.as_ref().unwrap().exit_schema).ok();
+        assert!(schema.is_some(), "schema must compile");
+
+        let source = Box::new(OneShotSource {
+            input: Some(LoopInput {
+                key: "issue-42".to_string(),
+                payload: json!({"issue_number": 42}),
+                correlation_id: CorrelationId::new("c"),
+            }),
+        });
+        let queues = Arc::new(LoopQueueRegistry::new());
+        let runner = LoopRunner::new(
+            Arc::new(spec),
+            schema,
+            source,
+            queues.clone(),
+            // Dispatcher returns an abort_task payload — exactly what
+            // api.rs would emit on `abort_task`.
+            Arc::new(StubOk {
+                result: json!({"aborted": true, "reason": "infeasible"}),
+            }),
+        );
+        let reason = runner.run().await;
+        // Loop should exit because the source is exhausted, NOT because of
+        // schema-validation quarantine.
+        assert_eq!(reason, "source exhausted");
+        // Effects must NOT run on an abort — downstream queue stays empty.
+        assert!(
+            queues.get_or_create("downstream").pop().is_none(),
+            "abort_task must not fire on_complete effects"
+        );
     }
 }

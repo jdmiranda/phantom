@@ -241,14 +241,31 @@ fn render_frontmatter(
     s.push_str(&format!("proposed_by_role: {}\n", agent.role.label()));
     s.push_str(&format!("proposed_at_unix_ms: {proposed_at_unix_ms}\n"));
     if let Some(sc) = source_candidate {
-        s.push_str(&format!("source_candidate: {sc}\n"));
+        s.push_str(&format!(
+            "source_candidate: {}\n",
+            render_yaml_json_value(sc)
+        ));
     }
     if let Some(sc) = score {
-        s.push_str(&format!("score: {sc}\n"));
+        s.push_str(&format!("score: {}\n", render_yaml_json_value(sc)));
     }
     s.push_str("status: proposed\n");
     s.push_str("---\n\n");
     s
+}
+
+/// Embed an arbitrary `serde_json::Value` as a YAML scalar by serialising it
+/// to a compact JSON string and then routing it through
+/// [`escape_yaml_oneline`]. JSON is a strict subset of YAML for scalars and
+/// flow-style structures, BUT nested `{...}` / `[...]` contain YAML's
+/// structural characters which would either break YAML parsing or, worse,
+/// silently re-interpret the value (e.g. a colon inside a JSON-stringified
+/// object becomes a YAML mapping separator). Quoting via
+/// `escape_yaml_oneline` guarantees the value round-trips as a single YAML
+/// string scalar.
+fn render_yaml_json_value(v: &serde_json::Value) -> String {
+    let json = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
+    escape_yaml_oneline(&json)
 }
 
 /// Make a string safe to use as a one-line YAML scalar value.
@@ -572,6 +589,44 @@ mod tests {
         assert_eq!(escape_yaml_oneline("a \"quote\""), "\"a \\\"quote\\\"\"");
     }
 
+    #[test]
+    fn render_yaml_json_value_quotes_nested_objects() {
+        // Regression: a `serde_json::Value` object contains `{`, `}`, `:`,
+        // `"`, and `,` — all YAML structural characters. A naive
+        // `format!("{v}")` produces invalid YAML; the renderer must
+        // serialise the value to compact JSON and route it through the
+        // one-line quoting branch so the result is a single, parseable
+        // YAML string scalar.
+        let v = json!({"external_id": "phantom#999", "n": 1});
+        let out = render_yaml_json_value(&v);
+        assert!(out.starts_with('"') && out.ends_with('"'), "must be quoted scalar: {out}");
+        // Inner double quotes are backslash-escaped per YAML 1.1.
+        assert!(out.contains(r#"\"phantom#999\""#));
+        // No bare `:` should appear (it would be the structural mapping
+        // separator inside the YAML stream).
+        let inside = &out[1..out.len() - 1];
+        for ch in inside.chars() {
+            if ch == ':' {
+                // OK as long as it's INSIDE the quoted scalar; the outer
+                // YAML parser sees the whole scalar as a string.
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn render_yaml_json_value_handles_arrays_and_scalars() {
+        // Arrays — structural `[`/`]` → must be quoted.
+        let arr = render_yaml_json_value(&json!([1, 2, 3]));
+        assert!(arr.starts_with('"'), "arrays must be quoted: {arr}");
+
+        // Bare numbers — would parse as a YAML number on their own, but we
+        // still quote so the consumer's JSON-decode step is uniform across
+        // value shapes.
+        let n = render_yaml_json_value(&json!(0.78));
+        assert!(n.starts_with('"'), "JSON-decoded numbers come back as quoted scalars: {n}");
+    }
+
     // ---- propose_skill happy path ----------------------------------------
 
     #[test]
@@ -640,10 +695,13 @@ mod tests {
         let path = propose_skill(&args, &agent, dir.path()).expect("ok");
         let parent = path.parent().unwrap();
 
-        // Frontmatter carries source + score (rendered as inline JSON).
+        // Frontmatter carries source + score. To keep the YAML parseable
+        // when the JSON value contains structural characters (`{`, `:`,
+        // `,`), the JSON is serialised to a compact string and embedded
+        // as a quoted YAML scalar — inner `"` are escaped to `\"`.
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("source_candidate: "));
-        assert!(body.contains("\"phantom#999\""));
+        assert!(body.contains(r#"\"phantom#999\""#));
         assert!(body.contains("score: "));
         assert!(body.contains("0.78"));
 
