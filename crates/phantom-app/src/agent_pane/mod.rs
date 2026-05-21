@@ -419,7 +419,7 @@ impl AgentPane {
     /// substrate `AgentBlocked` events.
     #[allow(dead_code)]
     pub(crate) fn spawn(task: AgentTask, claude_config: &ClaudeConfig) -> Self {
-        Self::spawn_with_opts(AgentSpawnOpts::new(task), claude_config, None, None, false)
+        Self::spawn_with_opts(AgentSpawnOpts::new(task), claude_config, None, None, false, Vec::new())
     }
 
     /// Create a new agent pane with explicit spawn options.
@@ -441,6 +441,7 @@ impl AgentPane {
         blocked_event_sink: Option<BlockedEventSink>,
         denied_event_sink: Option<DeniedEventSink>,
         privacy_mode: bool,
+        memory_snapshot: Vec<(String, String)>,
     ) -> Self {
         let task = opts.task.clone();
         // Capture the requested role before opts fields are consumed.
@@ -502,6 +503,17 @@ impl AgentPane {
         let codebase_context = build_codebase_context();
         if !codebase_context.is_empty() {
             agent.push_message(AgentMessage::System(codebase_context));
+        }
+
+        // Inject project memory snapshot so the agent can read stored facts
+        // (conventions, warnings, config) without a memory-lookup tool call.
+        // Only appended when the caller supplied a non-empty snapshot.
+        if !memory_snapshot.is_empty() {
+            let mut mem_block = String::from("## Stored Context\n");
+            for (k, v) in &memory_snapshot {
+                mem_block.push_str(&format!("- {k}: {v}\n"));
+            }
+            agent.push_message(AgentMessage::System(mem_block));
         }
 
         // Claude API requires at least one user message. Push the task
