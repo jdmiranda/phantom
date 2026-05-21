@@ -321,82 +321,127 @@ impl TextRenderer {
         let (cell_w, cell_h) = self.measure_cell();
         let rows = cells.len() / cols;
 
-        let mut batch = GlyphBatch {
-            mono: Vec::with_capacity(cells.len()),
-            color: Vec::new(),
-        };
+        // Bound the number of restart attempts so a pathological cell stream
+        // (e.g. every glyph evicts the atlas) cannot loop forever. Two retries
+        // is enough to recover from a single eviction without livelocking; if
+        // the third attempt would still evict mid-batch we drain the batch and
+        // accept the dropped frame.
+        const MAX_RESTARTS: usize = 2;
+        let mut restarts = 0usize;
 
-        for row in 0..rows {
-            for col in 0..cols {
-                let cell = &cells[row * cols + col];
+        loop {
+            // Consume any reset flag from a prior attempt so we can detect a
+            // NEW eviction during this attempt.
+            let _ = atlas.take_needs_reset();
+            let _ = color_atlas.take_needs_reset();
 
-                // Skip spaces and control characters — nothing to rasterize.
-                if cell.ch <= ' ' {
-                    continue;
-                }
+            let mut batch = GlyphBatch {
+                mono: Vec::with_capacity(cells.len()),
+                color: Vec::new(),
+            };
+            let mut restart = false;
 
-                // Look up the cached glyph key for this character+style. If not cached,
-                // shape it ONCE through cosmic-text and store the result.
-                let cache_key_tuple = (cell.ch, cell.bold, cell.italic);
-                let cached = if let Some(entry) = self.glyph_key_cache.get(&cache_key_tuple) {
-                    *entry
-                } else {
-                    let result = self.shape_char(cell.ch, cell_w, cell_h, cell.bold, cell.italic);
-                    self.glyph_key_cache.insert(cache_key_tuple, result);
-                    result
-                };
+            'outer: for row in 0..rows {
+                for col in 0..cols {
+                    let cell = &cells[row * cols + col];
 
-                let Some((cache_key, line_y, phys_x)) = cached else {
-                    continue;
-                };
+                    // Skip spaces and control characters — nothing to rasterize.
+                    if cell.ch <= ' ' {
+                        continue;
+                    }
 
-                // Try color atlas first, then monochrome.
-                let entry = color_atlas
-                    .get_or_insert(
-                        queue,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        cache_key,
-                    )
-                    .or_else(|| {
-                        atlas.get_or_insert(
+                    // Look up the cached glyph key for this character+style. If not cached,
+                    // shape it ONCE through cosmic-text and store the result.
+                    let cache_key_tuple = (cell.ch, cell.bold, cell.italic);
+                    let cached = if let Some(entry) = self.glyph_key_cache.get(&cache_key_tuple) {
+                        *entry
+                    } else {
+                        let result = self.shape_char(cell.ch, cell_w, cell_h, cell.bold, cell.italic);
+                        self.glyph_key_cache.insert(cache_key_tuple, result);
+                        result
+                    };
+
+                    let Some((cache_key, line_y, phys_x)) = cached else {
+                        continue;
+                    };
+
+                    // Try color atlas first, then monochrome.
+                    let entry = color_atlas
+                        .get_or_insert(
                             queue,
                             &mut self.font_system,
                             &mut self.swash_cache,
                             cache_key,
                         )
-                    });
+                        .or_else(|| {
+                            atlas.get_or_insert(
+                                queue,
+                                &mut self.font_system,
+                                &mut self.swash_cache,
+                                cache_key,
+                            )
+                        });
 
-                if let Some(entry) = entry {
-                    let cell_x = origin.0 + (col as f32) * cell_w;
-                    let baseline_y = origin.1 + (row as f32) * cell_h + line_y;
-                    let px = cell_x + phys_x + entry.left as f32;
-                    let py = baseline_y - entry.top as f32;
+                    // If either atlas evicted during this insert, every UV in
+                    // the in-progress batch is now stale (its referenced
+                    // texels may have been overwritten by later glyphs in this
+                    // same batch). Bail out and restart from the top so all
+                    // UVs reference the post-eviction state.
+                    if atlas.needs_reset() || color_atlas.needs_reset() {
+                        restart = true;
+                        break 'outer;
+                    }
 
-                    let instance = GlyphInstance {
-                        position: [px, py],
-                        uv_rect: [
-                            entry.uv_min[0],
-                            entry.uv_min[1],
-                            entry.uv_max[0],
-                            entry.uv_max[1],
-                        ],
-                        color: cell.fg,
-                        size: [entry.width as f32, entry.height as f32],
-                        is_color: u32::from(entry.is_color),
-                        _pad: 0,
-                    };
+                    if let Some(entry) = entry {
+                        let cell_x = origin.0 + (col as f32) * cell_w;
+                        let baseline_y = origin.1 + (row as f32) * cell_h + line_y;
+                        let px = cell_x + phys_x + entry.left as f32;
+                        let py = baseline_y - entry.top as f32;
 
-                    if entry.is_color {
-                        batch.color.push(instance);
-                    } else {
-                        batch.mono.push(instance);
+                        let instance = GlyphInstance {
+                            position: [px, py],
+                            uv_rect: [
+                                entry.uv_min[0],
+                                entry.uv_min[1],
+                                entry.uv_max[0],
+                                entry.uv_max[1],
+                            ],
+                            color: cell.fg,
+                            size: [entry.width as f32, entry.height as f32],
+                            is_color: u32::from(entry.is_color),
+                            _pad: 0,
+                        };
+
+                        if entry.is_color {
+                            batch.color.push(instance);
+                        } else {
+                            batch.mono.push(instance);
+                        }
                     }
                 }
             }
-        }
 
-        batch
+            if !restart {
+                // Clear the flag for the next frame; we just consumed it.
+                let _ = atlas.take_needs_reset();
+                let _ = color_atlas.take_needs_reset();
+                return batch;
+            }
+
+            restarts += 1;
+            if restarts > MAX_RESTARTS {
+                // Pathological case: keep evicting on every attempt. Drop the
+                // frame's glyph instances rather than loop forever. The atlas
+                // is in a consistent (post-eviction) state for the next call.
+                let _ = atlas.take_needs_reset();
+                let _ = color_atlas.take_needs_reset();
+                log::warn!(
+                    "phantom-renderer: dropping glyph batch after {MAX_RESTARTS} \
+                     atlas evictions in one frame; atlas may be undersized"
+                );
+                return GlyphBatch::default();
+            }
+        }
     }
 
     /// Shape a single character through cosmic-text ONCE and return the cache key
@@ -456,46 +501,79 @@ impl TextRenderer {
         default_color: [f32; 4],
         origin: (f32, f32),
     ) -> GlyphBatch {
-        let mut batch = GlyphBatch::default();
+        // Bound the number of restart attempts; mirrors `prepare_glyphs`.
+        const MAX_RESTARTS: usize = 2;
+        let mut restarts = 0usize;
 
-        for run in buffer.layout_runs() {
-            for glyph in run.glyphs.iter() {
-                let physical = glyph.physical((origin.0, origin.1), 1.0);
+        loop {
+            let _ = atlas.take_needs_reset();
+            let _ = color_atlas.take_needs_reset();
 
-                if let Some(entry) =
-                    self.rasterize_glyph(atlas, color_atlas, queue, physical.cache_key)
-                {
-                    // For color glyphs the fragment shader ignores the color
-                    // attribute, so we pass it anyway for layout compatibility.
-                    let color = glyph_color(glyph, default_color);
+            let mut batch = GlyphBatch::default();
+            let mut restart = false;
 
-                    let px = physical.x as f32 + entry.left as f32;
-                    let py = run.line_y + physical.y as f32 - entry.top as f32;
+            'outer: for run in buffer.layout_runs() {
+                for glyph in run.glyphs.iter() {
+                    let physical = glyph.physical((origin.0, origin.1), 1.0);
 
-                    let instance = GlyphInstance {
-                        position: [px, py],
-                        uv_rect: [
-                            entry.uv_min[0],
-                            entry.uv_min[1],
-                            entry.uv_max[0],
-                            entry.uv_max[1],
-                        ],
-                        color,
-                        size: [entry.width as f32, entry.height as f32],
-                        is_color: u32::from(entry.is_color),
-                        _pad: 0,
-                    };
+                    let entry =
+                        self.rasterize_glyph(atlas, color_atlas, queue, physical.cache_key);
 
-                    if entry.is_color {
-                        batch.color.push(instance);
-                    } else {
-                        batch.mono.push(instance);
+                    // Detect mid-batch eviction; restart so all UVs reference
+                    // the post-eviction atlas state.
+                    if atlas.needs_reset() || color_atlas.needs_reset() {
+                        restart = true;
+                        break 'outer;
+                    }
+
+                    if let Some(entry) = entry {
+                        // For color glyphs the fragment shader ignores the color
+                        // attribute, so we pass it anyway for layout compatibility.
+                        let color = glyph_color(glyph, default_color);
+
+                        let px = physical.x as f32 + entry.left as f32;
+                        let py = run.line_y + physical.y as f32 - entry.top as f32;
+
+                        let instance = GlyphInstance {
+                            position: [px, py],
+                            uv_rect: [
+                                entry.uv_min[0],
+                                entry.uv_min[1],
+                                entry.uv_max[0],
+                                entry.uv_max[1],
+                            ],
+                            color,
+                            size: [entry.width as f32, entry.height as f32],
+                            is_color: u32::from(entry.is_color),
+                            _pad: 0,
+                        };
+
+                        if entry.is_color {
+                            batch.color.push(instance);
+                        } else {
+                            batch.mono.push(instance);
+                        }
                     }
                 }
             }
-        }
 
-        batch
+            if !restart {
+                let _ = atlas.take_needs_reset();
+                let _ = color_atlas.take_needs_reset();
+                return batch;
+            }
+
+            restarts += 1;
+            if restarts > MAX_RESTARTS {
+                let _ = atlas.take_needs_reset();
+                let _ = color_atlas.take_needs_reset();
+                log::warn!(
+                    "phantom-renderer: dropping buffer glyph batch after {MAX_RESTARTS} \
+                     atlas evictions; atlas may be undersized"
+                );
+                return GlyphBatch::default();
+            }
+        }
     }
 }
 

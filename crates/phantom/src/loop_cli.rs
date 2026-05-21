@@ -146,10 +146,70 @@ struct RunArgs {
     /// is set.
     #[arg(long, default_value = "jdmiranda/phantom")]
     self_improve_repo: String,
+
+    /// Override the queue name the brain enqueues candidates to. Default
+    /// `implementer-queue` (legacy direct-to-implementer routing). Set to
+    /// `triage-queue` to route through the triager loop, which classifies
+    /// each candidate (close / comment / research / refine / implement)
+    /// before paying for an implementer agent.
+    #[arg(long, default_value = "implementer-queue")]
+    brain_queue: String,
+
+    /// Path for the brain's per-decision JSONL audit log. Every
+    /// `score_candidate` + `evaluate` pass appends one envelope with the
+    /// candidate id, score breakdown, and decision (enqueued / skipped /
+    /// rate-limited / hard-excluded). Defaults to
+    /// `<repo>/.phantom/brain-audit.jsonl`. Tail it to see what the brain
+    /// is actually deciding, especially under `--dry-run`.
+    #[arg(long)]
+    audit_log: Option<PathBuf>,
+
+    /// Bounded-mode: shut the daemon down after the brain has enqueued
+    /// `N` loop messages. Counts increments at the
+    /// `LoopQueueActionHandler::enqueue_loop_message` boundary — every
+    /// brain decision that would otherwise spawn an agent. Set to a small
+    /// number (e.g. `--max-iterations 1`) to validate the end-to-end loop
+    /// against the real API without an open-ended spend.
+    #[arg(long)]
+    max_iterations: Option<usize>,
+
+    /// Bounded-mode: shut the daemon down after `T` minutes of wall-clock
+    /// runtime. Triggered by a tokio timer spawned at boot; runs in parallel
+    /// with the ctrl-c handler and `--max-iterations`, whichever fires
+    /// first wins.
+    #[arg(long)]
+    max_runtime_min: Option<u64>,
+
+    /// Bounded-mode: brain still polls, scores, audits, and emits actions —
+    /// but the `LoopQueueActionHandler::enqueue_loop_message` body logs and
+    /// counts the would-be enqueue and SKIPS the push onto the registry.
+    /// No queue drains, no agent spawns, no API tokens spent. The audit log
+    /// captures every brain decision so you can review scoring quality
+    /// before authorising a live run.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 fn run_command(args: &[String]) -> Result<()> {
     use clap::Parser;
+
+    // Initialise structured logging early so brain ticks, dispatch decisions,
+    // and effect runs all surface to stderr under the user's RUST_LOG filter.
+    // `try_init` swallows the "already initialised" path so re-running the
+    // subcommand in the same process (tests) is a no-op rather than a panic.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .try_init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
 
     // We expect args[0] == "run"; strip it before clap sees the slice so
     // clap's positional handling matches the documented usage.
@@ -310,10 +370,27 @@ fn run_command(args: &[String]) -> Result<()> {
         let project_dir = repo.to_string_lossy().to_string();
         // Master kill switch defaults to OFF in the brain crate; the CLI is
         // the operator's explicit opt-in surface so flip it on here.
+        let audit_log_path = parsed
+            .audit_log
+            .clone()
+            .unwrap_or_else(|| repo.join(".phantom").join("brain-audit.jsonl"));
+        if let Some(parent) = audit_log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let state = SelfImprovementState::new(SelfImprovementConfig {
             enabled: true,
+            queue_name: parsed.brain_queue.clone(),
+            audit_log_path: Some(audit_log_path.clone()),
             ..Default::default()
         });
+        eprintln!(
+            "phantom loop run: brain will enqueue to `{}`",
+            parsed.brain_queue
+        );
+        eprintln!(
+            "phantom loop run: brain audit log at {}",
+            audit_log_path.display()
+        );
         let goal_sources: Vec<Box<dyn GoalSource>> = vec![
             Box::new(GhIssueGoalSource::new(parsed.self_improve_repo.clone(), None)),
             Box::new(GhCiFailureGoalSource::new(
@@ -348,33 +425,119 @@ fn run_command(args: &[String]) -> Result<()> {
         // drop sequence then waits for it on Ctrl-C teardown alongside the
         // other tasks.
         let queues_for_brain = Arc::clone(&queues);
+        let enqueue_counter =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_for_handler = std::sync::Arc::clone(&enqueue_counter);
+        let dry_run = parsed.dry_run;
+        let forwarder_shutdown =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let forwarder_shutdown_for_thread = std::sync::Arc::clone(&forwarder_shutdown);
         let _forwarder_handle = runtime.spawn_blocking(move || {
-            let mut handler = LoopQueueActionHandler::new(queues_for_brain);
-            loop {
+            let mut handler = LoopQueueActionHandler::new(queues_for_brain)
+                .with_dry_run(dry_run)
+                .with_enqueue_counter(counter_for_handler);
+            while !forwarder_shutdown_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
                 match brain.try_recv_action() {
                     Some(action) => action.execute(&mut handler),
                     None => std::thread::sleep(std::time::Duration::from_millis(100)),
                 }
             }
+            // Drop the handle so the brain OS thread joins on its own.
+            drop(brain);
+            eprintln!("phantom loop run: brain forwarder exited cleanly");
         });
-        Some(())
+        Some((enqueue_counter, forwarder_shutdown))
     };
 
+    if parsed.dry_run {
+        eprintln!("phantom loop run: DRY-RUN — brain runs but enqueues are suppressed (no API spend)");
+    }
+    if let Some(n) = parsed.max_iterations {
+        eprintln!("phantom loop run: bounded — will exit after {n} brain enqueue(s)");
+    }
+    if let Some(t) = parsed.max_runtime_min {
+        eprintln!("phantom loop run: bounded — will exit after {t} minute(s) of runtime");
+    }
     eprintln!("phantom loop run: all loops started. Press Ctrl-C to stop.");
 
-    // Block on ctrl-c. When it fires, abort every registered loop, abort
-    // the substrate driver, and exit.
+    // Shutdown is now sourced from multiple events: ctrl-c (the existing
+    // path), an optional wall-clock timer (`--max-runtime-min`), and an
+    // optional enqueue-count watcher (`--max-iterations`). Whichever fires
+    // first wakes the block_on closure, which then tears the loops down
+    // in the same order as before.
+    let max_iterations = parsed.max_iterations;
+    let max_runtime_min = parsed.max_runtime_min;
+    let counter_for_watcher = brain_state.as_ref().map(|(c, _)| Arc::clone(c));
+    let forwarder_shutdown_for_teardown = brain_state.as_ref().map(|(_, s)| Arc::clone(s));
     runtime.block_on(async move {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            eprintln!("phantom loop run: ctrl-c handler error: {e}");
+        let ctrl_c = tokio::signal::ctrl_c();
+        // SIGTERM: the watchdog (`scripts/phantom-loop-forever.sh`) sends this
+        // when it detects origin/main moved and wants to rebuild on the new
+        // code. Without explicit SIGTERM handling the process would zombie
+        // until SIGKILL because tokio::signal::ctrl_c() only catches SIGINT.
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .ok();
+        let sigterm_future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match sigterm.as_mut() {
+                Some(s) => Box::pin(async move {
+                    s.recv().await;
+                }),
+                None => Box::pin(std::future::pending::<()>()),
+            };
+        // Wall-clock timer: resolves into a non-firing future when the flag
+        // is absent, so the select! arm never wins in that case.
+        let runtime_timer: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match max_runtime_min {
+                Some(min) => Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(min * 60)).await;
+                }),
+                None => Box::pin(std::future::pending::<()>()),
+            };
+        // Counter watcher: only fires when `--max-iterations` is set AND we
+        // actually have a counter handle (i.e. self-improvement is enabled).
+        let counter_watch: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match (max_iterations, counter_for_watcher) {
+                (Some(limit), Some(counter)) if limit > 0 => Box::pin(async move {
+                    loop {
+                        let n = counter.load(std::sync::atomic::Ordering::SeqCst);
+                        if n >= limit {
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }),
+                _ => Box::pin(std::future::pending::<()>()),
+            };
+
+        tokio::select! {
+            res = ctrl_c => {
+                if let Err(e) = res {
+                    eprintln!("phantom loop run: ctrl-c handler error: {e}");
+                } else {
+                    eprintln!("phantom loop run: Ctrl-C received");
+                }
+            }
+            _ = sigterm_future => {
+                eprintln!("phantom loop run: SIGTERM received (watchdog restart?)");
+            }
+            _ = runtime_timer => {
+                eprintln!("phantom loop run: max-runtime reached, stopping");
+            }
+            _ = counter_watch => {
+                eprintln!("phantom loop run: max-iterations reached, stopping");
+            }
         }
+
         eprintln!("phantom loop run: stopping all loops");
         for snap in registry.list() {
             let _ = registry.stop(snap.id);
         }
         driver_handle.abort();
-        if brain_state.is_some() {
-            eprintln!("phantom loop run: brain forwarder will exit on process teardown");
+        if let Some(shutdown) = forwarder_shutdown_for_teardown {
+            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("phantom loop run: brain forwarder signalled — process exit imminent");
         }
     });
 

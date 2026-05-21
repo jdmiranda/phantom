@@ -7,6 +7,7 @@
 //! Heartbeats run on a dedicated background thread so they are never blocked
 //! by slow frames, GPU syncs, or heavy PTY processing on the main thread.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -18,9 +19,29 @@ use anyhow::Result;
 use log::{debug, warn};
 
 use phantom_protocol::{
-    AppMessage, HEARTBEAT_TIMEOUT_MS, SupervisorCommand, heartbeat_interval, reconnect,
+    AppMessage, HEARTBEAT_TIMEOUT_MS, SupervisorCommand, heartbeat_interval,
     set_nonblocking, try_read_line,
 };
+
+// ---------------------------------------------------------------------------
+// Activity ring buffer
+// ---------------------------------------------------------------------------
+
+/// A single entry in the client's activity ring buffer.
+///
+/// Each entry records what Phantom was doing at a given instant so that when
+/// a supervisor-silence event fires, the last N frames of activity are
+/// available for diagnostic logging.
+#[derive(Debug, Clone)]
+struct ActivityFrame {
+    /// Unix-epoch milliseconds when the event was recorded.
+    timestamp_ms: u64,
+    /// Short human-readable description of what Phantom was doing.
+    description: String,
+}
+
+/// How many activity frames to keep in the ring buffer.
+const ACTIVITY_RING_SIZE: usize = 20;
 
 // ---------------------------------------------------------------------------
 // SupervisorClient
@@ -47,6 +68,11 @@ pub struct SupervisorClient {
     last_ack_ms: Arc<AtomicU64>,
     /// The socket path we are currently connected to (for reconnect logic).
     socket_path: PathBuf,
+    /// Ring buffer of recent activity frames for crash diagnostics.
+    activity: VecDeque<ActivityFrame>,
+    /// Set to `true` the first time supervisor silence is detected so we only
+    /// dump the activity log once per silence episode (not every poll cycle).
+    silence_dumped: bool,
 }
 
 impl SupervisorClient {
@@ -88,6 +114,8 @@ impl SupervisorClient {
             heartbeat_thread: Some(heartbeat_thread),
             last_ack_ms,
             socket_path: path.to_path_buf(),
+            activity: VecDeque::with_capacity(ACTIVITY_RING_SIZE + 1),
+            silence_dumped: false,
         })
     }
 
@@ -118,6 +146,28 @@ impl SupervisorClient {
             std::thread::sleep(interval);
         }
         debug!("Heartbeat thread exiting");
+    }
+
+    /// Record a single activity frame into the diagnostic ring buffer.
+    ///
+    /// Call this from the main frame loop with a short description of what
+    /// Phantom is currently doing (e.g. `"frame 1234: 3 adapters, boot"`).
+    /// The oldest entry is evicted when the buffer exceeds [`ACTIVITY_RING_SIZE`].
+    ///
+    /// This is intentionally cheap: one `VecDeque` push + optional pop, no
+    /// allocation after the initial capacity is reached.
+    pub fn record_activity(&mut self, description: impl Into<String>) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if self.activity.len() >= ACTIVITY_RING_SIZE {
+            self.activity.pop_front();
+        }
+        self.activity.push_back(ActivityFrame {
+            timestamp_ms: ts,
+            description: description.into(),
+        });
     }
 
     /// Send an [`AppMessage`] to the supervisor (from the main thread).
@@ -154,8 +204,9 @@ impl SupervisorClient {
     ///
     /// Also checks for supervisor silence: if no message has been received
     /// within `HEARTBEAT_TIMEOUT_MS * 3` milliseconds, a warning is logged
-    /// and [`reconnect`] is attempted.  A successful reconnect replaces the
-    /// active stream and resets the ACK timestamp.
+    /// and a reconnect is attempted.  A successful reconnect replaces the
+    /// active stream, resets the ACK timestamp, and respawns the heartbeat
+    /// thread so heartbeats resume immediately on the new connection.
     pub fn try_recv(&mut self) -> Option<SupervisorCommand> {
         // ------------------------------------------------------------------
         // Silence detection: compare last-ack timestamp against the threshold.
@@ -172,29 +223,69 @@ impl SupervisorClient {
                 "Supervisor silent for >{}ms — attempting reconnect",
                 silence_threshold_ms
             );
-            if let Some(new_path) = reconnect(&self.socket_path) {
-                match UnixStream::connect(&new_path) {
-                    Ok(new_stream) => {
-                        if set_nonblocking(&new_stream).is_ok() {
-                            debug!(
-                                "Reconnected to supervisor at {}",
-                                new_path.display()
-                            );
-                            self.stream = new_stream;
-                            self.socket_path = new_path;
-                            self.read_buf.clear();
-                            self.last_ack_ms.store(now_ms, Ordering::Relaxed);
+
+            // Dump the activity ring buffer exactly once per silence episode
+            // (requirement 2) so we know what Phantom was doing when heartbeats
+            // stopped flowing.
+            if !self.silence_dumped {
+                self.silence_dumped = true;
+                warn!("crash-diag: supervisor-silence activity log ({} frames):", self.activity.len());
+                for (i, frame) in self.activity.iter().enumerate() {
+                    warn!(
+                        "  [{:>2}] +{}ms  {}",
+                        i,
+                        now_ms.saturating_sub(frame.timestamp_ms),
+                        frame.description
+                    );
+                }
+                if self.activity.is_empty() {
+                    warn!("  (no activity frames recorded — record_activity() not called yet)");
+                }
+            }
+
+            // Always reconnect to the known supervisor socket path.  The
+            // `reconnect()` helper scans for an ALTERNATIVE socket (for when
+            // the supervisor restarts), but since the supervisor socket path
+            // is fixed for its lifetime, we first try `self.socket_path`
+            // directly.  `reconnect()` is also unreliable because it matches
+            // `phantom-mcp-*.sock` files and returns them as valid targets.
+            let target = self.socket_path.clone();
+
+            match UnixStream::connect(&target) {
+                Ok(new_stream) => {
+                    if set_nonblocking(&new_stream).is_ok() {
+                        // Respawn the heartbeat thread with a clone of the new
+                        // stream.  The old thread may have exited on Broken Pipe
+                        // (when the previous connection dropped); without this
+                        // the supervisor never receives another heartbeat and
+                        // kills Phantom ~10s later.
+                        if let Ok(hb_stream) = new_stream.try_clone() {
+                            self.alive.store(false, Ordering::Relaxed);
+                            let _ = self.heartbeat_thread.take(); // drop old handle
+                            let alive = Arc::new(AtomicBool::new(true));
+                            self.alive = Arc::clone(&alive);
+                            if let Ok(handle) = std::thread::Builder::new()
+                                .name("supervisor-heartbeat".into())
+                                .spawn(move || Self::heartbeat_loop(hb_stream, alive))
+                            {
+                                self.heartbeat_thread = Some(handle);
+                            }
                         }
-                    }
-                    Err(e) => {
-                        warn!("Reconnect connect() failed: {e}");
+                        debug!("Reconnected to supervisor at {}", target.display());
+                        self.stream = new_stream;
+                        self.socket_path = target;
+                        self.read_buf.clear();
+                        self.last_ack_ms.store(now_ms, Ordering::Relaxed);
+                        // Reset the dump flag so a future silence episode
+                        // will produce a fresh log.
+                        self.silence_dumped = false;
                     }
                 }
-            } else {
-                warn!("No live supervisor socket found during reconnect scan");
-                // Reset the timestamp so we don't spam the log every poll cycle;
-                // the next check fires after another silence_threshold window.
-                self.last_ack_ms.store(now_ms, Ordering::Relaxed);
+                Err(e) => {
+                    warn!("Reconnect to {} failed: {e}", target.display());
+                    // Reset timestamp to avoid log spam; retry after another window.
+                    self.last_ack_ms.store(now_ms, Ordering::Relaxed);
+                }
             }
         }
 

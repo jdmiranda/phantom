@@ -157,6 +157,51 @@ impl App {
             });
         }
 
+        // Default to agent space: on the first normal (non-demo) Terminal frame,
+        // open an agent pane FULL-SIZE — the agent is the primary view, not a
+        // sidekick to the terminal. Phantom's identity is "AI with a terminal
+        // built in", not "terminal with AI bolted on" (see
+        // `feedback_agent_is_primary` memory).
+        //
+        // Implementation: spawn_agent_pane splits the focused pane (terminal)
+        // 50/50 so it can re-use the existing layout machinery. We then close
+        // the original terminal adapter, leaving the new agent as the sole
+        // pane — which the layout engine then resizes to fill the window.
+        if !self.demo_mode && self.state == AppState::Terminal && !self.post_boot_agent_spawned {
+            self.post_boot_agent_spawned = true;
+            // spawn_agent_pane internally takes the `replace_focused` path
+            // when adapter_count == 1 (post-boot single-SetupAdapter case),
+            // so the agent inherits the SetupAdapter's pane slot directly —
+            // no split, no half-window agent. If no API key is available the
+            // spawn returns None (see Change 2 in plan) and the SetupAdapter
+            // stays full-window with a "needs API key" panel. See
+            // `feedback_agent_is_primary` memory + the branch in
+            // `agent_pane::spawn`.
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+                prompt: "Welcome. I'm your Phantom agent — ready to help you build, debug, \
+                    or explore. What would you like to work on?"
+                    .to_owned(),
+            });
+        }
+
+        // Live SetupAdapter→Agent upgrade. When the user provisions an API
+        // key after launch, the live SetupAdapter flips `post_setup_upgrade`
+        // to `true` from its `update(dt)` hook. We drain the flag and fire a
+        // fresh agent spawn — the `adapter_count() == 1` replace-focused
+        // path inside `spawn_agent_pane_with_opts` swaps SetupAdapter out for
+        // the real agent at the same pane slot.
+        if self.state == AppState::Terminal
+            && self
+                .post_setup_upgrade
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+                prompt: "API key detected. I'm your Phantom agent — what would you like \
+                    to work on first?"
+                    .to_owned(),
+            });
+        }
+
         // Supervisor command polling (drain all pending; heartbeats are on a dedicated thread).
         while let Some(cmd) = self.supervisor.as_mut().and_then(|sv| sv.try_recv()) {
             self.handle_supervisor_command(cmd);
@@ -583,19 +628,31 @@ impl App {
         self.watchdog_frame += 1;
         if now.duration_since(self.watchdog_last).as_secs() >= 10 {
             let uptime = now.duration_since(self.start_time).as_secs();
+            let adapter_count = self.coordinator.adapter_count();
+            let agent_count = self
+                .coordinator
+                .registry()
+                .all_running()
+                .into_iter()
+                .filter_map(|id| self.coordinator.registry().get(id))
+                .filter(|e| e.app_type == "agent")
+                .count();
             info!(
                 "watchdog: alive frame={} uptime={}s adapters={} agents={}",
-                self.watchdog_frame,
-                uptime,
-                self.coordinator.adapter_count(),
-                self.coordinator
-                    .registry()
-                    .all_running()
-                    .into_iter()
-                    .filter_map(|id| self.coordinator.registry().get(id))
-                    .filter(|e| e.app_type == "agent")
-                    .count(),
+                self.watchdog_frame, uptime, adapter_count, agent_count,
             );
+
+            // Record an activity frame into the supervisor client's ring buffer
+            // so that if the supervisor-silence detector fires, the last N
+            // watchdog snapshots are available for diagnosis.
+            if let Some(ref mut sv) = self.supervisor {
+                let state = format!(
+                    "frame={} uptime={}s adapters={} agents={} state={:?}",
+                    self.watchdog_frame, uptime, adapter_count, agent_count, self.state,
+                );
+                sv.record_activity(state);
+            }
+
             self.watchdog_last = now;
         }
     }

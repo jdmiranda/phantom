@@ -203,6 +203,9 @@ pub enum AppMessage {
     /// Render loop accumulated too many consecutive panics and is forcing exit.
     /// The supervisor uses this to distinguish a panic-escalation crash from
     /// a silent heartbeat-timeout crash (GPU hang, SIGKILL, etc.).
+    ///
+    /// The render thread panicked. `count` is the number of panics since last
+    /// reset; `last_message` is the panic message (truncated if needed).
     RenderPanic { count: u32, last_message: String },
 }
 
