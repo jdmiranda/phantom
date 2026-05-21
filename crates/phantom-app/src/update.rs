@@ -405,6 +405,30 @@ impl App {
             }
         }
 
+        // Federation relay: poll for handshake completion.
+        // The relay task sends a RelayHandshakeInfo once the WebSocket
+        // handshake is complete. We emit AiEvent::RelayConnected to the brain
+        // so the AgentRouter can start routing cross-peer messages.
+        // After the first message we set relay_connected_rx to None —
+        // handshake is a one-shot event.
+        if self.relay_connected_rx.is_some() {
+            let info = {
+                let rx = self.relay_connected_rx.as_ref().unwrap();
+                rx.try_recv().ok()
+            };
+            if let Some(handshake) = info {
+                info!("Federation relay connected (peer id = {})", handshake.local_peer_id);
+                if let Some(ref brain) = self.brain {
+                    let _ = brain.send_event(AiEvent::RelayConnected {
+                        outbound_tx: handshake.outbound_tx,
+                        local_peer_id: handshake.local_peer_id,
+                    });
+                }
+                // One-shot: discard the receiver so we do not poll again.
+                self.relay_connected_rx = None;
+            }
+        }
+
         // Lars fix-thread consumer (Phase 2.G): drain any `EventKind::AgentBlocked`
         // substrate events that agent panes pushed into `App.blocked_event_sink`
         // during this frame's tool-result processing, and forward each into the
