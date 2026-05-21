@@ -102,6 +102,24 @@ pub trait ActionHandler {
     fn deliver_inbound_relay(&mut self, agent_id: AgentId, content: RemoteMessageContent) {
         let _ = (agent_id, content);
     }
+
+    /// Forward a brain-discovered candidate goal onto a named cross-loop queue.
+    ///
+    /// Default is a no-op so existing [`ActionHandler`] implementations keep
+    /// compiling unchanged. A production implementation calls
+    /// `phantom_loop::queue::LoopQueueRegistry::push(queue, LoopMessage::new(from_source, payload))`
+    /// on the shared registry the app owns. The substrate driver that drains
+    /// the queue and actually spawns the implementer agent is a follow-up
+    /// (`phantom-loop` side); this method only crosses the brain ↔ app
+    /// boundary.
+    fn enqueue_loop_message(
+        &mut self,
+        queue: String,
+        from_source: String,
+        payload: serde_json::Value,
+    ) {
+        let _ = (queue, from_source, payload);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +185,13 @@ impl AiAction {
             }
             AiAction::DeliverInboundRelay { agent_id, content } => {
                 handler.deliver_inbound_relay(agent_id, content);
+            }
+            AiAction::EnqueueLoopMessage {
+                queue,
+                from_source,
+                payload,
+            } => {
+                handler.enqueue_loop_message(queue, from_source, payload);
             }
             AiAction::DoNothing => {}
         }

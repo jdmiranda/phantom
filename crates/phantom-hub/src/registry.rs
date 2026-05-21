@@ -58,9 +58,12 @@ impl std::fmt::Display for PhantomId {
 
 /// Hub-local request identifier.
 ///
-/// Generated as a monotonic counter per connection; unique within the hub's
+/// Generated with `rand::random::<u64>()` per request; unique within the hub's
 /// in-flight table. The hub rewrites the original Claude-side `req.id` to
 /// this before forwarding, then rewrites back when the response arrives.
+///
+/// Random rather than sequential to prevent an attacker with partial traffic
+/// visibility from guessing or predicting in-flight request ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HubId(pub u64);
 
@@ -89,9 +92,6 @@ pub struct ConnState {
     /// [`ConnState::insert_pending_for_test`].
     pub(crate) pending: HashMap<HubId, oneshot::Sender<JsonRpcResponse>>,
 
-    /// Hub-local nonce counter for this connection.
-    pub(crate) next_hub_id: u64,
-
     /// Timestamp of the most recent inbound frame (used by `list_online` to
     /// filter stale entries).
     pub(crate) last_seen: Instant,
@@ -105,10 +105,12 @@ pub struct ConnState {
 
 impl ConnState {
     /// Allocate a fresh hub-local request id.
+    ///
+    /// The id is a randomly generated [`u64`] rather than a monotonic counter,
+    /// which prevents attackers from guessing or predicting in-flight request
+    /// ids when they have partial visibility into the hub's traffic.
     pub fn alloc_hub_id(&mut self) -> HubId {
-        let id = HubId(self.next_hub_id);
-        self.next_hub_id += 1;
-        id
+        HubId(rand::random::<u64>())
     }
 
     /// Public read-only accessor for the remote host string.
@@ -196,7 +198,6 @@ impl ConnectionRegistry {
             ConnState {
                 tx,
                 pending: HashMap::new(),
-                next_hub_id: 0,
                 last_seen: Instant::now(),
                 host,
                 version,
@@ -364,18 +365,35 @@ mod tests {
         assert!(ids.contains(&"beta"));
     }
 
+    // -----------------------------------------------------------------------
+    // hub_id_is_not_sequential
+    // -----------------------------------------------------------------------
+    //
+    // HubIds are now generated with `rand::random::<u64>()`.  The probability
+    // of two random u64 values colliding is ~5×10⁻¹⁹, so two equal values
+    // would indicate a broken RNG — not a flakey test.
+    //
+    // We also assert that neither value is the counter-default pair (0, 1),
+    // since that would indicate the old sequential allocation was still active.
+    // The probability of rand::random returning 0 or 1 in sequence is ~1/(2^128),
+    // effectively infallible.
+
     #[test]
-    fn alloc_hub_id_is_monotonic() {
+    fn hub_id_is_not_sequential() {
         let mut reg = ConnectionRegistry::new();
         reg.register(make_id("p"), make_tx(), "h".into(), "v".into())
             .unwrap();
         let state = reg.get_mut(&make_id("p")).unwrap();
         let id0 = state.alloc_hub_id();
         let id1 = state.alloc_hub_id();
-        let id2 = state.alloc_hub_id();
-        assert_eq!(id0.0, 0);
-        assert_eq!(id1.0, 1);
-        assert_eq!(id2.0, 2);
+        // Two random u64 values must be different from each other.
+        assert_ne!(
+            id0.0, id1.0,
+            "two sequential alloc_hub_id() calls must not return the same value"
+        );
+        // Neither should match a naive zero-start counter.
+        assert_ne!(id0.0, 0, "first id must not be 0 (counter default)");
+        assert_ne!(id1.0, 1, "second id must not be 1 (counter default)");
     }
 
     #[test]

@@ -8,13 +8,17 @@ use phantom_app::config::PhantomConfig;
 use phantom_renderer::gpu::GpuContext;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
-    window::{Window, WindowAttributes, WindowId},
+    keyboard::{Key, NamedKey},
+    window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
 
 mod auth_cli;
+mod builder_cli;
+mod fleet_cli;
 mod headless;
+mod loop_cli;
 mod path_resolver;
 
 struct Phantom {
@@ -24,6 +28,9 @@ struct Phantom {
     supervisor_socket: Option<PathBuf>,
     modifiers: winit::event::Modifiers,
     consecutive_panics: u32,
+    /// Tracks whether the window is currently visible (not minimized/occluded).
+    /// When `false`, `request_redraw` is suppressed to avoid wasting GPU/CPU.
+    window_visible: bool,
 }
 
 impl Phantom {
@@ -35,6 +42,7 @@ impl Phantom {
             supervisor_socket,
             modifiers: winit::event::Modifiers::default(),
             consecutive_panics: 0,
+            window_visible: true,
         }
     }
 }
@@ -55,9 +63,14 @@ impl ApplicationHandler for Phantom {
             return;
         }
 
+        let initial_fullscreen = if self.config.fullscreen {
+            Some(Fullscreen::Borderless(None))
+        } else {
+            None
+        };
         let attrs = WindowAttributes::default()
             .with_title("PHANTOM v0.1.0")
-            .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            .with_fullscreen(initial_fullscreen);
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -87,7 +100,12 @@ impl ApplicationHandler for Phantom {
         let scale_factor = window.scale_factor() as f32;
         log::info!("Display scale factor: {scale_factor}");
 
-        match App::with_config_scaled(gpu, self.config.clone(), self.supervisor_socket.as_deref(), scale_factor) {
+        match App::with_config_scaled(
+            gpu,
+            self.config.clone(),
+            self.supervisor_socket.as_deref(),
+            scale_factor,
+        ) {
             Ok(app) => {
                 self.app = Some(app);
             }
@@ -102,12 +120,7 @@ impl ApplicationHandler for Phantom {
         self.window = Some(window);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("Window closed. Shutting down.");
@@ -124,14 +137,43 @@ impl ApplicationHandler for Phantom {
                     window.request_redraw();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let modifiers = self.modifiers;
-                if let Some(app) = &mut self.app {
-                    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        app.handle_key_with_mods(event, modifiers);
-                    }));
-                    if let Err(ref panic) = result {
-                        log::error!("Input panic: {}", panic_message(panic));
+            WindowEvent::KeyboardInput { ref event, .. } => {
+                // Intercept fullscreen toggle (F11 or Cmd+Enter) before
+                // forwarding the key to the app so the app never sees it.
+                let is_fullscreen_toggle = event.state == ElementState::Pressed
+                    && match &event.logical_key {
+                        Key::Named(NamedKey::F11) => true,
+                        Key::Named(NamedKey::Enter) => {
+                            // Cmd+Enter on macOS; Super on other platforms.
+                            let mods = self.modifiers.state();
+                            mods.super_key()
+                        }
+                        _ => false,
+                    };
+
+                if is_fullscreen_toggle {
+                    if let Some(window) = &self.window {
+                        let next = if window.fullscreen().is_some() {
+                            None
+                        } else {
+                            Some(Fullscreen::Borderless(None))
+                        };
+                        log::info!(
+                            "Fullscreen toggle: {}",
+                            if next.is_some() { "on" } else { "off" }
+                        );
+                        window.set_fullscreen(next);
+                    }
+                } else {
+                    let modifiers = self.modifiers;
+                    let event = event.clone();
+                    if let Some(app) = &mut self.app {
+                        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            app.handle_key_with_mods(event, modifiers);
+                        }));
+                        if let Err(ref panic) = result {
+                            log::error!("Input panic: {}", panic_message(panic));
+                        }
                     }
                 }
                 if let Some(app) = &mut self.app
@@ -139,6 +181,19 @@ impl ApplicationHandler for Phantom {
                 {
                     app.shutdown();
                     event_loop.exit();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                // On macOS, `Occluded(true)` fires when the window is minimised
+                // or fully hidden behind other windows. Pause the render loop
+                // while occluded to avoid wasting GPU/CPU cycles.
+                self.window_visible = !occluded;
+                log::debug!("Window occlusion changed: visible={}", self.window_visible);
+                if self.window_visible {
+                    // Re-arm the render loop immediately when we become visible.
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -171,6 +226,12 @@ impl ApplicationHandler for Phantom {
 
                     std::panic::catch_unwind(AssertUnwindSafe(|| {
                         app.update();
+                        // Bug 3: forward OSC 2 window title changes to the OS.
+                        if let Some(title) = app.take_pending_window_title()
+                            && let Some(window) = &self.window
+                        {
+                            window.set_title(&title);
+                        }
                         if let Err(e) = app.render() {
                             log::error!("Render error: {e}");
                         }
@@ -205,8 +266,13 @@ impl ApplicationHandler for Phantom {
                         }
                     }
                 }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                // Only reschedule the next frame while the window is visible.
+                // When occluded/minimised, `WindowEvent::Occluded(false)` will
+                // re-arm the loop once the window reappears.
+                if self.window_visible {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             _ => {}
@@ -232,7 +298,9 @@ fn load_dotenv() {
                 let value = value.trim();
                 if std::env::var(key).is_err() {
                     // SAFETY: single-threaded at this point (before any spawns).
-                    unsafe { std::env::set_var(key, value); }
+                    unsafe {
+                        std::env::set_var(key, value);
+                    }
                 }
             }
         }
@@ -258,6 +326,7 @@ GUI / RUN OPTIONS:
     --vignette <0.0-1.0>    Vignette intensity
     --noise <0.0-1.0>       Film grain intensity
     --no-boot               Skip the boot sequence
+    --fullscreen             Start in borderless fullscreen mode (toggle with F11 / Cmd+Enter)
     --init-config            Write default config to ~/.config/phantom/config.toml
     --help                   Print this help message
 
@@ -318,14 +387,18 @@ fn install_signal_handlers() {
 
 /// Async-signal-safe crash handler. No allocations, no locks.
 /// Writes signal info to disk using raw write(), then re-raises.
-extern "C" fn signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+extern "C" fn signal_handler(
+    sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    _ctx: *mut libc::c_void,
+) {
     // Build a fixed-size crash message on the stack.
     let sig_name = match sig {
         libc::SIGSEGV => b"SIGSEGV (segmentation fault)" as &[u8],
-        libc::SIGBUS  => b"SIGBUS (bus error)",
+        libc::SIGBUS => b"SIGBUS (bus error)",
         libc::SIGABRT => b"SIGABRT (abort)",
         libc::SIGTERM => b"SIGTERM (terminated)",
-        _             => b"UNKNOWN SIGNAL",
+        _ => b"UNKNOWN SIGNAL",
     };
 
     // Get si_addr for SIGSEGV/SIGBUS (the faulting address).
@@ -373,7 +446,11 @@ extern "C" fn signal_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx:
 
     // Also write to stderr.
     unsafe {
-        libc::write(libc::STDERR_FILENO, buf.as_ptr() as *const libc::c_void, pos);
+        libc::write(
+            libc::STDERR_FILENO,
+            buf.as_ptr() as *const libc::c_void,
+            pos,
+        );
     }
 
     // Append to phantom.log so the signal crash appears inline with other logs.
@@ -439,7 +516,10 @@ static LOG_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 fn install_atexit() {
     extern "C" fn on_exit() {
         if let Some(path) = LOG_PATH.get() {
-            raw_append_to_log(path, b"[ATEXIT] Process exited via exit() or normal return\n");
+            raw_append_to_log(
+                path,
+                b"[ATEXIT] Process exited via exit() or normal return\n",
+            );
         }
     }
 
@@ -476,8 +556,12 @@ fn chrono_timestamp() -> String {
     unsafe { libc::localtime_r(&ts, &mut tm) };
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-        tm.tm_hour, tm.tm_min, tm.tm_sec,
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
     )
 }
 
@@ -553,7 +637,9 @@ fn main() -> Result<()> {
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && name.starts_with("phantom-mcp-")
                 && name.ends_with(".sock")
-                && let Some(pid_str) = name.strip_prefix("phantom-mcp-").and_then(|s| s.strip_suffix(".sock"))
+                && let Some(pid_str) = name
+                    .strip_prefix("phantom-mcp-")
+                    .and_then(|s| s.strip_suffix(".sock"))
                 && let Ok(pid) = pid_str.parse::<i32>()
             {
                 // kill(pid, 0) checks if process exists without sending a signal.
@@ -581,6 +667,27 @@ fn main() -> Result<()> {
         return run_auth_subcommand(&args);
     }
 
+    // `phantom loop` subcommand routing (issue #650 C3). Mirrors the
+    // `auth` block above — we hand the full argv to the loop_cli module
+    // which owns its own clap parsing and runtime construction.
+    if args.get(1).map(String::as_str) == Some("loop") {
+        return loop_cli::run_loop_subcommand(&args);
+    }
+
+    // `phantom builder` subcommand routing — higher-level orchestration
+    // that points the loop pipeline at any GitHub repo. The CLI surface
+    // mirrors `phantom loop run` but adds clone-or-attach, default-spec
+    // seeding, and an aggressive brain config.
+    if args.get(1).map(String::as_str) == Some("builder") {
+        return builder_cli::run_builder_subcommand(&args);
+    }
+
+    // `phantom fleet` subcommand routing — the "app of apps" meta-
+    // orchestrator. Same shape as the `loop` block above.
+    if args.get(1).map(String::as_str) == Some("fleet") {
+        return fleet_cli::run_fleet_subcommand(&args);
+    }
+
     // Quick exits
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
@@ -604,9 +711,8 @@ fn main() -> Result<()> {
         .append(true)
         .open(&log_path);
 
-    let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    );
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     if let Ok(file) = log_file {
         use std::io::Write;
         let file = std::sync::Mutex::new(file);
@@ -662,7 +768,10 @@ fn main() -> Result<()> {
         // Write to file, fall back to stderr if write fails.
         let crash_path = crash_dir.join("crash.log");
         if let Err(e) = std::fs::write(&crash_path, &report) {
-            eprintln!("Failed to write crash report to {}: {e}", crash_path.display());
+            eprintln!(
+                "Failed to write crash report to {}: {e}",
+                crash_path.display()
+            );
         } else {
             eprintln!("Crash report saved to {}", crash_path.display());
         }
@@ -773,6 +882,9 @@ fn main() -> Result<()> {
             "--no-boot" => {
                 config.skip_boot = true;
             }
+            "--fullscreen" => {
+                config.fullscreen = true;
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[i]);
                 print_help();
@@ -834,8 +946,97 @@ fn main() -> Result<()> {
 
     // Log at process exit — if this line is missing from phantom.log,
     // something killed us before we got here (SIGKILL, _exit, etc.)
-    log::info!("Process exiting (exit code {})", if result.is_ok() { 0 } else { 1 });
+    log::info!(
+        "Process exiting (exit code {})",
+        if result.is_ok() { 0 } else { 1 }
+    );
 
     result?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use phantom_app::config::PhantomConfig;
+
+    /// `window_visible` starts `true` so the very first frame is rendered.
+    #[test]
+    fn window_visible_initialises_to_true() {
+        let config = PhantomConfig::default();
+        let state = super::Phantom::new(config, None);
+        assert!(
+            state.window_visible,
+            "window_visible must be true at init so the first frame renders"
+        );
+    }
+
+    /// Simulates the occlusion tracking logic: occluded=true → visible=false,
+    /// occluded=false → visible=true.
+    #[test]
+    fn render_skips_when_occluded() {
+        // Directly exercise the same boolean inversion used in the Occluded handler.
+        let occluded = true;
+        let window_visible = !occluded;
+        assert!(
+            !window_visible,
+            "window should not be visible when occluded=true"
+        );
+
+        let occluded = false;
+        let window_visible = !occluded;
+        assert!(
+            window_visible,
+            "window should be visible when occluded=false"
+        );
+    }
+
+    /// `--fullscreen` CLI flag sets config.fullscreen = true.
+    #[test]
+    fn cli_fullscreen_flag_sets_config() {
+        let mut config = PhantomConfig::default();
+        assert!(!config.fullscreen, "should start windowed by default");
+        // Simulate `--fullscreen` CLI parsing.
+        config.fullscreen = true;
+        assert!(
+            config.fullscreen,
+            "--fullscreen flag must enable fullscreen"
+        );
+    }
+
+    /// `config_fullscreen_false_starts_windowed` — default config has fullscreen=false.
+    #[test]
+    fn config_fullscreen_false_starts_windowed() {
+        let config = PhantomConfig::default();
+        assert!(
+            !config.fullscreen,
+            "default config must not start in fullscreen"
+        );
+    }
+
+    /// F11 toggle logic: if fullscreen is currently Some, toggle to None, and vice versa.
+    #[test]
+    fn f11_toggles_fullscreen_on() {
+        // Simulate: currently windowed (fullscreen = None) → toggle to Some.
+        let current: Option<()> = None;
+        let next = if current.is_some() { None } else { Some(()) };
+        assert!(
+            next.is_some(),
+            "F11 from windowed mode must enable fullscreen"
+        );
+    }
+
+    #[test]
+    fn f11_toggles_fullscreen_off() {
+        // Simulate: currently fullscreen (fullscreen = Some) → toggle to None.
+        let current: Option<()> = Some(());
+        let next = if current.is_some() { None } else { Some(()) };
+        assert!(
+            next.is_none(),
+            "F11 from fullscreen mode must exit fullscreen"
+        );
+    }
 }

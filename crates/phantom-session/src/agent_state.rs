@@ -430,6 +430,17 @@ impl AgentStatePersister {
         AgentStateFile::load(&self.path)
     }
 
+    /// Load agent snapshots from the sidecar file.
+    ///
+    /// Returns an empty `Vec` when no file exists (first run).
+    /// Returns an error when the file exists but cannot be parsed.
+    pub fn load_snapshots(&self) -> Result<Vec<AgentSnapshot>> {
+        match AgentStateFile::load(&self.path)? {
+            Some(file) => Ok(file.agents),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Delete the sidecar file (e.g., after the user declines to restore).
     pub fn discard(&self) -> Result<()> {
         match fs::remove_file(&self.path) {
