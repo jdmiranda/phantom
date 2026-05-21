@@ -1,11 +1,12 @@
 //! Brain-level recall context — wires phantom-recall into the OODA loop.
 //!
-//! `BrainRecallContext` wraps either an [`EmbeddedRecallEngine`] (when
+//! [`BrainRecallContext`] wraps either an [`EmbeddedRecallEngine`] (when
 //! `OPENAI_API_KEY` is set at construction time) or the mock
 //! [`InMemoryRecallEngine`] as a fallback for offline / test use. Callers
-//! interact exclusively through [`BrainRecallContext::index`] and
-//! [`BrainRecallContext::query_text`] and never need to know which backend
-//! is active.
+//! interact through a sync command-history surface (`index_command`,
+//! `query_relevant`, `format_for_prompt`) used by the brain's OODA loop, or
+//! through the async surface (`index`, `query_text`) when they already live
+//! on a tokio runtime. The active backend is never exposed.
 //!
 //! ## Backend selection
 //!
@@ -38,6 +39,11 @@ enum Inner {
 }
 
 /// Recall context used by the brain's OODA loop.
+///
+/// Indexes command+output pairs as they are observed and answers natural-
+/// language queries by returning the most similar corpus entries. The top-K
+/// hits can be formatted as a Markdown prompt section and injected into agent
+/// system prompts.
 ///
 /// Construct with [`BrainRecallContext::new`]; the backend is selected
 /// automatically based on environment variables.
@@ -84,7 +90,7 @@ impl BrainRecallContext {
         matches!(self.inner, Inner::Embedded(_))
     }
 
-    /// Index `text` so it can be retrieved later.
+    /// Index `text` so it can be retrieved later (async).
     ///
     /// When the embedded backend is active the text is sent to the embedding
     /// API; when the in-memory mock is active a deterministic vector is
@@ -100,8 +106,8 @@ impl BrainRecallContext {
         }
     }
 
-    /// Query the index for `text`, returning up to `top_k` results with a
-    /// minimum cosine similarity of `min_score`.
+    /// Query the index for `text` (async), returning up to `top_k` results
+    /// with a minimum cosine similarity of `min_score`.
     pub async fn query_text(
         &self,
         text: &str,
@@ -114,6 +120,90 @@ impl BrainRecallContext {
             Inner::InMemory(e) => e.query(q).await,
         }
     }
+
+    /// Add a command+output pair to the recall index (sync).
+    ///
+    /// `tags` are stored in the entry's metadata under the key `"tags"` as a
+    /// comma-separated list so they survive the untyped `HashMap<String,String>`
+    /// metadata layer. The `command` is preserved under the `"command"` key so
+    /// `format_for_prompt` can render concise summaries.
+    pub fn index_command(&mut self, command: &str, output: &str, tags: Vec<String>) {
+        let text = if output.trim().is_empty() {
+            command.to_string()
+        } else {
+            // Cap output at 512 chars to keep the corpus lean.
+            let capped = if output.len() > 512 { &output[..512] } else { output };
+            format!("{command}\n{capped}")
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert("command".to_string(), command.to_string());
+        if !tags.is_empty() {
+            metadata.insert("tags".to_string(), tags.join(","));
+        }
+
+        match &mut self.inner {
+            Inner::InMemory(e) => {
+                e.add_text(text, None, metadata);
+            }
+            Inner::Embedded(e) => {
+                // Block on the async index using a single-use tokio runtime.
+                // Mirrors the sync bridge used by `query_relevant`. Failures
+                // are logged and swallowed so a single API hiccup does not
+                // kill the OODA loop.
+                let entry = RecallEntry::with_metadata(text, metadata);
+                if let Err(err) = build_rt().block_on(e.index(entry)) {
+                    log::warn!("BrainRecallContext: index_command failed: {err}");
+                }
+            }
+        }
+    }
+
+    /// Query for relevant context given a natural-language question (sync).
+    ///
+    /// Returns up to `limit` results sorted by cosine-similarity score
+    /// descending. Applies a minimum score of `0.0` so all matches that beat
+    /// cosine-0 are returned (negative-cosine entries are excluded).
+    pub fn query_relevant(&self, question: &str, limit: usize) -> Vec<RecallResult> {
+        let q = VectorQuery::new(question, limit, 0.0, None);
+        // Block on the async query using a single-use tokio runtime.
+        // The in-memory engine never awaits real I/O so this is cheap; the
+        // embedded backend trades a single API round-trip per query.
+        let result = match &self.inner {
+            Inner::InMemory(e) => build_rt().block_on(e.query(q)),
+            Inner::Embedded(e) => build_rt().block_on(e.query(q)),
+        };
+        match result {
+            Ok(hits) => hits,
+            Err(e) => {
+                log::warn!("BrainRecallContext: query failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Format the top-K most relevant hits as a Markdown prompt section.
+    ///
+    /// Returns an empty string when no hits exceed the minimum score threshold,
+    /// so callers can safely append the result without checking first.
+    #[must_use]
+    pub fn format_for_prompt(&self, question: &str, limit: usize) -> String {
+        let hits = self.query_relevant(question, limit);
+        if hits.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("\n## Relevant Context from History\n");
+        for hit in &hits {
+            // Use the command metadata if available, otherwise the raw text.
+            let summary = hit
+                .metadata()
+                .get("command")
+                .map(String::as_str)
+                .unwrap_or_else(|| hit.text());
+            out.push_str(&format!("- {summary}\n"));
+        }
+        out
+    }
 }
 
 impl Default for BrainRecallContext {
@@ -122,7 +212,18 @@ impl Default for BrainRecallContext {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Sync bridge ──────────────────────────────────────────────────────────────
+// The recall engines are async but the brain runs synchronously.
+
+/// Build a minimal single-use tokio runtime for blocking on async ops.
+fn build_rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("BrainRecallContext: failed to build single-use tokio runtime")
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -135,7 +236,6 @@ mod tests {
 
     #[test]
     fn brain_recall_context_defaults_to_in_memory_without_key() {
-        // Ensure OPENAI_API_KEY is absent for this test.
         // We can't mutate env from safe Rust without unsafe tricks, so we
         // use `with_in_memory` directly to exercise the same branch.
         let ctx = BrainRecallContext::with_in_memory();
@@ -176,5 +276,81 @@ mod tests {
         }
         let results = ctx.query_text("document", 2, -1.0).await.expect("query");
         assert_eq!(results.len(), 2, "top_k must be respected");
+    }
+
+    // ── Sync command-history API tests (PR 577 contract) ──────────────────
+
+    /// Verify that RecallQuery can be constructed with enriched_query = Some("test").
+    ///
+    /// This is the canonical smoke test for the PR 597 `enriched_query` field:
+    /// before the fix, this literal did not compile because the field was
+    /// missing from the struct.
+    #[test]
+    fn recall_query_compiles_with_enriched_query_field() {
+        let q = phantom_recall::RecallQuery {
+            natural_language: "test query".into(),
+            intent_hint: None,
+            tags: vec![],
+            time_window_unix_ms: None,
+            modality_hint: None,
+            limit: 5,
+            enriched_query: Some("test".into()),
+        };
+        assert_eq!(q.enriched_query.as_deref(), Some("test"));
+        assert_eq!(q.natural_language, "test query");
+    }
+
+    /// Index 3 commands and verify that a relevant query returns at least one hit.
+    #[test]
+    fn brain_recall_context_indexes_and_queries() {
+        let mut ctx = BrainRecallContext::with_in_memory();
+
+        ctx.index_command("cargo build", "Finished dev [unoptimized]", vec!["rust".into()]);
+        ctx.index_command("git status", "On branch main\nnothing to commit", vec!["git".into()]);
+        ctx.index_command(
+            "cargo test",
+            "test result: ok. 3 passed; 0 failed",
+            vec!["rust".into(), "test".into()],
+        );
+
+        let results = ctx.query_relevant("cargo build", 3);
+        assert!(!results.is_empty(), "expected at least one hit for 'cargo build'");
+
+        // The top result should be the exact match.
+        let top = &results[0];
+        assert!(
+            top.score() > 0.0,
+            "top hit score should be positive, got {}",
+            top.score()
+        );
+    }
+
+    /// An empty engine returns an empty string from format_for_prompt.
+    #[test]
+    fn format_for_prompt_returns_empty_on_no_hits() {
+        let ctx = BrainRecallContext::with_in_memory();
+        let result = ctx.format_for_prompt("what happened yesterday", 5);
+        assert!(result.is_empty(), "empty engine should produce empty prompt section");
+    }
+
+    /// After indexing, format_for_prompt includes the relevant context section.
+    #[test]
+    fn format_for_prompt_includes_hits() {
+        let mut ctx = BrainRecallContext::with_in_memory();
+        ctx.index_command("cargo build", "Finished", vec![]);
+
+        let prompt_section = ctx.format_for_prompt("cargo build", 3);
+        assert!(
+            !prompt_section.is_empty(),
+            "prompt section should not be empty after indexing"
+        );
+        assert!(
+            prompt_section.contains("## Relevant Context from History"),
+            "prompt section should contain the markdown header"
+        );
+        assert!(
+            prompt_section.contains("cargo build"),
+            "prompt section should contain the indexed command"
+        );
     }
 }

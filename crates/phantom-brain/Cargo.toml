@@ -25,6 +25,12 @@ tokio = { version = "1", features = ["fs", "sync", "rt", "macros"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 serial_test = "3"
+uuid.workspace = true
+# Required for the self-improvement integration test, which forwards
+# `AiAction::EnqueueLoopMessage` payloads onto a real `LoopQueueRegistry`
+# the same way the app handler will. Brain code itself does NOT depend on
+# phantom-loop at runtime — only the integration test does.
+phantom-loop = { path = "../phantom-loop" }
 
 [lints]
 workspace = true

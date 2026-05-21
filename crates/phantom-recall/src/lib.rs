@@ -59,7 +59,7 @@ pub enum Modality {
 
 /// A structured retrieval query. Produced either directly by the caller or
 /// by a [`QueryRewriter`] from a natural-language phrase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RecallQuery {
     /// Original natural-language query, preserved for reranking and audit.
     pub natural_language: String,

@@ -40,6 +40,12 @@ members = [
     "crates/phantom-hub",
     # Hot-module reload host — Phase 1 dylib loading (issue #382).
     "crates/phantom-skill-host",
+    # Loop overseer — types and TOML spec parsing (C1 of issue #650).
+    "crates/phantom-loop",
+    # App-of-apps meta-orchestrator hosting multiple builders + loops.
+    "crates/phantom-fleet",
+    # Higher-level builder orchestration on top of phantom-loop + phantom-brain.
+    "crates/phantom-builder",
 ]
 resolver = "2"
 
