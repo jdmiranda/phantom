@@ -44,6 +44,7 @@ toml = "0.8"
 notify.workspace = true
 libc = "0.2"
 arboard = "3"
+open = "5"
 
 # Image encoding for frame blob persistence (capture pipeline).
 # `default-features = false` strips out tiff/jpeg/etc. — we only need PNG.

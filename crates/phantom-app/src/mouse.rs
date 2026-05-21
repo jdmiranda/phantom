@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use log::debug;
+use log::{debug, warn};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
 use phantom_terminal::input::{
@@ -43,6 +43,46 @@ pub(crate) fn pixel_to_cell(
     let row = (rel_y / cell_h).floor() as usize;
 
     (col.min(max_col), row.min(max_row))
+}
+
+// ---------------------------------------------------------------------------
+// Hyperlink scheme allowlist
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when a URI is safe to forward to the system's default URL
+/// handler.
+///
+/// OSC 8 hyperlinks are emitted by an arbitrary terminal program — including
+/// processes the user does not fully trust (remote SSH sessions, container
+/// shells, build output piped through `less`, etc.). The OSC 8 spec puts no
+/// restriction on the URI scheme, so a hostile process can stamp a cell with
+/// `javascript:...`, `file:///etc/passwd`, `vscode://...`, or any custom
+/// scheme an installed app has registered, and trigger that handler on a
+/// click. We restrict click-to-open to `http://` and `https://`.
+///
+/// The scheme check is case-insensitive per RFC 3986 §3.1.
+pub(crate) fn is_safe_hyperlink_scheme(uri: &str) -> bool {
+    let Some(colon) = uri.find(':') else { return false };
+    let scheme = &uri[..colon];
+    // Reject empty or non-ASCII-alpha schemes (a real scheme is alpha then
+    // alnum/+/-/. per RFC 3986).
+    if scheme.is_empty() || !scheme.bytes().all(|b| b.is_ascii()) {
+        return false;
+    }
+    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+}
+
+/// Truncate a string for inclusion in a log line. Long URLs in attacker-
+/// controlled escape sequences could spam the log; cap at 200 chars.
+fn truncate_for_log(s: &str) -> String {
+    const MAX: usize = 200;
+    if s.len() <= MAX {
+        s.to_owned()
+    } else {
+        let mut out = s.chars().take(MAX).collect::<String>();
+        out.push_str("...");
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +494,34 @@ impl App {
                     debug!("Mouse focus: adapter {app_id}");
                     self.coordinator.set_focus(app_id);
                 }
+
+            // Hyperlink hit-test: on single click, check if the clicked cell
+            // carries an OSC 8 hyperlink and open it in the default browser.
+            //
+            // Security: the URI is emitted by an arbitrary terminal program,
+            // so we must NOT pass it to `open::that` unconditionally — that
+            // would let a hostile or compromised process invoke any URL
+            // handler installed on the host (e.g. `file://`, `vscode://`,
+            // `slack://`, or a registered custom scheme). We allowlist
+            // `http`/`https` only; everything else is logged and dropped.
+            if self.click_count == 1
+                && let Some(focused) = self.coordinator.focused()
+                && let Some((col, row)) = self.cursor_to_cell(focused)
+                && let Some(url) = self.coordinator.hyperlink_at(focused, col, row)
+            {
+                if is_safe_hyperlink_scheme(&url) {
+                    debug!("Hyperlink click: {url}");
+                    if let Err(e) = open::that(&url) {
+                        warn!("Failed to open hyperlink {url}: {e}");
+                    }
+                } else {
+                    warn!(
+                        "Refusing to open hyperlink with disallowed scheme: {}",
+                        truncate_for_log(&url)
+                    );
+                }
+                return;
+            }
 
             // Dispatch selection based on click count.
             if let Some(focused) = self.coordinator.focused()
@@ -869,5 +937,70 @@ mod tests {
              from the window top; got {}",
             inner_multi.y,
         );
+    }
+
+    // -- OSC 8 hyperlink scheme allowlist ---------------------------------
+
+    #[test]
+    fn safe_hyperlink_scheme_accepts_http_https() {
+        assert!(is_safe_hyperlink_scheme("http://example.com"));
+        assert!(is_safe_hyperlink_scheme("https://example.com/path?q=1"));
+    }
+
+    #[test]
+    fn safe_hyperlink_scheme_is_case_insensitive() {
+        assert!(is_safe_hyperlink_scheme("HTTP://example.com"));
+        assert!(is_safe_hyperlink_scheme("HtTpS://example.com"));
+    }
+
+    #[test]
+    fn safe_hyperlink_scheme_rejects_javascript() {
+        // The classic exploit: clicking opens a JS execution context in the
+        // default browser. Must be refused.
+        assert!(!is_safe_hyperlink_scheme("javascript:alert(1)"));
+        assert!(!is_safe_hyperlink_scheme("JavaScript:alert(1)"));
+    }
+
+    #[test]
+    fn safe_hyperlink_scheme_rejects_file() {
+        // file:// would let a terminal program point the browser at any
+        // local resource the user can read.
+        assert!(!is_safe_hyperlink_scheme("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn safe_hyperlink_scheme_rejects_app_handlers() {
+        // Custom-scheme handlers registered by other apps would otherwise be
+        // hijackable. Vscode, Slack, Zoom, etc.
+        assert!(!is_safe_hyperlink_scheme("vscode://file/etc/passwd"));
+        assert!(!is_safe_hyperlink_scheme("slack://channel/foo"));
+        assert!(!is_safe_hyperlink_scheme("zoommtg://zoom.us/join?confno=1"));
+        assert!(!is_safe_hyperlink_scheme("ftp://example.com"));
+        assert!(!is_safe_hyperlink_scheme("mailto:a@b.c"));
+        assert!(!is_safe_hyperlink_scheme("data:text/html,<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn safe_hyperlink_scheme_rejects_malformed() {
+        // No colon, no scheme.
+        assert!(!is_safe_hyperlink_scheme("example.com"));
+        assert!(!is_safe_hyperlink_scheme(""));
+        // Empty scheme.
+        assert!(!is_safe_hyperlink_scheme(":foo"));
+        // Non-ASCII bytes in scheme position.
+        assert!(!is_safe_hyperlink_scheme("ht\u{00e9}p://example.com"));
+    }
+
+    #[test]
+    fn truncate_for_log_passes_short_strings() {
+        assert_eq!(truncate_for_log("hello"), "hello");
+    }
+
+    #[test]
+    fn truncate_for_log_caps_long_strings() {
+        let long = "a".repeat(500);
+        let out = truncate_for_log(&long);
+        assert!(out.ends_with("..."));
+        assert!(out.len() <= 210);
     }
 }
