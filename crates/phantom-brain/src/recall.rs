@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 
+use phantom_embeddings::openai::OpenAiEmbeddingBackend;
 use phantom_recall::engine::{
     EmbeddedRecallEngine, InMemoryRecallEngine, RecallEngine, RecallEntry, RecallResult,
     VectorQuery,
@@ -52,7 +53,6 @@ impl BrainRecallContext {
     pub fn new() -> Self {
         let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
         if !key.is_empty() {
-            use phantom_embeddings::openai::OpenAiEmbeddingBackend;
             let backend = Box::new(OpenAiEmbeddingBackend::new(key));
             Self { inner: Inner::Embedded(EmbeddedRecallEngine::new(backend)) }
         } else {

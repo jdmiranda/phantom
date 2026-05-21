@@ -334,21 +334,34 @@ impl RecallEngine for InMemoryRecallEngine {
 pub struct RecallEntry {
     /// The text content to embed and retrieve.
     pub text: String,
+    /// Optional session id used by `VectorQuery::session_filter`. When
+    /// `None`, the entry is matched only by queries that pass no filter.
+    pub session_id: Option<SessionId>,
     /// Arbitrary caller-supplied metadata.
     pub metadata: HashMap<String, String>,
 }
 
 impl RecallEntry {
-    /// Create a new entry with the given text and no metadata.
+    /// Create a new entry with the given text, no session, and no metadata.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), metadata: HashMap::new() }
+        Self { text: text.into(), session_id: None, metadata: HashMap::new() }
     }
 
-    /// Create a new entry with text and metadata.
+    /// Create a new entry with text and metadata (no session id).
     #[must_use]
     pub fn with_metadata(text: impl Into<String>, metadata: HashMap<String, String>) -> Self {
-        Self { text: text.into(), metadata }
+        Self { text: text.into(), session_id: None, metadata }
+    }
+
+    /// Create a new entry with text, an optional session id, and metadata.
+    #[must_use]
+    pub fn with_session(
+        text: impl Into<String>,
+        session_id: Option<SessionId>,
+        metadata: HashMap<String, String>,
+    ) -> Self {
+        Self { text: text.into(), session_id, metadata }
     }
 }
 
@@ -362,6 +375,26 @@ impl RecallEntry {
 /// semantically ranked rather than hash-ranked.
 ///
 /// The store is entirely in-memory; persistence is the caller's responsibility.
+///
+/// # Complexity
+///
+/// `query` performs a linear scan over the in-memory store and is therefore
+/// O(n) in the number of indexed entries (plus one network round-trip to the
+/// embedding backend for the query vector). There is no eviction or cap on
+/// store size; callers placing this engine on a hot path are expected to
+/// either bound the number of indexed entries themselves or replace this
+/// backend with an ANN index once the corpus grows large.
+///
+/// # Concurrency
+///
+/// `query` takes `&self` and may be invoked concurrently from multiple tasks.
+/// The cosine-similarity scan is purely local, but each call invokes
+/// `backend.embed(...)` to vectorise the query text; concurrent callers
+/// share the underlying `Box<dyn EmbeddingBackend + Send + Sync>`. The
+/// `Send + Sync` bound means the backend itself is safe to share, but
+/// stateful backends (rate limiters, connection pools) may serialise calls
+/// internally. `index` takes `&mut self` and therefore excludes concurrent
+/// `query` calls for the duration of the write.
 ///
 /// # Example
 ///
@@ -400,9 +433,11 @@ impl EmbeddedRecallEngine {
     /// Query the index using a [`VectorQuery`] and return matching results.
     ///
     /// The query text is embedded, then cosine similarity is computed against
-    /// every indexed entry. Results that fall below `q.min_score()` are
-    /// discarded; the remainder are sorted by score descending, truncated to
-    /// `q.top_k()`, and returned as [`RecallResult`]s.
+    /// every indexed entry. Entries that don't match `q.session_filter()` are
+    /// dropped before scoring; results that fall below `q.min_score()` or
+    /// produce a non-finite score are discarded; the remainder are sorted by
+    /// score descending (ties broken by insertion order ascending), truncated
+    /// to `q.top_k()`, and returned as [`RecallResult`]s.
     pub async fn query(&self, q: VectorQuery) -> Result<Vec<RecallResult>, RecallError> {
         let query_vec = self.embed_text(q.text()).await?;
 
@@ -411,7 +446,21 @@ impl EmbeddedRecallEngine {
             .iter()
             .enumerate()
             .filter_map(|(idx, (entry, emb))| {
+                // Apply session filter.
+                if let Some(filter_id) = q.session_filter() {
+                    match entry.session_id {
+                        Some(sid) if sid == filter_id => {}
+                        _ => return None,
+                    }
+                }
+
                 let score = Self::cosine_similarity(&query_vec, emb);
+                // Drop non-finite scores defensively (NaN can sneak in if a
+                // backend returns degenerate vectors); they would otherwise
+                // poison the sort.
+                if !score.is_finite() {
+                    return None;
+                }
                 if score < q.min_score() { None } else { Some((idx, score, entry)) }
             })
             .collect();
@@ -481,6 +530,16 @@ impl EmbeddedRecallEngine {
             .pop()
             .map(|e| e.vec)
             .ok_or_else(|| RecallError::Index("backend returned no embeddings".into()))
+    }
+}
+
+#[async_trait]
+impl RecallEngine for EmbeddedRecallEngine {
+    async fn query(&self, q: VectorQuery) -> Result<Vec<RecallResult>, RecallError> {
+        // Delegate to the inherent method so callers using `dyn RecallEngine`
+        // observe identical filtering, scoring, and ordering semantics as the
+        // direct `EmbeddedRecallEngine::query` call.
+        EmbeddedRecallEngine::query(self, q).await
     }
 }
 
@@ -832,5 +891,60 @@ mod tests {
         let a = vec![0.0_f32, 0.0, 0.0];
         let b = vec![1.0_f32, 2.0, 3.0];
         assert_eq!(EmbeddedRecallEngine::cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_session_filter_excludes_other_sessions() {
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        engine
+            .index(RecallEntry::with_session("session one doc", Some(1), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("session two doc", Some(2), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("no session doc", None, no_meta()))
+            .await
+            .expect("index");
+
+        let q = VectorQuery::new("doc", 10, -1.0, Some(1));
+        let results = engine.query(q).await.expect("query");
+        assert_eq!(results.len(), 1, "only the session-1 entry should be returned");
+        assert_eq!(results[0].text(), "session one doc");
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_no_session_filter_returns_all() {
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        engine
+            .index(RecallEntry::with_session("a", Some(1), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("b", Some(2), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("c", None, no_meta()))
+            .await
+            .expect("index");
+
+        let q = VectorQuery::new("any", 10, -1.0, None);
+        let results = engine.query(q).await.expect("query");
+        assert_eq!(results.len(), 3, "no filter should include all sessions plus None");
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_implements_recall_engine_trait() {
+        // Confirm `EmbeddedRecallEngine` is usable as `dyn RecallEngine`.
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        engine.index(RecallEntry::new("polymorphic call")).await.expect("index");
+
+        let dyn_engine: &dyn RecallEngine = &engine;
+        let q = VectorQuery::new("polymorphic call", 10, -1.0, None);
+        let results = dyn_engine.query(q).await.expect("query");
+        assert_eq!(results.len(), 1, "dyn dispatch should produce the indexed entry");
     }
 }
