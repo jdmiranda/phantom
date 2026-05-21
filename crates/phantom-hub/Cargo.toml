@@ -14,8 +14,6 @@ name = "phantom-hub"
 path = "src/main.rs"
 
 [dependencies]
-log.workspace = true
-env_logger.workspace = true
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -66,6 +64,9 @@ name = "frame_routing"
 
 [[test]]
 name = "registration_handshake"
+
+[[test]]
+name = "cross_surface_register_to_ws"
 
 [lints]
 workspace = true

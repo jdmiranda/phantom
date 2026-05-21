@@ -41,7 +41,11 @@ use phantom_agents::policy::AgentPolicy;
 use phantom_agents::{AgentId, AgentTask};
 
 use crate::events::{AiAction, ConnectionState};
-use crate::orchestrator::{ReplanDecision, StepStatus, TaskLedger};
+use crate::orchestrator::{DispatchBlocked, ReplanDecision, TaskLedger};
+// `StepStatus` is only referenced from the test module below; bring it in
+// there via a separate `use` to keep the production import surface minimal.
+#[cfg(test)]
+use crate::orchestrator::StepStatus;
 
 /// How often the reconciler checks whether a paused agent's backend has
 /// become available again.
@@ -371,6 +375,28 @@ impl ReconcilerState {
             .collect();
 
         for (idx, task, disposition, description) in eligible {
+            // Route the Pending → Active transition through the guarded
+            // mutator so `PlanStep.depends_on` is enforced at the dispatch
+            // boundary (issue #647). Reaching `UnmetDeps` here indicates a
+            // race between `eligible_next()` and `try_dispatch()` — e.g. a
+            // dependency reverted from `Done` between the two calls — since
+            // `eligible_next()` already pre-filters by satisfied deps.
+            match ledger.try_dispatch(idx) {
+                Ok(_) => {}
+                Err(DispatchBlocked::UnmetDeps { open, .. }) => {
+                    log::warn!(
+                        "Reconciler: try_dispatch rejected step {idx}; unmet deps {open:?} — skipping this tick"
+                    );
+                    continue;
+                }
+                Err(blocked) => {
+                    log::warn!(
+                        "Reconciler: try_dispatch rejected step {idx}: {blocked:?} — skipping this tick"
+                    );
+                    continue;
+                }
+            }
+
             let agent_id: AgentId = self.next_agent_id;
             self.next_agent_id = self
                 .next_agent_id
@@ -382,10 +408,9 @@ impl ReconcilerState {
             let stall_timeout =
                 Duration::from_secs(self.agent_policy.timeout_seconds);
 
-            // Advance step to Active before emitting SpawnAgent so that a
-            // synchronous ledger inspection sees the correct state.
+            // The guarded mutator already flipped status to Active; the
+            // reconciler still owns `agent_id` and `attempts` stamping.
             if let Some(s) = ledger.plan.get_mut(idx) {
-                s.status = StepStatus::Active;
                 s.agent_id = Some(agent_id);
                 s.attempts += 1;
             }

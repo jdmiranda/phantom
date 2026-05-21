@@ -7,7 +7,22 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use phantom_semantic::CommandType;
+use phantom_semantic::{CommandType, SemanticParser};
+
+// ---------------------------------------------------------------------------
+// Schema versioning
+// ---------------------------------------------------------------------------
+
+/// Current schema version written into every new entry.
+///
+/// Increment this constant whenever the `HistoryEntry` schema changes in a
+/// backward-incompatible way, and add a migration arm in
+/// [`HistoryEntry::from_jsonl_line`].
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+pub(crate) fn schema_v1() -> u32 {
+    1
+}
 
 // ---------------------------------------------------------------------------
 // HistoryEntry
@@ -19,6 +34,12 @@ use phantom_semantic::CommandType;
 /// provided getters to read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
+    /// Schema version — defaults to 1 when deserialising pre-versioned records.
+    ///
+    /// Forward compatibility: entries with a version higher than
+    /// [`CURRENT_SCHEMA_VERSION`] are rejected by [`HistoryEntry::from_jsonl_line`].
+    #[serde(default = "schema_v1")]
+    pub schema_version: u32,
     id: Uuid,
     /// ISO-8601 timestamp of when the command was submitted.
     timestamp: DateTime<Utc>,
@@ -29,6 +50,9 @@ pub struct HistoryEntry {
     session_id: Uuid,
     /// Semantic classification of the command (from phantom-semantic).
     semantic_type: CommandType,
+    /// Optional agent that generated or requested this command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_id: Option<String>,
 }
 
 impl HistoryEntry {
@@ -78,6 +102,10 @@ impl HistoryEntry {
     #[must_use]
     pub fn semantic_type(&self) -> &CommandType { &self.semantic_type }
 
+    /// Agent that generated or requested this command, if any.
+    #[must_use]
+    pub fn agent_id(&self) -> Option<&str> { self.agent_id.as_deref() }
+
     // -----------------------------------------------------------------------
     // (De)serialisation helpers
     // -----------------------------------------------------------------------
@@ -88,8 +116,22 @@ impl HistoryEntry {
     }
 
     /// Deserialise from a single JSONL line.
+    ///
+    /// Returns an error if the record's `schema_version` is greater than
+    /// [`CURRENT_SCHEMA_VERSION`] (forward-compat guard).  Records with a
+    /// version below the current one are accepted as-is — the missing field
+    /// defaults applied by serde are sufficient for the v0 → v1 migration.
     pub fn from_jsonl_line(line: &str) -> Result<Self> {
-        serde_json::from_str(line).context("failed to deserialise HistoryEntry")
+        let entry: Self =
+            serde_json::from_str(line).context("failed to deserialise HistoryEntry")?;
+        if entry.schema_version > CURRENT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported schema_version {} (max supported: {})",
+                entry.schema_version,
+                CURRENT_SCHEMA_VERSION,
+            );
+        }
+        Ok(entry)
     }
 }
 
@@ -107,10 +149,12 @@ pub struct HistoryEntryBuilder {
     exit_code: Option<i32>,
     duration_ms: Option<u64>,
     semantic_type: CommandType,
+    agent_id: Option<String>,
 }
 
 impl HistoryEntryBuilder {
     fn new(command: String, cwd: PathBuf, session_id: Uuid) -> Self {
+        let semantic_type = SemanticParser::classify_command(&command);
         Self {
             command,
             cwd,
@@ -119,9 +163,11 @@ impl HistoryEntryBuilder {
             timestamp: Utc::now(),
             exit_code: None,
             duration_ms: None,
-            semantic_type: CommandType::Unknown,
+            semantic_type,
+            agent_id: None,
         }
     }
+
 
     /// Override the auto-generated UUID (useful in tests).
     #[must_use]
@@ -143,10 +189,18 @@ impl HistoryEntryBuilder {
     #[must_use]
     pub fn semantic_type(mut self, t: CommandType) -> Self { self.semantic_type = t; self }
 
+    /// Tag this entry with the agent that produced it.
+    #[must_use]
+    pub fn agent_id(mut self, id: impl Into<String>) -> Self {
+        self.agent_id = Some(id.into());
+        self
+    }
+
     /// Finalise and return the entry.
     #[must_use]
     pub fn build(self) -> HistoryEntry {
         HistoryEntry {
+            schema_version: CURRENT_SCHEMA_VERSION,
             id: self.id,
             timestamp: self.timestamp,
             command: self.command,
@@ -155,6 +209,7 @@ impl HistoryEntryBuilder {
             cwd: self.cwd,
             session_id: self.session_id,
             semantic_type: self.semantic_type,
+            agent_id: self.agent_id,
         }
     }
 }
@@ -183,7 +238,8 @@ mod tests {
         assert_eq!(e.exit_code(), None);
         assert_eq!(e.duration_ms(), None);
         assert_eq!(e.cwd(), &PathBuf::from("/home/dev/project"));
-        assert_eq!(e.semantic_type(), &CommandType::Unknown);
+        // "ls" is a known shell builtin — auto-classified at construction time.
+        assert_eq!(e.semantic_type(), &CommandType::Shell);
     }
 
     // -----------------------------------------------------------------------
@@ -271,5 +327,72 @@ mod tests {
     fn corrupt_line_returns_err() {
         let result = HistoryEntry::from_jsonl_line("{not valid json");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. schema_version_defaults_to_one_on_old_entries
+    //
+    //    A record written without `schema_version` (simulating a pre-v1 entry)
+    //    must deserialise successfully and report schema_version == 1.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn schema_version_defaults_to_one_on_old_entries() {
+        // Craft a minimal valid JSON that omits schema_version entirely.
+        let session = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let line = format!(
+            r#"{{"id":"{id}","timestamp":"2024-01-01T00:00:00Z","command":"ls","exit_code":null,"duration_ms":null,"cwd":"/","session_id":"{session}","semantic_type":"Shell"}}"#,
+        );
+
+        let entry = HistoryEntry::from_jsonl_line(&line).unwrap();
+        assert_eq!(
+            entry.schema_version, 1,
+            "missing schema_version should default to 1"
+        );
+        assert_eq!(entry.command(), "ls");
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. entry_with_future_schema_version_is_skipped_with_warning
+    //
+    //    A record with schema_version > CURRENT_SCHEMA_VERSION must be rejected.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn entry_with_future_schema_version_is_skipped_with_warning() {
+        let session = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let line = format!(
+            r#"{{"schema_version":{future_version},"id":"{id}","timestamp":"2024-01-01T00:00:00Z","command":"ls","exit_code":null,"duration_ms":null,"cwd":"/","session_id":"{session}","semantic_type":"Shell"}}"#,
+        );
+
+        let result = HistoryEntry::from_jsonl_line(&line);
+        assert!(
+            result.is_err(),
+            "entry with future schema_version must be rejected"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("unsupported schema_version"),
+            "error message should mention unsupported schema_version, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. round_trip_preserves_schema_version
+    //
+    //    A new entry serialised and deserialised must have schema_version == 1.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn round_trip_preserves_schema_version() {
+        let e = make_entry("cargo test");
+        assert_eq!(e.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let line = e.to_jsonl_line().unwrap();
+        let restored = HistoryEntry::from_jsonl_line(&line).unwrap();
+        assert_eq!(restored.schema_version, CURRENT_SCHEMA_VERSION);
     }
 }

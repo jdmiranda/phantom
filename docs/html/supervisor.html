@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · supervisor</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 04 · SUPERVISOR · OTP-STYLE PROCESS MONITOR</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html" class="active">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 04 · TWO-PROCESS SUPERVISION</span>
+    <span class="sysid">SYS://supervisor.0</span>
+  </div>
+  <h1 class="page-title">Supervisor</h1>
+  <p class="page-lede">
+    Phantom runs as <strong>two processes</strong>. A featherweight <code>phantom-supervisor</code> monitors a heavyweight
+    <code>phantom</code> child via Unix socket heartbeat. If the GPU hangs, the renderer panics, the terminal
+    deadlocks, or memory pressure crosses a threshold, the supervisor sends <code>SIGTERM</code>, waits a second
+    for graceful exit, escalates to <code>SIGKILL</code>, and respawns. Erlang would approve.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Heartbeat timeout</div><div class="value">10,000 ms</div></div>
+    <div class="status-cell"><div class="label">Grace period</div><div class="value">1 s</div></div>
+    <div class="status-cell"><div class="label">Max restarts</div><div class="value">5 / 60 s</div></div>
+    <div class="status-cell"><div class="label">Socket</div><div class="value">PHANTOM_SUPERVISOR_SOCK</div></div>
+    <div class="status-cell"><div class="label">Crash log</div><div class="value">supervisor_events.jsonl</div></div>
+  </div>
+
+  <h2>The two-process diagram</h2>
+
+<pre class="ascii">
+   +---------------------------------+         +----------------------------------+
+   |  phantom-supervisor (parent)    |         |  phantom (child)                  |
+   |  --------------------------     |         |  --------------------------       |
+   |                                 |         |                                  |
+   |  bind  unix-domain socket  -----+--&gt;  PHANTOM_SUPERVISOR_SOCK env var       |
+   |  spawn child                    |  &lt;-----+ connect over socket              |
+   |                                 |         |                                  |
+   |  every 1s:                      |         |  every 1s:                       |
+   |    if now - last_heartbeat &gt;    |  &lt;-----+ send AppMessage::Heartbeat       |
+   |       HEARTBEAT_TIMEOUT_MS:     |         |                                  |
+   |          dump pre_sigterm_state |         |  on panic / SIGSEGV:             |
+   |          send SIGTERM           +-----&gt;  |    write signal_crash.log        |
+   |          sleep 1s               |         |    re-raise signal               |
+   |          send SIGKILL           |         |                                  |
+   |          respawn (rate-limited) |         |  on graceful close:              |
+   |                                 |         |    send AppMessage::Shutdown     |
+   |                                 |         |    exit(0)                       |
+   +---------------------------------+         +----------------------------------+
+</pre>
+
+  <h2>The handshake</h2>
+  <p>
+    Supervisor starts first. It creates a Unix domain socket at a per-PID path, exports
+    <code>PHANTOM_SUPERVISOR_SOCK</code>, and spawns <code>phantom</code> as a child
+    (<code>phantom-supervisor/src/main.rs:186</code>). The child reads the env var, connects, and starts the
+    heartbeat tick.
+  </p>
+
+<pre class="code-rust"><code><span class="c">// phantom-protocol/src/lib.rs:29-35</span>
+<span class="k">pub const</span> <span class="n">HEARTBEAT_TIMEOUT_MS</span>: <span class="t">u64</span> = <span class="lit">10_000</span>;
+<span class="k">pub const</span> <span class="n">MAX_RESTARTS</span>: <span class="t">u32</span>    = <span class="lit">5</span>;
+<span class="k">pub const</span> <span class="n">RESTART_WINDOW_SECS</span>: <span class="t">u64</span> = <span class="lit">60</span>;
+<span class="k">pub const</span> <span class="n">GRACE_PERIOD_MS</span>: <span class="t">u64</span> = <span class="lit">1_000</span>;</code></pre>
+
+  <h2>The protocol</h2>
+  <p>
+    <code>phantom-protocol</code> defines a length-prefixed JSON wire format. Three message classes:
+  </p>
+
+  <table class="table">
+    <thead><tr><th>Direction</th><th>Variant</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>App → Supervisor</td><td><code>AppMessage::Heartbeat</code></td><td>Liveness ping. Once per second.</td></tr>
+      <tr><td>App → Supervisor</td><td><code>AppMessage::Event</code></td><td>Forward an <code>Event</code> for monitoring/telemetry.</td></tr>
+      <tr><td>App → Supervisor</td><td><code>AppMessage::Shutdown</code></td><td>Clean exit. Supervisor will not respawn.</td></tr>
+      <tr><td>Supervisor → App</td><td><code>SupervisorMessage::Restart</code></td><td>Request graceful restart (e.g. config reload).</td></tr>
+      <tr><td>Supervisor → App</td><td><code>SupervisorMessage::Quit</code></td><td>Final shutdown request.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>The restart machine</h2>
+
+<pre class="ascii">
+                 +---------------+
+                 |   spawning    |
+                 +-------+-------+
+                         |
+                         v
+              +----------+----------+        no heartbeat &gt; 10s
+              |   handshake_wait    +-----+
+              +----------+----------+     |
+                         |                 |
+                heartbeat received          |
+                         v                 v
+              +----------+----------+    +-----------+
+              |     monitoring      +--&gt;|  sigterm  |
+              +----------+----------+    +-----+-----+
+                         ^                     |
+                         |                     | 1s grace
+                         |                     v
+                         |               +-----+-----+
+              +----------+-----+         |  sigkill  |
+              |  respawn       |&lt;--------+-----------+
+              | (rate-limited) |
+              +-----+----------+
+                    |
+                    +--&gt; tracked: restart_count_in_window
+                          if > MAX_RESTARTS in RESTART_WINDOW_SECS:
+                              giving_up -&gt; exit(1) supervisor too
+</pre>
+
+  <h2>Crash forensics</h2>
+  <p>
+    On every restart the supervisor appends a structured JSON envelope to
+    <code>~/.config/phantom/supervisor_events.jsonl</code> (<code>phantom-supervisor/src/main.rs:46-67</code>).
+    The <code>pre_sigterm_state</code> block captures everything the supervisor knows about the dying child
+    right before it kills it.
+  </p>
+
+<pre class="code-rust"><code><span class="k">struct</span> <span class="t">PreSigtermState</span> {
+    <span class="n">reason</span>:                  <span class="t">String</span>,        <span class="c">// "heartbeat_timeout" | "explicit_request" | …</span>
+    <span class="n">pid</span>:                     <span class="t">u32</span>,
+    <span class="n">uptime_s</span>:                <span class="t">u64</span>,
+    <span class="n">last_heartbeat_ms_ago</span>:   <span class="t">u64</span>,
+    <span class="n">restart_count</span>:           <span class="t">u32</span>,
+    <span class="n">supervisor_uptime_s</span>:     <span class="t">u64</span>,
+    <span class="n">app_connected</span>:           <span class="t">bool</span>,
+}</code></pre>
+
+  <h2>Signal handling on the app side</h2>
+  <p>
+    <code>phantom/src/main.rs:366-461</code> installs async-signal-safe handlers for
+    <code>SIGSEGV · SIGBUS · SIGABRT · SIGTERM</code>. They <code>raw_append_to_log</code> a one-line crash
+    summary to <code>~/.config/phantom/signal_crash.log</code> before re-raising the signal. The supervisor
+    then reads this file alongside <code>supervisor_events.jsonl</code> to correlate cause and effect across
+    the process boundary.
+  </p>
+
+  <div class="callout">
+    <div class="callout-title">Why two processes</div>
+    Wgpu can hang. Drivers can deadlock. Tokio runtimes can wedge under memory pressure. If the supervisor lived
+    in the same process as the renderer, all of those would also wedge the supervisor. Splitting them means
+    <em>something always responds</em>. Even if the entire app process is frozen, you can still close the supervisor
+    (a single-page tokio task) and have a clean restart.
+  </div>
+
+  <h2>Running with the supervisor</h2>
+<pre class="code-bash"><code><span class="c"># recommended path — supervisor wraps phantom</span>
+cargo run --bin phantom-supervisor
+
+<span class="c"># or just the convenience script</span>
+./run.sh
+
+<span class="c"># standalone (no supervisor monitoring; for hard-crash debugging)</span>
+cargo run --bin phantom</code></pre>
+
+  <h2>Inspecting state</h2>
+<pre class="code-bash"><code><span class="c"># tail the crash log</span>
+tail -f ~/.config/phantom/supervisor_events.jsonl | jq
+
+<span class="c"># last app signal</span>
+cat ~/.config/phantom/signal_crash.log</code></pre>
+
+  <footer class="footer">
+    <span>SEC 04 · SUPERVISOR</span>
+    <span><a href="rendering.html">↩ SEC 03 · RENDER</a> · <a href="agents.html">next → SEC 05 · AGENTS</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

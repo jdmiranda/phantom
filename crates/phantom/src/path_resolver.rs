@@ -172,7 +172,10 @@ mod tests {
             merged.starts_with("/opt/homebrew/bin:"),
             "shell path not first: {merged}"
         );
-        assert!(merged.contains("/usr/bin"), "current path missing: {merged}");
+        assert!(
+            merged.contains("/usr/bin"),
+            "current path missing: {merged}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -238,10 +241,7 @@ mod tests {
 
         // Mimic what resolve_desktop_path_unix does with an empty probe result.
         let is_empty = matches!(&shell_path_opt, Some(p) if p.is_empty());
-        assert!(
-            is_empty,
-            "empty shell PATH should be detected and skipped"
-        );
+        assert!(is_empty, "empty shell PATH should be detected and skipped");
 
         // When the shell returns nothing we should not mutate PATH — verify
         // that the branch exits early without panicking.

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · build &amp; run</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 11 · BUILD &amp; RUN · OPERATOR MANUAL</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html" class="active">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 11 · BUILD &amp; RUN</span>
+    <span class="sysid">SYS://operator.0</span>
+  </div>
+  <h1 class="page-title">Build &amp; Run</h1>
+  <p class="page-lede">
+    From <code>git clone</code> to a running terminal in under 90 seconds on a warm Cargo cache. This page is
+    your operator manual — system requirements, build commands, themes, keybindings, configuration,
+    troubleshooting.
+  </p>
+
+  <h2>Requirements</h2>
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Rust</div><div class="value">2024 edition</div></div>
+    <div class="status-cell"><div class="label">GPU</div><div class="value">OpenGL 3.3+ / Vulkan / Metal / D3D12</div></div>
+    <div class="status-cell"><div class="label">OS</div><div class="value">macOS 10.15+ · Linux · Win 10+</div></div>
+    <div class="status-cell"><div class="label">Memory</div><div class="value">4 GB+</div></div>
+  </div>
+
+  <h2>Build</h2>
+<pre class="code-bash"><code><span class="c"># clone</span>
+git clone https://github.com/jdmiranda/phantom.git
+cd phantom
+
+<span class="c"># build all binaries (release)</span>
+cargo build --release
+
+<span class="c"># build specific crate</span>
+cargo build -p phantom-renderer
+
+<span class="c"># run tests</span>
+cargo test
+
+<span class="c"># run with logging</span>
+RUST_LOG=debug cargo run --bin phantom</code></pre>
+
+  <h2>Run</h2>
+<pre class="code-bash"><code><span class="c"># recommended — supervisor + app together</span>
+cargo run --bin phantom-supervisor
+<span class="c"># or just</span>
+./run.sh
+
+<span class="c"># standalone (no supervisor, useful for hard-crash debugging)</span>
+cargo run --bin phantom
+
+<span class="c"># theme variants</span>
+cargo run -- --theme amber
+cargo run -- --theme ice
+cargo run -- --theme blood
+cargo run -- --theme vapor
+cargo run -- --theme verdant
+cargo run -- --theme plain    <span class="c"># disables CRT effects entirely</span>
+
+<span class="c"># skip the cinematic boot</span>
+cargo run -- --no-boot
+
+<span class="c"># debug mode (more logging, debug overlays)</span>
+cargo run -- --debug
+
+<span class="c"># GPU diagnostic dump</span>
+cargo run -- --gpu-info</code></pre>
+
+  <h2>Configuration</h2>
+  <p>Phantom reads <code>~/.config/phantom/config.toml</code> on boot. All fields optional.</p>
+
+<pre class="code-toml"><code><span class="a">[renderer]</span>
+<span class="n">theme</span>        = <span class="s">"phosphor"</span>     <span class="c"># phosphor · amber · ice · blood · vapor · verdant · plain</span>
+<span class="n">font_size</span>    = <span class="lit">14.0</span>
+<span class="n">scanlines</span>    = <span class="lit">0.8</span>
+<span class="n">bloom</span>        = <span class="lit">0.6</span>
+<span class="n">curvature</span>    = <span class="lit">0.1</span>
+<span class="n">chromatic</span>    = <span class="lit">0.02</span>
+<span class="n">vignette</span>     = <span class="lit">0.4</span>
+<span class="n">noise</span>        = <span class="lit">0.05</span>
+
+<span class="a">[terminal]</span>
+<span class="n">shell</span>             = <span class="s">"/bin/zsh"</span>
+<span class="n">working_directory</span> = <span class="s">"~"</span>
+<span class="n">scrollback_lines</span>  = <span class="lit">10000</span>
+
+<span class="a">[agents]</span>
+<span class="n">claude_api_key</span>  = <span class="s">"sk-..."</span>          <span class="c"># or via ANTHROPIC_API_KEY env</span>
+<span class="n">max_concurrent</span>  = <span class="lit">3</span>
+<span class="n">timeout_seconds</span> = <span class="lit">30</span>
+
+<span class="a">[brain]</span>
+<span class="n">enabled</span>             = <span class="lit">true</span>
+<span class="n">self_improvement</span>    = <span class="lit">false</span>             <span class="c"># opt-in only</span>
+<span class="n">trust_band</span>          = <span class="s">"Conservative"</span>
+<span class="n">audit_log_path</span>      = <span class="s">"~/.phantom/audit/brain.jsonl"</span></code></pre>
+
+  <h2>Keybindings</h2>
+  <table class="table">
+    <thead><tr><th>Key</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>Cmd+D</code></td><td>Split pane horizontal</td></tr>
+      <tr><td><code>Cmd+Shift+D</code></td><td>Split pane vertical</td></tr>
+      <tr><td><code>Cmd+[</code> / <code>Cmd+]</code></td><td>Focus previous / next pane</td></tr>
+      <tr><td><code>Cmd+W</code></td><td>Close focused pane</td></tr>
+      <tr><td><code>Cmd+T</code></td><td>New tab</td></tr>
+      <tr><td><code>Cmd+Shift+[</code> / <code>]</code></td><td>Previous / next tab</td></tr>
+      <tr><td><code>`</code> (backtick)</td><td>Command mode (system commands)</td></tr>
+      <tr><td><code>Cmd+,</code></td><td>Open settings overlay</td></tr>
+      <tr><td><code>Cmd+/</code></td><td>Open agent inspector</td></tr>
+      <tr><td><code>Cmd+R</code></td><td>Hot-reload shaders (if <code>PHANTOM_HOT_SHADERS=1</code>)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Command mode</h2>
+  <p>Press <code>`</code> (backtick) anywhere to open command mode. Then:</p>
+
+<pre class="code-bash"><code><span class="c"># spawn AI agent</span>
+agent <span class="s">"fix the failing tests"</span>
+
+<span class="c"># list running agents</span>
+agents
+
+<span class="c"># natural-language commands</span>
+build the project
+what changed today
+deploy staging
+
+<span class="c"># inspector</span>
+inspector
+brain
+ledger</code></pre>
+
+  <h2>Running the autonomous loops</h2>
+<pre class="code-bash"><code><span class="c"># the four canonical loops against the phantom repo</span>
+phantom loop run \
+    <span class="k">--repo</span>  ~/code/phantom \
+    <span class="k">--loops</span> pr_finder_review,pr_finder_impl,reviewer,implementer
+
+<span class="c"># the loop overseer ships preflight checks:</span>
+<span class="c">#   - gh binary must be on PATH</span>
+<span class="c">#   - gh auth status must report logged-in</span>
+<span class="c">#   - MCP tool names must not collide with complete_task / abort_task</span>
+
+<span class="c"># acquire an exclusive lock at .phantom/loops/.runlock to prevent races</span>
+<span class="c"># Ctrl-C releases the lock cleanly via Drop</span></code></pre>
+
+  <h2>Running phantom as a builder</h2>
+<pre class="code-bash"><code><span class="c"># point phantom at any GitHub repo and let it eat the issue queue</span>
+phantom builder run \
+    <span class="k">--target</span>      your-org/your-repo \
+    <span class="k">--trust-band</span>  conservative \
+    <span class="k">--max-prs</span>     4</code></pre>
+
+  <h2>Hot shader reload</h2>
+<pre class="code-bash"><code><span class="c"># shaders/crt.wgsl is polled on mtime change</span>
+PHANTOM_HOT_SHADERS=1 cargo run --bin phantom-supervisor</code></pre>
+
+  <h2>Troubleshooting</h2>
+
+  <h3>Build issues</h3>
+<pre class="code-bash"><code><span class="c"># clean rebuild</span>
+cargo clean &amp;&amp; cargo build
+
+<span class="c"># refresh dependencies</span>
+cargo update
+
+<span class="c"># check Rust version</span>
+rustc --version          <span class="c"># needs nightly with 2024 edition</span></code></pre>
+
+  <h3>Runtime issues</h3>
+<pre class="code-bash"><code><span class="c"># full debug log</span>
+RUST_LOG=phantom=debug cargo run
+
+<span class="c"># gpu capability dump</span>
+cargo run -- --gpu-info
+
+<span class="c"># disable post-fx if GPU driver is flaky</span>
+cargo run -- --theme plain
+
+<span class="c"># skip boot if iterating quickly</span>
+cargo run -- --no-boot</code></pre>
+
+  <h3>Diagnostics</h3>
+<pre class="code-bash"><code><span class="c"># tail supervisor crash forensics</span>
+tail -f ~/.config/phantom/supervisor_events.jsonl | jq
+
+<span class="c"># last app signal (SIGSEGV / SIGBUS / SIGTERM)</span>
+cat ~/.config/phantom/signal_crash.log
+
+<span class="c"># brain audit log</span>
+tail -f .phantom/brain/audit.jsonl | jq</code></pre>
+
+  <h3>Common problems</h3>
+  <table class="table">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Black screen after boot</td><td>GPU adapter selected fallback backend</td><td><code>--gpu-info</code>, update drivers, try <code>--theme plain</code></td></tr>
+      <tr><td>Glyphs missing</td><td>System font not installed</td><td>Install <em>JetBrains Mono</em> or override in config</td></tr>
+      <tr><td>"capability denied"</td><td>Agent's role doesn't have the tool's capability class</td><td>Working as intended — see <a href="agents.html">agents</a></td></tr>
+      <tr><td>Loop refuses to start: "gh binary not found"</td><td><code>gh</code> CLI not installed</td><td><code>brew install gh</code> + <code>gh auth login</code></td></tr>
+      <tr><td>Loop refuses to start: "MCP tool collision"</td><td>An MCP server registered a tool named <code>complete_task</code></td><td>Rename in the MCP server's manifest</td></tr>
+      <tr><td>Self-improvement won't enqueue</td><td>Trust band threshold, rate limit, or hard exclusion</td><td>Check <code>brain/audit.jsonl</code> — every skip has a reason</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Performance</h2>
+  <ul>
+    <li><strong>GPU:</strong> Use the dedicated card on hybrid systems. <code>--theme plain</code> on integrated GPUs.</li>
+    <li><strong>Glyph atlas:</strong> Grows on demand. Large terminals with mixed scripts may benefit from a larger preallocation.</li>
+    <li><strong>Scrollback:</strong> Default 10K lines. Reduce for low-RAM hosts.</li>
+    <li><strong>Agent concurrency:</strong> Default 3. Bump to taste, but each agent is a tokio-task footprint.</li>
+  </ul>
+
+  <h2>Contributing</h2>
+  <ol>
+    <li>Read the architecture docs in <code>docs/</code></li>
+    <li>Follow Rust style guidelines (see <code>~/.claude/skills/rust-skills</code> if you're using Claude Code)</li>
+    <li>Add tests for new features</li>
+    <li>Update documentation (including this page if you change the operator surface)</li>
+    <li>Submit PR with clear description</li>
+  </ol>
+
+  <p class="muted">Built with ❤ by Jeremy Miranda and Claude. MIT.</p>
+
+  <footer class="footer">
+    <span>SEC 11 · BUILD / RUN</span>
+    <span><a href="fleet.html">↩ SEC 10 · FLEET</a> · <a href="protocol.html">next → SEC 12 · PROTOCOL</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

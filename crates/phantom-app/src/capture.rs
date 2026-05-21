@@ -39,6 +39,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use phantom_adapter::AppId;
 use phantom_bundle_store::{BundleEmbeddings, BundleStore};
 use phantom_bundles::{Bundle, FrameRef};
+use phantom_bundles::session::{CaptureFrame, CaptureSession};
 use phantom_embeddings::{
     EmbedItem, EmbedRequest, Embedding, EmbeddingBackend, Modality, openai::OpenAiEmbeddingBackend,
 };
@@ -73,7 +74,12 @@ const MAX_FRAMES_PER_BUNDLE: usize = 128;
 /// produced at least one capture. Tracks the last dhash (for dedup), how
 /// many consecutive identical captures we've seen (for adaptive cadence),
 /// when we last captured (for the cadence gate itself), and the in-flight
-/// bundle being assembled.
+/// [`CaptureSession`] being assembled.
+///
+/// The [`CaptureSession`] accumulates [`CaptureFrame`] values (phash, pixels,
+/// dimensions) and handles run-length duplicate suppression internally.
+/// When sealed via [`CaptureSession::finalize`] it produces a [`Bundle`] ready
+/// for the persistence job.
 #[derive(Default)]
 pub(crate) struct PaneCaptureState {
     /// dhash of the most recently *stored* frame for this pane.
@@ -83,19 +89,21 @@ pub(crate) struct PaneCaptureState {
     /// Wall-clock time when we last *attempted* a capture for this pane.
     /// `None` means no attempt yet — capture immediately on the next call.
     last_attempt: Option<Instant>,
-    /// Wall-clock when the open bundle started, in monotonic time.
-    /// Used to compute frame `t_offset_ns`.
+    /// Wall-clock when the open session started, in monotonic time.
+    /// Used to compute frame `t_offset_ns` when building the `Bundle`.
     bundle_start: Option<Instant>,
-    /// Wall-clock unix-ms when the open bundle started. Stored verbatim on
-    /// the `Bundle` at seal time.
+    /// Wall-clock unix-ms when the open session started. Stored verbatim on
+    /// the sealed `Bundle`.
     bundle_wall_ms: i64,
-    /// Bundle currently being assembled. `None` means no open bundle —
-    /// the next captured frame will start one.
-    open_bundle: Option<Bundle>,
-    /// Raw RGBA pixel buffers for each frame in `open_bundle`, in lock-step
-    /// with `Bundle::frames`. The persistence job consumes these to encode
-    /// PNG and seal them into the encrypted blob store. Cleared every
-    /// time `open_bundle` is taken.
+    /// Capture session currently being assembled.  `None` means no open
+    /// session — the next captured frame will start one.  Replaces the old
+    /// manual `open_bundle: Option<Bundle>` field.
+    open_session: Option<CaptureSession>,
+    /// Raw RGBA pixel buffers for each frame accepted into `open_session`,
+    /// in lock-step with the session's internal frame list.  The persistence
+    /// job consumes these to encode PNG blobs; they are not stored inside
+    /// [`CaptureSession`] because the blob layer is separate from the schema.
+    /// Cleared every time `open_session` is finalized/taken.
     pending_pixels: Vec<Vec<u8>>,
 }
 
@@ -133,14 +141,14 @@ impl CaptureState {
     }
 
     /// Total frames captured (across all panes) that are currently in open
-    /// (unsealed) bundles. Used by tests to assert dedup behavior without
+    /// (unsealed) sessions. Used by tests to assert dedup behavior without
     /// reaching into the bundle store.
     #[allow(dead_code)]
     #[must_use]
     pub fn open_frame_count(&self) -> usize {
         self.panes
             .values()
-            .map(|p| p.open_bundle.as_ref().map_or(0, |b| b.frames.len()))
+            .map(|p| p.open_session.as_ref().map_or(0, |s| s.frame_count()))
             .sum()
     }
 
@@ -529,52 +537,94 @@ impl crate::app::App {
                 self.coordinator.bus_mut().emit(msg);
             }
 
-            // Open a fresh bundle if we don't have one. Wall-clock is
-            // captured here so frame offsets are relative to bundle start.
-            if pane_state.open_bundle.is_none() {
-                let pane_id_u64 = u64::from(app_id);
-                let mut b = Bundle::new(pane_id_u64);
-                b.t_start_ns = 0;
-                b.t_wall_unix_ms = SystemTime::now()
+            // GPT-4V analysis — best-effort, non-blocking.
+            //
+            // When a `VisionAnalyzer` is available (i.e. `OPENAI_API_KEY` is
+            // set), we clone the pixel buffer and dispatch analysis on a
+            // tokio task so the capture loop is never stalled by a network
+            // call. Results are logged at DEBUG level. Future work (issue #79)
+            // may route `Analysis` into `BrainAction::ScreenAnalysis`.
+            if let Some(analyzer) = self.vision_analyzer.as_ref() {
+                let pixels_for_task = pixels.clone();
+                let (w, h) = extent;
+                let ts = frame_timestamp_ms;
+                let pane_id_for_log = u64::from(app_id);
+                let analyzer_arc = std::sync::Arc::clone(analyzer);
+                let _task = tokio::spawn(async move {
+                    match analyzer_arc.analyze_frame(&pixels_for_task, w, h, ts).await {
+                        Ok(analysis) => {
+                            log::debug!(
+                                "GPT-4V analysis (pane {pane_id_for_log}): {}",
+                                analysis.summary()
+                            );
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "GPT-4V analysis failed (pane {pane_id_for_log}): {e}"
+                            );
+                        }
+                    }
+                });
+            }
+
+            // Validate frame dimensions before accumulating. A zero-dimension
+            // frame cannot be PNG-encoded and would produce an empty blob.
+            // Log and skip so the pipeline keeps running on the other panes.
+            if extent.0 == 0 || extent.1 == 0 {
+                log::warn!(
+                    "capture_panes: skipping zero-dimension frame for pane {app_id} \
+                     ({}x{})",
+                    extent.0,
+                    extent.1,
+                );
+                continue;
+            }
+
+            // Open a fresh CaptureSession if we don't have one. Wall-clock is
+            // captured here so frame offsets are relative to session start.
+            if pane_state.open_session.is_none() {
+                let session_id = uuid::Uuid::new_v4();
+                pane_state.bundle_start = Some(now);
+                pane_state.bundle_wall_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                pane_state.bundle_start = Some(now);
-                pane_state.bundle_wall_ms = b.t_wall_unix_ms;
-                pane_state.open_bundle = Some(b);
+                pane_state.open_session = Some(CaptureSession::new(session_id));
             }
 
-            let t_offset_ns = pane_state
-                .bundle_start
-                .map(|s| now.duration_since(s).as_nanos() as u64)
-                .unwrap_or(0);
-
-            // SHA-256-style hex of the raw RGBA — gives us a
-            // content-addressable identifier for the frame blob without
-            // pulling in another dep. The actual blob_path is filled in
-            // by the persist job once the store decides where it lives.
-            let sha_hex = simple_sha_hex(&pixels);
-            let bundle = pane_state.open_bundle.as_mut().expect("just inserted");
-            let frame = FrameRef {
-                t_offset_ns,
-                sha: sha_hex,
-                // Placeholder path. `PersistBundleJob::run` rewrites this
-                // to the relpath returned by `BundleStore::write_frame_blob`.
-                blob_path: format!("frames/{}-{}.png", bundle.id, bundle.frames.len()),
-                dhash: hash,
-                width: extent.0,
-                height: extent.1,
-            };
-            bundle.add_frame(frame);
+            // Push the captured frame into the CaptureSession.
+            // CaptureFrame carries the raw pixels so the session knows what
+            // to hand to finalize(); pending_pixels travels in lock-step for
+            // the PNG-encoding layer in the persistence job.
+            let session = pane_state.open_session.as_mut().expect("just opened");
+            let capture_frame = CaptureFrame::new(
+                frame_timestamp_ms,
+                hash,
+                pixels.clone(),
+                extent.0,
+                extent.1,
+            );
+            session.add_frame(capture_frame);
             pane_state.pending_pixels.push(pixels);
 
-            // Force-seal if the open bundle is at the cap.
-            if bundle.frames.len() >= MAX_FRAMES_PER_BUNDLE {
-                let mut taken = pane_state.open_bundle.take().expect("just had it");
-                taken.seal(Some("auto-cap".into()), vec!["auto".into()], 0.3);
+            // Force-seal if the session is at the cap.
+            if session.frame_count() >= MAX_FRAMES_PER_BUNDLE {
+                let taken_session = pane_state.open_session.take().expect("just had it");
                 let pixels_for_seal = std::mem::take(&mut pane_state.pending_pixels);
-                sealed_bundles.push((taken, pixels_for_seal));
                 pane_state.bundle_start = None;
+
+                match taken_session.finalize() {
+                    Ok(mut bundle) => {
+                        // Stamp wall-clock on the bundle so the store can order by time.
+                        // `finalize` already sealed the bundle via BundleAssembler::finish;
+                        // we only overwrite the wall-clock field.
+                        bundle.t_wall_unix_ms = pane_state.bundle_wall_ms;
+                        sealed_bundles.push((bundle, pixels_for_seal));
+                    }
+                    Err(e) => {
+                        log::warn!("CaptureSession::finalize failed at cap for pane {app_id}: {e}");
+                    }
+                }
             }
         }
 
@@ -585,26 +635,46 @@ impl crate::app::App {
         }
     }
 
-    /// Seal the open bundle for `pane` (if any) and queue it for persistence.
-    /// Called at command boundaries via [`Self::on_command_boundary`] and
-    /// from the bus-drain loop when an `Event::CommandComplete` is observed.
+    /// Seal the open session for `pane` (if any), finalize it into a
+    /// [`Bundle`], and queue it for persistence.  Called at command
+    /// boundaries via [`Self::on_command_boundary`] and from the bus-drain
+    /// loop when an `Event::CommandComplete` is observed.
     ///
     /// Returns `true` if a bundle was sealed and queued, `false` if there
-    /// was nothing to do (no open bundle for this pane).
+    /// was nothing to do (no open session for this pane, or the session had
+    /// no valid frames after zero-dimension filtering).
     pub(crate) fn seal_pane_bundle(&mut self, pane: AppId, intent: Option<String>) -> bool {
         let Some(state) = self.capture_state.panes.get_mut(&pane) else {
             return false;
         };
-        let Some(mut bundle) = state.open_bundle.take() else {
+        let Some(session) = state.open_session.take() else {
             return false;
         };
         let pixels = std::mem::take(&mut state.pending_pixels);
+        let wall_ms = state.bundle_wall_ms;
         state.bundle_start = None;
         state.last_dhash = None;
         state.consecutive_identical = 0;
-        bundle.seal(intent, vec!["pane-boundary".into()], 0.5);
-        self.persist_sealed_bundles(vec![(bundle, pixels)]);
-        true
+
+        match session.finalize() {
+            Ok(mut bundle) => {
+                // `finalize` already sealed the bundle via BundleAssembler::finish;
+                // we only overwrite the wall-clock field which was 0-initialized.
+                bundle.t_wall_unix_ms = wall_ms;
+                // Propagate the caller's intent into the already-sealed bundle.
+                if let Some(ref intent_str) = intent {
+                    bundle.intent = Some(intent_str.clone());
+                }
+                self.persist_sealed_bundles(vec![(bundle, pixels)]);
+                true
+            }
+            Err(e) => {
+                log::warn!(
+                    "seal_pane_bundle: CaptureSession::finalize failed for pane {pane}: {e}"
+                );
+                false
+            }
+        }
     }
 
     /// Explicit entry point for command-boundary sealing.
@@ -634,6 +704,10 @@ impl crate::app::App {
 
     /// Submit one or more sealed bundles to the job pool for off-thread
     /// persistence. The render thread never blocks on disk I/O.
+    ///
+    /// Uses the `embedding_backend` pre-wired at startup (from
+    /// [`App::with_config_scaled`]) to determine whether vector indexing is
+    /// available. Avoids re-reading the env var on every seal event.
     fn persist_sealed_bundles(&mut self, bundles: Vec<(Bundle, Vec<Vec<u8>>)>) {
         let Some(store) = self.bundle_store.clone() else {
             return;
@@ -644,13 +718,9 @@ impl crate::app::App {
             log::warn!("no job pool, dropping {} sealed bundles", bundles.len());
             return;
         };
-        // Decide once whether OpenAI embeddings are reachable from this
-        // process. If `OPENAI_API_KEY` is unset we never spin up a tokio
-        // runtime on the worker — bundles still persist with metadata.
-        let backend_kind = if std::env::var_os("OPENAI_API_KEY")
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
+        // Use the pre-constructed embedding backend stored on the App.
+        // `None` → bundles persist with metadata but no vector index.
+        let backend_kind = if self.embedding_backend.is_some() {
             EmbeddingBackendKind::OpenAi
         } else {
             EmbeddingBackendKind::None
@@ -674,6 +744,10 @@ impl crate::app::App {
 /// Instead we use FxHash-style 64-bit fold over the bytes and hex-encode
 /// it. Collisions are possible but the field is informational only; the
 /// dhash is what actually drives dedup.
+///
+/// Used by tests to verify determinism. The main pipeline delegates sha
+/// computation to [`CaptureSession`], which derives it from the phash.
+#[allow(dead_code)]
 fn simple_sha_hex(bytes: &[u8]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit basis
     for &b in bytes {
@@ -699,7 +773,7 @@ mod tests {
             last_attempt: None,
             bundle_start: None,
             bundle_wall_ms: 0,
-            open_bundle: None,
+            open_session: None,
             pending_pixels: Vec::new(),
         }
     }
@@ -753,28 +827,22 @@ mod tests {
 
     /// `capture_pipeline_command_boundary_seals_bundle`
     ///
-    /// When a command boundary fires, the open bundle (if any) is sealed
+    /// When a command boundary fires, the open session (if any) is finalized
     /// and removed from the per-pane state. We exercise the seal path
-    /// directly on a synthetic bundle since the seal-and-persist branches
-    /// in `seal_pane_bundle` mirror this logic.
+    /// directly on a synthetic `CaptureSession` since the finalize-and-persist
+    /// branches in `seal_pane_bundle` mirror this logic.
     #[test]
     fn capture_pipeline_command_boundary_seals_bundle() {
+
         let mut state = CaptureState::new();
         let pane: AppId = 7;
 
-        // Open a bundle by hand and stuff a frame into it.
-        let mut bundle = Bundle::new(u64::from(pane));
-        bundle.t_wall_unix_ms = 1_700_000_000_000;
-        bundle.add_frame(FrameRef {
-            t_offset_ns: 0,
-            sha: "stub".into(),
-            blob_path: "frames/0.rgba".into(),
-            dhash: 0xAA,
-            width: 100,
-            height: 100,
-        });
+        // Open a CaptureSession and push one valid frame into it.
+        let mut session = CaptureSession::new(uuid::Uuid::new_v4());
+        session.add_frame(CaptureFrame::new(0, 0xAA, vec![0xAA, 0xBB, 0xCC, 0xDD], 100, 100));
         let ps = PaneCaptureState {
-            open_bundle: Some(bundle),
+            open_session: Some(session),
+            bundle_wall_ms: 1_700_000_000_000,
             pending_pixels: vec![vec![0xAA, 0xBB, 0xCC, 0xDD]],
             ..PaneCaptureState::default()
         };
@@ -782,32 +850,31 @@ mod tests {
 
         assert_eq!(state.open_frame_count(), 1, "1 frame open before seal");
 
-        // Pull the bundle out (mimics what `seal_pane_bundle` does).
-        let mut sealed = state
+        // Pull the session out and finalize it (mimics what `seal_pane_bundle` does).
+        let taken_session = state
             .panes
             .get_mut(&pane)
             .unwrap()
-            .open_bundle
+            .open_session
             .take()
             .unwrap();
-        sealed.seal(
-            Some("test-boundary".into()),
-            vec!["pane-boundary".into()],
-            0.5,
-        );
+        let mut sealed = taken_session.finalize().expect("one valid frame → Ok");
+        sealed.t_wall_unix_ms = 1_700_000_000_000;
+        sealed.intent = Some("test-boundary".into());
 
         assert_eq!(state.open_frame_count(), 0, "0 open frames after take");
-        assert!(sealed.sealed, "bundle sealed flag must be set");
+        assert!(sealed.sealed, "bundle must be sealed by finalize");
         assert_eq!(sealed.intent.as_deref(), Some("test-boundary"));
-        assert_eq!(sealed.frames.len(), 1, "frame count preserved by seal");
+        assert_eq!(sealed.frames.len(), 1, "frame count preserved by finalize");
     }
 
     /// `capture_state_advances_frame_counter_per_pane`
     ///
-    /// Each pane gets its own `consecutive_identical` and `open_bundle`
+    /// Each pane gets its own `consecutive_identical` and `open_session`
     /// frame counters — incrementing one must not touch the other.
     #[test]
     fn capture_state_advances_frame_counter_per_pane() {
+
         let mut state = CaptureState::new();
         let pane_a: AppId = 1;
         let pane_b: AppId = 2;
@@ -815,25 +882,11 @@ mod tests {
         state.panes.insert(pane_a, PaneCaptureState::default());
         state.panes.insert(pane_b, PaneCaptureState::default());
 
-        // Open a bundle in pane A only.
-        let mut a_bundle = Bundle::new(u64::from(pane_a));
-        a_bundle.add_frame(FrameRef {
-            t_offset_ns: 0,
-            sha: "a0".into(),
-            blob_path: "a/0.rgba".into(),
-            dhash: 1,
-            width: 10,
-            height: 10,
-        });
-        a_bundle.add_frame(FrameRef {
-            t_offset_ns: 1_000,
-            sha: "a1".into(),
-            blob_path: "a/1.rgba".into(),
-            dhash: 2,
-            width: 10,
-            height: 10,
-        });
-        state.panes.get_mut(&pane_a).unwrap().open_bundle = Some(a_bundle);
+        // Open a CaptureSession in pane A with 2 frames (distinct phashes).
+        let mut session_a = CaptureSession::new(uuid::Uuid::new_v4());
+        session_a.add_frame(CaptureFrame::new(0, 0x01, vec![0; 4], 10, 10));
+        session_a.add_frame(CaptureFrame::new(1_000, 0x02, vec![0; 4], 10, 10));
+        state.panes.get_mut(&pane_a).unwrap().open_session = Some(session_a);
 
         assert_eq!(state.open_frame_count(), 2, "pane A has 2 frames");
 
@@ -1117,35 +1170,28 @@ mod tests {
         assert_eq!(hits[0].bundle_id, a.id, "alpha must be the closest");
     }
 
-    /// `seal_pane_bundle_signature_takes_pixels_through`
+    /// `seal_pane_bundle_drains_pending_pixels_in_lockstep`
     ///
     /// Fix #1 unit-level check: when `seal_pane_bundle`-style logic runs
     /// (we call the underlying transitions directly since `App` requires
-    /// a full GPU context), the open bundle is taken, pending pixels
-    /// are drained in lock-step, and a sealed bundle + matching
+    /// a full GPU context), the open session is taken and finalized, pending
+    /// pixels are drained in lock-step, and a sealed bundle + matching
     /// `Vec<Vec<u8>>` is what would be queued.
     ///
     /// This mirrors the `App::seal_pane_bundle` body without going
     /// through GPU-bound `App::new`.
     #[test]
     fn seal_pane_bundle_drains_pending_pixels_in_lockstep() {
+
         let mut state = CaptureState::new();
         let pane: AppId = 11;
 
-        // Seed an open bundle with 2 frames + 2 pixel buffers.
-        let mut bundle = Bundle::new(u64::from(pane));
-        for i in 0..2_u64 {
-            bundle.add_frame(FrameRef {
-                t_offset_ns: i * 1_000_000,
-                sha: format!("sha-{i}"),
-                blob_path: "placeholder".into(),
-                dhash: i,
-                width: 2,
-                height: 2,
-            });
-        }
+        // Seed an open CaptureSession with 2 frames + 2 pixel buffers.
+        let mut session = CaptureSession::new(uuid::Uuid::new_v4());
+        session.add_frame(CaptureFrame::new(0, 0x01, vec![1; 16], 2, 2));
+        session.add_frame(CaptureFrame::new(1_000, 0x02, vec![2; 16], 2, 2));
         let ps = PaneCaptureState {
-            open_bundle: Some(bundle),
+            open_session: Some(session),
             pending_pixels: vec![vec![1; 16], vec![2; 16]],
             ..PaneCaptureState::default()
         };
@@ -1153,15 +1199,46 @@ mod tests {
 
         // Mirror the seal_pane_bundle body.
         let pane_state = state.panes.get_mut(&pane).expect("pane present");
-        let mut sealed = pane_state.open_bundle.take().expect("had open bundle");
+        let taken_session = pane_state.open_session.take().expect("had open session");
         let pixels = std::mem::take(&mut pane_state.pending_pixels);
-        sealed.seal(Some("test".into()), vec!["pane-boundary".into()], 0.5);
+        let mut sealed = taken_session.finalize().expect("two valid frames → Ok");
+        sealed.intent = Some("test".into());
 
-        assert!(sealed.sealed);
+        assert!(sealed.sealed, "finalize returns a sealed bundle");
         assert_eq!(sealed.frames.len(), 2);
         assert_eq!(pixels.len(), 2, "pixels must travel with the sealed bundle");
         assert_eq!(pixels[0].len(), 16);
         assert_eq!(pixels[1].len(), 16);
         assert_eq!(state.open_frame_count(), 0, "no open frames after seal");
+    }
+
+    /// `capture_pipeline_skips_analysis_when_no_key`
+    ///
+    /// Verifies that `VisionAnalyzer::from_env()` returns `None`-equivalent
+    /// (via `.ok()`) when `OPENAI_API_KEY` is not set, so the capture pipeline
+    /// gracefully skips GPT-4V analysis rather than panicking.
+    #[test]
+    fn capture_pipeline_skips_analysis_when_no_key() {
+        // Remove the env var for this test scope.
+        // SAFETY: tests are single-threaded by default in cargo test; mutating
+        // process env vars in this scope is safe within Rust 2024's
+        // `std::env::remove_var` unsafe contract.
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+
+        let result = phantom_vision::VisionAnalyzer::from_env();
+        assert!(
+            result.is_err(),
+            "from_env must fail without OPENAI_API_KEY"
+        );
+
+        // The capture pipeline stores `from_env().ok()` — verify it yields None.
+        let analyzer: Option<std::sync::Arc<phantom_vision::VisionAnalyzer>> =
+            phantom_vision::VisionAnalyzer::from_env()
+                .ok()
+                .map(std::sync::Arc::new);
+        assert!(
+            analyzer.is_none(),
+            "vision_analyzer field must be None when OPENAI_API_KEY is absent"
+        );
     }
 }
