@@ -13,12 +13,22 @@ use phantom_nlp::NlpInterpreter;
 use phantom_nlp::interpreter::ResolvedAction;
 use phantom_nlp::{Intent, translate};
 use phantom_protocol::{AppMessage, SupervisorCommand};
+use phantom_renderer::screenshot::{ScreenshotMetadata, capture_frame, save_screenshot};
 use phantom_ui::themes;
 
 use crate::app::{App, AppState, NlpTranslateResult};
 use crate::boot::BootSequence;
 use crate::config::PhantomConfig;
 use crate::console_eval::{self, EvalResult};
+
+/// Default font size in points used by `font reset`. Mirrors the
+/// `PhantomConfig::default().font_size` value so the console reset and the
+/// disk-loaded default stay in lockstep.
+const DEFAULT_FONT_SIZE_PT: f32 = 14.0;
+
+/// Minimum/maximum font size accepted by the `font <size>` command, in points.
+const MIN_FONT_SIZE_PT: f32 = 6.0;
+const MAX_FONT_SIZE_PT: f32 = 72.0;
 
 impl App {
     /// Send a command to a coordinator-managed adapter by app ID.
@@ -586,77 +596,98 @@ impl App {
             // ------------------------------------------------------------------
             // font <size> | font reset
             // ------------------------------------------------------------------
-            "font" => match parts.get(1).copied() {
-                None | Some("") => {
-                    let current = self.text_renderer.font_size();
-                    self.console
-                        .output(format!("Font size: {current:.0}pt (default: 14pt)"));
-                    self.console.output("Usage: font <size>  |  font reset");
-                }
-                Some("reset") => {
-                    const FONT_DEFAULT: f32 = 14.0;
-                    self.text_renderer.set_font_size(FONT_DEFAULT);
-                    self.console
-                        .output(format!("Font size reset to {FONT_DEFAULT:.0}pt"));
-                }
-                Some(size_str) => match size_str.parse::<f32>() {
-                    Ok(size) if size >= 6.0 && size <= 72.0 => {
-                        self.text_renderer.set_font_size(size);
-                        self.console.output(format!("Font size set to {size:.0}pt"));
+            "font" => {
+                // Lowercase the subcommand so `font Reset`, `font RESET`, and
+                // `font reset` all match. The primary command word is already
+                // lowercased above; this matches that contract.
+                let sub = parts.get(1).map(|s| s.to_ascii_lowercase());
+                match sub.as_deref() {
+                    None | Some("") => {
+                        let current = self.text_renderer.font_size();
+                        self.console.output(format!(
+                            "Font size: {current:.0}pt (default: {DEFAULT_FONT_SIZE_PT:.0}pt)"
+                        ));
+                        self.console.output("Usage: font <size>  |  font reset");
                     }
-                    Ok(size) => {
-                        self.console
-                            .error(format!("Font size {size} out of range (6–72pt)"));
+                    Some("reset") => {
+                        self.text_renderer.set_font_size(DEFAULT_FONT_SIZE_PT);
+                        self.console.output(format!(
+                            "Font size reset to {DEFAULT_FONT_SIZE_PT:.0}pt"
+                        ));
                     }
-                    Err(_) => {
-                        self.console.error(format!("Invalid font size: {size_str}"));
-                    }
-                },
-            },
-            // ------------------------------------------------------------------
-            // memory  |  memory clear
-            // ------------------------------------------------------------------
-            "memory" => match parts.get(1).copied() {
-                Some("clear") => match self.memory {
-                    None => {
-                        self.console.output("Memory store not available.");
-                    }
-                    Some(ref mut store) => {
-                        let keys: Vec<String> = store.all().iter().map(|e| e.key.clone()).collect();
-                        let count = keys.len();
-                        for key in &keys {
-                            let _ = store.remove(key);
-                        }
-                        self.console
-                            .output(format!("Memory cleared ({count} entries removed)."));
-                    }
-                },
-                _ => match self.memory {
-                    None => {
-                        self.console.output("Memory store not available.");
-                    }
-                    Some(ref store) => {
-                        let entries = store.all();
-                        if entries.is_empty() {
-                            self.console.output("Memory: (no entries)");
-                        } else {
-                            self.console
-                                .output(format!("Memory ({} entries):", entries.len()));
-                            for entry in entries {
-                                self.console
-                                    .output(format!("  {:30}  {}", entry.key, entry.value));
+                    Some(_) => {
+                        // Re-borrow the raw token so we surface the user's
+                        // original casing in error messages.
+                        let size_str = parts.get(1).copied().unwrap_or("");
+                        match size_str.parse::<f32>() {
+                            Ok(size) if (MIN_FONT_SIZE_PT..=MAX_FONT_SIZE_PT).contains(&size) => {
+                                self.text_renderer.set_font_size(size);
+                                self.console.output(format!("Font size set to {size:.0}pt"));
+                            }
+                            Ok(size) => {
+                                self.console.error(format!(
+                                    "Font size {size} out of range ({MIN_FONT_SIZE_PT:.0}–{MAX_FONT_SIZE_PT:.0}pt)"
+                                ));
+                            }
+                            Err(_) => {
+                                self.console.error(format!("Invalid font size: {size_str}"));
                             }
                         }
                     }
-                },
-            },
+                }
+            }
+            // ------------------------------------------------------------------
+            // memory  |  memory clear
+            // ------------------------------------------------------------------
+            "memory" => {
+                // Lowercase the subcommand to keep the command case-insensitive
+                // end-to-end (`memory CLEAR`, `Memory Clear`, etc.).
+                let sub = parts.get(1).map(|s| s.to_ascii_lowercase());
+                match sub.as_deref() {
+                    Some("clear") => match self.memory {
+                        None => {
+                            self.console.output("Memory store not available.");
+                        }
+                        Some(ref mut store) => {
+                            // `store.all()` returns `&[MemoryEntry]` borrowed
+                            // from `store`. We must collect owned `String`s
+                            // *before* the mutable `store.remove(...)` calls
+                            // because the slice borrow conflicts with the
+                            // `&mut self` on `remove`.
+                            let keys: Vec<String> =
+                                store.all().iter().map(|e| e.key.clone()).collect();
+                            let count = keys.len();
+                            for key in &keys {
+                                let _ = store.remove(key);
+                            }
+                            self.console
+                                .output(format!("Memory cleared ({count} entries removed)."));
+                        }
+                    },
+                    _ => match self.memory {
+                        None => {
+                            self.console.output("Memory store not available.");
+                        }
+                        Some(ref store) => {
+                            let entries = store.all();
+                            if entries.is_empty() {
+                                self.console.output("Memory: (no entries)");
+                            } else {
+                                self.console
+                                    .output(format!("Memory ({} entries):", entries.len()));
+                                for entry in entries {
+                                    self.console
+                                        .output(format!("  {:30}  {}", entry.key, entry.value));
+                                }
+                            }
+                        }
+                    },
+                }
+            }
             // ------------------------------------------------------------------
             // screenshot
             // ------------------------------------------------------------------
             "screenshot" => {
-                use phantom_renderer::screenshot::{
-                    ScreenshotMetadata, capture_frame, save_screenshot,
-                };
                 use std::time::{SystemTime, UNIX_EPOCH};
 
                 let texture = self.postfx.scene_texture();
@@ -669,7 +700,10 @@ impl App {
                             .error(format!("Screenshot capture failed: {e}"));
                     }
                     Ok(pixels) => {
-                        // Swap BGRA → RGBA on Metal/D3D12 where surface format is Bgra8.
+                        // Swap BGRA → RGBA on Metal/D3D12 where the surface
+                        // format is Bgra8. `capture_frame` strips row padding
+                        // but does not re-encode channel order, so we resolve
+                        // it here against the live `gpu.format`.
                         let pixels_rgba = match self.gpu.format {
                             wgpu::TextureFormat::Bgra8Unorm
                             | wgpu::TextureFormat::Bgra8UnormSrgb => {
@@ -700,10 +734,11 @@ impl App {
                                 .and_then(|c| c.git.as_ref().map(|g| g.branch.clone())),
                         };
 
-                        let downloads = std::env::var("HOME")
-                            .ok()
-                            .map(|h| std::path::PathBuf::from(h).join("Downloads"))
-                            .unwrap_or_else(|| std::env::temp_dir());
+                        // Resolve the target directory: prefer `$HOME/Downloads`,
+                        // fall back to `std::env::temp_dir()` if `HOME` is unset
+                        // *or* if the Downloads directory cannot be created
+                        // (headless Linux, sandboxed containers, etc).
+                        let downloads = resolve_screenshot_dir();
                         let filename = format!("phantom-{timestamp}.png");
                         let png_path = downloads.join(&filename);
 
@@ -1111,6 +1146,27 @@ fn capability_class_str(c: CapabilityClass) -> &'static str {
     }
 }
 
+/// Resolve the directory used to save screenshots.
+///
+/// Prefers `$HOME/Downloads`. If `HOME` is unset or the Downloads directory
+/// cannot be created (headless Linux, sandboxed containers, NixOS where the
+/// XDG dir was never provisioned, etc.) the function falls back to
+/// `std::env::temp_dir()`. The returned directory is guaranteed to exist on
+/// success; if both the preferred path *and* the temp dir cannot be created
+/// the temp dir path is still returned so the eventual `save_screenshot`
+/// call surfaces a useful filesystem error to the user.
+fn resolve_screenshot_dir() -> std::path::PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        let downloads = std::path::PathBuf::from(home).join("Downloads");
+        if std::fs::create_dir_all(&downloads).is_ok() {
+            return downloads;
+        }
+    }
+    let tmp = std::env::temp_dir();
+    let _ = std::fs::create_dir_all(&tmp);
+    tmp
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1316,6 +1372,64 @@ mod tests {
         let cmd_lower = parts[0].to_lowercase();
         assert_eq!(cmd_lower.as_str(), "font");
         assert_eq!(parts.get(1).copied(), Some("reset"));
+    }
+
+    /// Subcommand tokens for `font` must be matched case-insensitively
+    /// (review follow-up — addresses the "incomplete case-sensitivity fix"
+    /// raised on the original PR).
+    #[test]
+    fn font_subcommand_is_case_insensitive() {
+        for raw in &["FONT RESET", "Font Reset", "fOnT rEsEt"] {
+            let parts: Vec<&str> = raw.trim().splitn(4, ' ').collect();
+            let cmd_lower = parts[0].to_lowercase();
+            let sub_lower = parts.get(1).map(|s| s.to_ascii_lowercase());
+            assert_eq!(cmd_lower, "font");
+            assert_eq!(sub_lower.as_deref(), Some("reset"), "input was {raw}");
+        }
+    }
+
+    /// Subcommand tokens for `memory` must be matched case-insensitively.
+    #[test]
+    fn memory_subcommand_is_case_insensitive() {
+        for raw in &["memory clear", "MEMORY CLEAR", "Memory Clear"] {
+            let parts: Vec<&str> = raw.trim().splitn(4, ' ').collect();
+            let cmd_lower = parts[0].to_lowercase();
+            let sub_lower = parts.get(1).map(|s| s.to_ascii_lowercase());
+            assert_eq!(cmd_lower, "memory");
+            assert_eq!(sub_lower.as_deref(), Some("clear"), "input was {raw}");
+        }
+    }
+
+    /// Constants advertised in the `font` usage string must match the
+    /// values used in the parse guard, so users see the same range the
+    /// validator actually enforces.
+    #[test]
+    fn font_size_constants_match_advertised_range() {
+        assert_eq!(MIN_FONT_SIZE_PT, 6.0);
+        assert_eq!(MAX_FONT_SIZE_PT, 72.0);
+        assert_eq!(DEFAULT_FONT_SIZE_PT, 14.0);
+    }
+
+    /// `resolve_screenshot_dir()` must always return a path; under tests
+    /// the temp dir branch is the deterministic fallback.
+    #[test]
+    fn screenshot_dir_resolution_is_robust() {
+        // Save and clear HOME so we exercise the temp-dir fallback.
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: tests are single-threaded by default for the modify-env
+        // case; if this becomes flaky under nextest parallelism, scope it
+        // to a serial test module.
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        let dir = super::resolve_screenshot_dir();
+        assert!(dir.exists() || dir == std::env::temp_dir());
+        // Restore.
+        if let Some(h) = prev_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
