@@ -79,6 +79,12 @@ impl AgentPane {
         let registry = self.registry.clone()?;
         let pending_spawn = self.pending_spawn.clone()?;
         let self_ref = self.self_ref.clone()?;
+        // #645: DispatchContext::event_log is non-optional, so the pane's
+        // own `Option<Arc<Mutex<EventLog>>>` must be `Some` before a
+        // context can be constructed. The deferred-construction pattern in
+        // `set_substrate_handles` still applies — the pane keeps `Option`
+        // on its own field; the boundary is here.
+        let event_log = self.event_log.clone()?;
         // Issue #235: inject the ticket dispatcher only for Dispatcher-role
         // panes. Non-Dispatcher agents receive `None` so the three Dispatcher
         // tools remain unreachable to them (capability gate catches first, but
@@ -106,7 +112,7 @@ impl AgentPane {
             role: self.role,
             working_dir: std::path::Path::new(self.working_dir.as_str()),
             registry,
-            event_log: self.event_log.clone(),
+            event_log,
             pending_spawn,
             source_event_id: None,
             // Sec.7.3 fix (#225): pass the real quarantine registry so the
@@ -117,6 +123,7 @@ impl AgentPane {
             ticket_dispatcher,
             runtime_mode: phantom_agents::dispatch::RuntimeMode::Normal,
             dag_explorer,
+            mcp_registry: self.mcp_registry.clone(),
         })
     }
 }

@@ -571,6 +571,14 @@ impl App {
                     .system("SELFHEAL: test → diagnose → fix → verify → commit → push");
                 self.selftest = Some(crate::selftest::SelfTestRunner::new(true));
             }
+            "inspect" => {
+                if self.spawn_inspector_pane() {
+                    self.console.system("Inspector pane opened.");
+                    self.console.open = false;
+                } else {
+                    self.console.error("inspect: could not open inspector pane (no focused pane or split failed)");
+                }
+            }
             "clear" => {
                 self.console.history.clear();
                 self.console.scroll_offset = 0;
@@ -629,6 +637,8 @@ impl App {
                     .output("  history [N]         Show last N commands (default 20)");
                 self.console
                     .output("  suggestions         List dismissed/expired suggestion history");
+                self.console
+                    .output("  inspect             Open inspector pane (Cmd+I also works)");
                 self.console
                     .output("  selftest            Brain exercises its own features");
                 self.console

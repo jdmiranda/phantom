@@ -17,6 +17,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::jsonl::{CURRENT_SCHEMA_VERSION, schema_v1};
+
 // ---------------------------------------------------------------------------
 // ToolCall
 // ---------------------------------------------------------------------------
@@ -67,6 +69,14 @@ impl ToolCall {
     /// Timestamp of the invocation.
     #[must_use]
     pub fn called_at(&self) -> DateTime<Utc> { self.called_at }
+
+    /// Set the output JSON for this tool call.
+    ///
+    /// Called after the tool result arrives so the capture record carries the
+    /// full input→output pair rather than a one-sided input-only snapshot.
+    pub fn set_output_json(&mut self, output: String) {
+        self.output_json = Some(output);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +86,9 @@ impl ToolCall {
 /// A single captured record from an agent run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentRecord {
+    /// Schema version — defaults to 1 when deserialising pre-versioned records.
+    #[serde(default = "schema_v1")]
+    schema_version: u32,
     /// UUID of this record.
     id: Uuid,
     /// Which agent produced this record.
@@ -148,6 +161,7 @@ impl AgentOutputCapture {
         text_output: impl Into<String>,
     ) -> Result<()> {
         let record = AgentRecord {
+            schema_version: CURRENT_SCHEMA_VERSION,
             id: Uuid::new_v4(),
             agent_name: agent_name.into(),
             session_id,
@@ -203,8 +217,13 @@ impl AgentOutputCapture {
         for line in reader.lines() {
             let line = line.context("read error counting agent sidecar lines")?;
             let t = line.trim();
-            if !t.is_empty() && serde_json::from_str::<AgentRecord>(t).is_ok() {
-                count += 1;
+            if t.is_empty() {
+                continue;
+            }
+            if let Ok(r) = serde_json::from_str::<AgentRecord>(t) {
+                if r.schema_version <= CURRENT_SCHEMA_VERSION {
+                    count += 1;
+                }
             }
         }
         Ok(count)
@@ -233,7 +252,16 @@ impl AgentOutputCapture {
                 continue;
             }
             match serde_json::from_str::<AgentRecord>(trimmed) {
-                Ok(r) => records.push(CapturedAgent::from(r)),
+                Ok(r) => {
+                    if r.schema_version > CURRENT_SCHEMA_VERSION {
+                        log::warn!(
+                            "skipping agent sidecar record with unsupported schema_version {}",
+                            r.schema_version
+                        );
+                        continue;
+                    }
+                    records.push(CapturedAgent::from(r));
+                }
                 Err(e) => log::warn!("skipping corrupt agent sidecar line: {e}"),
             }
         }
@@ -455,5 +483,53 @@ mod tests {
         assert_eq!(tc.name(), "WriteFile");
         assert!(tc.input_json().contains("/tmp/x"));
         assert!(tc.output_json().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. set_output_json populates the output field after construction
+    //
+    //    Bug 2 fix: ToolCall records are initially created with output_json = None
+    //    and later updated when the tool result arrives.  set_output_json must
+    //    make the value visible through the output_json() getter.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_output_json_populates_output_field() {
+        let mut tc = ToolCall::new("RunCommand", r#"{"command":"ls"}"#, None);
+        assert!(tc.output_json().is_none(), "output must start as None");
+
+        tc.set_output_json(r#"{"stdout":"file.txt","exit_code":0}"#.to_string());
+        assert!(
+            tc.output_json().is_some(),
+            "output_json must be Some after set_output_json"
+        );
+        assert_eq!(
+            tc.output_json().unwrap(),
+            r#"{"stdout":"file.txt","exit_code":0}"#
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Tool call with output_json set survives round-trip through the sidecar
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_call_with_output_json_round_trips() {
+        let (cap, _dir) = temp_capture();
+        let session = Uuid::new_v4();
+
+        let mut tc = ToolCall::new("ReadFile", r#"{"path":"/etc/hosts"}"#, None);
+        tc.set_output_json(r#"{"content":"127.0.0.1 localhost"}"#.to_string());
+
+        cap.append("agent-z", session, vec![tc], "done reading").unwrap();
+
+        let records = cap.recent(1).unwrap();
+        assert_eq!(records.len(), 1);
+        let calls = records[0].tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].output_json().unwrap(),
+            r#"{"content":"127.0.0.1 localhost"}"#
+        );
     }
 }

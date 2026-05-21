@@ -1,6 +1,146 @@
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use crate::types::*;
+
+// ---------------------------------------------------------------------------
+// Compiled-once regex statics (LazyLock ensures initialization happens once
+// per process).  Any panic here is a programmer bug — the literals are
+// hardcoded and must be valid.
+// ---------------------------------------------------------------------------
+
+// -- git status regexes -----------------------------------------------------
+static GIT_STATUS_BRANCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"On branch (\S+)")
+        .expect("GIT_STATUS_BRANCH_RE literal must compile")
+});
+static GIT_STATUS_UPSTREAM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Your branch is .+ '([^']+)'")
+        .expect("GIT_STATUS_UPSTREAM_RE literal must compile")
+});
+static GIT_STATUS_AHEAD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"ahead of .+ by (\d+) commit")
+        .expect("GIT_STATUS_AHEAD_RE literal must compile")
+});
+static GIT_STATUS_BEHIND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"behind .+ by (\d+) commit")
+        .expect("GIT_STATUS_BEHIND_RE literal must compile")
+});
+static GIT_STATUS_MODIFIED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s+modified:\s+(.+)$")
+        .expect("GIT_STATUS_MODIFIED_RE literal must compile")
+});
+static GIT_STATUS_NEW_FILE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s+new file:\s+(.+)$")
+        .expect("GIT_STATUS_NEW_FILE_RE literal must compile")
+});
+static GIT_STATUS_DELETED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s+deleted:\s+(.+)$")
+        .expect("GIT_STATUS_DELETED_RE literal must compile")
+});
+static GIT_STATUS_RENAMED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s+renamed:\s+(.+)$")
+        .expect("GIT_STATUS_RENAMED_RE literal must compile")
+});
+
+// -- git log regexes --------------------------------------------------------
+static GIT_LOG_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^commit ([0-9a-f]+)")
+        .expect("GIT_LOG_COMMIT_RE literal must compile")
+});
+static GIT_LOG_AUTHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^Author:\s+(.+)$")
+        .expect("GIT_LOG_AUTHOR_RE literal must compile")
+});
+static GIT_LOG_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^Date:\s+(.+)$")
+        .expect("GIT_LOG_DATE_RE literal must compile")
+});
+static GIT_LOG_ONELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^([0-9a-f]{7,40})\s+(.+)$")
+        .expect("GIT_LOG_ONELINE_RE literal must compile")
+});
+
+// -- rust / cargo error regexes ---------------------------------------------
+static RUST_DIAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^(error|warning)(?:\[([A-Z]\d+)\])?: (.+)\n\s*--> ([^:]+):(\d+):(\d+)",
+    )
+    .expect("RUST_DIAG_RE literal must compile")
+});
+static RUST_HELP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*= help: (.+)$")
+        .expect("RUST_HELP_RE literal must compile")
+});
+static RUST_SUGGESTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^help: (.+)$")
+        .expect("RUST_SUGGESTION_RE literal must compile")
+});
+static RUST_SIMPLE_ERR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^error: (.+)$")
+        .expect("RUST_SIMPLE_ERR_RE literal must compile")
+});
+
+// -- test results regexes ---------------------------------------------------
+static TEST_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored",
+    )
+    .expect("TEST_RESULT_RE literal must compile")
+});
+static TEST_FAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^test (.+) \.\.\. FAILED$")
+        .expect("TEST_FAIL_RE literal must compile")
+});
+
+// -- HTTP response regexes --------------------------------------------------
+static HTTP_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^HTTP/[\d.]+ (\d{3})\s*(.*)$")
+        .expect("HTTP_STATUS_RE literal must compile")
+});
+static HTTP_CONTENT_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?mi)^content-type:\s*(.+)$")
+        .expect("HTTP_CONTENT_TYPE_RE literal must compile")
+});
+
+// -- docker output regexes --------------------------------------------------
+static DOCKER_BUILT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Successfully built ([0-9a-f]+)")
+        .expect("DOCKER_BUILT_RE literal must compile")
+});
+
+// -- npm output regexes -----------------------------------------------------
+static NPM_ADDED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"added (\d+) package")
+        .expect("NPM_ADDED_RE literal must compile")
+});
+static NPM_AUDIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"found (\d+) vulnerabilit")
+        .expect("NPM_AUDIT_RE literal must compile")
+});
+static NPM_PASSING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(\d+) passing")
+        .expect("NPM_PASSING_RE literal must compile")
+});
+static NPM_FAILING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(\d+) failing")
+        .expect("NPM_FAILING_RE literal must compile")
+});
+static NPM_JEST_PASS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Tests:.*?(\d+) passed")
+        .expect("NPM_JEST_PASS_RE literal must compile")
+});
+static NPM_JEST_FAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Tests:.*?(\d+) failed")
+        .expect("NPM_JEST_FAIL_RE literal must compile")
+});
+
+// -- table detection regex --------------------------------------------------
+/// Matches two or more consecutive spaces (column gap heuristic).
+static TABLE_GAP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r" {2,}").expect("TABLE_GAP_RE literal must compile")
+});
 
 /// Semantic parser: classifies commands and extracts structured data from
 /// terminal output.  Stateless — every method is pure.
@@ -62,6 +202,21 @@ impl SemanticParser {
             | "sh" => CommandType::Shell,
             _ => CommandType::Unknown,
         }
+    }
+
+    /// Full parse pipeline with timing.  Returns the [`ParsedOutput`] and the
+    /// wall-clock duration of the parse itself.
+    #[must_use]
+    pub fn parse_with_timing(
+        &self,
+        command: &str,
+        stdout: &str,
+        stderr: &str,
+        exit_code: Option<i32>,
+    ) -> (ParsedOutput, std::time::Duration) {
+        let start = std::time::Instant::now();
+        let result = Self::parse(command, stdout, stderr, exit_code);
+        (result, start.elapsed())
     }
 
     /// Full parse pipeline: classify, detect content type, extract errors.
@@ -197,6 +352,14 @@ impl SemanticParser {
                     Self::fallback_content_type(combined)
                 }
             }
+            CommandType::Docker(sub) => {
+                let ct = Self::parse_docker_output(sub, combined);
+                (ct, vec![], vec![])
+            }
+            CommandType::Npm(sub) => {
+                let ct = Self::parse_npm_output(sub, combined);
+                (ct, vec![], vec![])
+            }
             _ => Self::fallback_content_type(combined),
         }
     }
@@ -217,28 +380,18 @@ impl SemanticParser {
     // -- git status ---------------------------------------------------------
 
     fn parse_git_status(output: &str) -> ContentType {
-        let branch_re = Regex::new(r"On branch (\S+)").unwrap();
-        let upstream_re =
-            Regex::new(r"Your branch is .+ '([^']+)'").unwrap();
-        let ahead_re = Regex::new(r"ahead of .+ by (\d+) commit").unwrap();
-        let behind_re = Regex::new(r"behind .+ by (\d+) commit").unwrap();
-        let modified_re = Regex::new(r"(?m)^\s+modified:\s+(.+)$").unwrap();
-        let new_file_re = Regex::new(r"(?m)^\s+new file:\s+(.+)$").unwrap();
-        let deleted_re = Regex::new(r"(?m)^\s+deleted:\s+(.+)$").unwrap();
-        let renamed_re = Regex::new(r"(?m)^\s+renamed:\s+(.+)$").unwrap();
-
-        let branch = branch_re
+        let branch = GIT_STATUS_BRANCH_RE
             .captures(output)
             .map(|c| c[1].to_string())
             .unwrap_or_default();
-        let upstream = upstream_re
+        let upstream = GIT_STATUS_UPSTREAM_RE
             .captures(output)
             .map(|c| c[1].to_string());
-        let ahead = ahead_re
+        let ahead = GIT_STATUS_AHEAD_RE
             .captures(output)
             .and_then(|c| c[1].parse().ok())
             .unwrap_or(0);
-        let behind = behind_re
+        let behind = GIT_STATUS_BEHIND_RE
             .captures(output)
             .and_then(|c| c[1].parse().ok())
             .unwrap_or(0);
@@ -286,20 +439,20 @@ impl SemanticParser {
             match current_section {
                 Section::Staged => {
                     // Lines like "  new file:   foo.rs" or "  modified:   bar.rs"
-                    if let Some(caps) = new_file_re.captures(line) {
+                    if let Some(caps) = GIT_STATUS_NEW_FILE_RE.captures(line) {
                         staged.push(caps[1].trim().to_string());
-                    } else if let Some(caps) = modified_re.captures(line) {
+                    } else if let Some(caps) = GIT_STATUS_MODIFIED_RE.captures(line) {
                         staged.push(caps[1].trim().to_string());
-                    } else if let Some(caps) = deleted_re.captures(line) {
+                    } else if let Some(caps) = GIT_STATUS_DELETED_RE.captures(line) {
                         staged.push(caps[1].trim().to_string());
-                    } else if let Some(caps) = renamed_re.captures(line) {
+                    } else if let Some(caps) = GIT_STATUS_RENAMED_RE.captures(line) {
                         staged.push(caps[1].trim().to_string());
                     }
                 }
                 Section::Unstaged => {
-                    if let Some(caps) = modified_re.captures(line) {
+                    if let Some(caps) = GIT_STATUS_MODIFIED_RE.captures(line) {
                         modified.push(caps[1].trim().to_string());
-                    } else if let Some(caps) = deleted_re.captures(line) {
+                    } else if let Some(caps) = GIT_STATUS_DELETED_RE.captures(line) {
                         modified.push(caps[1].trim().to_string());
                     }
                 }
@@ -333,16 +486,12 @@ impl SemanticParser {
     // -- git log ------------------------------------------------------------
 
     fn parse_git_log(output: &str) -> ContentType {
-        let commit_re = Regex::new(r"(?m)^commit ([0-9a-f]+)").unwrap();
-        let author_re = Regex::new(r"(?m)^Author:\s+(.+)$").unwrap();
-        let date_re = Regex::new(r"(?m)^Date:\s+(.+)$").unwrap();
-
         // Split on "commit <hash>" boundaries.
-        let blocks: Vec<&str> = commit_re
+        let blocks: Vec<&str> = GIT_LOG_COMMIT_RE
             .split(output)
             .filter(|s| !s.trim().is_empty())
             .collect();
-        let hashes: Vec<String> = commit_re
+        let hashes: Vec<String> = GIT_LOG_COMMIT_RE
             .captures_iter(output)
             .map(|c| c[1].to_string())
             .collect();
@@ -351,11 +500,11 @@ impl SemanticParser {
 
         for (i, block) in blocks.iter().enumerate() {
             let hash = hashes.get(i).cloned().unwrap_or_default();
-            let author = author_re
+            let author = GIT_LOG_AUTHOR_RE
                 .captures(block)
                 .map(|c| c[1].trim().to_string())
                 .unwrap_or_default();
-            let date = date_re
+            let date = GIT_LOG_DATE_RE
                 .captures(block)
                 .map(|c| c[1].trim().to_string())
                 .unwrap_or_default();
@@ -382,8 +531,7 @@ impl SemanticParser {
 
         // Also try the compact `<hash> <message>` one-line format.
         if entries.is_empty() {
-            let oneline_re = Regex::new(r"(?m)^([0-9a-f]{7,40})\s+(.+)$").unwrap();
-            for caps in oneline_re.captures_iter(output) {
+            for caps in GIT_LOG_ONELINE_RE.captures_iter(output) {
                 entries.push(GitLogEntry {
                     hash: caps[1].to_string(),
                     author: String::new(),
@@ -436,15 +584,7 @@ impl SemanticParser {
         // Primary pattern:
         //   error[E0308]: mismatched types
         //     --> src/main.rs:10:5
-        let diag_re = Regex::new(
-            r"(?m)^(error|warning)(?:\[([A-Z]\d+)\])?: (.+)\n\s*--> ([^:]+):(\d+):(\d+)",
-        )
-        .unwrap();
-
-        let help_re = Regex::new(r"(?m)^\s*= help: (.+)$").unwrap();
-        let suggestion_re = Regex::new(r"(?m)^help: (.+)$").unwrap();
-
-        for caps in diag_re.captures_iter(stderr) {
+        for caps in RUST_DIAG_RE.captures_iter(stderr) {
             let severity_str = &caps[1];
             let code = caps.get(2).map(|m| m.as_str().to_string());
             let message = caps[3].to_string();
@@ -471,9 +611,9 @@ impl SemanticParser {
                 None => remaining,
             };
 
-            let suggestion = help_re
+            let suggestion = RUST_HELP_RE
                 .captures(scope)
-                .or_else(|| suggestion_re.captures(scope))
+                .or_else(|| RUST_SUGGESTION_RE.captures(scope))
                 .map(|c| c[1].trim().to_string());
 
             let raw_line = caps[0].lines().next().unwrap_or("").to_string();
@@ -492,8 +632,7 @@ impl SemanticParser {
         }
 
         // Simpler pattern for linker errors or plain "error: ..." without location.
-        let simple_err_re = Regex::new(r"(?m)^error: (.+)$").unwrap();
-        for caps in simple_err_re.captures_iter(stderr) {
+        for caps in RUST_SIMPLE_ERR_RE.captures_iter(stderr) {
             let msg = caps[1].to_string();
             // Skip if we already captured this as a richer diagnostic.
             if results.iter().any(|e| e.message == msg) {
@@ -524,12 +663,7 @@ impl SemanticParser {
     fn parse_test_results(output: &str) -> Option<TestSummary> {
         // `test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out`
         // `test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out`
-        let result_re = Regex::new(
-            r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored",
-        )
-        .unwrap();
-
-        let caps = result_re.captures(output)?;
+        let caps = TEST_RESULT_RE.captures(output)?;
         let passed: u32 = caps[1].parse().unwrap_or(0);
         let failed: u32 = caps[2].parse().unwrap_or(0);
         let ignored: u32 = caps[3].parse().unwrap_or(0);
@@ -537,8 +671,7 @@ impl SemanticParser {
 
         // Collect names of failing tests.
         // Pattern: `test some::path ... FAILED`
-        let fail_re = Regex::new(r"(?m)^test (.+) \.\.\. FAILED$").unwrap();
-        let failures: Vec<String> = fail_re
+        let failures: Vec<String> = TEST_FAIL_RE
             .captures_iter(output)
             .map(|c| c[1].trim().to_string())
             .collect();
@@ -575,16 +708,11 @@ impl SemanticParser {
 
     fn parse_http_response(output: &str) -> Option<ContentType> {
         // Pattern: `HTTP/1.1 200 OK` or `HTTP/2 404 Not Found`
-        let status_re =
-            Regex::new(r"(?m)^HTTP/[\d.]+ (\d{3})\s*(.*)$").unwrap();
-        let content_type_re =
-            Regex::new(r"(?mi)^content-type:\s*(.+)$").unwrap();
-
-        let caps = status_re.captures(output)?;
+        let caps = HTTP_STATUS_RE.captures(output)?;
         let status: u16 = caps[1].parse().ok()?;
         let status_text = caps[2].trim().to_string();
 
-        let content_type = content_type_re
+        let content_type = HTTP_CONTENT_TYPE_RE
             .captures(output)
             .map(|c| c[1].trim().to_string());
 
@@ -604,6 +732,109 @@ impl SemanticParser {
             content_type,
             body_preview,
         }))
+    }
+
+    // -- docker output ------------------------------------------------------
+
+    fn parse_docker_output(sub: &DockerCommand, output: &str) -> ContentType {
+        match sub {
+            DockerCommand::Ps => {
+                // `docker ps` prints a fixed-width table:
+                //   CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS     PORTS    NAMES
+                //   abc123def456   nginx     …         …         Up 5 min   80/tcp   web
+                // Split on 2+ spaces (docker ps uses wide column gaps).
+                let mut containers = Vec::new();
+
+                // Skip the header row (first line).
+                for line in output.lines().skip(1) {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let cols: Vec<&str> = TABLE_GAP_RE.splitn(trimmed, 7).collect();
+                    // Columns: ID IMAGE COMMAND CREATED STATUS PORTS NAMES
+                    let id = cols.first().copied().unwrap_or("").to_string();
+                    // NAMES is the last column; STATUS is index 4; PORTS is index 5.
+                    let status = cols.get(4).copied().unwrap_or("").to_string();
+                    let ports = cols.get(5).copied().unwrap_or("").to_string();
+                    let name = cols.get(6).copied().unwrap_or("").to_string();
+
+                    if !id.is_empty() {
+                        containers.push(DockerContainer { id, name, status, ports });
+                    }
+                }
+
+                ContentType::DockerOutput(DockerOutputData {
+                    containers,
+                    built_image_hash: None,
+                    build_failed: false,
+                })
+            }
+            DockerCommand::Build => {
+                // "Successfully built abc123def456" or error patterns.
+                let built_image_hash = DOCKER_BUILT_RE
+                    .captures(output)
+                    .map(|c| c[1].to_string());
+                let build_failed = output.contains("ERROR") || output.contains("failed to");
+
+                ContentType::DockerOutput(DockerOutputData {
+                    containers: vec![],
+                    built_image_hash,
+                    build_failed,
+                })
+            }
+            _ => {
+                // For other docker subcommands fall through to table/plain detection.
+                if let Some(ct) = Self::detect_table(output) {
+                    ct
+                } else {
+                    ContentType::PlainText
+                }
+            }
+        }
+    }
+
+    // -- npm output ---------------------------------------------------------
+
+    fn parse_npm_output(sub: &NpmCommand, output: &str) -> ContentType {
+        match sub {
+            NpmCommand::Install => {
+                // "added 123 packages" / "changed 5 packages" / "removed 2 packages"
+                let package_count = NPM_ADDED_RE
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok());
+                let audit_warnings = NPM_AUDIT_RE
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok());
+
+                ContentType::NpmOutput(NpmOutputData {
+                    package_count,
+                    audit_warnings,
+                    tests_passed: None,
+                    tests_failed: None,
+                })
+            }
+            NpmCommand::Test => {
+                // Jest-style: "Tests: 2 failed, 5 passed, 7 total"
+                // Mocha-style: "passing (200ms)" / "failing"
+                let tests_passed = NPM_PASSING_RE
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok())
+                    .or_else(|| NPM_JEST_PASS_RE.captures(output).and_then(|c| c[1].parse().ok()));
+                let tests_failed = NPM_FAILING_RE
+                    .captures(output)
+                    .and_then(|c| c[1].parse().ok())
+                    .or_else(|| NPM_JEST_FAIL_RE.captures(output).and_then(|c| c[1].parse().ok()));
+
+                ContentType::NpmOutput(NpmOutputData {
+                    package_count: None,
+                    audit_warnings: None,
+                    tests_passed,
+                    tests_failed,
+                })
+            }
+            _ => ContentType::PlainText,
+        }
     }
 
     // -- table detection ----------------------------------------------------
@@ -632,8 +863,10 @@ impl SemanticParser {
         // Find positions of "  " (2+ space gaps) in each line.
         // If at least 60% of lines share the same number of gaps and those
         // positions are roughly consistent, it is a table.
-        let gap_re = Regex::new(r" {2,}").unwrap();
-        let gap_counts: Vec<usize> = lines.iter().map(|l| gap_re.find_iter(l).count()).collect();
+        let gap_counts: Vec<usize> = lines
+            .iter()
+            .map(|l| TABLE_GAP_RE.find_iter(l).count())
+            .collect();
 
         if gap_counts.iter().all(|&c| c > 0) {
             let first = gap_counts[0];
