@@ -1609,6 +1609,12 @@ mod tests {
 
     /// When the cancel flag is set before the thread checks it, the thread
     /// exits without sending a GitStateChanged event.
+    ///
+    /// Note: this test only exercises the happy path — the flag is set, then
+    /// the thread reads it. The cancellation is explicitly best-effort and
+    /// cannot interrupt a blocking `refresh_git()` call already in flight;
+    /// a TOCTOU race where the thread reads the flag *before* the cancel
+    /// store is therefore expected and not covered here.
     #[test]
     fn git_thread_cancels_on_signal() {
         use std::sync::Arc;

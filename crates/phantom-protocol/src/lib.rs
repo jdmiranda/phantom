@@ -142,10 +142,12 @@ impl AppMessage {
     /// newline so callers control framing on the socket write.
     ///
     /// The encoding is intentionally allocation-light and panic-free: simple
-    /// variants resolve to interned literals, and only `Log` allocates because
-    /// its payload is dynamic. The `LOG:` prefix is the only variant that may
-    /// embed colons in its tail; `from_line` therefore matches it greedily so
-    /// log bodies survive round-trip without escaping.
+    /// variants resolve to interned literals, while `Log` and `RenderPanic`
+    /// allocate because their payloads are dynamic. Both `LOG:` and the
+    /// trailing `last_message` of `RENDER_PANIC:<count>:<message>` may embed
+    /// colons; `from_line` strips their fixed-shape prefixes and treats the
+    /// remainder as opaque so message bodies survive round-trip without
+    /// escaping.
     #[must_use]
     pub fn to_line(&self) -> String {
         match self {

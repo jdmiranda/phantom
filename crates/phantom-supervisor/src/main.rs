@@ -53,6 +53,10 @@ struct Supervisor {
     stdin_rx: mpsc::Receiver<String>,
     /// Shared flag to request graceful shutdown.
     shutdown: Arc<AtomicBool>,
+    /// The most recent `RenderPanic` reason reported by the app, if any.
+    /// Cleared once a fresh child is spawned so the field always reflects
+    /// the crash that caused the *pending* restart, not an earlier one.
+    last_render_panic: Option<(u32, String)>,
 }
 
 impl Supervisor {
@@ -107,6 +111,7 @@ impl Supervisor {
             phantom_binary,
             stdin_rx: rx,
             shutdown,
+            last_render_panic: None,
         })
     }
 
@@ -212,10 +217,16 @@ impl Supervisor {
         self.kill_phantom();
         self.restart_count += 1;
         self.restart_timestamps.push_back(now);
-        info!(
-            "restarting phantom (total restarts: {})",
-            self.restart_count
-        );
+        match self.last_render_panic.take() {
+            Some((count, msg)) => info!(
+                "restarting phantom (total restarts: {}) — last crash: render-panic x{count}: {msg}",
+                self.restart_count,
+            ),
+            None => info!(
+                "restarting phantom (total restarts: {})",
+                self.restart_count,
+            ),
+        }
         self.spawn_phantom()
     }
 
@@ -360,6 +371,16 @@ impl Supervisor {
             AppMessage::ExitClean => {
                 info!("phantom requested clean exit — supervisor standing down");
                 self.shutdown.store(true, Ordering::Relaxed);
+            }
+            AppMessage::RenderPanic { count, last_message } => {
+                // Record the reason so the next restart log line in
+                // `attempt_restart` can attribute the crash. Logged at warn
+                // level immediately so it surfaces between the app's panic
+                // spam and the supervisor's respawn notice.
+                warn!(
+                    "render-panic escalation from app: {count} consecutive panics — {last_message}"
+                );
+                self.last_render_panic = Some((count, last_message));
             }
         }
     }

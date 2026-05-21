@@ -34,6 +34,7 @@ mod selftest;
 pub mod session;
 pub mod settings;
 pub(crate) mod settings_ui;
+pub mod stt;
 pub mod supervisor_client;
 mod sysmon;
 mod update;
