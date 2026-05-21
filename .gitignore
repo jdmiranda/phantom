@@ -19,3 +19,9 @@
 
 # Reference material (copyrighted / bulky)
 docs/references/*.pdf
+
+# Engineering docs site — source is committed under docs/engineering/{src,theme}/;
+# vendored mermaid.min.js / mermaid-init.js are ALSO committed (output of
+# `mdbook-mermaid install .`, needed by every build).  Only the rendered
+# book/ output is gitignored — it's regenerable via `mdbook build`.
+docs/engineering/book/
