@@ -42,6 +42,36 @@ const WINDOW_DURATION: Duration = Duration::from_secs(10);
 /// behavior so existing peers continue to work during rollout.
 pub const ENV_REQUIRE_SIGNATURES: &str = "PHANTOM_RELAY_REQUIRE_SIGNATURES";
 
+/// A `std::io::Write` that discards bytes and counts them.
+///
+/// Used to measure the JSON-serialized size of an envelope payload without
+/// allocating an intermediate `String`. Cheap enough to call on the hot path.
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Measure the serialized JSON size of a payload in bytes without allocating
+/// a `String`. Returns `usize::MAX` on serialization failure so the caller's
+/// size-cap check treats the payload as oversized.
+fn measure_payload_bytes(payload: &serde_json::Value) -> usize {
+    let mut counter = CountingWriter { bytes: 0 };
+    match serde_json::to_writer(&mut counter, payload) {
+        Ok(()) => counter.bytes,
+        Err(_) => usize::MAX,
+    }
+}
+
 /// Returns `true` when [`ENV_REQUIRE_SIGNATURES`] is set to a truthy value.
 fn deny_unsigned_from_env() -> bool {
     match std::env::var(ENV_REQUIRE_SIGNATURES) {
@@ -188,13 +218,15 @@ impl Router {
     fn forward(&mut self, sender: &PeerId, envelope: Envelope) -> RelayMessage {
         // --- message size cap ---
         //
-        // Serialize the payload to measure its wire size. If it exceeds
+        // Measure the serialized wire size of the payload. If it exceeds
         // MAX_MESSAGE_BYTES we reject with MessageTooLarge (WS 1009). This
         // check runs before signature validation and rate-limit accounting so
         // no tokens are burned on oversized frames.
-        let payload_bytes = serde_json::to_string(&envelope.payload)
-            .map(|s| s.len())
-            .unwrap_or(usize::MAX);
+        //
+        // We stream into a `CountingWriter` rather than `serde_json::to_string`
+        // so that large (~1 MiB) payloads do not allocate a transient String
+        // just to read its length.
+        let payload_bytes = measure_payload_bytes(&envelope.payload);
         if payload_bytes > MAX_MESSAGE_BYTES {
             warn!(
                 "router: oversized envelope from peer {} ({} bytes > {} limit); closing 1009",
