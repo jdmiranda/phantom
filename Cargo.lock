@@ -6385,9 +6385,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
+ "chacha20poly1305",
  "dirs 5.0.1",
  "ed25519-dalek",
  "futures-util",
+ "hkdf",
  "log",
  "rand 0.8.6",
  "serde",
@@ -6396,6 +6398,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -10752,6 +10755,18 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
+]
 
 [[package]]
 name = "xcursor"
