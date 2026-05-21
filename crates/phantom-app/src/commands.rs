@@ -51,6 +51,54 @@ impl App {
 impl App {
     /// Parse and execute a user command string entered via the console.
     pub(crate) fn execute_user_command(&mut self, input: &str) {
+        // `! <cmd>` — shell passthrough, same convention as Claude Code.
+        // Runs `sh -c <cmd>` off-thread, dumps combined stdout+stderr into
+        // the console on the next frame via the nlp_translate channel.
+        if let Some(shell_cmd) = input.trim().strip_prefix('!') {
+            let shell_cmd = shell_cmd.trim().to_string();
+            if shell_cmd.is_empty() {
+                self.console.error("Usage: ! <shell command>");
+                return;
+            }
+            self.console.system(format!("$ {shell_cmd}"));
+            let tx = self.nlp_translate_tx.clone();
+            let _ = std::thread::Builder::new()
+                .name("shell-passthrough".into())
+                .spawn(move || {
+                    let output = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&shell_cmd)
+                        .output();
+                    let display = match output {
+                        Ok(out) => {
+                            let mut buf = String::new();
+                            let stdout = String::from_utf8_lossy(&out.stdout);
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            if !stdout.is_empty() {
+                                buf.push_str(stdout.trim_end());
+                            }
+                            if !stderr.is_empty() {
+                                if !buf.is_empty() {
+                                    buf.push('\n');
+                                }
+                                buf.push_str(stderr.trim_end());
+                            }
+                            if buf.is_empty() {
+                                format!("[exit {}]", out.status.code().unwrap_or(-1))
+                            } else {
+                                buf
+                            }
+                        }
+                        Err(e) => format!("shell error: {e}"),
+                    };
+                    let _ = tx.try_send(crate::app::NlpTranslateResult {
+                        display,
+                        action: None,
+                    });
+                });
+            return;
+        }
+
         // Fast path: try the console evaluator first (builtin commands).
         match console_eval::evaluate(input) {
             EvalResult::Ok(Some(msg)) => {
