@@ -155,6 +155,22 @@ impl ScrollState {
 }
 
 // ---------------------------------------------------------------------------
+// ScrollbarAction — result of a mouse interaction
+// ---------------------------------------------------------------------------
+
+/// Action emitted when the user interacts with the scrollbar.
+///
+/// Wire this back into the terminal adapter by calling
+/// `terminal.set_display_offset(offset)` and triggering a redraw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbarAction {
+    /// Jump the viewport to an absolute line offset from the bottom.
+    ///
+    /// `0` = live output (bottom); `history_size` = top of scrollback.
+    ScrollTo(usize),
+}
+
+// ---------------------------------------------------------------------------
 // Scrollbar widget
 // ---------------------------------------------------------------------------
 
@@ -166,22 +182,29 @@ impl ScrollState {
 pub struct Scrollbar {
     colors: ColorRoles,
     state: ScrollState,
+    /// Y position where the last drag started, for relative drag math.
+    drag_anchor_y: Option<f32>,
 }
 
 impl Scrollbar {
     /// Create a scrollbar with Phosphor-default colors.
-    #[must_use] 
+    #[must_use]
     pub fn new(state: ScrollState) -> Self {
         Self {
             colors: ColorRoles::phosphor(),
             state,
+            drag_anchor_y: None,
         }
     }
 
     /// Create a scrollbar with explicit color roles (e.g. from the active theme).
-    #[must_use] 
+    #[must_use]
     pub fn with_colors(state: ScrollState, colors: ColorRoles) -> Self {
-        Self { colors, state }
+        Self {
+            colors,
+            state,
+            drag_anchor_y: None,
+        }
     }
 
     /// Update scroll state (e.g. after a new frame's output arrives).
@@ -190,9 +213,56 @@ impl Scrollbar {
     }
 
     /// The current scroll state.
-    #[must_use] 
+    #[must_use]
     pub fn state(&self) -> ScrollState {
         self.state
+    }
+
+    // -- Mouse interaction --------------------------------------------------
+
+    /// Handle a mouse button press at pixel position `(x, y)`.
+    ///
+    /// `rect` is the bounding rectangle of the scrollbar track (the same rect
+    /// passed to [`Widget::render_quads`]).
+    ///
+    /// Returns [`ScrollbarAction::ScrollTo`] with the target `display_offset`
+    /// when the click lands inside the track; `None` otherwise.
+    ///
+    /// Also records the click Y as the drag anchor so that a subsequent
+    /// [`handle_mouse_drag`] can compute a relative delta correctly.
+    pub fn handle_mouse_press(&mut self, _x: f32, y: f32, rect: &Rect) -> Option<ScrollbarAction> {
+        if !self.state.is_scrollable() {
+            return None;
+        }
+        // Hit-test: only respond to clicks inside the track.
+        if y < rect.y || y > rect.y + rect.height {
+            self.drag_anchor_y = None;
+            return None;
+        }
+        self.drag_anchor_y = Some(y);
+        let offset = track_y_to_offset(*rect, y, self.state.history_size);
+        Some(ScrollbarAction::ScrollTo(offset))
+    }
+
+    /// Handle a mouse drag (cursor moved while button held).
+    ///
+    /// `y` is the current cursor Y pixel coordinate.
+    /// `rect` is the bounding rectangle of the scrollbar track.
+    ///
+    /// Returns [`ScrollbarAction::ScrollTo`] whenever the drag is active
+    /// (i.e. [`handle_mouse_press`] was called first and the button is still
+    /// held); `None` when no drag is in progress.
+    pub fn handle_mouse_drag(&mut self, y: f32, rect: &Rect) -> Option<ScrollbarAction> {
+        if self.drag_anchor_y.is_none() || !self.state.is_scrollable() {
+            return None;
+        }
+        let offset = track_y_to_offset(*rect, y, self.state.history_size);
+        Some(ScrollbarAction::ScrollTo(offset))
+    }
+
+    /// Signal that the mouse button has been released, ending any drag.
+    pub fn handle_mouse_release(&mut self) {
+        self.drag_anchor_y = None;
     }
 }
 
@@ -553,5 +623,92 @@ mod tests {
         let mut bar = Scrollbar::new(state(0, 0, 0));
         bar.set_state(state(10, 100, 24));
         assert!(bar.state().is_scrollable());
+    }
+
+    // -----------------------------------------------------------------------
+    // ScrollbarAction — handle_mouse_press / handle_mouse_drag
+    // -----------------------------------------------------------------------
+
+    /// Clicking inside the track returns ScrollTo with a proportional offset.
+    #[test]
+    fn scrollbar_click_returns_scroll_to_action() {
+        let t = track();
+        let mut bar = Scrollbar::new(state(0, 500, 24));
+
+        // Click at the very top of the track → should return max offset (history_size).
+        let action = bar.handle_mouse_press(t.x, t.y, &t);
+        assert!(
+            action.is_some(),
+            "clicking inside the track must return Some(ScrollbarAction)"
+        );
+        let ScrollbarAction::ScrollTo(offset) = action.unwrap();
+        assert_eq!(
+            offset, 500,
+            "click at track top should produce offset == history_size (500); got {offset}"
+        );
+    }
+
+    /// Clicking outside the track returns None.
+    #[test]
+    fn scrollbar_click_outside_track_returns_none() {
+        let t = track();
+        let mut bar = Scrollbar::new(state(0, 500, 24));
+        // Click above the track.
+        let action = bar.handle_mouse_press(t.x, t.y - 10.0, &t);
+        assert!(action.is_none(), "click above track must return None");
+    }
+
+    /// Dragging returns a proportional offset relative to cursor position.
+    #[test]
+    fn scrollbar_drag_returns_proportional_offset() {
+        let t = track();
+        let mut bar = Scrollbar::new(state(0, 500, 24));
+
+        // Press near the bottom of the track to start drag.
+        let _ = bar.handle_mouse_press(t.x, t.y + t.height - 1.0, &t);
+
+        // Drag to the midpoint.
+        let mid_y = t.y + t.height / 2.0;
+        let action = bar.handle_mouse_drag(mid_y, &t);
+        assert!(
+            action.is_some(),
+            "dragging while button is held must return Some(ScrollbarAction)"
+        );
+        let ScrollbarAction::ScrollTo(offset) = action.unwrap();
+        // Mid-point → frac ≈ 0.5 → offset ≈ 250.
+        assert!(
+            offset > 200 && offset < 300,
+            "drag to midpoint must produce an offset near 250; got {offset}"
+        );
+    }
+
+    /// Dragging without a prior press returns None.
+    #[test]
+    fn scrollbar_drag_without_press_returns_none() {
+        let t = track();
+        let mut bar = Scrollbar::new(state(0, 500, 24));
+        // No handle_mouse_press called first.
+        let action = bar.handle_mouse_drag(t.y + 10.0, &t);
+        assert!(action.is_none(), "drag without prior press must return None");
+    }
+
+    /// After release, drag returns None even if press was called earlier.
+    #[test]
+    fn scrollbar_drag_after_release_returns_none() {
+        let t = track();
+        let mut bar = Scrollbar::new(state(0, 500, 24));
+        let _ = bar.handle_mouse_press(t.x, t.y, &t);
+        bar.handle_mouse_release();
+        let action = bar.handle_mouse_drag(t.y + 50.0, &t);
+        assert!(action.is_none(), "drag after release must return None");
+    }
+
+    /// Clicking on a non-scrollable bar returns None.
+    #[test]
+    fn scrollbar_click_non_scrollable_returns_none() {
+        let t = track();
+        let mut bar = Scrollbar::new(state(0, 0, 24));
+        let action = bar.handle_mouse_press(t.x, t.y + t.height / 2.0, &t);
+        assert!(action.is_none(), "non-scrollable bar must return None on press");
     }
 }

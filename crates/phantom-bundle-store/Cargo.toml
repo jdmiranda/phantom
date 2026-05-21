@@ -31,16 +31,9 @@ arrow-array = { version = "57", optional = true }
 arrow-schema = { version = "57", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 futures = { version = "0.3", optional = true }
+# Config-directory resolution for the on-disk master-key store.
+# Replaces the prior `keyring` backend; see `crypto.rs` for rationale (mirrors phantom-net #539).
 dirs = "5"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3.6", features = ["apple-native"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6", features = ["linux-native"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3.6", features = ["windows-native"] }
 
 [dev-dependencies]
 tempfile = "3"

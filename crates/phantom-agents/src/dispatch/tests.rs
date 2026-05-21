@@ -64,7 +64,7 @@ fn build_ctx<'a>(
         role,
         working_dir,
         registry,
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn,
         source_event_id: None,
         quarantine: None,
@@ -72,6 +72,7 @@ fn build_ctx<'a>(
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     }
 }
 
@@ -116,7 +117,7 @@ async fn dispatch_routes_send_to_agent_to_chat_tools() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry,
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -124,6 +125,7 @@ async fn dispatch_routes_send_to_agent_to_chat_tools() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let result = dispatch_tool(
@@ -253,7 +255,7 @@ fn dispatch_capability_denied_for_chat_tool() {
         role: AgentRole::Transcriber,
         working_dir: tmp.path(),
         registry,
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -261,6 +263,7 @@ fn dispatch_capability_denied_for_chat_tool() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let result = dispatch_tool(
@@ -426,7 +429,7 @@ fn dispatch_clean_source_chain_taint_is_clean() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: Some(log),
+        event_log: log,
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: Some(upstream_id),
         quarantine: None,
@@ -434,6 +437,7 @@ fn dispatch_clean_source_chain_taint_is_clean() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // Act.
@@ -480,7 +484,7 @@ fn dispatch_capability_denied_upstream_taint_is_suspect() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: Some(log),
+        event_log: log,
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: Some(denied_event_id),
         quarantine: None,
@@ -488,6 +492,7 @@ fn dispatch_capability_denied_upstream_taint_is_suspect() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // Act.
@@ -545,7 +550,7 @@ fn dispatch_quarantined_source_agent_taint_is_tainted() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry,
-        event_log: Some(log),
+        event_log: log,
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: Some(upstream_id),
         quarantine: None,
@@ -553,6 +558,7 @@ fn dispatch_quarantined_source_agent_taint_is_tainted() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // Act.
@@ -612,7 +618,7 @@ fn dispatch_self_referential_chain_does_not_loop() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: Some(log),
+        event_log: log,
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: Some(event_id),
         quarantine: None,
@@ -620,6 +626,7 @@ fn dispatch_self_referential_chain_does_not_loop() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // This call must return — any infinite loop would cause the test to hang
@@ -674,7 +681,7 @@ fn dispatch_denied_for_quarantined_agent() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: Some(quarantine),
@@ -682,6 +689,7 @@ fn dispatch_denied_for_quarantined_agent() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // A normal file-read that would otherwise succeed must be denied.
@@ -758,7 +766,7 @@ fn dispatch_succeeds_after_quarantine_release() {
             role: AgentRole::Conversational,
             working_dir: tmp.path(),
             registry: Arc::new(Mutex::new(AgentRegistry::new())),
-            event_log: None,
+            event_log: crate::test_support::fresh_log(),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: Some(Arc::clone(&quarantine)),
@@ -766,6 +774,7 @@ fn dispatch_succeeds_after_quarantine_release() {
             ticket_dispatcher: None,
             runtime_mode: RuntimeMode::Normal,
             dag_explorer: None,
+        mcp_registry: None,
         };
         let blocked = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
         assert!(
@@ -805,7 +814,7 @@ fn dispatch_succeeds_after_quarantine_release() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: Some(Arc::clone(&quarantine)),
@@ -813,6 +822,7 @@ fn dispatch_succeeds_after_quarantine_release() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
@@ -854,7 +864,7 @@ fn dispatch_allowed_for_clean_agent_with_quarantine_registry() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: Some(quarantine),
@@ -862,6 +872,7 @@ fn dispatch_allowed_for_clean_agent_with_quarantine_registry() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -892,7 +903,7 @@ fn dispatch_with_correlation_id_routes_normally() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -900,6 +911,7 @@ fn dispatch_with_correlation_id_routes_normally() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "corr.txt"}), &ctx);
@@ -934,7 +946,7 @@ fn dispatch_with_shared_correlation_id_routes_independently() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -942,6 +954,7 @@ fn dispatch_with_shared_correlation_id_routes_independently() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let ctx_b = DispatchContext {
@@ -949,7 +962,7 @@ fn dispatch_with_shared_correlation_id_routes_independently() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -957,6 +970,7 @@ fn dispatch_with_shared_correlation_id_routes_independently() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res_a = dispatch_tool("read_file", &json!({"path": "a.txt"}), &ctx_a);
@@ -1013,7 +1027,7 @@ fn capability_denied_source_chain_propagates_taint() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: Some(log),
+        event_log: log,
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: Some(denied_event_id),
         quarantine: None,
@@ -1021,6 +1035,7 @@ fn capability_denied_source_chain_propagates_taint() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "data.txt"}), &ctx);
@@ -1066,7 +1081,7 @@ fn watcher_role_blocked_from_run_command() {
         role: AgentRole::Watcher,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -1074,6 +1089,7 @@ fn watcher_role_blocked_from_run_command() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // Attempt to invoke run_command — Act-class tool.
@@ -1142,7 +1158,7 @@ fn dispatch_with_correlation_id_writes_correlation_id_to_event_log() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: Some(log.clone()),
+        event_log: log.clone(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -1150,6 +1166,7 @@ fn dispatch_with_correlation_id_writes_correlation_id_to_event_log() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // Act — dispatch a normal read_file tool.
@@ -1197,7 +1214,7 @@ fn dispatch_with_correlation_id_writes_correlation_id_to_event_log() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: Some(log2.clone()),
+        event_log: log2.clone(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -1205,6 +1222,7 @@ fn dispatch_with_correlation_id_writes_correlation_id_to_event_log() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
     let res2 = dispatch_tool("read_file", &json!({"path": "probe2.txt"}), &ctx_no_corr);
     assert!(res2.success, "no-corr dispatch must succeed: {}", res2.output);
@@ -1437,7 +1455,7 @@ fn spawn_only_blocks_non_spawn_tools() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -1445,6 +1463,7 @@ fn spawn_only_blocks_non_spawn_tools() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::SpawnOnly,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "probe.txt"}), &ctx);
@@ -1469,7 +1488,7 @@ fn spawn_only_permits_spawn_subagent() {
         role: AgentRole::Composer,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -1477,6 +1496,7 @@ fn spawn_only_permits_spawn_subagent() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::SpawnOnly,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     // Empty args — handler may fail on validation but must not be
@@ -1506,7 +1526,7 @@ fn spawn_only_denial_is_logged_to_event_log() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: Some(log.clone()),
+        event_log: log.clone(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -1514,6 +1534,7 @@ fn spawn_only_denial_is_logged_to_event_log() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::SpawnOnly,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res = dispatch_tool("write_file", &json!({"path": "x.txt", "content": "boom"}), &ctx);
@@ -1538,7 +1559,7 @@ fn normal_mode_is_transparent() {
         role: AgentRole::Conversational,
         working_dir: tmp.path(),
         registry: Arc::new(Mutex::new(AgentRegistry::new())),
-        event_log: None,
+        event_log: crate::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -1546,6 +1567,7 @@ fn normal_mode_is_transparent() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let res = dispatch_tool("read_file", &json!({"path": "visible.txt"}), &ctx);

@@ -47,4 +47,11 @@ pub enum McpError {
     /// error message from the server or a description of the local failure.
     #[error("MCP invoke error for tool '{tool}': {detail}")]
     InvokeError { tool: String, detail: String },
+
+    /// A tokio runtime could not be created for the hub-listener OS thread.
+    ///
+    /// This is fatal for the hub connection but the rest of Phantom continues
+    /// to function — the hub is an optional capability.
+    #[error("MCP hub runtime init failed: {0}")]
+    RuntimeInit(String),
 }

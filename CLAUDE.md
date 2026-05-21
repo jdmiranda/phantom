@@ -55,7 +55,7 @@ tokio = { version = "1", features = ["full"] }
 
 ## Architecture Overview
 
-Phantom is structured as a Rust workspace with **31 crates**, all wired into the top-level `Cargo.toml` workspace.
+Phantom is structured as a Rust workspace with **32 crates**, all wired into the top-level `Cargo.toml` workspace.
 
 Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issues noted)
 
@@ -75,8 +75,9 @@ Legend: ✅ complete/active · 🔧 skeletal/stubbed · 🚧 Phase 2+ (open issu
 - **phantom-semantic** 🔧 — Command classification and output parsing (git, cargo, etc.); stub integration pending ([#74](https://github.com/jdmiranda/phantom/issues/74), [#94](https://github.com/jdmiranda/phantom/issues/94))
 
 ### AI & Intelligence
-- **phantom-agents** ✅ — Agent lifecycle, tool execution, Claude API chat, role system (Defender/Inspector), permission model, taint levels ([#60](https://github.com/jdmiranda/phantom/issues/60), [#87](https://github.com/jdmiranda/phantom/issues/87), [#93](https://github.com/jdmiranda/phantom/issues/93)–[#96](https://github.com/jdmiranda/phantom/issues/96), [#103](https://github.com/jdmiranda/phantom/issues/103)–[#105](https://github.com/jdmiranda/phantom/issues/105))
-- **phantom-brain** ✅ — Ambient OODA loop on a dedicated thread: event scoring, utility AI, action dispatch, autonomous reconciler ([#32](https://github.com/jdmiranda/phantom/issues/32), [#36](https://github.com/jdmiranda/phantom/issues/36)–[#40](https://github.com/jdmiranda/phantom/issues/40), [#45](https://github.com/jdmiranda/phantom/issues/45)–[#47](https://github.com/jdmiranda/phantom/issues/47), [#61](https://github.com/jdmiranda/phantom/issues/61), [#98](https://github.com/jdmiranda/phantom/issues/98)–[#99](https://github.com/jdmiranda/phantom/issues/99))
+- **phantom-agents** ✅ — Agent lifecycle, tool execution, Claude API chat, 10-variant `AgentRole` enum (Conversational/Watcher/Capturer/Transcriber/Reflector/Indexer/Actor/Composer/Fixer/Defender), role-based tool whitelisting at the `dispatch/mod.rs` capability gate, `complete_task` lifecycle tool + `AgentSpawnOpts::with_requires_complete_task` builder, `try_auto_approve_with_audit` audit-traced fast-path, permission model, taint levels ([#60](https://github.com/jdmiranda/phantom/issues/60), [#87](https://github.com/jdmiranda/phantom/issues/87), [#93](https://github.com/jdmiranda/phantom/issues/93)–[#96](https://github.com/jdmiranda/phantom/issues/96), [#103](https://github.com/jdmiranda/phantom/issues/103)–[#105](https://github.com/jdmiranda/phantom/issues/105), [#646](https://github.com/jdmiranda/phantom/issues/646), [#648](https://github.com/jdmiranda/phantom/issues/648))
+- **phantom-brain** ✅ — Ambient OODA loop on a dedicated thread: event scoring, utility AI, action dispatch, autonomous reconciler, `TaskLedger::try_dispatch` guarded mutator with `DispatchBlocked` enum, `StepFailureCause` + `QuarantinePolicy` cascade semantics on `PlanStep`. Self-improvement reconciler (`crates/phantom-brain/src/self_improvement.rs`): `GoalSource` trait + `GhIssueGoalSource` + `GhCiFailureGoalSource` auto-discover candidate work from `jdmiranda/phantom`, `score_candidate` weighted-sum scorer, `HardExclusions` keyword filter, `TrustBudget` with 4 autonomy bands (SuggestionOnly / Conservative / Standard / Aggressive), `RateLimiter` per-hour / per-day / cooldown windows, `AuditEntry` JSONL persistence, `AiAction::EnqueueLoopMessage` forwarded to the loop overseer ([#32](https://github.com/jdmiranda/phantom/issues/32), [#36](https://github.com/jdmiranda/phantom/issues/36)–[#40](https://github.com/jdmiranda/phantom/issues/40), [#45](https://github.com/jdmiranda/phantom/issues/45)–[#47](https://github.com/jdmiranda/phantom/issues/47), [#61](https://github.com/jdmiranda/phantom/issues/61), [#98](https://github.com/jdmiranda/phantom/issues/98)–[#99](https://github.com/jdmiranda/phantom/issues/99), [#647](https://github.com/jdmiranda/phantom/issues/647), [#649](https://github.com/jdmiranda/phantom/issues/649), [#660](https://github.com/jdmiranda/phantom/issues/660))
+- **phantom-loop** ✅ — Loop overseer: durable repo-scoped `LoopRunner` async FSM pulling typed input from a pluggable `LoopSource` trait (`CronSource` for agentless poll loops, `LoopMessageQueueSource` for cross-loop fan-out, `GhIssueQueueSource` + `GhPrReviewQueueSource` for GitHub-backed inputs). Validates each agent's `complete_task` payload against the per-loop `ExitSchema`. Routes typed `LoopMessage`s through `LoopQueueRegistry`. `SubstrateAgentDispatcher` pushes `SpawnSubagentRequest`s onto the shared spawn queue with `requires_complete_task=true`. (PR #670 in flight adds a headless `SubstrateDriver` + `SubstrateBackend` trait — `ChatBackedSubstrateBackend` for production, `MockSubstrateBackend` for tests — so `phantom loop run` drains the queue without the GUI App.) CLI entry-point `phantom loop run --repo <path> --loops <names>` runs `check_gh_binary` / `check_gh_auth` / `check_mcp_collisions` preflight, acquires a `RunLock` at `<repo>/.phantom/loops/.runlock`, and registers each runner in `LoopRegistry` ([#650](https://github.com/jdmiranda/phantom/issues/650), [#665](https://github.com/jdmiranda/phantom/issues/665))
 - **phantom-nlp** 🔧 — Natural-language command interpreter; LLM call routing is a stub ([#55](https://github.com/jdmiranda/phantom/issues/55))
 - **phantom-context** ✅ — Project/git/environment detection and context assembly for agent prompts
 - **phantom-memory** 🔧 — Per-project knowledge store with event log and memory blocks; schema and event log pending ([#28](https://github.com/jdmiranda/phantom/issues/28), [#33](https://github.com/jdmiranda/phantom/issues/33), [#62](https://github.com/jdmiranda/phantom/issues/62), [#78](https://github.com/jdmiranda/phantom/issues/78))
@@ -142,6 +143,78 @@ $ git status
 - **Tool Framework**: 7 core tools (ReadFile, WriteFile, RunCommand, etc.)
 - **Permission Model**: Granular access control
 - **Visual Integration**: Agents render in dedicated panes
+
+### Harness-Level Workflow Control
+
+All four properties of harness control are now in place on `main`. The 5 audit gaps tracked under issue #650 are closed.
+
+1. **Per-role tool whitelists** — `crates/phantom-agents/src/dispatch/mod.rs` routes every tool-use through `capability::check_capability(ctx.role, tool.class())` before the handler runs. Denials return a canonical `"capability denied: <Class> not in <Role> manifest"` `ToolResult` so the model self-corrects. (Gap closed: PR #655 made `event_log` non-optional at the dispatch boundary so the gate cannot be silently bypassed.)
+2. **External state machine** — `phantom-brain::TaskLedger` with the `try_dispatch(idx) -> Result<&PlanStep, DispatchBlocked>` guarded mutator and the 9-state `AgentStatus` FSM (Queued, Planning, AwaitingApproval, Working, WaitingForTool, Paused, Done, Failed, Flatline). (Gaps closed: PR #654 — guarded dispatch with `DispatchBlocked`; PR #657 — `StepFailureCause` + `QuarantinePolicy` typed quarantine recovery.)
+3. **Structured exit** — `complete_task` lifecycle tool emitted by `phantom_agents::tools::lifecycle_tools()` when an agent is spawned with `AgentSpawnOpts::with_requires_complete_task(true)`. Result payload is a typed `Option<serde_json::Value>` on `Event::AgentTaskComplete`, validated against the per-loop `ExitSchema` from `phantom-loop`. A 3-strike `validation_failure_count` on `AgentPane` flatlines the pane after three consecutive schema-invalid `complete_task` calls; the legacy "PARTIAL" stringly-typed exit is gone. (Gaps closed: PR #652 — spike delivery path; PR #656 — production tool-list wiring + 3-strike flatline.)
+4. **Typed inter-agent messaging** — `phantom-protocol::Event` bus with 22 typed variants (and `EventTopic` routing) plus the new `Event::FastPathTaken { agent_id, kind: FastPathKind, reason }` envelope from PR #653. `phantom-loop::LoopMessage` adds typed inter-loop routing through `LoopQueueRegistry`.
+
+### Self-Improving Phantom
+
+The four properties above sum to a closed feedback loop: phantom-on-phantom. The brain auto-discovers work in its own repository, scores it for utility, and forwards the highest-scoring candidates to the loop overseer for autonomous implementation — no human prompting required. Phase 1 (harness control) is complete; the brain self-improvement layer landed in PR #669; the substrate driver wires the loop CLI to real agent spawning in PR #670; the brain↔queue bridge (`LoopQueueActionHandler` + headless brain boot in `phantom loop run`) is the final hookup.
+
+End-to-end flow once the bridge lands:
+
+```
+phantom-brain GoalSource polls jdmiranda/phantom (GhIssueGoalSource + GhCiFailureGoalSource)
+    -> phantom-brain self_improvement::score_candidate weighted-sum scorer
+    -> HardExclusions keyword filter + TrustBand threshold + RateLimiter window
+    -> AiAction::EnqueueLoopMessage emitted onto the brain action channel
+    -> LoopQueueActionHandler.enqueue_loop_message  (in-flight, brain<->queue bridge)
+    -> LoopQueueRegistry.push(implementer-queue, LoopMessage{...})
+    -> LoopRunner pulls via LoopMessageQueueSource
+    -> SubstrateAgentDispatcher builds AgentSpawnOpts with requires_complete_task=true
+    -> SubstrateDriver.tick drains SpawnSubagentQueue, runs ChatBackedSubstrateBackend
+    -> Claude API stream loops through TextDelta / ToolUse until complete_task tool call
+    -> Event::AgentTaskComplete fulfils the dispatcher's oneshot
+    -> LoopRunner validates the payload against the loop's ExitSchema
+    -> on_complete LoopEffects fire (typically EnqueueTo a downstream review-queue)
+```
+
+Source paths:
+- Brain scorer + state machine: `crates/phantom-brain/src/self_improvement.rs`
+- Goal sources: `crates/phantom-brain/src/goal_source/{mod,gh_issues,gh_ci}.rs`
+- Dispatch action variant: `crates/phantom-brain/src/events.rs` (`AiAction::EnqueueLoopMessage`)
+- Loop FSM: `crates/phantom-loop/src/runner/{fsm,source,dispatcher}.rs`
+- Substrate dispatcher: `crates/phantom-loop/src/dispatcher/substrate.rs`
+- Substrate driver (PR #670 branch): `crates/phantom-loop/src/dispatcher/driver.rs`
+- CLI entry-point: `crates/phantom/src/loop_cli.rs`
+- Design doc: `docs/design/brain-self-improvement.md`
+
+### Operating Phantom Self-Improvement
+
+```bash
+phantom loop run --repo <path> --loops pr_finder_review,pr_finder_impl,reviewer,implementer
+```
+
+Preflight gates (`crates/phantom/src/loop_cli.rs::run_command`, calling `phantom_loop::preflight`):
+- `check_gh_binary` — `gh` binary on PATH and executable.
+- `check_gh_auth` — `gh auth status` reports a logged-in account.
+- `check_mcp_collisions` — MCP tool names do not collide with the reserved `complete_task` / `abort_task` lifecycle names.
+- `RunLock::acquire(&repo)` — exclusive runlock at `<repo>/.phantom/loops/.runlock`. Released on Ctrl-C or process exit via `Drop`.
+
+Loop spec discovery: `<repo>/.phantom/loops/*.toml`. The shipped specs are `pr_finder_review.toml`, `pr_finder_impl.toml`, `reviewer.toml`, `implementer.toml` (see `.phantom/loops/` at repo root).
+
+Brain self-improvement config (`SelfImprovementConfig` in `crates/phantom-brain/src/self_improvement.rs`):
+- `enabled: bool` — default OFF per design doc §5.1; operator must opt in.
+- `queue_name: "implementer-queue"` — the brain's default destination.
+- `audit_log_path: Option<PathBuf>` — when set, every decision (enqueue or skip) appends one `AuditEntry` JSONL envelope.
+- `per_hour: u32`, `per_day: u32`, `cooldown: Duration` — `RateLimiter` ceilings.
+- `max_in_flight: u32` — concurrent in-flight cap.
+
+Trust bands (`TrustBand` in `self_improvement.rs`, ramps automatically on enqueue success / failure):
+- **SuggestionOnly** (budget 0) — no auto-enqueue regardless of score.
+- **Conservative** (budget 1-3) — raised threshold 0.85, halved per-hour ceiling.
+- **Standard** (budget 4-9) — design-doc defaults.
+- **Aggressive** (budget 10-20) — lowered threshold 0.65, doubled per-hour ceiling.
+
+A `critical` / `regression` / `blocker` label on a candidate floors the score at `CRITICAL_LABEL_FLOOR = 0.85` per design doc §7.1.
+
+The audit log JSONL file (path passed via `SelfImprovementConfig::audit_log_path`) captures every decision with `external_id`, `source`, `score`, `score_breakdown`, `decision`, and `reason`. Tail it to inspect autonomous activity.
 
 ## Build Process Details
 
@@ -360,9 +433,9 @@ Built with ❤️ by Jeremy Miranda and Claude Code.
 
 Rules that govern how autonomous agents coordinate within the Phantom multi-agent pipeline.
 
-1. **Post-merge workspace check**: After every PR merge, an agent must run `cargo build --workspace` and `cargo test --workspace --no-run` on main before spawning new implementation agents that touch the same crates.
+1. **Post-merge workspace check**: After every PR merge, an agent must run `cargo build --workspace` and `cargo test --workspace --no-run` on main before spawning new implementation agents that touch the same crates. Block spawning only when the post-merge run introduces NEW failures relative to the pre-merge baseline; pre-existing red is not a gate.
 
-2. **Pre-PR self-check**: Every implementation agent must run `./scripts/pre-pr-check.sh <crate-name>` before calling `gh pr create`. A PR must not be opened if the script fails.
+2. **Pre-PR self-check**: Every implementation agent must run `./scripts/pre-pr-check.sh <crate-name>` before calling `gh pr create`. A PR must not be opened if the script introduces NEW failures relative to the baseline captured at branch-off; pre-existing failures inherited from main do not block the PR.
 
 3. **Worktree cleanup**: After every 10 merges, a cleanup agent must be spawned to prune merged worktrees.
 
@@ -370,7 +443,7 @@ Rules that govern how autonomous agents coordinate within the Phantom multi-agen
 
 5. **Hot-file tracking**: Before spawning an agent on a crate, check `gh pr list -R jdmiranda/phantom --state open` to confirm no other open PR already modifies the same files.
 
-6. **Branch hygiene**: All agent worktrees MUST branch from the most recent clean baseline tag, not from HEAD of main. Spawn command: `git checkout $(git describe --tags --match 'v*.baseline' --abbrev=0 2>/dev/null || git rev-parse --short origin/main) -b <branch-name>`. Never: `git checkout main -b <branch>`.
+6. **Branch hygiene**: All agent worktrees MUST branch from the most recent clean baseline — preferring a `v*.baseline` tag, falling back to `origin/main` when no such tag exists. Spawn command: `git checkout $(git describe --tags --match 'v*.baseline' --abbrev=0 2>/dev/null || git rev-parse --short origin/main) -b <branch-name>`. Never: `git checkout main -b <branch>` against local main without first fetching.
 
 7. **Spec gate**: Before spawning any executor agent, a spec agent must first produce SPEC.md, PLAN.md, and TASKS.md in the worktree. The executor receives only TASKS.md — not the raw issue. Any issue scoring ≥7/10 on the MAST rubric may skip the spec agent; lower-scoring issues must pass through it.
 
