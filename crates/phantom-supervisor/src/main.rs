@@ -110,6 +110,10 @@ struct Supervisor {
     stdin_rx: mpsc::Receiver<String>,
     /// Shared flag to request graceful shutdown.
     shutdown: Arc<AtomicBool>,
+    /// The most recent `RenderPanic` reason reported by the app, if any.
+    /// Cleared once a fresh child is spawned so the field always reflects
+    /// the crash that caused the *pending* restart, not an earlier one.
+    last_render_panic: Option<(u32, String)>,
     /// PID of the running child (cached for crash reports).
     child_pid: Option<u32>,
     /// Deadline for a deferred restart spawn (used by `restart_phantom` to
@@ -174,6 +178,7 @@ impl Supervisor {
             phantom_binary,
             stdin_rx: rx,
             shutdown,
+            last_render_panic: None,
             child_pid: None,
             pending_restart_at: None,
         })
@@ -335,14 +340,25 @@ impl Supervisor {
         // up — not here. Resetting at restart time would zero the counter
         // *during* a crash storm, which is the opposite of the intent.
 
+        match self.last_render_panic.take() {
+            Some((count, msg)) => info!(
+                "restarting phantom (total restarts: {}) — last crash: render-panic x{count}: {msg}",
+                self.restart_count,
+            ),
+            None => info!(
+                "restarting phantom (total restarts: {})",
+                self.restart_count,
+            ),
+        }
+
         // Exponential backoff to avoid tight restart loops during cascading
         // failures. The sleep is deferred to the main loop so the supervisor
         // stays responsive to SIGINT / shutdown requests during the wait.
         let delay = Self::backoff_delay(self.restart_count);
         let deadline = now + delay;
         info!(
-            "restarting phantom (total restarts: {}) -- backoff {:?}",
-            self.restart_count, delay
+            "restart backoff: {:?} before respawn (total restarts: {})",
+            delay, self.restart_count
         );
         self.pending_restart_at = Some(deadline);
         Ok(())
@@ -634,9 +650,14 @@ impl Supervisor {
                 self.shutdown.store(true, Ordering::Relaxed);
             }
             AppMessage::RenderPanic { count, last_message } => {
+                // Record the reason so the next restart log line in
+                // `attempt_restart` can attribute the crash. Logged at warn
+                // level immediately so it surfaces between the app's panic
+                // spam and the supervisor's respawn notice.
                 warn!(
-                    "render thread panic reported -- count={count} msg={last_message}"
+                    "render-panic escalation from app: {count} consecutive panics — {last_message}"
                 );
+                self.last_render_panic = Some((count, last_message.clone()));
                 self.render_panic_count += count;
                 if self.render_panic_count >= 3 {
                     error!("3+ render panics — forcing restart");

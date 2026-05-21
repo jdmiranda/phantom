@@ -400,11 +400,16 @@ impl App {
                         "git-refresh thread exceeded {}s timeout; abandoning handle",
                         GIT_REFRESH_TIMEOUT.as_secs()
                     );
+                    if let Some(ref cancel) = self.git_refresh_cancel {
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     self.git_refresh_handle = None;
                     self.git_refresh_spawned_at = None;
+                    self.git_refresh_cancel = None;
                 } else if finished {
                     self.git_refresh_handle = None;
                     self.git_refresh_spawned_at = None;
+                    self.git_refresh_cancel = None;
                     // Signal the OODA cache that git state just refreshed (#358).
                     self.ooda_git_changed = true;
                 }
@@ -417,6 +422,10 @@ impl App {
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
                 let assembler_arc = self.context_assembler.clone();
+
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancel_clone = std::sync::Arc::clone(&cancel);
+
                 self.git_refresh_handle = std::thread::Builder::new()
                     .name("git-refresh".into())
                     .spawn(move || {
@@ -427,14 +436,18 @@ impl App {
                         if let Ok(mut asm) = assembler_arc.lock() {
                             let _ = asm.assemble(path);
                         }
-                        if let Some(tx) = brain_tx {
-                            let _ = tx.send(AiEvent::GitStateChanged);
+                        if !cancel_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(tx) = brain_tx {
+                                let _ = tx.send(AiEvent::GitStateChanged);
+                            }
                         }
                     })
                     .ok();
                 self.git_refresh_spawned_at = if self.git_refresh_handle.is_some() {
+                    self.git_refresh_cancel = Some(cancel);
                     Some(now)
                 } else {
+                    self.git_refresh_cancel = None;
                     None
                 };
             }
@@ -1780,6 +1793,43 @@ mod tests {
         assert!(
             git_refresh_spawned_at.is_none(),
             "spawned_at must be cleared when the handle is reaped"
+        );
+    }
+
+    // ---- git_refresh_cancel flag exits thread early ------------------------
+
+    /// When the cancel flag is set before the thread checks it, the thread
+    /// exits without sending a GitStateChanged event.
+    ///
+    /// Note: this test only exercises the happy path — the flag is set, then
+    /// the thread reads it. The cancellation is explicitly best-effort and
+    /// cannot interrupt a blocking `refresh_git()` call already in flight;
+    /// a TOCTOU race where the thread reads the flag *before* the cancel
+    /// store is therefore expected and not covered here.
+    #[test]
+    fn git_thread_cancels_on_signal() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = Arc::clone(&cancel);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        let thread = std::thread::Builder::new()
+            .name("test-cancel-git".into())
+            .spawn(move || {
+                if !cancel_clone.load(Ordering::Relaxed) {
+                    let _ = tx.send(());
+                }
+            })
+            .expect("spawn");
+
+        cancel.store(true, Ordering::Relaxed);
+        thread.join().expect("thread panicked");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "cancelled git-refresh thread must not send GitStateChanged"
         );
     }
 

@@ -275,10 +275,11 @@ impl ApplicationHandler for Phantom {
                     Ok(()) => self.consecutive_panics = 0,
                     Err(panic) => {
                         self.consecutive_panics += 1;
+                        let msg = panic_message(&panic);
                         log::error!(
                             "Frame panic #{}: {}",
                             self.consecutive_panics,
-                            panic_message(&panic),
+                            msg,
                         );
                         if self.consecutive_panics > 10 {
                             log::error!(
@@ -286,6 +287,10 @@ impl ApplicationHandler for Phantom {
                                 self.consecutive_panics,
                             );
                             if let Some(app) = &mut self.app {
+                                // Notify the supervisor before shutting down so it
+                                // can distinguish a panic-escalation crash from a
+                                // silent heartbeat-timeout crash (GPU hang, SIGKILL).
+                                app.notify_render_panic(self.consecutive_panics, &msg);
                                 app.shutdown();
                             }
                             event_loop.exit();

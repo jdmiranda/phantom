@@ -29,10 +29,33 @@ use phantom_bundles::events::CaptureEvent;
 use phantom_stt::{AudioChunk, TranscriptBackend};
 use phantom_stt::stream::{PartialTranscript, SttStream, SttStreamConfig};
 
+/// JoinHandles for the two background tokio tasks spawned by [`SttPipeline::start`].
+///
+/// Storing the handles allows callers to abort both tasks on shutdown rather
+/// than relying on the channel-close cascade, which can delay termination when
+/// the STT backend is blocked in a long I/O call.
+pub struct SttTaskHandles {
+    /// Handle for the [`SttStream::run`] loop.
+    pub audio_task: tokio::task::JoinHandle<()>,
+    /// Handle for the partial-transcript event-forwarding loop.
+    pub forward_task: tokio::task::JoinHandle<()>,
+}
+
+impl SttTaskHandles {
+    /// Abort both background tasks immediately.
+    pub fn abort(self) {
+        self.audio_task.abort();
+        self.forward_task.abort();
+    }
+}
+
 /// Handle to a running STT pipeline.
 ///
 /// Drop this value to stop the pipeline gracefully (audio channel closes →
 /// remaining segment flushed → event-forwarding task exits).
+///
+/// For immediate cancellation on shutdown, use the [`SttTaskHandles`] returned
+/// by [`SttPipeline::start`] and call [`SttTaskHandles::abort`].
 pub struct SttPipeline {
     audio_tx: mpsc::Sender<AudioChunk>,
 }
@@ -53,18 +76,19 @@ impl SttPipeline {
         config: SttStreamConfig,
         event_tx: mpsc::Sender<CaptureEvent>,
         audio_channel_capacity: usize,
-    ) -> Self {
+    ) -> (Self, SttTaskHandles) {
         let (audio_tx, audio_rx) = mpsc::channel::<AudioChunk>(audio_channel_capacity);
         let (partial_tx, partial_rx) = mpsc::channel::<PartialTranscript>(64);
 
         let stream = SttStream::new(backend, config);
-        tokio::spawn(async move {
+        let audio_task = tokio::spawn(async move {
             stream.run(audio_rx, partial_tx).await;
         });
 
-        tokio::spawn(forward_partials(partial_rx, event_tx));
+        let forward_task = tokio::spawn(forward_partials(partial_rx, event_tx));
 
-        Self { audio_tx }
+        let handles = SttTaskHandles { audio_task, forward_task };
+        (Self { audio_tx }, handles)
     }
 
     /// Push an [`AudioChunk`] into the pipeline.
@@ -155,7 +179,7 @@ mod tests {
             .with_interim_interval_ms(9999);
 
         let (event_tx, mut event_rx) = mpsc::channel::<CaptureEvent>(64);
-        let pipeline = SttPipeline::start(backend, config, event_tx, 64);
+        let (pipeline, _handles) = SttPipeline::start(backend, config, event_tx, 64);
 
         for _ in 0..5 {
             assert!(pipeline.push_chunk(voice_chunk()), "pipeline should accept audio");
@@ -188,7 +212,7 @@ mod tests {
             .with_interim_interval_ms(9999);
 
         let (event_tx, mut event_rx) = mpsc::channel::<CaptureEvent>(8);
-        let pipeline = SttPipeline::start(backend, config, event_tx, 8);
+        let (pipeline, _handles) = SttPipeline::start(backend, config, event_tx, 8);
         drop(pipeline);
 
         let events = collect_events_with_timeout(&mut event_rx, 1).await;
@@ -206,6 +230,25 @@ mod tests {
             !pipeline.push_chunk(silence_chunk()),
             "push_chunk returns false when receiver closed"
         );
+    }
+
+    /// `SttTaskHandles::abort` cancels both spawned tasks without panic or deadlock.
+    #[tokio::test]
+    async fn stt_tasks_aborted_on_shutdown() {
+        let backend = Arc::new(MockBackend::new());
+        let config = SttStreamConfig::new()
+            .with_silence_boundary_ms(50)
+            .with_interim_interval_ms(9999);
+
+        let (event_tx, _event_rx) = mpsc::channel::<CaptureEvent>(8);
+        let (_pipeline, handles) = SttPipeline::start(backend, config, event_tx, 8);
+
+        // Abort both tasks -- simulating what App::shutdown does.
+        handles.abort();
+
+        // Give the tokio runtime a tick to process the abort signal.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Reaching here without panic or deadlock is the pass condition.
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

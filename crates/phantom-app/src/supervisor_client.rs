@@ -184,6 +184,22 @@ impl SupervisorClient {
         self.send(&AppMessage::Ready);
     }
 
+    /// Notify the supervisor that the render loop has escalated past the
+    /// consecutive-panic threshold and is forcing an exit.
+    ///
+    /// This allows the supervisor to distinguish a panic-escalation crash from
+    /// a silent heartbeat-timeout crash (GPU hang, SIGKILL, etc.) and record
+    /// the cause in its log before restarting.
+    pub fn notify_render_panic(&mut self, count: u32, last_message: &str) {
+        warn!(
+            "Notifying supervisor of render-panic escalation (count={count}, msg={last_message})"
+        );
+        self.send(&AppMessage::RenderPanic {
+            count,
+            last_message: last_message.to_owned(),
+        });
+    }
+
     /// Non-blocking attempt to read a command from the supervisor.
     ///
     /// Also checks for supervisor silence: if no message has been received
@@ -326,8 +342,72 @@ impl Drop for SupervisorClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+
+    use phantom_protocol::{AppMessage, HEARTBEAT_TIMEOUT_MS};
+
+    use super::SupervisorClient;
+
+    fn temp_sock_path(suffix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("phantom-test-{suffix}.sock"))
+    }
+
+    fn bind_listener(path: &PathBuf) -> UnixListener {
+        let _ = std::fs::remove_file(path);
+        UnixListener::bind(path).expect("bind listener")
+    }
+
+    /// `notify_render_panic` writes a `RENDER_PANIC:<count>:<msg>` line to the
+    /// supervisor socket.  Spins up a minimal Unix socket server, connects a
+    /// `SupervisorClient`, triggers panic escalation, and verifies the server
+    /// received the expected wire message.
+    #[test]
+    fn render_panic_sends_supervisor_notification() {
+        let path = temp_sock_path("render-panic");
+        let listener = bind_listener(&path);
+
+        let listener_thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => lines.push(line.trim().to_owned()),
+                    Err(_) => break,
+                }
+            }
+            lines
+        });
+
+        let mut client = SupervisorClient::connect(&path).expect("connect");
+        client.notify_render_panic(11, "index out of bounds: the len is 0");
+        drop(client);
+
+        let received = listener_thread.join().expect("listener thread panicked");
+
+        let panic_line = received
+            .iter()
+            .find(|l| l.starts_with("RENDER_PANIC:"))
+            .expect("no RENDER_PANIC line received");
+
+        let parsed =
+            AppMessage::from_line(panic_line).expect("RENDER_PANIC line must parse as AppMessage");
+
+        match parsed {
+            AppMessage::RenderPanic { count, last_message } => {
+                assert_eq!(count, 11);
+                assert_eq!(last_message, "index out of bounds: the len is 0");
+            }
+            other => panic!("expected RenderPanic, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(temp_sock_path("render-panic"));
+    }
 
     /// Verify that a client whose `last_ack_ms` is set far in the past will
     /// attempt to reconnect during `try_recv`.  The test uses a real listener
