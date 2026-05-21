@@ -150,6 +150,8 @@ fn content_type_label(ct: &ContentType) -> &'static str {
         ContentType::CompilerOutput => "build.error",
         ContentType::TestResults(_) => "test.result",
         ContentType::HttpResponse(_) => "http.response",
+        ContentType::DockerOutput(_) => "docker.output",
+        ContentType::NpmOutput(_) => "npm.output",
     }
 }
 

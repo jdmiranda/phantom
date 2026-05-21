@@ -180,18 +180,21 @@ pub fn dispatch_tool(
     // All other tools are denied before any capability check or handler runs.
     // The denial is recorded in the event log for audit completeness.
     if !ctx.runtime_mode.permits(name) {
-        if let Some(log) = ctx.event_log.as_ref()
-            && let Ok(mut guard) = log.lock() {
-                let _ = guard.append(
-                    phantom_memory::event_log::EventSource::Agent { id: ctx.self_ref.id },
-                    "runtime.denied",
-                    serde_json::json!({
-                        "agent_id": ctx.self_ref.id,
-                        "tool": name,
-                        "mode": ctx.runtime_mode.as_str(),
-                    }),
-                );
-            }
+        // #645: event_log is non-optional. The poisoned-mutex case is the
+        // only reason we still wrap in `if let Ok(...)`. Audit completeness
+        // is a best-effort goal here — wedging dispatch on a poisoned lock
+        // would be worse than losing one runtime-denied entry.
+        if let Ok(mut guard) = ctx.event_log.lock() {
+            let _ = guard.append(
+                phantom_memory::event_log::EventSource::Agent { id: ctx.self_ref.id },
+                "runtime.denied",
+                serde_json::json!({
+                    "agent_id": ctx.self_ref.id,
+                    "tool": name,
+                    "mode": ctx.runtime_mode.as_str(),
+                }),
+            );
+        }
         return result(
             PLACEHOLDER_TOOL,
             false,
@@ -221,7 +224,7 @@ pub fn dispatch_tool(
             let chat_ctx = ChatToolContext {
                 self_ref: ctx.self_ref.clone(),
                 registry: ctx.registry.clone(),
-                event_log: ctx.event_log.clone(),
+                event_log: Arc::clone(&ctx.event_log),
             };
             match chat_tool {
                 ChatTool::SendToAgent => match send_to_agent(args, &chat_ctx) {
@@ -262,53 +265,50 @@ pub fn dispatch_tool(
                         Err(e) => result(PLACEHOLDER_TOOL, false, e),
                     }
                 }
-                ComposerTool::WaitForAgent => match ctx.event_log.as_ref() {
-                    None => {
-                        result(PLACEHOLDER_TOOL, false, "event log not configured".into())
+                // #645: `ctx.event_log` is non-`Option`, so each composer
+                // tool dispatches directly against the wired log. The
+                // "event log not configured" no-log fork is gone — the
+                // pre-condition is now enforced by
+                // `AgentPane::build_dispatch_context`, which returns
+                // `None` (and the agent loop falls back to the file/git
+                // surface) until `set_substrate_handles` runs.
+                ComposerTool::WaitForAgent => match wait_for_agent(args, &ctx.event_log) {
+                    Ok(env) => {
+                        let body = serde_json::to_string(&env)
+                            .unwrap_or_else(|e| format!("encode error: {e}"));
+                        result(PLACEHOLDER_TOOL, true, body)
                     }
-                    Some(log) => match wait_for_agent(args, log) {
-                        Ok(env) => {
-                            let body = serde_json::to_string(&env)
-                                .unwrap_or_else(|e| format!("encode error: {e}"));
-                            result(PLACEHOLDER_TOOL, true, body)
-                        }
-                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
-                    },
+                    Err(e) => result(PLACEHOLDER_TOOL, false, e),
                 },
-                ComposerTool::RequestCritique => match ctx.event_log.as_ref() {
-                    None => {
-                        result(PLACEHOLDER_TOOL, false, "event log not configured".into())
-                    }
-                    Some(log) => match ctx.registry.lock() {
-                        Err(_) => result(
-                            PLACEHOLDER_TOOL,
-                            false,
-                            "agent registry poisoned".into(),
-                        ),
-                        Ok(registry_guard) => {
-                            match request_critique(args, &ctx.self_ref, &registry_guard, log) {
-                                Ok(env) => {
-                                    let body = serde_json::to_string(&env)
-                                        .unwrap_or_else(|e| format!("encode error: {e}"));
-                                    result(PLACEHOLDER_TOOL, true, body)
-                                }
-                                Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                ComposerTool::RequestCritique => match ctx.registry.lock() {
+                    Err(_) => result(
+                        PLACEHOLDER_TOOL,
+                        false,
+                        "agent registry poisoned".into(),
+                    ),
+                    Ok(registry_guard) => {
+                        match request_critique(
+                            args,
+                            &ctx.self_ref,
+                            &registry_guard,
+                            &ctx.event_log,
+                        ) {
+                            Ok(env) => {
+                                let body = serde_json::to_string(&env)
+                                    .unwrap_or_else(|e| format!("encode error: {e}"));
+                                result(PLACEHOLDER_TOOL, true, body)
                             }
+                            Err(e) => result(PLACEHOLDER_TOOL, false, e),
                         }
-                    },
-                },
-                ComposerTool::EventLogQuery => match ctx.event_log.as_ref() {
-                    None => {
-                        result(PLACEHOLDER_TOOL, false, "event log not configured".into())
                     }
-                    Some(log) => match event_log_query(args, log) {
-                        Ok(envs) => {
-                            let body = serde_json::to_string(&envs)
-                                .unwrap_or_else(|e| format!("encode error: {e}"));
-                            result(PLACEHOLDER_TOOL, true, body)
-                        }
-                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
-                    },
+                },
+                ComposerTool::EventLogQuery => match event_log_query(args, &ctx.event_log) {
+                    Ok(envs) => {
+                        let body = serde_json::to_string(&envs)
+                            .unwrap_or_else(|e| format!("encode error: {e}"));
+                        result(PLACEHOLDER_TOOL, true, body)
+                    }
+                    Err(e) => result(PLACEHOLDER_TOOL, false, e),
                 },
             }
         }
@@ -320,7 +320,7 @@ pub fn dispatch_tool(
             let defender_ctx = DefenderToolContext {
                 self_ref: ctx.self_ref.clone(),
                 registry: ctx.registry.clone(),
-                event_log: ctx.event_log.clone(),
+                event_log: Arc::clone(&ctx.event_log),
             };
             match defender_tool {
                 DefenderTool::ChallengeAgent => match challenge_agent(args, &defender_ctx) {
@@ -403,8 +403,63 @@ pub fn dispatch_tool(
             }
         }
     } else {
-        // ---- Unknown -------------------------------------------------------
-        result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+        // ---- MCP fallback / Unknown ----------------------------------------
+        //
+        // If the agent's DispatchContext carries an MCP registry, forward the
+        // call to the first connected server that knows this tool name.
+        // `blocking_read()` is safe here because dispatch runs on a sync agent
+        // thread, never inside an async executor.
+        if let Some(ref registry_arc) = ctx.mcp_registry {
+            // `McpToolRegistry::invoke` is `async fn` (since #625 wired the real
+            // server-call path). Dispatch runs on a sync agent thread, so we
+            // either reuse the ambient tokio runtime (when present) via
+            // `Handle::block_on`, or fall back to a one-shot current-thread
+            // runtime. Either way the agent thread blocks until the network
+            // round-trip completes.
+            let registry_arc = std::sync::Arc::clone(registry_arc);
+            let name_owned = name.to_owned();
+            let args_clone = args.clone();
+            let invoke_result: Result<
+                (serde_json::Value, phantom_mcp::ToolProvenance),
+                phantom_mcp::McpError,
+            > = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        let registry = registry_arc.read().await;
+                        registry.invoke(&name_owned, args_clone).await
+                    })
+                }),
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("dispatch: tokio runtime");
+                    rt.block_on(async {
+                        let registry = registry_arc.read().await;
+                        registry.invoke(&name_owned, args_clone).await
+                    })
+                }
+            };
+            match invoke_result {
+                Ok((payload, _provenance)) => {
+                    let output = serde_json::to_string(&payload)
+                        .unwrap_or_else(|_| payload.to_string());
+                    result(PLACEHOLDER_TOOL, true, output)
+                }
+                Err(phantom_mcp::McpError::UnknownTool { .. }) => {
+                    result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+                }
+                Err(e) => {
+                    result(
+                        PLACEHOLDER_TOOL,
+                        false,
+                        format!("mcp invoke error for '{name}': {e}"),
+                    )
+                }
+            }
+        } else {
+            result(PLACEHOLDER_TOOL, false, format!("unknown tool: {name}"))
+        }
     };
 
     // ---- Correlation ID: emit tool.invoked event with correlation_id -------
@@ -419,7 +474,11 @@ pub fn dispatch_tool(
     // The append is best-effort: a poisoned lock or I/O error is swallowed
     // rather than converting a successful tool result into a failure.  Tracing
     // loss is preferable to breaking the agent loop.
-    if let (Some(cid), Some(log)) = (ctx.correlation_id.as_ref(), ctx.event_log.as_ref()) {
+    // #645: event_log is non-optional; only the correlation token can
+    // legitimately be `None`. Tool-invocation tracing is still best-effort
+    // — a poisoned lock or I/O error is swallowed rather than converting a
+    // successful tool result into a failure.
+    if let Some(cid) = ctx.correlation_id.as_ref() {
         let mut payload = serde_json::json!({
             "tool": name,
             "agent_id": ctx.self_ref.id,
@@ -429,7 +488,7 @@ pub fn dispatch_tool(
         if let Some(src_id) = ctx.source_event_id {
             payload["source_event_id"] = serde_json::Value::from(src_id);
         }
-        if let Ok(mut guard) = log.lock() {
+        if let Ok(mut guard) = ctx.event_log.lock() {
             let _ = guard.append(
                 phantom_memory::event_log::EventSource::Agent { id: ctx.self_ref.id },
                 "tool.invoked",
@@ -444,8 +503,13 @@ pub fn dispatch_tool(
     // result taint when upstream sources are denied or quarantined. Runs after
     // every fork so even capability-denied and unknown-tool results inherit
     // taint from their call context.
-    if let (Some(start_id), Some(log)) = (ctx.source_event_id, ctx.event_log.as_ref()) {
-        let chain_taint = taint_from_source_chain(start_id, log, &ctx.registry);
+    // #645: event_log is non-optional; only the per-turn source event id
+    // can legitimately be `None`. When the dispatch is not anchored to an
+    // upstream event (legacy / test path with `source_event_id: None`),
+    // the chain walk is skipped.
+    if let Some(start_id) = ctx.source_event_id {
+        let chain_taint =
+            taint_from_source_chain(start_id, &ctx.event_log, &ctx.registry);
         tool_result.taint = tool_result.taint.merge(chain_taint);
     }
 

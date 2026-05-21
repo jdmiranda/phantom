@@ -229,8 +229,8 @@ async fn hub_rewrites_id_on_wire_and_restores_original_on_response() {
     tokio::spawn(async move {
         let req = rx.recv().await.unwrap();
         let wire_id = req.id.clone().unwrap().as_u64().unwrap();
-        // Wire id must be the hub-local counter (0), not Claude's 77.
-        assert_eq!(wire_id, 0, "hub must rewrite id to 0 on the wire");
+        // Wire id must be a hub-local random u64, not Claude's 77.
+        assert_ne!(wire_id, 77, "hub must rewrite Claude's id on the wire");
         deliver_response(&reg_clone, &phantom_id("id-phantom"), ok_response(wire_id)).await;
     });
 

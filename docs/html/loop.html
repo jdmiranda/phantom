@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · loop overseer</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 08 · LOOP OVERSEER · SUBSTRATE DRIVER</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html" class="active">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 08 · LOOP OVERSEER</span>
+    <span class="sysid">SYS://loop.0</span>
+  </div>
+  <h1 class="page-title">Loop Overseer</h1>
+  <p class="page-lede">
+    The loop overseer is what lets Phantom run autonomous work pipelines without a human in the chair. A
+    <code>LoopRunner</code> is a 6-state async FSM that pulls typed input from a <code>LoopSource</code>,
+    dispatches it through the substrate (which spawns an agent), waits for a schema-valid
+    <code>complete_task</code>, validates the payload, and fires any <code>on_complete</code> effects.
+    Repeat forever.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">FSM states</div><div class="value">6</div></div>
+    <div class="status-cell"><div class="label">Source kinds</div><div class="value">4</div></div>
+    <div class="status-cell"><div class="label">Shipped specs</div><div class="value">4</div></div>
+    <div class="status-cell"><div class="label">Spec format</div><div class="value">TOML</div></div>
+    <div class="status-cell"><div class="label">Preflight gates</div><div class="value">3</div></div>
+  </div>
+
+  <h2>LoopRunner FSM</h2>
+
+<pre class="ascii">
+            ┌──────────────┐
+            │     Idle     │  ← initial
+            └──────┬───────┘
+                   │ tick
+                   ▼
+            ┌──────────────┐         empty
+            │   Pulling    │────────────────┐
+            └──────┬───────┘                │
+              available                     │
+                   ▼                        │
+            ┌──────────────────┐            │
+            │  Dispatching     │            │
+            │  { input }       │            │
+            └──────┬───────────┘            │
+                   │ agent_id               │
+                   ▼                        │
+            ┌──────────────────┐            │
+            │   Awaiting       │            │
+            │ { input, id, t } │            │
+            └──────┬───────────┘            │
+                   │ AgentTaskComplete       │
+                   ▼                        │
+            ┌──────────────────┐            │
+            │   Validating     │            │
+            │ { input, result }│            │
+            └───┬──────────────┘            │
+           ok   │         schema-invalid     │
+                ▼                            │
+            on_complete → Idle ◀──────────────┘
+                                              ↓
+                                          ┌──────────┐
+                                          │  Stopped │  (Ctrl-C / fatal)
+                                          └──────────┘
+</pre>
+
+  <h2>The LoopSource trait</h2>
+  <p>
+    Every loop is defined by what it pulls. The <code>LoopSource</code> trait is the pluggable input boundary:
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub trait</span> <span class="t">LoopSource</span> {
+    <span class="k">fn</span> <span class="fn">next</span>(&amp;<span class="k">mut self</span>) -&gt; <span class="t">LoopPullResult</span>;
+}
+
+<span class="k">pub enum</span> <span class="t">LoopPullResult</span> {
+    <span class="n">Available</span>(<span class="t">LoopInput</span>),
+    <span class="n">Empty</span>,
+    <span class="n">Done</span>,
+    <span class="n">Error</span>(<span class="t">SourceError</span>),
+}</code></pre>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-h"><span class="card-title">CronSource</span><span class="card-sub">poll</span></div>
+      <div class="card-body">Agentless poll loops on a fixed schedule. Used for periodic substrate maintenance.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">LoopMessageQueueSource</span><span class="card-sub">queue</span></div>
+      <div class="card-body">Drains <code>LoopQueueRegistry</code> by queue name. Used for cross-loop fan-out (implementer → review).</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">GhIssueQueueSource</span><span class="card-sub">github</span></div>
+      <div class="card-body"><code>gh issue list</code> adapter. Yields one <code>LoopInput</code> per matching issue.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">GhPrReviewQueueSource</span><span class="card-sub">github</span></div>
+      <div class="card-body"><code>gh pr list</code> adapter for open PRs awaiting review.</div>
+    </div>
+  </div>
+
+  <h2>The substrate dispatcher</h2>
+  <p>
+    <code>SubstrateAgentDispatcher</code> at <code>phantom-loop/src/dispatcher/substrate.rs:98</code> is the
+    production <code>AgentDispatcher</code> trait impl. It pushes a <code>SpawnSubagentRequest</code> onto a
+    shared queue, allocates an <code>AgentId</code> from a monotonic counter (base
+    <code>SUBSTRATE_DISPATCHER_ID_BASE = 50_000</code> so substrate IDs don't collide with UI-spawned agents),
+    and registers a pending oneshot keyed by that ID.
+  </p>
+
+<pre class="code-rust"><code><span class="k">impl</span> <span class="t">AgentDispatcher</span> <span class="k">for</span> <span class="t">SubstrateAgentDispatcher</span> {
+    <span class="k">fn</span> <span class="fn">dispatch</span>(&amp;<span class="k">self</span>, input: <span class="t">LoopInput</span>) -&gt; <span class="t">DispatchHandle</span> {
+        <span class="k">let</span> agent_id = <span class="k">self</span>.next_id();
+        <span class="k">let</span> (tx, rx) = <span class="n">oneshot</span>::<span class="fn">channel</span>();
+        <span class="k">self</span>.pending.<span class="fn">lock</span>().<span class="fn">insert</span>(agent_id, tx);
+        <span class="k">self</span>.queue.<span class="fn">push</span>(<span class="t">SpawnSubagentRequest</span> {
+            agent_id,
+            role:     input.role(),
+            task:     input.task(),
+            opts:     <span class="t">AgentSpawnOpts</span>::<span class="fn">new</span>(input.role(), input.task())
+                          .<span class="fn">with_requires_complete_task</span>(<span class="lit">true</span>)
+                          .<span class="fn">with_exit_schema</span>(input.exit_schema()),
+        });
+        <span class="t">DispatchHandle</span> { agent_id, rx }
+    }
+}</code></pre>
+
+  <h2>SubstrateBackend — pluggable execution</h2>
+  <p>
+    The dispatcher only <em>pushes</em>. The <code>SubstrateDriver</code> pops. The driver delegates each request
+    to a <code>SubstrateBackend</code> impl. Two impls ship: production (Claude API) and mock (tests).
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub trait</span> <span class="t">SubstrateBackend</span> {
+    <span class="k">async fn</span> <span class="fn">drive_agent</span>(
+        &amp;<span class="k">self</span>,
+        request: <span class="t">SpawnSubagentRequest</span>,
+    ) -&gt; <span class="t">Result</span>&lt;<span class="t">serde_json</span>::<span class="t">Value</span>, <span class="t">DispatchError</span>&gt;;
+}
+
+<span class="c">// production impl</span>
+<span class="k">pub struct</span> <span class="t">ChatBackedSubstrateBackend</span> { … }
+
+<span class="k">impl</span> <span class="t">SubstrateBackend</span> <span class="k">for</span> <span class="t">ChatBackedSubstrateBackend</span> {
+    <span class="k">async fn</span> <span class="fn">drive_agent</span>(&amp;<span class="k">self</span>, req: <span class="t">SpawnSubagentRequest</span>) -&gt; …
+    {
+        <span class="c">// Streams TextDelta / ToolUse through Claude API.</span>
+        <span class="c">// Returns when the agent calls complete_task.</span>
+    }
+}
+
+<span class="c">// test impl</span>
+<span class="k">pub struct</span> <span class="t">MockSubstrateBackend</span> { canned_results: <span class="t">HashMap</span>&lt;<span class="t">AgentId</span>, <span class="t">Value</span>&gt; }</code></pre>
+
+  <h2>The four shipped loop specs</h2>
+  <p>
+    Live at <code>.phantom/loops/*.toml</code>. Each spec is a self-describing TOML record consumed by
+    <code>LoopRunner</code>. The implementer spec, for example:
+  </p>
+
+<pre class="code-toml"><code><span class="c"># .phantom/loops/implementer.toml</span>
+<span class="n">id</span> = <span class="s">"implementer"</span>
+<span class="n">max_concurrent</span> = <span class="lit">1</span>
+<span class="n">on_quarantine</span> = <span class="s">"skip_and_continue"</span>
+
+<span class="a">[agent]</span>
+<span class="n">role</span>        = <span class="s">"Actor"</span>
+<span class="n">allow_tools</span> = [<span class="s">"read_file"</span>, <span class="s">"write_file"</span>, <span class="s">"edit_file"</span>, <span class="s">"run_command"</span>, <span class="s">"gh_pr_create"</span>]
+<span class="n">system_prompt</span> = <span class="s">"""
+You are an implementation agent for the Phantom repo (jdmiranda/phantom).
+Pull the assigned issue. Read the relevant code. Write tests first.
+Implement the change. Run cargo test. Push a branch. Open a PR.
+You MUST call complete_task with {issue_number, pr_url, summary}.
+"""</span>
+
+<span class="a">[agent.policy]</span>
+<span class="n">auto_approve</span>    = <span class="lit">true</span>
+<span class="n">timeout_seconds</span> = <span class="lit">1800</span>
+
+<span class="a">[agent.exit_schema]</span>
+<span class="n">type</span>     = <span class="s">"object"</span>
+<span class="n">required</span> = [<span class="s">"issue_number"</span>, <span class="s">"pr_url"</span>, <span class="s">"summary"</span>]
+
+<span class="a">[source]</span>
+<span class="n">kind</span> = <span class="s">"queue"</span>
+<span class="n">name</span> = <span class="s">"implementer-queue"</span>
+
+<span class="a">[[on_complete]]</span>
+<span class="n">kind</span>  = <span class="s">"enqueue_to"</span>
+<span class="n">queue</span> = <span class="s">"review-queue"</span>
+
+<span class="a">[[on_complete.fields]]</span>
+<span class="n">from</span> = <span class="s">"result.pr_url"</span>
+<span class="n">to</span>   = <span class="s">"pr_url"</span></code></pre>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-h"><span class="card-title">pr_finder_review.toml</span><span class="pill pill-info">SCAN</span></div>
+      <div class="card-body">Polls GitHub for open PRs. Yields one input per PR awaiting review.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">pr_finder_impl.toml</span><span class="pill pill-info">SCAN</span></div>
+      <div class="card-body">Polls GitHub for open issues. Yields one input per labeled, unassigned issue.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">implementer.toml</span><span class="pill pill-warn">WRITE</span></div>
+      <div class="card-body">Drains <code>implementer-queue</code>. Writes code, runs cargo test, opens PR.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">reviewer.toml</span><span class="pill pill-info">READ</span></div>
+      <div class="card-body">Drains <code>review-queue</code>. Reads PR diff, posts review comments.</div>
+    </div>
+  </div>
+
+  <h2>Running it</h2>
+<pre class="code-bash"><code>phantom loop run <span class="k">--repo</span> ~/code/phantom <span class="k">--loops</span> pr_finder_impl,implementer,pr_finder_review,reviewer</code></pre>
+
+  <h2>Preflight gates</h2>
+  <p>Before any runner starts, <code>phantom-loop::preflight</code> runs three checks:</p>
+
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-h"><span class="card-title">check_gh_binary</span><span class="pill pill-info">G1</span></div>
+      <div class="card-body"><code>gh</code> on PATH and executable. No fallback to <code>git</code> + REST — the loop refuses to start without <code>gh</code>.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">check_gh_auth</span><span class="pill pill-info">G2</span></div>
+      <div class="card-body"><code>gh auth status</code> reports a logged-in account. Otherwise refuse.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">check_mcp_collisions</span><span class="pill pill-info">G3</span></div>
+      <div class="card-body">MCP tool names cannot collide with reserved <code>complete_task</code> / <code>abort_task</code> lifecycle names.</div>
+    </div>
+  </div>
+
+  <h2>The RunLock</h2>
+  <p>
+    Two concurrent loop runners against the same repo would race. Phantom prevents this with an exclusive file
+    lock at <code>&lt;repo&gt;/.phantom/loops/.runlock</code>, acquired by <code>RunLock::acquire(&amp;repo)</code>
+    on startup and released via <code>Drop</code> on Ctrl-C or process exit.
+  </p>
+
+  <h2>The headless substrate driver</h2>
+  <p>
+    <code>phantom loop run</code> doesn't boot wgpu, winit, or the renderer. The <code>SubstrateDriver</code>
+    (PR <code>#670</code>) is a pure tokio async tick loop. It drains the <code>SpawnSubagentQueue</code>, drives
+    each request through <code>ChatBackedSubstrateBackend</code>, and emits <code>Event::AgentTaskComplete</code>
+    onto a tokio mpsc bus. A <code>SubstrateCompletionRouter</code> subscribes to that bus and fulfils the
+    pending oneshot. Same dispatcher, same agent contract, no GUI.
+  </p>
+
+<pre class="ascii">
+                +-------------------------+
+                |  phantom-brain (headless)|
+                +-----------+-------------+
+                            |
+                            v
+                +-------------------------+
+                |  LoopQueueRegistry      |
+                +-----------+-------------+
+                            |
+                            v
+                +-------------------------+
+                |  LoopRunner × N         |  ←  one per .toml spec
+                +-----------+-------------+
+                            |
+                            v
+                +-------------------------+
+                |  SubstrateAgentDispatcher|
+                +-----------+-------------+
+                            |
+                            v
+                +-------------------------+
+                |  SpawnSubagentQueue     |
+                +-----------+-------------+
+                            |
+                            v
+                +-------------------------+
+                |  SubstrateDriver        |  ←  tokio tick loop
+                +-----------+-------------+
+                            |
+                            v
+                +-------------------------+
+                |  ChatBackedSubstrate    |  ←  Claude API
+                +-------------------------+
+</pre>
+
+  <footer class="footer">
+    <span>SEC 08 · LOOP</span>
+    <span><a href="harness.html">↩ SEC 07 · HARNESS</a> · <a href="self-improvement.html">next → SEC 09 · SELF-IMPROVE</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

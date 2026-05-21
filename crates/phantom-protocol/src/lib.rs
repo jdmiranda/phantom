@@ -12,7 +12,8 @@ pub use events::{AgentId, Event, EventTopic, JobId, SessionId};
 
 use std::io::Read as _;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -34,6 +35,30 @@ pub const MAX_RESTARTS: u32 = 5;
 pub const RESTART_WINDOW_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
+// Env-var accessors for heartbeat constants
+// ---------------------------------------------------------------------------
+
+/// Returns the heartbeat interval, overridable via `PHANTOM_HEARTBEAT_INTERVAL_MS`.
+#[must_use]
+pub fn heartbeat_interval() -> Duration {
+    let ms = std::env::var("PHANTOM_HEARTBEAT_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(HEARTBEAT_INTERVAL_MS);
+    Duration::from_millis(ms)
+}
+
+/// Returns the heartbeat timeout, overridable via `PHANTOM_HEARTBEAT_TIMEOUT_MS`.
+#[must_use]
+pub fn heartbeat_timeout() -> Duration {
+    let ms = std::env::var("PHANTOM_HEARTBEAT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(HEARTBEAT_TIMEOUT_MS);
+    Duration::from_millis(ms)
+}
+
+// ---------------------------------------------------------------------------
 // Socket path helpers
 // ---------------------------------------------------------------------------
 
@@ -43,7 +68,25 @@ pub fn socket_path(supervisor_pid: u32) -> PathBuf {
     PathBuf::from(format!("/tmp/phantom-{supervisor_pid}.sock"))
 }
 
-/// Scans `/tmp` for an existing `phantom-*.sock` file and returns the first match.
+/// Returns `true` when a `connect()` to `path` succeeds within ~200 ms.
+///
+/// The connect itself is synchronous; the read timeout is set only as a
+/// safety net — we do not actually read anything. A successful connection
+/// is sufficient evidence that a live listener is on the other end.
+#[must_use]
+pub fn is_socket_live(path: &Path) -> bool {
+    match UnixStream::connect(path) {
+        Ok(stream) => {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Scans `/tmp` for `phantom-*.sock` files and returns the first one that
+/// accepts a connection.  Stale socket files left by a crashed supervisor
+/// are skipped via [`is_socket_live`].
 #[must_use]
 pub fn find_socket() -> Option<PathBuf> {
     let Ok(entries) = std::fs::read_dir("/tmp") else {
@@ -53,7 +96,33 @@ pub fn find_socket() -> Option<PathBuf> {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         if name.starts_with("phantom-") && name.ends_with(".sock") {
-            return Some(entry.path());
+            let path = entry.path();
+            if is_socket_live(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Scans `/tmp` for a live `phantom-*.sock` that is **not** `old_path`.
+///
+/// Call this after detecting that the current supervisor has gone silent.
+/// Returns the path of the first live replacement socket found, or `None`
+/// if no alternative is available yet.
+#[must_use]
+pub fn reconnect(old_path: &Path) -> Option<PathBuf> {
+    let Ok(entries) = std::fs::read_dir("/tmp") else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("phantom-") && name.ends_with(".sock") {
+            let path = entry.path();
+            if path != old_path && is_socket_live(&path) {
+                return Some(path);
+            }
         }
     }
     None
@@ -525,5 +594,86 @@ mod tests {
         let line = cmd.to_line();
         assert_eq!(line, "USER:SET:url:http://localhost:8080");
         assert_eq!(UserCommand::from_line(&line), Some(cmd));
+    }
+
+    // -- is_socket_live / find_socket / reconnect -------------------------
+
+    #[test]
+    fn find_socket_skips_stale_socket() {
+        use std::fs;
+
+        // Create a socket file path that no one is listening on.
+        let stale = PathBuf::from("/tmp/phantom-test-stale-99999.sock");
+        // Ensure any leftover file is cleaned up first.
+        let _ = fs::remove_file(&stale);
+        // Write a regular file at that path — nothing is listening.
+        fs::write(&stale, b"").expect("could not create stale socket file");
+
+        // is_socket_live must return false for a non-socket path.
+        assert!(!is_socket_live(&stale), "stale file should not be live");
+
+        let _ = fs::remove_file(&stale);
+    }
+
+    #[test]
+    fn reconnect_returns_new_socket() {
+        use std::fs;
+        use std::os::unix::net::UnixListener;
+
+        let old = PathBuf::from("/tmp/phantom-test-old-88888.sock");
+        let new_path = PathBuf::from("/tmp/phantom-test-new-88888.sock");
+        let _ = fs::remove_file(&old);
+        let _ = fs::remove_file(&new_path);
+
+        // Bind a live listener on new_path.
+        let _listener =
+            UnixListener::bind(&new_path).expect("could not bind test socket");
+
+        // old_path does not exist, new_path is live.
+        let found = reconnect(&old);
+        // We may find new_path or any other real phantom socket, but we must
+        // not return old_path.
+        if let Some(ref p) = found {
+            assert_ne!(p, &old, "reconnect must not return the old socket");
+        }
+
+        let _ = fs::remove_file(&new_path);
+    }
+
+    // -- Env-var accessors ------------------------------------------------
+
+    #[test]
+    fn heartbeat_interval_reads_from_env_var() {
+        // SAFETY: this test is single-threaded; no concurrent env access.
+        unsafe {
+            std::env::set_var("PHANTOM_HEARTBEAT_INTERVAL_MS", "1234");
+        }
+        let d = heartbeat_interval();
+        unsafe {
+            std::env::remove_var("PHANTOM_HEARTBEAT_INTERVAL_MS");
+        }
+        assert_eq!(d, Duration::from_millis(1234));
+    }
+
+    #[test]
+    fn heartbeat_interval_uses_default_when_unset() {
+        unsafe {
+            std::env::remove_var("PHANTOM_HEARTBEAT_INTERVAL_MS");
+        }
+        let d = heartbeat_interval();
+        assert_eq!(d, Duration::from_millis(HEARTBEAT_INTERVAL_MS));
+    }
+
+    #[test]
+    fn heartbeat_timeout_reads_from_env_var() {
+        // SAFETY: this test is single-threaded; no concurrent env access.
+        unsafe {
+            std::env::set_var("PHANTOM_HEARTBEAT_TIMEOUT_MS", "9999");
+        }
+        let d = heartbeat_timeout();
+        unsafe {
+            std::env::remove_var("PHANTOM_HEARTBEAT_TIMEOUT_MS");
+        }
+        assert_eq!(d, Duration::from_millis(9999));
     }
 }

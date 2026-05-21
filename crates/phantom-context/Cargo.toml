@@ -9,6 +9,7 @@ log.workspace = true
 anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+phantom-dag = { path = "../phantom-dag" }
 
 [dev-dependencies]
 tempfile = "3"
