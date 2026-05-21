@@ -146,6 +146,15 @@ pub struct App {
     /// at a raw terminal.
     pub(crate) post_boot_agent_spawned: bool,
 
+    /// Shared flag between the live `SetupAdapter` (when present) and the
+    /// App's update loop. `SetupAdapter::update` flips this to `true` on a
+    /// `NONE → SOME` `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` transition.
+    /// `App::update` drains the flag each tick and, when set, calls
+    /// `spawn_agent_pane(...)` whose `adapter_count() == 1` replace-focused
+    /// path swaps the SetupAdapter out for the real agent at the same pane
+    /// slot. This avoids any cross-thread `AppCommand` plumbing.
+    pub(crate) post_setup_upgrade: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
@@ -1101,19 +1110,32 @@ impl App {
         // -- App coordinator (owns all adapters, dispatches update/render/input) --
         let mut coordinator = AppCoordinator::new(event_bus);
 
-        // -- Register initial terminal as adapter (Phase 3 — coordinator-managed) --
-        {
-            use crate::adapters::terminal::TerminalAdapter;
-            use phantom_scene::clock::Cadence;
-            use phantom_terminal::output::TerminalThemeColors;
+        // -- Register initial SetupAdapter as the sole pane --
+        //
+        // The cold-launch first impression is "Phantom IS the AI", not "Phantom
+        // is a terminal" (see `feedback_agent_is_primary` memory).  We
+        // register a dependency-free `SetupAdapter` here.  On the first
+        // `update.rs` tick the post-boot agent-spawn code runs; if an API key
+        // is available the existing `adapter_count() == 1 → kill_keeping_pane`
+        // replace-focused path swaps SetupAdapter out for the real agent at
+        // the SAME pane slot — no split, no half-window agent.  If no key is
+        // available SetupAdapter stays put with a "needs API key" message.
+        //
+        // The early `terminal: PhantomTerminal` built above at line ~679 is
+        // now unused at init; we drop it.  Cmd+T constructs a fresh terminal
+        // via `PhantomTerminal::new` in `pane.rs` when the user actually wants
+        // one.  Letting `terminal` go out of scope releases the PTY cleanly
+        // via `Drop`.
+        drop(terminal);
 
-            let theme_colors = TerminalThemeColors {
-                foreground: theme.colors.foreground,
-                background: theme.colors.background,
-                cursor: theme.colors.cursor,
-                ansi: Some(theme.colors.ansi),
-            };
-            let adapter = TerminalAdapter::with_theme(terminal, theme_colors);
+        let post_setup_upgrade = std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        );
+        {
+            use crate::adapters::setup::SetupAdapter;
+            use phantom_scene::clock::Cadence;
+
+            let adapter = SetupAdapter::new(std::sync::Arc::clone(&post_setup_upgrade));
             let _app_id = coordinator.register_adapter_at_pane(
                 Box::new(adapter),
                 pane_id,
@@ -1121,7 +1143,7 @@ impl App {
                 Cadence::unlimited(),
                 &mut layout,
             );
-            info!("Initial terminal registered as adapter (AppId {_app_id})");
+            info!("Initial SetupAdapter registered (AppId {_app_id}) — agent is king");
         }
 
         // Configure the arbiter with window content area and cell metrics.
@@ -1348,6 +1370,7 @@ impl App {
             demo_mode: config.demo_mode,
             demo_post_boot_done: false,
             post_boot_agent_spawned: false,
+            post_setup_upgrade,
             start_time: now,
             last_frame: now,
             dt_clamp: phantom_scene::DtClamp::default_60fps(),

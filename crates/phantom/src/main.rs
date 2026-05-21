@@ -1000,26 +1000,28 @@ mod tests {
         );
     }
 
-    /// `--fullscreen` CLI flag sets config.fullscreen = true.
+    /// `--fullscreen` CLI flag remains idempotent given the new fullscreen-by-default cold-launch UX.
     #[test]
     fn cli_fullscreen_flag_sets_config() {
         let mut config = PhantomConfig::default();
-        assert!(!config.fullscreen, "should start windowed by default");
-        // Simulate `--fullscreen` CLI parsing.
+        assert!(config.fullscreen, "should start fullscreen by default — agent is king");
+        // Simulate `--fullscreen` CLI parsing. Already true; this is a no-op
+        // (and that's the point: the flag must not break when the default
+        // is already on).
         config.fullscreen = true;
         assert!(
             config.fullscreen,
-            "--fullscreen flag must enable fullscreen"
+            "--fullscreen flag must keep fullscreen enabled"
         );
     }
 
-    /// `config_fullscreen_false_starts_windowed` — default config has fullscreen=false.
+    /// Default config starts in fullscreen so the agent pane owns the whole screen.
     #[test]
-    fn config_fullscreen_false_starts_windowed() {
+    fn default_fullscreen_is_true_for_agent_first_ux() {
         let config = PhantomConfig::default();
         assert!(
-            !config.fullscreen,
-            "default config must not start in fullscreen"
+            config.fullscreen,
+            "default config must start in fullscreen — Phantom IS the AI; the AI owns the screen"
         );
     }
 

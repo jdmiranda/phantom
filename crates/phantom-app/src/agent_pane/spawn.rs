@@ -4,7 +4,7 @@
 //! inside the GUI coordinator, and the `drain_blocked_events` helper used
 //! by `update.rs`.
 
-use log::{info, warn};
+use log::{error, info, warn};
 
 use phantom_agents::AgentSpawnOpts;
 use phantom_agents::agent::AgentTask;
@@ -77,7 +77,21 @@ impl App {
         let spawn_label = opts.label().unwrap_or("agent-pane").to_string();
         let resolved_model = opts.resolve_model();
         let Some(claude_config) = resolve_api_config(&resolved_model) else {
-            warn!("Cannot spawn agent: no API key configured for model {:?}", resolved_model);
+            // The user sees the SetupAdapter still on screen — surface a loud
+            // message so the failure mode is obvious from logs and the
+            // in-app console rather than a single `warn!` line in journald.
+            error!(
+                "agent spawn blocked: no API key configured for model {:?} \
+                 — set ANTHROPIC_API_KEY (or OPENAI_API_KEY) and restart, \
+                 or run: phantom auth login",
+                resolved_model
+            );
+            self.console.system(
+                "agent spawn blocked: API key not set — \
+                 set ANTHROPIC_API_KEY (or OPENAI_API_KEY) and restart, \
+                 or run: phantom auth login"
+                    .to_string(),
+            );
             return None;
         };
 

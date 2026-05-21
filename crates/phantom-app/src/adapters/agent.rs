@@ -551,10 +551,17 @@ impl Renderable for AgentAdapter {
     }
 
     fn spatial_preference(&self) -> Option<SpatialPreference> {
+        // Agent is king — preferred_size is bumped to a "larger than any
+        // monitor" sentinel so the arbiter's Phase 2 greedy allocation eats
+        // ALL available height for the agent pane in the single-adapter
+        // case.  Earlier values (preferred 80x20, max 120x40) clamped the
+        // pane to ~680 physical px on Retina, leaving a massive black void
+        // below the agent content on fullscreen displays.  No max_size so
+        // the pane can grow to whatever the window provides.
         Some(SpatialPreference {
             min_size: (30, 8),
-            preferred_size: (80, 20),
-            max_size: Some((120, 40)),
+            preferred_size: (500, 200),
+            max_size: None,
             aspect_ratio: None,
             internal_panes: 1,
             internal_layout: InternalLayout::Single,

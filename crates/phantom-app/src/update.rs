@@ -171,13 +171,34 @@ impl App {
         if !self.demo_mode && self.state == AppState::Terminal && !self.post_boot_agent_spawned {
             self.post_boot_agent_spawned = true;
             // spawn_agent_pane internally takes the `replace_focused` path
-            // when adapter_count == 1 (post-boot single-terminal case), so
-            // the agent inherits the terminal's pane slot directly — no
-            // split, no half-window agent. See `feedback_agent_is_primary`
-            // memory + the branch in `agent_pane::spawn`.
+            // when adapter_count == 1 (post-boot single-SetupAdapter case),
+            // so the agent inherits the SetupAdapter's pane slot directly —
+            // no split, no half-window agent. If no API key is available the
+            // spawn returns None (see Change 2 in plan) and the SetupAdapter
+            // stays full-window with a "needs API key" panel. See
+            // `feedback_agent_is_primary` memory + the branch in
+            // `agent_pane::spawn`.
             let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
                 prompt: "Welcome. I'm your Phantom agent — ready to help you build, debug, \
                     or explore. What would you like to work on?"
+                    .to_owned(),
+            });
+        }
+
+        // Live SetupAdapter→Agent upgrade. When the user provisions an API
+        // key after launch, the live SetupAdapter flips `post_setup_upgrade`
+        // to `true` from its `update(dt)` hook. We drain the flag and fire a
+        // fresh agent spawn — the `adapter_count() == 1` replace-focused
+        // path inside `spawn_agent_pane_with_opts` swaps SetupAdapter out for
+        // the real agent at the same pane slot.
+        if self.state == AppState::Terminal
+            && self
+                .post_setup_upgrade
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+                prompt: "API key detected. I'm your Phantom agent — what would you like \
+                    to work on first?"
                     .to_owned(),
             });
         }
