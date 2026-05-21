@@ -39,11 +39,17 @@ pub struct DispatchContext<'a> {
     /// Live agent directory used by chat tools (`send_to_agent`,
     /// `broadcast_to_role`) and `request_critique`.
     pub registry: Arc<Mutex<AgentRegistry>>,
-    /// Shared append-only log. `None` is permitted for legacy / test paths
-    /// that haven't opened a log file; chat-tool log emission becomes a
-    /// no-op and `read_from_agent` / `wait_for_agent` / `event_log_query`
-    /// return a structured error.
-    pub event_log: Option<Arc<Mutex<EventLog>>>,
+    /// Shared append-only log.
+    ///
+    /// Issue #645: this is **non-optional** at the dispatch boundary so the
+    /// causality guarantee — every `agent.speak` / `agent.challenge` /
+    /// `tool.invoked` envelope is durably recorded — cannot be silently
+    /// elided. Production callers wire the runtime's log via the App's
+    /// `AgentPane::set_substrate_handles` before the pane is allowed to
+    /// dispatch (`AgentPane::build_dispatch_context` returns `None` until
+    /// the handle is present). Tests construct an isolated fixture via
+    /// [`crate::test_support::fresh_log`].
+    pub event_log: Arc<Mutex<EventLog>>,
     /// Queue the Composer's `spawn_subagent` tool pushes into. The App
     /// drains this once per frame in `update.rs`.
     pub pending_spawn: Arc<Mutex<VecDeque<SpawnSubagentRequest>>>,
@@ -106,4 +112,12 @@ pub struct DispatchContext<'a> {
     /// `None` returns an `"unknown tool"` style error for those names —
     /// correct behaviour for non-Cartographer agents and legacy test paths.
     pub dag_explorer: Option<crate::dag_explorer::DagExplorerContext>,
+    /// MCP tool registry for external tool fallback.
+    ///
+    /// When `Some`, any tool name that does not match a built-in handler is
+    /// forwarded to the connected MCP servers via
+    /// [`phantom_mcp::McpToolRegistry::invoke`]. `None` disables MCP fallback —
+    /// the correct behaviour for legacy / test paths that have not wired an
+    /// MCP registry.
+    pub mcp_registry: Option<std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>>,
 }

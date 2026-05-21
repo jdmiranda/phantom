@@ -50,6 +50,7 @@ pub mod decompose;
 pub mod dispatch;
 pub mod events;
 pub mod goal;
+pub mod goal_source;
 pub mod goals;
 pub mod ollama;
 pub mod ooda;
@@ -60,6 +61,7 @@ pub mod provider_catalog;
 pub mod reconciler;
 pub mod router;
 pub mod scoring;
+pub mod self_improvement;
 pub mod skill_store;
 
 pub use attention::{Attention, PaneSnapshot};
@@ -653,6 +655,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
 
         // Send an event.
@@ -679,6 +682,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
 
         assert!(handle.try_recv_action().is_none());
@@ -751,6 +755,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
         let sender_clone = handle.event_sender();
 

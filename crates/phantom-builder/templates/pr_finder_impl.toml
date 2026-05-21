@@ -1,0 +1,36 @@
+# PR-finder (impl) loop — agentless watcher for PRs with failing CI.
+#
+# Role
+# ----
+# Polls `gh pr list` against jdmiranda/phantom with `failing_ci = true`
+# and enqueues each unseen PR onto `implementer-queue`. The implementer
+# loop drains that queue and re-rolls the failing change.
+#
+# Sister spec to `pr_finder_review.toml`. See that file's header for the
+# rationale behind the split from the original `pr_finder.toml`; the
+# short version is "agentless single-source, single-destination avoids
+# the three C1 schema gaps GAMMA surfaced in PR #662".
+
+id = "pr_finder_impl"
+max_concurrent = 1
+on_quarantine = "skip_and_continue"
+
+# The source polls `gh pr list -R jdmiranda/phantom --state open
+# --search status:failure` and emits one unseen PR per `next()` call.
+[source]
+kind = "gh_pr"
+repo = "jdmiranda/phantom"
+
+[source.predicate]
+state = "open"
+failing_ci = true
+
+# Forward the PR number to `implementer-queue`. See the field-map note
+# in `pr_finder_review.toml`.
+[[on_complete]]
+kind = "enqueue_to"
+queue = "implementer-queue"
+
+[[on_complete.fields]]
+from = "key"
+to = "pr_number"

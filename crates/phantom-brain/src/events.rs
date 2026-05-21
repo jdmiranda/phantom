@@ -8,6 +8,7 @@ use phantom_agents::agent::PauseReason;
 use phantom_agents::dispatch::Disposition;
 use phantom_agents::peer_routing::RemoteMessageContent;
 use phantom_agents::{AgentId, AgentTask};
+use phantom_history::HistoryEntry;
 use phantom_semantic::ParsedOutput;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,13 @@ pub enum AiEvent {
         /// This instance's peer id string (e.g. a UUIDv4).
         local_peer_id: String,
     },
+
+    /// Refresh the brain's in-memory history snapshot.
+    ///
+    /// Sent by the app thread every N commands (or on startup) so the brain
+    /// can inject recent session history into agent prompts without holding
+    /// a reference to the `HistoryStore` across thread boundaries.
+    HistorySnapshot(Vec<HistoryEntry>),
 
     /// Graceful shutdown request.
     Shutdown,
@@ -254,6 +262,35 @@ pub enum AiAction {
         agent_id: AgentId,
         /// The serializable message content decoded from the relay frame.
         content: RemoteMessageContent,
+    },
+
+    /// Enqueue a brain-discovered candidate goal onto a named cross-loop queue.
+    ///
+    /// Emitted by the brain's self-improvement reconciler (see
+    /// [`crate::self_improvement::SelfImprovementState::evaluate`]) when a
+    /// [`crate::goal_source::GoalCandidate`] passes hard exclusions, scores
+    /// above the active trust-band threshold, and clears the rate limiter.
+    ///
+    /// The app-layer [`crate::dispatch::ActionHandler`] handles this by
+    /// calling
+    /// `phantom_loop::queue::LoopQueueRegistry::push(queue, LoopMessage::new(from_source, payload))`
+    /// on the shared registry, so the implementer-queue consumer eventually
+    /// picks the message up. The default-noop method on
+    /// [`crate::dispatch::ActionHandler`] means existing handlers compile
+    /// unchanged; only handlers that actually wire the loop registry need to
+    /// override the method.
+    ///
+    /// `payload` shape is documented in §4.1 of the brain self-improvement
+    /// design doc.
+    EnqueueLoopMessage {
+        /// Target queue name. Brain emits `"implementer-queue"` by default.
+        queue: String,
+        /// Source identifier — copied from `GoalCandidate::source` so the
+        /// consuming loop can trace causality.
+        from_source: String,
+        /// Free-form JSON payload. The brain's payload-builder fills the
+        /// shape from §4.1; consumers should treat unknown fields as ignored.
+        payload: serde_json::Value,
     },
 
     /// Do nothing. The brain decided silence is the best action.

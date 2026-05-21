@@ -29,11 +29,17 @@ const NOT_CONFIGURED_REASON: &str = "Image and Audio embedding backends are not 
 /// Construct via [`OpenAiEmbeddingBackend::from_env`] (reads `OPENAI_API_KEY`)
 /// or [`OpenAiEmbeddingBackend::new`]. Defaults to `text-embedding-3-large`;
 /// call [`OpenAiEmbeddingBackend::with_small`] to switch to the small model.
+///
+/// The [`reqwest::Client`] is created once at construction time and reused
+/// across all [`embed`](Self::embed) calls. This avoids spawning a new
+/// connection pool per request and keeps TLS handshake overhead to a minimum.
 pub struct OpenAiEmbeddingBackend {
     api_key: String,
     model: String,
     base_url: String,
     dim: usize,
+    /// Shared HTTP client — created once, reused for every embedding request.
+    client: std::sync::Arc<reqwest::Client>,
 }
 
 impl std::fmt::Debug for OpenAiEmbeddingBackend {
@@ -44,6 +50,7 @@ impl std::fmt::Debug for OpenAiEmbeddingBackend {
             .field("model", &self.model)
             .field("base_url", &self.base_url)
             .field("dim", &self.dim)
+            // client is intentionally omitted — not meaningful in debug output.
             .finish()
     }
 }
@@ -68,6 +75,9 @@ impl OpenAiEmbeddingBackend {
     }
 
     /// Build a backend with an explicit API key. Defaults to the large model.
+    ///
+    /// A [`reqwest::Client`] is created once here and stored for reuse across
+    /// all subsequent [`embed`](Self::embed) calls — no per-request allocation.
     #[must_use]
     pub fn new(api_key: String) -> Self {
         Self {
@@ -75,6 +85,7 @@ impl OpenAiEmbeddingBackend {
             model: MODEL_LARGE.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             dim: DIM_LARGE,
+            client: std::sync::Arc::new(reqwest::Client::new()),
         }
     }
 
@@ -171,8 +182,9 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
         };
         let url = format!("{}/embeddings", self.base_url);
 
-        let client = reqwest::Client::new();
-        let resp = client
+        // Use the cached client — avoids TLS handshake setup on every call.
+        let resp = self
+            .client
             .post(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
