@@ -239,9 +239,32 @@ impl SceneTree {
         result
     }
 
+    /// Return `true` when at least one node has a pending dirty flag.
+    ///
+    /// Cheap O(n) scan over the node list; equivalent to
+    /// `!dirty_nodes().is_empty()` but avoids allocating the Vec.
+    #[must_use]
+    pub fn has_dirty_nodes(&self) -> bool {
+        self.nodes
+            .iter()
+            .any(|n| n.alive && n.dirty.needs_upload())
+    }
+
+    /// Clear all dirty flags on every node.
+    ///
+    /// Call after a completed render pass so static frames are skipped on the
+    /// next tick.
+    pub fn clear_all_dirty(&mut self) {
+        for n in self.nodes.iter_mut() {
+            if n.alive {
+                n.dirty = DirtyFlags::empty();
+            }
+        }
+    }
+
     /// Return IDs of all visible nodes in a specific render layer,
     /// sorted by z-order (ascending — lower draws first).
-    #[must_use] 
+    #[must_use]
     pub fn visible_nodes(&self, layer: RenderLayer) -> Vec<NodeId> {
         let mut result: Vec<_> = self
             .nodes
@@ -886,5 +909,72 @@ mod tests {
         assert!(children.contains(&p1));
         assert!(children.contains(&p3));
         assert!(tree.get(p2).is_none());
+    }
+
+    // ── Render-gating helpers ───────────────────────────────────────────
+
+    #[test]
+    fn render_runs_when_scene_dirty() {
+        let mut tree = SceneTree::new();
+        let _pane = tree.add_node(0, NodeKind::Pane);
+        // new node starts with ALL flags — tree is dirty.
+        assert!(tree.has_dirty_nodes());
+    }
+
+    #[test]
+    fn render_skipped_when_scene_not_dirty() {
+        let mut tree = SceneTree::new();
+        let _pane = tree.add_node(0, NodeKind::Pane);
+        tree.clear_all_dirty();
+        // After clearing, the gate check `!has_dirty_nodes()` is true → skip.
+        assert!(!tree.has_dirty_nodes());
+    }
+
+    #[test]
+    fn force_redraw_cleared_after_render() {
+        let mut tree = SceneTree::new();
+        tree.clear_all_dirty();
+
+        // Simulate force_redraw = true (set by keypress).
+        let mut force_redraw = true;
+        // Gate: !clean && !force → skip. With force=true, must NOT skip.
+        assert!(!(!tree.has_dirty_nodes() && !force_redraw));
+
+        // Post-render cleanup.
+        force_redraw = false;
+        // Now both clean AND force cleared → would skip.
+        assert!(!tree.has_dirty_nodes() && !force_redraw);
+    }
+
+    #[test]
+    fn clear_all_dirty_removes_all_flags() {
+        let mut tree = SceneTree::new();
+        let a = tree.add_node(0, NodeKind::Pane);
+        let b = tree.add_node(0, NodeKind::StatusBar);
+        let c = tree.add_node(a, NodeKind::Image);
+
+        assert!(tree.has_dirty_nodes());
+        tree.clear_all_dirty();
+        assert!(!tree.has_dirty_nodes());
+
+        for id in [0, a, b, c] {
+            assert!(tree.get(id).unwrap().dirty.is_clean(), "node {id} not clean");
+        }
+    }
+
+    #[test]
+    fn tombstoned_nodes_not_counted_as_dirty() {
+        let mut tree = SceneTree::new();
+        let id = tree.add_node(0, NodeKind::Pane);
+        tree.clear_all_dirty();
+        assert!(!tree.has_dirty_nodes());
+
+        // Directly tombstone the slot and give it extreme dirty state.
+        // This bypasses remove_node's propagation so the root stays clean.
+        tree.nodes[id as usize].alive = false;
+        tree.nodes[id as usize].dirty = DirtyFlags::ALL;
+
+        // Dead slot must not count.
+        assert!(!tree.has_dirty_nodes(), "tombstoned node must not set has_dirty_nodes");
     }
 }

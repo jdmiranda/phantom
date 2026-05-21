@@ -16,13 +16,19 @@ log.workspace = true
 anyhow.workspace = true
 
 # Optional: only pulled in when the `hot-modules` feature is enabled.
-libloading = { workspace = true, optional = true }
-notify     = { workspace = true, optional = true }
+libloading  = { workspace = true, optional = true }
+notify      = { workspace = true, optional = true }
 
 # Always depend on phantom-semantic so callers get the concrete types.
 phantom-semantic = { path = "../phantom-semantic" }
 # Always depend on phantom-nlp so callers get the concrete LlmBackend types.
 phantom-nlp = { path = "../phantom-nlp" }
+
+# SHA-256 dylib signature verification (always present).
+sha2 = { workspace = true }
+hex  = { workspace = true }
+# Used to deserialise `ParsedOutput` / LLM responses that cross the C ABI boundary.
+serde_json = "1"
 
 [dev-dependencies]
 tempfile   = { workspace = true }

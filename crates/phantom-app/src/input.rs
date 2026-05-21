@@ -9,7 +9,7 @@ use std::time::Instant;
 use log::{debug, info, warn};
 use winit::keyboard::{Key, NamedKey};
 
-use phantom_terminal::input::{self, KeyEvent, PhantomKey, PhantomModifiers};
+use phantom_terminal::input::{self, KeyEvent, KittyEventType, PhantomKey, PhantomModifiers};
 use phantom_ui::keybinds::Key as UiKey;
 use phantom_ui::keybinds::{Action, KeyCombo};
 
@@ -163,24 +163,27 @@ impl App {
                         focused,
                         "select_copy",
                         &serde_json::json!({}),
-                    ) {
-                        if !text.is_empty() {
-                            if let Ok(mut clipboard) = arboard::Clipboard::new()
-                                && let Err(e) = clipboard.set_text(&text) {
-                                    debug!("clipboard write failed: {e}");
-                                }
-                            info!("Copied {} chars to clipboard", text.len());
-                        } else {
-                            debug!("Copy: no selection");
+                    )
+                {
+                    if !text.is_empty() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new()
+                            && let Err(e) = clipboard.set_text(&text)
+                        {
+                            debug!("clipboard write failed: {e}");
                         }
+                        info!("Copied {} chars to clipboard", text.len());
+                    } else {
+                        debug!("Copy: no selection");
                     }
+                }
             }
             Action::Paste => {
                 if let Ok(mut clipboard) = arboard::Clipboard::new()
-                    && let Ok(text) = clipboard.get_text() {
-                        self.coordinator.route_bytes(text.as_bytes());
-                        info!("Pasted {} bytes from clipboard", text.len());
-                    }
+                    && let Ok(text) = clipboard.get_text()
+                {
+                    self.coordinator.route_bytes(text.as_bytes());
+                    info!("Pasted {} bytes from clipboard", text.len());
+                }
             }
             // Phantom is panes-first; tabs are not a shipped concept.
             // Redirect tab actions to their pane equivalents so the keybind
@@ -382,11 +385,10 @@ impl App {
         self.last_input_time = Instant::now();
 
         // Escape dismisses context menu.
-        if self.context_menu.visible
-            && matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
-                self.context_menu.hide();
-                return;
-            }
+        if self.context_menu.visible && matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.context_menu.hide();
+            return;
+        }
 
         // Escape exits fullscreen mode.
         if self.fullscreen_pane.is_some()
@@ -394,6 +396,30 @@ impl App {
         {
             info!("Exiting fullscreen via Escape");
             self.fullscreen_pane = None;
+            return;
+        }
+
+        // F1 or bare `?` toggles the keybind help overlay.
+        // Handled before console/suggestion routing so the overlay is always
+        // reachable regardless of which sub-mode is active.
+        if !modifiers.state().control_key()
+            && !modifiers.state().alt_key()
+            && !modifiers.state().super_key()
+        {
+            let is_f1 = matches!(&event.logical_key, Key::Named(NamedKey::F1));
+            let is_question = matches!(&event.logical_key, Key::Character(s) if s.as_str() == "?");
+            if is_f1 || is_question {
+                self.keybind_help.toggle();
+                debug!("Keybind help overlay toggled: {}", self.keybind_help.visible());
+                return;
+            }
+        }
+
+        // Escape also hides the keybind help overlay if it is visible.
+        if self.keybind_help.visible()
+            && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+        {
+            self.keybind_help.hide();
             return;
         }
 
@@ -486,10 +512,11 @@ impl App {
             && matches!(&event.logical_key, Key::Character(s) if s == "D" || s == "d")
         {
             if let Some(focused) = self.coordinator.focused()
-                && self.coordinator.is_floating(focused) {
-                    self.coordinator
-                        .dock_to_grid(focused, &mut self.layout, &mut self.scene);
-                }
+                && self.coordinator.is_floating(focused)
+            {
+                self.coordinator
+                    .dock_to_grid(focused, &mut self.layout, &mut self.scene);
+            }
             return;
         }
 
@@ -515,45 +542,112 @@ impl App {
             return;
         }
 
+        // Cmd+F (super+f on macOS) — toggle find-in-terminal search bar.
+        if modifiers.state().super_key()
+            && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "f" || s.as_str() == "F")
+        {
+            self.search_bar.toggle();
+            debug!("Search bar toggled: visible={}", self.search_bar.visible);
+            return;
+        }
+
+        // Search bar captures keys when visible (before they reach the PTY).
+        if self.search_bar.visible {
+            use phantom_ui::widgets::SearchKey;
+            use phantom_ui::widgets::SearchBarAction;
+
+            let action = match &event.logical_key {
+                Key::Named(NamedKey::Escape) => self.search_bar.handle_key(SearchKey::Escape),
+                Key::Named(NamedKey::Enter) => self.search_bar.handle_key(SearchKey::Enter),
+                Key::Named(NamedKey::Backspace) => self.search_bar.handle_key(SearchKey::Backspace),
+                Key::Named(NamedKey::Delete) => self.search_bar.handle_key(SearchKey::Delete),
+                Key::Named(NamedKey::ArrowLeft) => self.search_bar.handle_key(SearchKey::Left),
+                Key::Named(NamedKey::ArrowRight) => self.search_bar.handle_key(SearchKey::Right),
+                Key::Named(NamedKey::ArrowUp) => self.search_bar.handle_key(SearchKey::Up),
+                Key::Named(NamedKey::ArrowDown) => self.search_bar.handle_key(SearchKey::Down),
+                Key::Named(NamedKey::Home) => self.search_bar.handle_key(SearchKey::Home),
+                Key::Named(NamedKey::End) => self.search_bar.handle_key(SearchKey::End),
+                Key::Character(s) => {
+                    if let Some(ch) = s.chars().next() {
+                        self.search_bar.handle_char(ch)
+                    } else {
+                        SearchBarAction::None
+                    }
+                }
+                _ => SearchBarAction::None,
+            };
+
+            match action {
+                SearchBarAction::QueryChanged(query) => {
+                    self.update_search_query(&query);
+                }
+                SearchBarAction::Next => {
+                    self.advance_search_match(1);
+                }
+                SearchBarAction::Prev => {
+                    self.advance_search_match(-1);
+                }
+                SearchBarAction::Close => {
+                    self.clear_search();
+                }
+                SearchBarAction::None => {}
+            }
+            return;
+        }
+
         if !modifiers.state().control_key()
             && !modifiers.state().alt_key()
             && !modifiers.state().super_key()
-            && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`") {
-                self.console.toggle();
-                debug!("Console toggled open");
-                return;
+            && matches!(&event.logical_key, Key::Character(s) if s.as_str() == "`")
+        {
+            self.console.toggle();
+            debug!("Console toggled open");
+            return;
+        }
+
+        // Cmd+I: toggle inspector pane.
+        if modifiers.state().super_key()
+            && matches!(&event.logical_key, Key::Character(s) if s == "i" || s == "I")
+        {
+            if self.spawn_inspector_pane() {
+                self.console.system("Inspector pane opened.");
+            } else {
+                debug!("Cmd+I: inspector pane spawn failed (no focused pane)");
             }
+            return;
+        }
 
         if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers)
-            && let Some(action) = self.keybinds.lookup(&combo) {
-                // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
-                // Let them fall through to the PTY so the program receives them.
-                let is_scroll = matches!(
-                    action,
-                    Action::ScrollPageUp
-                        | Action::ScrollPageDown
-                        | Action::ScrollToTop
-                        | Action::ScrollToBottom
-                );
-                if is_scroll {
-                    // Check if focused adapter is in alt-screen mode (vim/htop/less).
-                    // If so, let the keypress fall through to the PTY.
-                    let in_alt = self
-                        .coordinator
-                        .focused()
-                        .and_then(|id| self.coordinator.get_state(id))
-                        .and_then(|state| state.get("alt_screen").and_then(|v| v.as_bool()))
-                        .unwrap_or(false);
-                    if !in_alt {
-                        self.dispatch_action(*action);
-                        return;
-                    }
-                    // alt screen: fall through to PTY encoding
-                } else {
+            && let Some(action) = self.keybinds.lookup(&combo)
+        {
+            // Alt-screen guard: don't consume scroll keybinds in vim/htop/less.
+            // Let them fall through to the PTY so the program receives them.
+            let is_scroll = matches!(
+                action,
+                Action::ScrollPageUp
+                    | Action::ScrollPageDown
+                    | Action::ScrollToTop
+                    | Action::ScrollToBottom
+            );
+            if is_scroll {
+                // Check if focused adapter is in alt-screen mode (vim/htop/less).
+                // If so, let the keypress fall through to the PTY.
+                let in_alt = self
+                    .coordinator
+                    .focused()
+                    .and_then(|id| self.coordinator.get_state(id))
+                    .and_then(|state| state.get("alt_screen").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+                if !in_alt {
                     self.dispatch_action(*action);
                     return;
                 }
+                // alt screen: fall through to PTY encoding
+            } else {
+                self.dispatch_action(*action);
+                return;
             }
+        }
 
         if self.state == AppState::Boot {
             self.boot.skip();
@@ -576,8 +670,27 @@ impl App {
                         .send_command(focused, "select_clear", &serde_json::json!({}));
             }
 
-            // Encode key event to raw PTY bytes.
-            let bytes = input::encode_key(&terminal_event);
+            // Check if the focused adapter has Kitty keyboard mode active.
+            let kitty_active = self
+                .coordinator
+                .focused()
+                .and_then(|id| self.coordinator.get_state(id))
+                .and_then(|s| s.get("kitty_keyboard_mode").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+
+            // Encode key event: try Kitty CSI u first when the mode is on,
+            // fall back to legacy VT100 if the key has no Kitty mapping.
+            let bytes = if kitty_active {
+                input::encode_kitty_key(
+                    terminal_event.key,
+                    terminal_event.mods,
+                    KittyEventType::Press,
+                )
+                .unwrap_or_else(|| input::encode_key(&terminal_event))
+            } else {
+                input::encode_key(&terminal_event)
+            };
+
             if bytes.is_empty() {
                 return;
             }
@@ -615,10 +728,28 @@ impl App {
             Key::Named(NamedKey::ArrowRight) => self.settings_panel.adjust(1.0),
             Key::Named(NamedKey::ArrowLeft) => self.settings_panel.adjust(-1.0),
             Key::Named(NamedKey::Tab) => self.settings_panel.next_section(),
+            // [R] Revert to Defaults: reset all settings panel values, apply
+            // the default CRT parameters immediately, and persist defaults.
+            Key::Character(s) if s.as_str() == "r" || s.as_str() == "R" => {
+                self.settings_panel.revert_to_defaults();
+                let snap = self.settings_panel.to_snapshot();
+                self.apply_settings_snapshot(&snap);
+                let settings = crate::settings::PhantomSettings::default();
+                if let Err(e) = settings.save() {
+                    log::warn!("Failed to save default settings: {e}");
+                }
+                self.console.system("Settings reverted to defaults");
+                return;
+            }
             _ => {}
         }
-        // Apply CRT changes live.
+        // Apply live changes from every other key.
         let snap = self.settings_panel.to_snapshot();
+        self.apply_settings_snapshot(&snap);
+    }
+
+    /// Apply a `SettingsSnapshot` to the live theme shader parameters.
+    fn apply_settings_snapshot(&mut self, snap: &crate::settings_ui::SettingsSnapshot) {
         self.theme.shader_params.scanline_intensity = snap.scanline_intensity;
         self.theme.shader_params.bloom_intensity = snap.bloom_intensity;
         self.theme.shader_params.chromatic_aberration = snap.chromatic_aberration;

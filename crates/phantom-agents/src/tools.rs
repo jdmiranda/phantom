@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use phantom_semantic::{ParsedOutput, SemanticParser};
@@ -482,6 +481,67 @@ pub fn available_tools() -> Vec<ToolDefinition> {
     ]
 }
 
+/// Return the lifecycle tool definitions (`complete_task`, `abort_task`).
+///
+/// Issue #646 broader implementation: when an [`crate::agent::Agent`] is spawned
+/// with [`crate::agent::AgentSpawnOpts::with_requires_complete_task`] set to
+/// `true`, the agent-pane dispatch loop must extend its LLM tool manifest with
+/// these definitions so the model can emit the terminal signal. Both Claude
+/// (`api.rs`) and OpenAI (`chat.rs`) parsers divert tool-name matches for
+/// `complete_task` ahead of [`ToolType::from_api_name`] into a dedicated
+/// [`crate::api::ApiEvent::CompleteTask`] event (decision #1 from the spike
+/// PR — option (b)).
+///
+/// `result` is required and must be a JSON object — the consumer-side
+/// validation gate in `phantom-app::agent_pane` enforces this and flatlines
+/// the pane after three consecutive schema-invalid calls.
+///
+/// Out of scope: full `abort_task` consumer wiring lives behind future work.
+/// The definition is exposed here so the model can call it; the consumer side
+/// is currently a no-op that lets the existing iteration-limit / error arms
+/// terminate the agent.
+#[must_use]
+pub fn lifecycle_tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "complete_task".into(),
+            description: "Signal that the task is complete. Call this once when you have finished \
+                          the work — the call ends the agent loop. `result` must be a JSON object \
+                          summarising the outcome (e.g. `{\"summary\": \"...\", \"artifacts\": [...]}`).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Short human-readable description of what was accomplished."
+                    },
+                    "artifacts": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of files, identifiers, or outputs produced."
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "abort_task".into(),
+            description: "Signal that the task cannot be completed. Call this once when you have \
+                          determined the work is infeasible or blocked — the call ends the agent \
+                          loop. `reason` must be a short string explaining why.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Short human-readable explanation of why the task was aborted."
+                    }
+                },
+                "required": ["reason"]
+            }),
+        },
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Path sandboxing
 // ---------------------------------------------------------------------------
@@ -861,43 +921,51 @@ fn execute_search_files(root: &Path, args: &serde_json::Value) -> ToolResult {
 
 fn execute_git_status(root: &Path) -> ToolResult {
     let tool = ToolType::GitStatus;
-
-    match Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(root)
-        .output()
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            if output.status.success() {
-                tool_ok(tool, stdout)
+    // Route through the OS-level sandbox with Strict policy so that a crafted
+    // .git/config core.hooksPath cannot execute arbitrary code outside the
+    // agent's cwd, AND a hung credential helper cannot block the agent thread
+    // indefinitely (the COMMAND_TIMEOUT wall-clock is the guard).
+    match sandbox::execute_sandboxed(
+        "git status --porcelain=v2 --branch",
+        root,
+        SandboxPolicy::Strict,
+        COMMAND_TIMEOUT,
+    ) {
+        Ok(out) => {
+            if out.success {
+                tool_ok(tool, out.stdout)
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                tool_err(tool, format!("git status failed: {stderr}"))
+                tool_err(tool, format!("git status failed: {}", out.stderr))
             }
         }
-        Err(e) => tool_err(tool, format!("cannot run git: {e}")),
+        Err(sandbox::SandboxError::Timeout { limit }) => {
+            tool_err(tool, format!("git status timed out after {limit:?}"))
+        }
+        Err(e) => tool_err(tool, format!("sandbox error running git status: {e}")),
     }
 }
 
 fn execute_git_diff(root: &Path) -> ToolResult {
     let tool = ToolType::GitDiff;
-
-    match Command::new("git")
-        .arg("diff")
-        .current_dir(root)
-        .output()
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            if output.status.success() {
-                tool_ok(tool, stdout)
+    // Route through the OS-level sandbox with Strict policy (same reasoning
+    // as execute_git_status). COMMAND_TIMEOUT guards against hung git.
+    match sandbox::execute_sandboxed(
+        "git diff",
+        root,
+        SandboxPolicy::Strict,
+        COMMAND_TIMEOUT,
+    ) {
+        Ok(out) => {
+            if out.success {
+                tool_ok(tool, out.stdout)
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                tool_err(tool, format!("git diff failed: {stderr}"))
+                tool_err(tool, format!("git diff failed: {}", out.stderr))
             }
         }
-        Err(e) => tool_err(tool, format!("cannot run git: {e}")),
+        Err(sandbox::SandboxError::Timeout { limit }) => {
+            tool_err(tool, format!("git diff timed out after {limit:?}"))
+        }
+        Err(e) => tool_err(tool, format!("sandbox error running git diff: {e}")),
     }
 }
 
@@ -1805,14 +1873,16 @@ mod tests {
             role: AgentRole::Watcher,
             working_dir: tmp.path(),
             registry,
-            event_log: None,
+            // #645: every DispatchContext now carries a real event log.
+            event_log: crate::test_support::fresh_log(),
             pending_spawn,
             source_event_id: None,
             quarantine: None,
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        dag_explorer: None,
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,
+            mcp_registry: None,
         };
 
         // One call → must produce exactly one denial result.
@@ -1899,5 +1969,87 @@ mod tests {
 
         // Provenance tool_name must still be "read_file".
         assert_eq!(result.tool_name, "read_file");
+    }
+
+    #[test]
+    fn git_status_runs_through_sandbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output();
+        let result = execute_git_status(dir.path());
+        // Verify we are on the sandboxed path: errors say "sandbox error" or
+        // "git status failed", never the old bare "cannot run git" message.
+        if !result.success {
+            assert!(
+                result.output.contains("sandbox error") || result.output.contains("git status failed"),
+                "unexpected error from non-sandboxed path: {}",
+                result.output,
+            );
+        }
+    }
+
+    #[test]
+    fn git_diff_runs_through_sandbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output();
+        let result = execute_git_diff(dir.path());
+        if !result.success {
+            assert!(
+                result.output.contains("sandbox error") || result.output.contains("git diff failed"),
+                "unexpected error from non-sandboxed path: {}",
+                result.output,
+            );
+        }
+    }
+
+    // -- Bug fix: git_status / git_diff timeout -----------------------------
+    //
+    // A hung git process (e.g. credential helper on a network mount) must not
+    // block the agent thread indefinitely. The sandboxed path ensures a
+    // timeout is always set; we assert non-repo failures return promptly.
+
+    #[test]
+    fn git_status_timeout_returns_tool_error_not_hang() {
+        let tmp = TempDir::new().unwrap();
+        let result = execute_tool(
+            ToolType::GitStatus,
+            &serde_json::json!({}),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        assert!(
+            !result.success,
+            "git status in non-repo must fail; got success with: {}",
+            result.output,
+        );
+        assert!(
+            !result.output.is_empty(),
+            "failure result must carry an error message, not empty output",
+        );
+    }
+
+    #[test]
+    fn git_diff_timeout_returns_tool_error_not_hang() {
+        let tmp = TempDir::new().unwrap();
+        let result = execute_tool(
+            ToolType::GitDiff,
+            &serde_json::json!({}),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        assert!(
+            !result.success,
+            "git diff in non-repo must fail; got success with: {}",
+            result.output,
+        );
+        assert!(
+            !result.output.is_empty(),
+            "failure result must carry an error message, not empty output",
+        );
     }
 }

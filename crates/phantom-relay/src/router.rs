@@ -4,14 +4,35 @@
 //! wrapped in an `Arc<Mutex<…>>` and cloned into each connection task.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use log::{debug, warn};
 
 use crate::envelope::{ClientMessage, Envelope, PeerId, RelayMessage};
 use crate::grant::{CapabilityClass, Grant, PeerGrantRegistry};
-use crate::rate_limit::TokenBucket;
+use crate::rate_limit::{SlidingWindow, TokenBucket};
 use crate::session::SessionHandle;
+
+/// Maximum payload size (in serialized bytes) for any single envelope.
+///
+/// Envelopes whose `payload` field serializes to more than this are rejected
+/// with [`RelayMessage::MessageTooLarge`] and the connection is closed with
+/// WS close code 1009 (Message Too Large).
+pub const MAX_MESSAGE_BYTES: usize = 1_048_576; // 1 MiB
+
+/// Maximum number of simultaneously connected peers.
+///
+/// When the active session count equals this value, [`Router::register`]
+/// returns an error and the server closes the incoming connection with WS
+/// close code 1013 (Try Again Later).
+pub const MAX_CONNECTIONS: usize = 1_000;
+
+/// Sliding-window message limit per connection.
+const WINDOW_MAX_MESSAGES: u32 = 100;
+
+/// Duration of the per-connection sliding window.
+const WINDOW_DURATION: Duration = Duration::from_secs(10);
 
 /// Environment variable that flips the unsigned-envelope policy from
 /// "accept with WARN" (migration window) to "deny" (issue #525).
@@ -36,8 +57,10 @@ fn deny_unsigned_from_env() -> bool {
 pub struct Router {
     /// Live peer → session handle map.
     sessions: HashMap<PeerId, SessionHandle>,
-    /// Per-peer token buckets.
+    /// Per-peer token buckets (continuous throughput limiter).
     rate_buckets: HashMap<PeerId, TokenBucket>,
+    /// Per-peer sliding-window counters (hard burst limiter, WS 1008).
+    sliding_windows: HashMap<PeerId, SlidingWindow>,
     /// Per-peer capability grant registry (default-deny).
     grants: PeerGrantRegistry,
     /// Default rate limit (messages / second).
@@ -74,6 +97,7 @@ impl Router {
         Self {
             sessions: HashMap::new(),
             rate_buckets: HashMap::new(),
+            sliding_windows: HashMap::new(),
             grants: PeerGrantRegistry::new(),
             rate_limit,
             max_peers,
@@ -111,8 +135,8 @@ impl Router {
 
     /// Register a peer's session handle.
     ///
-    /// Returns an error when `max_peers` is already reached or the peer is
-    /// already registered.
+    /// Returns an error when `max_peers` (or [`MAX_CONNECTIONS`]) is already
+    /// reached, or the peer is already registered.
     pub fn register(&mut self, handle: SessionHandle) -> Result<()> {
         if self.sessions.len() >= self.max_peers {
             bail!("max_peers ({}) reached", self.max_peers);
@@ -124,8 +148,13 @@ impl Router {
         debug!("router: registered peer {}", id);
         self.sessions.insert(id.clone(), handle);
         self.rate_buckets
-            .entry(id)
+            .entry(id.clone())
             .or_insert_with(|| TokenBucket::new(self.rate_limit));
+        // Fresh sliding window per connection: do NOT inherit a stale window
+        // from a previous connection (unlike token buckets). A reconnecting
+        // peer starts with a clean budget.
+        self.sliding_windows
+            .insert(id, SlidingWindow::new(WINDOW_MAX_MESSAGES, WINDOW_DURATION));
         Ok(())
     }
 
@@ -157,6 +186,26 @@ impl Router {
     }
 
     fn forward(&mut self, sender: &PeerId, envelope: Envelope) -> RelayMessage {
+        // --- message size cap ---
+        //
+        // Serialize the payload to measure its wire size. If it exceeds
+        // MAX_MESSAGE_BYTES we reject with MessageTooLarge (WS 1009). This
+        // check runs before signature validation and rate-limit accounting so
+        // no tokens are burned on oversized frames.
+        let payload_bytes = serde_json::to_string(&envelope.payload)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
+        if payload_bytes > MAX_MESSAGE_BYTES {
+            warn!(
+                "router: oversized envelope from peer {} ({} bytes > {} limit); closing 1009",
+                sender, payload_bytes, MAX_MESSAGE_BYTES
+            );
+            return RelayMessage::MessageTooLarge {
+                peer_id: sender.clone(),
+                limit_bytes: MAX_MESSAGE_BYTES,
+            };
+        }
+
         // --- unsigned-envelope policy (issue #525) ---
         //
         // During the migration window we accept envelopes with an empty `sig`
@@ -209,7 +258,30 @@ impl Router {
             };
         }
 
-        // --- rate limit check ---
+        // --- per-connection sliding-window check (WS 1008) ---
+        //
+        // Hard cap: at most WINDOW_MAX_MESSAGES per WINDOW_DURATION per
+        // connection. Exceeding this triggers a policy-violation close rather
+        // than a soft retry — the peer is disconnected immediately.
+        //
+        // The sliding_windows map is populated by `register`; an entry should
+        // always be present for an authenticated peer. If it is missing for any
+        // reason, insert a fresh window so the check still runs.
+        let sw = self
+            .sliding_windows
+            .entry(sender.clone())
+            .or_insert_with(|| SlidingWindow::new(WINDOW_MAX_MESSAGES, WINDOW_DURATION));
+        if !sw.check() {
+            warn!(
+                "router: sliding-window rate limit exceeded for peer {} (>{}/{}s); closing 1008",
+                sender, WINDOW_MAX_MESSAGES, WINDOW_DURATION.as_secs()
+            );
+            return RelayMessage::SlidingWindowExceeded {
+                peer_id: sender.clone(),
+            };
+        }
+
+        // --- token-bucket rate limit check ---
         let bucket = self
             .rate_buckets
             .entry(sender.clone())
@@ -743,5 +815,189 @@ mod tests {
             .try_recv()
             .expect("unsigned envelope must reach destination under default policy");
         assert!(raw.contains("hello"));
+    }
+
+    // ── Message-size cap tests ────────────────────────────────────────────────
+
+    /// A payload that serializes to more than MAX_MESSAGE_BYTES must be
+    /// rejected with `MessageTooLarge`. The connection is then closed by
+    /// server.rs with WS 1009; the router itself just returns the variant.
+    #[test]
+    fn oversized_message_closes_connection_with_1009() {
+        let mut router = Router::new(100, 10);
+        let (_, ha) = make_session("alice");
+        let (_, hb) = make_session("bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
+
+        // Build a payload that is definitely > 1 MiB when serialized.
+        let big_string = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        let envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!(big_string),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(
+                reply,
+                RelayMessage::MessageTooLarge {
+                    ref peer_id,
+                    limit_bytes
+                } if peer_id == &PeerId("alice".into()) && limit_bytes == MAX_MESSAGE_BYTES
+            ),
+            "expected MessageTooLarge, got {reply:?}"
+        );
+    }
+
+    // ── Sliding-window rate-limit tests ────────────────────────────────────────
+
+    /// Sending more than WINDOW_MAX_MESSAGES within a window must return
+    /// `SlidingWindowExceeded`. The router uses configurable limits for test
+    /// isolation — we insert a custom window directly.
+    #[test]
+    fn rate_limit_exceeded_closes_connection_with_1008() {
+        let mut router = Router::new(1000, 10); // generous token-bucket so it doesn't interfere
+        let (_alice_session, ha) = make_session("sw-alice");
+        let (_bob_session, hb) = make_session("sw-bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "sw-alice");
+        grant_relay(&mut router, "sw-bob");
+
+        // Replace the sliding window with a tiny 2-message cap so the test
+        // runs quickly without a real 10-second window.
+        router.sliding_windows.insert(
+            PeerId("sw-alice".into()),
+            SlidingWindow::new(2, Duration::from_secs(10)),
+        );
+
+        let make_env = || Envelope {
+            from: PeerId("sw-alice".into()),
+            to: PeerId("sw-bob".into()),
+            payload: serde_json::json!(null),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        // First 2 must be delivered.
+        for _ in 0..2 {
+            let reply = router.route(&PeerId("sw-alice".into()), ClientMessage::Send(make_env()));
+            assert!(
+                matches!(reply, RelayMessage::Delivered { .. }),
+                "expected Delivered within window, got {reply:?}"
+            );
+        }
+
+        // 3rd must be denied with SlidingWindowExceeded.
+        let reply = router.route(&PeerId("sw-alice".into()), ClientMessage::Send(make_env()));
+        assert!(
+            matches!(reply, RelayMessage::SlidingWindowExceeded { ref peer_id } if peer_id == &PeerId("sw-alice".into())),
+            "expected SlidingWindowExceeded, got {reply:?}"
+        );
+    }
+
+    /// After the window expires the counter resets and messages flow again.
+    #[test]
+    fn rate_limit_resets_after_window_expires() {
+        let mut router = Router::new(1000, 10);
+        let (_alice_session, ha) = make_session("rw-alice");
+        let (_bob_session, hb) = make_session("rw-bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "rw-alice");
+        grant_relay(&mut router, "rw-bob");
+
+        // Replace the window with a tiny cap and an already-expired start so
+        // the first check immediately starts a fresh window.
+        let mut sw = SlidingWindow::new(1, Duration::from_millis(1));
+        // Exhaust the window.
+        assert!(sw.check(), "first check must pass");
+        assert!(!sw.check(), "second check must fail");
+        // Back-date the window start so it has expired.
+        sw.backdate_window(Duration::from_millis(100));
+        router
+            .sliding_windows
+            .insert(PeerId("rw-alice".into()), sw);
+
+        // Next message should start a fresh window and be allowed.
+        let envelope = Envelope {
+            from: PeerId("rw-alice".into()),
+            to: PeerId("rw-bob".into()),
+            payload: serde_json::json!("fresh-window"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let reply = router.route(&PeerId("rw-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { .. }),
+            "expected Delivered after window reset, got {reply:?}"
+        );
+    }
+
+    // ── Connection-limit tests ────────────────────────────────────────────────
+
+    /// When the session count equals max_peers, `register` must fail.
+    /// server.rs interprets this as a 1013 close.
+    #[test]
+    fn connection_limit_rejects_new_connections_with_1013() {
+        // Use max_peers=2 so the test is fast.
+        let mut router = Router::new(100, 2);
+        let (_, h1) = make_session("cl-alice");
+        let (_, h2) = make_session("cl-bob");
+        let (_, h3) = make_session("cl-carol");
+
+        router.register(h1).unwrap();
+        router.register(h2).unwrap();
+
+        // Third registration must fail — this triggers the TryAgainLater path
+        // in server.rs (WS close 1013).
+        let err = router.register(h3).unwrap_err();
+        assert!(
+            err.to_string().contains("max_peers"),
+            "error message must mention max_peers, got: {err}"
+        );
+        assert_eq!(router.peer_count(), 2, "peer count must not increase");
+    }
+
+    // ── Normal-path regression test ───────────────────────────────────────────
+
+    /// Messages that are within all limits must still be routed normally.
+    #[tokio::test]
+    async fn messages_within_limit_are_routed_normally() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("lim-bob");
+        let (_, ha) = make_session("lim-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "lim-alice");
+        grant_relay(&mut router, "lim-bob");
+
+        // Small payload, first message in the window, within token-bucket.
+        let envelope = Envelope {
+            from: PeerId("lim-alice".into()),
+            to: PeerId("lim-bob".into()),
+            payload: serde_json::json!("within-limits"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("lim-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "expected Delivered for a within-limit message, got {reply:?}"
+        );
+
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("within-limit message must be delivered to destination");
+        assert!(raw.contains("within-limits"));
     }
 }

@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · brain · OODA</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 06 · BRAIN · OBSERVE / ORIENT / DECIDE / ACT</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html" class="active">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 06 · BRAIN · AMBIENT OODA</span>
+    <span class="sysid">SYS://brain.0</span>
+  </div>
+  <h1 class="page-title">Brain · OODA</h1>
+  <p class="page-lede">
+    The brain runs an <strong>ambient OODA loop</strong> on a dedicated thread. It Observes the event stream,
+    Orients facts onto a confidence scale, Decides through the TaskLedger guarded mutator, and Acts by emitting
+    typed AiActions onto a channel. Plans aren't strings — they're a vector of typed PlanStep records with a
+    9-state status FSM and typed failure causes.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Loop</div><div class="value">Observe · Orient · Decide · Act</div></div>
+    <div class="status-cell"><div class="label">Thread</div><div class="value">dedicated</div></div>
+    <div class="status-cell"><div class="label">PlanStep FSM</div><div class="value">9 states</div></div>
+    <div class="status-cell"><div class="label">Guarded mutator</div><div class="value">TaskLedger::try_dispatch</div></div>
+  </div>
+
+  <h2>OODA — Boyd's loop, in Rust</h2>
+
+<pre class="ascii">
+                  ┌───────────────────────────────────┐
+                  │            PHANTOM BRAIN          │
+                  └───────────────────────────────────┘
+
+  ┌──── OBSERVE ────┐    ┌──── ORIENT ────┐    ┌──── DECIDE ────┐    ┌──── ACT ────┐
+  │ AiEvent channel │ ─→ │ Facts          │ ─→ │ TaskLedger     │ ─→ │ AiAction tx │
+  │  CommandComplete│    │  classified by │    │  try_dispatch  │    │  SpawnAgent │
+  │  OutputChunk    │    │  FactConfidence│    │  → PlanStep    │    │  Enqueue    │
+  │  AgentComplete  │    │   Verified     │    │  → status mut  │    │  EmitEvent  │
+  │  HeartbeatTick  │    │   ToLookUp     │    │                │    │             │
+  │  GoalCandidate  │    │   ToDerive     │    │                │    │             │
+  │  …              │    │   Guess        │    │                │    │             │
+  └─────────────────┘    └────────────────┘    └────────────────┘    └─────────────┘
+                                                       │
+                                       stall_counter ≥ stall_threshold?
+                                                       │
+                                                       ▼
+                                              re-plan (outer loop)
+</pre>
+
+  <h2>The TaskLedger</h2>
+  <p>
+    The central data structure. Holds a goal, a vector of facts, a vector of typed plan steps, and a history of
+    superseded plans. Defined at <code>phantom-brain/src/orchestrator.rs:~230</code>.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub struct</span> <span class="t">TaskLedger</span> {
+    <span class="n">goal</span>:            <span class="t">String</span>,
+    <span class="n">facts</span>:           <span class="t">Vec</span>&lt;<span class="t">Fact</span>&gt;,
+    <span class="n">plan</span>:            <span class="t">Vec</span>&lt;<span class="t">PlanStep</span>&gt;,
+    <span class="n">plan_history</span>:    <span class="t">Vec</span>&lt;<span class="t">Vec</span>&lt;<span class="t">PlanStep</span>&gt;&gt;,
+    <span class="n">stall_counter</span>:   <span class="t">u32</span>,
+    <span class="n">stall_threshold</span>: <span class="t">u32</span>,
+}
+
+<span class="k">impl</span> <span class="t">TaskLedger</span> {
+    <span class="c">// THE guarded mutator. The only legal way to advance a step.</span>
+    <span class="k">pub fn</span> <span class="fn">try_dispatch</span>(&amp;<span class="k">mut self</span>, idx: <span class="t">usize</span>)
+        -> <span class="t">Result</span>&lt;&amp;<span class="t">PlanStep</span>, <span class="t">DispatchBlocked</span>&gt;
+    { … }
+}</code></pre>
+
+  <h2>DispatchBlocked — typed refusals</h2>
+  <p>
+    No string excuses. Every refusal is a typed variant the caller must handle.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">DispatchBlocked</span> {
+    <span class="n">OutOfBounds</span>   { idx: <span class="t">usize</span>, len: <span class="t">usize</span> },
+    <span class="n">NotPending</span>    { idx: <span class="t">usize</span>, current: <span class="t">PlanStepStatus</span> },
+    <span class="n">UnmetDeps</span>     { idx: <span class="t">usize</span>, open: <span class="t">Vec</span>&lt;<span class="t">usize</span>&gt; },
+    <span class="n">Quarantined</span>,
+}</code></pre>
+
+  <h2>The 9-state AgentStatus FSM</h2>
+  <p>
+    Defined at <code>phantom-agents/src/agent.rs:~200</code>. Every agent transitions through this finite-state
+    machine. Illegal transitions are unrepresentable.
+  </p>
+
+<pre class="ascii">
+                       ┌────────────┐
+                       │   Queued   │
+                       └─────┬──────┘
+                             │
+                             ▼
+                       ┌─────────────┐
+                       │  Planning   │
+                       └─────┬───────┘
+                             │
+              ┌──────────────┴──────────────┐
+              │                             │
+              ▼                             ▼
+   ┌─────────────────────┐         ┌────────────────┐
+   │ AwaitingApproval    │────────▶│    Working     │◀──────┐
+   └─────────┬───────────┘  approve└────┬───────────┘       │
+             │ deny                     │                   │ tool ready
+             │                          ▼                   │
+             │                ┌──────────────────┐          │
+             ▼                │  WaitingForTool  │──────────┘
+        ┌─────────┐           └────┬─────────────┘
+        │ Failed  │                │ timeout │ block
+        └─────────┘                ▼         ▼
+                              ┌────────┐  ┌──────────┐
+                              │ Paused │  │  Failed  │
+                              └───┬────┘  └────┬─────┘
+                                  │            │
+                              resume           │
+                                  │            ▼
+                                  ▼      3-strike validation
+                              ┌──────┐  ┌────────────┐
+                              │ Done │  │  Flatline  │
+                              └──────┘  └────────────┘
+</pre>
+
+  <table class="table">
+    <thead><tr><th>State</th><th>Meaning</th><th>Exits</th></tr></thead>
+    <tbody>
+      <tr><td><code>Queued</code></td><td>Waiting behind concurrency limit</td><td>→ Planning</td></tr>
+      <tr><td><code>Planning</code></td><td>Generating execution plan</td><td>→ AwaitingApproval / Working</td></tr>
+      <tr><td><code>AwaitingApproval</code></td><td>Waiting for user or policy approval</td><td>→ Working / Failed</td></tr>
+      <tr><td><code>Working</code></td><td>Actively processing</td><td>→ WaitingForTool / Done / Failed</td></tr>
+      <tr><td><code>WaitingForTool</code></td><td>Awaiting tool result</td><td>→ Working / Paused</td></tr>
+      <tr><td><code>Paused { reason }</code></td><td>Recoverable condition (network outage etc.)</td><td>→ Working</td></tr>
+      <tr><td><code>Done</code></td><td>Completed successfully</td><td>terminal</td></tr>
+      <tr><td><code>Failed</code></td><td>Completed with error</td><td>terminal (retryable)</td></tr>
+      <tr><td><code>Flatline</code></td><td>Terminal failure, manual retry required</td><td>terminal (sticky)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>StepFailureCause — typed cascade semantics</h2>
+  <p>
+    When a plan step fails, the brain doesn't just shrug. The cause is typed, and the cause drives the
+    <code>QuarantinePolicy</code>.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">StepFailureCause</span> {
+    <span class="n">AgentFailed</span>,
+    <span class="n">AgentQuarantined</span>     { agent_id: <span class="t">AgentId</span>, since_ms: <span class="t">u64</span> },
+    <span class="n">DispatchTimedOut</span>,
+    <span class="n">DependencyFailed</span>     { dep_idx: <span class="t">usize</span> },
+    <span class="n">CompleteTaskNotCalled</span>,
+}
+
+<span class="k">pub enum</span> <span class="t">QuarantinePolicy</span> {
+    <span class="n">FailAndAllowRetry</span>,   <span class="c">// default: mark failed, clear agent_id, fresh spawn ok</span>
+    <span class="n">FailAndCascade</span>,      <span class="c">// + mark downstream depends_on steps as Skipped</span>
+    <span class="n">Park</span>,                 <span class="c">// leave Active, log cause; human must intervene</span>
+}</code></pre>
+
+  <h2>The action channel</h2>
+  <p>
+    The brain emits <code>AiAction</code> records onto a tokio mpsc. The forwarder thread translates each
+    variant into a side-effect: spawning an agent, enqueuing a loop message, emitting a UI event.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">AiAction</span> {
+    <span class="n">SpawnAgent</span>           { role: <span class="t">AgentRole</span>, task: <span class="t">String</span>, opts: <span class="t">AgentSpawnOpts</span> },
+    <span class="n">EnqueueLoopMessage</span>   { queue: <span class="t">String</span>, message: <span class="t">LoopMessage</span> },
+    <span class="n">EmitEvent</span>            { event: <span class="t">Event</span> },
+    <span class="n">ApproveStep</span>          { ledger: <span class="t">LedgerId</span>, step: <span class="t">usize</span> },
+    <span class="n">RejectStep</span>           { ledger: <span class="t">LedgerId</span>, step: <span class="t">usize</span>, reason: <span class="t">String</span> },
+    <span class="n">Suggest</span>              { text: <span class="t">String</span>, confidence: <span class="t">f32</span> },
+    <span class="c">// …</span>
+}</code></pre>
+
+  <h2>FactConfidence — typed knowledge</h2>
+  <p>
+    Every fact the brain consumes is labeled. A <code>Verified</code> fact came from a tool result; a
+    <code>Guess</code> came from the model. Plan steps that depend on guesses get extra scrutiny.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">FactConfidence</span> {
+    <span class="n">Verified</span>,    <span class="c">// produced by a tool with structured output</span>
+    <span class="n">ToLookUp</span>,    <span class="c">// brain knows it doesn't know; queued for retrieval</span>
+    <span class="n">ToDerive</span>,    <span class="c">// computable from existing facts</span>
+    <span class="n">Guess</span>,       <span class="c">// model assertion, unverified</span>
+}</code></pre>
+
+  <h2>Stall detection</h2>
+  <p>
+    Every tick the ledger updates a <code>stall_counter</code>. If steps stop transitioning and no new
+    facts arrive, the counter increments. When it crosses <code>stall_threshold</code>, the brain pushes the
+    current plan onto <code>plan_history</code>, clears <code>plan</code>, and re-enters the outer loop. New
+    plan, possibly new strategy, same goal.
+  </p>
+
+  <div class="callout">
+    <div class="callout-title">Why a separate process from the brain isn't enough</div>
+    The brain is not "the AI that talks to the user." That's <code>Conversational</code>, an agent. The brain
+    is the <em>supervisory cortex</em> — it never produces a chat response. Its only outputs are typed actions.
+    This keeps the user-facing surface separable from the planning substrate.
+  </div>
+
+  <footer class="footer">
+    <span>SEC 06 · BRAIN</span>
+    <span><a href="agents.html">↩ SEC 05 · AGENTS</a> · <a href="harness.html">next → SEC 07 · HARNESS</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

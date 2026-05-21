@@ -1,0 +1,13 @@
+[forever 2026-05-20T21:56:51Z] ==== iteration 51 begin ====
+[forever 2026-05-20T21:56:51Z] fetching origin
+[forever 2026-05-20T21:56:51Z] branch=feat/fleet-builder-integration-shim HEAD=4da8dfe origin/main=6eca564f3417c485cc98941fc642d67708e1bb06
+[forever 2026-05-20T21:56:51Z] cargo build --release --bin phantom
+    Finished `release` profile [optimized] target(s) in 1.07s
+[forever 2026-05-20T21:56:53Z] build ok
+[forever 2026-05-20T21:56:53Z] launching: phantom loop run --repo /Users/jermiranda/Documents/Github/badass-cli --loops triager,implementer,reviewer --brain-queue triage-queue --max-runtime-min 8
+[forever 2026-05-20T21:56:53Z] daemon PID=80048
+phantom loop run: preflight checks
+  ok   gh binary present
+Error: GitHub CLI is not authenticated — run `gh auth login` to authenticate, then re-run `phantom loop run`
+[forever 2026-05-20T21:57:04Z] daemon exited with code 1
+[forever 2026-05-20T21:57:04Z] sleeping 5s before next iteration
