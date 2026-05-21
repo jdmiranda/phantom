@@ -10,6 +10,7 @@
 //! - [`StatusBar`] — bottom bar showing cwd, git branch, and clock.
 
 use crate::layout::Rect;
+use crate::themes::UiColors;
 use phantom_renderer::quads::QuadInstance;
 
 // Sec.8 — top-of-screen banner that surfaces capability-denial patterns.
@@ -36,7 +37,7 @@ pub use panel::{Panel, TITLE_BAR_HEIGHT};
 
 // Issue #16 — 8px vertical scrollbar with token-driven colors.
 pub mod scrollbar;
-pub use scrollbar::{SCROLLBAR_WIDTH, ScrollState, Scrollbar, track_y_to_offset};
+pub use scrollbar::{SCROLLBAR_WIDTH, ScrollState, ScrollbarAction, Scrollbar, track_y_to_offset};
 
 // Issue #25 — horizontal tab strip with badge and keyboard nav.
 pub mod tab_strip;
@@ -53,6 +54,14 @@ pub use input_bar::{INPUT_BAR_HEIGHT, InputBar, InputKey};
 pub mod focus_ring;
 pub use focus_ring::{FADE_DURATION_MS, FocusRing};
 
+// Issue #27 — full-screen keybind help overlay (F1 / ?).
+pub mod keybind_help;
+pub use keybind_help::KeybindHelp;
+
+// Find-in-terminal search bar (Cmd+F).
+pub mod search_bar;
+pub use search_bar::{SEARCH_BAR_HEIGHT, SearchBar, SearchBarAction, SearchKey};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------
@@ -62,14 +71,14 @@ const STATUS_BAR_BG: [f32; 4] = [0.08, 0.08, 0.12, 1.0];
 /// Muted green status bar foreground.
 const STATUS_BAR_FG: [f32; 4] = [0.6, 0.7, 0.6, 1.0];
 
-/// Near-black tab bar background.
-const TAB_BAR_BG: [f32; 4] = [0.06, 0.06, 0.09, 1.0];
-/// Slightly lighter active tab background.
-const ACTIVE_TAB_BG: [f32; 4] = [0.12, 0.14, 0.18, 1.0];
-/// Dim inactive tab text.
-const INACTIVE_TAB_FG: [f32; 4] = [0.4, 0.4, 0.5, 1.0];
-/// Bright active tab text.
-const ACTIVE_TAB_FG: [f32; 4] = [0.8, 0.9, 0.8, 1.0];
+/// Fallback tab bar background used when no theme is applied.
+const DEFAULT_TAB_BAR_BG: [f32; 4] = [0.06, 0.06, 0.09, 1.0];
+/// Fallback active tab background used when no theme is applied.
+const DEFAULT_ACTIVE_TAB_BG: [f32; 4] = [0.12, 0.14, 0.18, 1.0];
+/// Fallback inactive tab text used when no theme is applied.
+const DEFAULT_INACTIVE_TAB_FG: [f32; 4] = [0.4, 0.4, 0.5, 1.0];
+/// Fallback active tab text used when no theme is applied.
+const DEFAULT_ACTIVE_TAB_FG: [f32; 4] = [0.8, 0.9, 0.8, 1.0];
 
 /// Horizontal padding inside each tab button, in pixels.
 const TAB_PADDING_H: f32 = 16.0;
@@ -378,20 +387,74 @@ struct Tab {
 ///
 /// Each tab is drawn as a rectangular button. The active tab receives a
 /// lighter background and brighter text; inactive tabs are dimmed.
+///
+/// Colors default to a neutral dark palette. Call [`TabBar::apply_ui_colors`]
+/// with a theme's [`UiColors`] to make the tab bar follow the active theme.
 #[derive(Clone, Debug)]
 pub struct TabBar {
     tabs: Vec<Tab>,
     active: usize,
+    /// Background color of the full tab bar strip.
+    bar_bg: [f32; 4],
+    /// Background color applied to the active tab button.
+    active_tab_bg: [f32; 4],
+    /// Text color for inactive (non-selected) tab labels.
+    inactive_tab_fg: [f32; 4],
+    /// Text color for the active (selected) tab label.
+    active_tab_fg: [f32; 4],
 }
 
 impl TabBar {
     /// Create an empty tab bar with no tabs.
-    #[must_use] 
+    ///
+    /// Colors default to a neutral dark palette. Call [`TabBar::apply_ui_colors`]
+    /// after construction to apply the active theme.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tabs: Vec::new(),
             active: 0,
+            bar_bg: DEFAULT_TAB_BAR_BG,
+            active_tab_bg: DEFAULT_ACTIVE_TAB_BG,
+            inactive_tab_fg: DEFAULT_INACTIVE_TAB_FG,
+            active_tab_fg: DEFAULT_ACTIVE_TAB_FG,
         }
+    }
+
+    /// Apply theme colors from a [`UiColors`] token set.
+    ///
+    /// Call this whenever the active theme changes so the tab bar reflects the
+    /// new palette. Replaces all four color fields derived from the theme.
+    pub fn apply_ui_colors(&mut self, ui: &UiColors) {
+        self.bar_bg = ui.tab_bar_bg;
+        self.active_tab_bg = ui.tab_active_bg;
+        self.inactive_tab_fg = ui.tab_bar_fg;
+        self.active_tab_fg = ui.tab_active_fg;
+    }
+
+    /// Current bar background color (reflects active theme after
+    /// [`apply_ui_colors`](Self::apply_ui_colors) is called).
+    #[must_use]
+    pub fn bar_bg(&self) -> [f32; 4] {
+        self.bar_bg
+    }
+
+    /// Current active-tab background color.
+    #[must_use]
+    pub fn active_tab_bg(&self) -> [f32; 4] {
+        self.active_tab_bg
+    }
+
+    /// Current inactive-tab foreground color.
+    #[must_use]
+    pub fn inactive_tab_fg(&self) -> [f32; 4] {
+        self.inactive_tab_fg
+    }
+
+    /// Current active-tab foreground color.
+    #[must_use]
+    pub fn active_tab_fg(&self) -> [f32; 4] {
+        self.active_tab_fg
     }
 
     /// Add a tab with the given title. Returns the index of the new tab.
@@ -468,11 +531,11 @@ impl Widget for TabBar {
         // One background quad for the full bar, plus one per tab.
         let mut quads = Vec::with_capacity(1 + self.tabs.len());
 
-        // Full bar background.
+        // Full bar background — reads from theme-derived field.
         quads.push(QuadInstance {
             pos: [rect.x, rect.y],
             size: [rect.width, rect.height],
-            color: TAB_BAR_BG,
+            color: self.bar_bg,
             border_radius: 0.0,
         });
 
@@ -490,7 +553,7 @@ impl Widget for TabBar {
                 quads.push(QuadInstance {
                     pos: [tab_x, rect.y],
                     size: [tab_w, rect.height],
-                    color: ACTIVE_TAB_BG,
+                    color: self.active_tab_bg,
                     border_radius: 0.0,
                 });
             }
@@ -525,10 +588,11 @@ impl Widget for TabBar {
             let title_width = title.len() as f32 * CHAR_WIDTH;
             let text_x = tab_x + (tab_w - title_width) * 0.5;
 
+            // Colors read from theme-derived fields rather than hardcoded constants.
             let color = if is_active {
-                ACTIVE_TAB_FG
+                self.active_tab_fg
             } else {
-                INACTIVE_TAB_FG
+                self.inactive_tab_fg
             };
 
             segments.push(TextSegment {
@@ -580,7 +644,7 @@ mod tests {
             1,
             "empty tab bar should have one background quad"
         );
-        assert_eq!(quads[0].color, TAB_BAR_BG);
+        assert_eq!(quads[0].color, bar.bar_bg());
 
         let texts = bar.render_text(&bar_rect());
         assert!(texts.is_empty());
@@ -650,7 +714,7 @@ mod tests {
         let quads = bar.render_quads(&bar_rect());
         // 1 background + 1 active tab highlight
         assert_eq!(quads.len(), 2);
-        assert_eq!(quads[1].color, ACTIVE_TAB_BG);
+        assert_eq!(quads[1].color, bar.active_tab_bg());
     }
 
     #[test]
@@ -663,12 +727,84 @@ mod tests {
         let texts = bar.render_text(&bar_rect());
         assert_eq!(texts.len(), 2);
         assert_eq!(
-            texts[0].color, ACTIVE_TAB_FG,
+            texts[0].color,
+            bar.active_tab_fg(),
             "active tab should use active fg"
         );
         assert_eq!(
-            texts[1].color, INACTIVE_TAB_FG,
+            texts[1].color,
+            bar.inactive_tab_fg(),
             "inactive tab should use inactive fg"
+        );
+    }
+
+    // -- TabBar theme-wiring tests --
+
+    #[test]
+    fn tab_bar_uses_theme_bg_color() {
+        use crate::themes;
+        let theme = themes::amber();
+        let mut bar = TabBar::new();
+        bar.apply_ui_colors(&theme.ui_colors);
+
+        let quads = bar.render_quads(&bar_rect());
+        assert_eq!(
+            quads[0].color,
+            theme.ui_colors.tab_bar_bg,
+            "bar background must match theme.ui_colors.tab_bar_bg after apply_ui_colors"
+        );
+    }
+
+    #[test]
+    fn tab_bar_active_tab_color_matches_theme() {
+        use crate::themes;
+        let theme = themes::ice();
+        let mut bar = TabBar::new();
+        bar.add_tab("X");
+        bar.add_tab("Y");
+        bar.set_active(0);
+        bar.apply_ui_colors(&theme.ui_colors);
+
+        let quads = bar.render_quads(&bar_rect());
+        // quads[0] = bar bg, quads[1] = active tab highlight
+        assert_eq!(quads.len(), 2);
+        assert_eq!(
+            quads[1].color,
+            theme.ui_colors.tab_active_bg,
+            "active tab quad must match theme.ui_colors.tab_active_bg"
+        );
+
+        let texts = bar.render_text(&bar_rect());
+        assert_eq!(texts.len(), 2);
+        assert_eq!(
+            texts[0].color,
+            theme.ui_colors.tab_active_fg,
+            "active tab text must match theme.ui_colors.tab_active_fg"
+        );
+        assert_eq!(
+            texts[1].color,
+            theme.ui_colors.tab_bar_fg,
+            "inactive tab text must match theme.ui_colors.tab_bar_fg"
+        );
+    }
+
+    #[test]
+    fn theme_switch_updates_tab_bar_colors() {
+        use crate::themes;
+        let mut bar = TabBar::new();
+        bar.add_tab("A");
+
+        let phosphor = themes::phosphor();
+        bar.apply_ui_colors(&phosphor.ui_colors);
+        let phosphor_bg = bar.render_quads(&bar_rect())[0].color;
+
+        let blood = themes::blood();
+        bar.apply_ui_colors(&blood.ui_colors);
+        let blood_bg = bar.render_quads(&bar_rect())[0].color;
+
+        assert_ne!(
+            phosphor_bg, blood_bg,
+            "switching themes must change the tab bar background color"
         );
     }
 

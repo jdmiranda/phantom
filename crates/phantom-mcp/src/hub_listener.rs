@@ -76,6 +76,9 @@ const HUB_PEER_ID: &str = "hub";
 /// Identity-file namespace used for the Phantom instance identity.
 const IDENTITY_NAMESPACE: &str = "phantom";
 
+/// The default path appended to a bare hub URL (issue #572).
+const HUB_DEFAULT_PATH: &str = "/phantom/connect";
+
 // ---------------------------------------------------------------------------
 // Back-off configuration
 // ---------------------------------------------------------------------------
@@ -107,6 +110,64 @@ impl HubListener {
 }
 
 // ---------------------------------------------------------------------------
+// URL normalisation (issue #572)
+// ---------------------------------------------------------------------------
+
+/// Ensure `raw` ends with `/phantom/connect`.
+///
+/// If the caller provides only a base URL such as `wss://hub.example.com` (or
+/// with a trailing slash), this function appends the well-known
+/// `/phantom/connect` path so users do not have to remember it.
+///
+/// Rules:
+/// * Already ends with `/phantom/connect` → returned unchanged.
+/// * Has a non-root path (user supplied a custom endpoint) → returned unchanged
+///   so the caller's intent is respected.
+/// * Is a bare host URL (empty path or just `"/"`) → `/phantom/connect` is
+///   appended.
+///
+/// The trailing slash, if present, is stripped before any comparison or
+/// concatenation so that `wss://hub.example.com/` and
+/// `wss://hub.example.com` both normalise to
+/// `wss://hub.example.com/phantom/connect`.
+fn normalize_hub_url(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches('/');
+
+    if trimmed.ends_with(HUB_DEFAULT_PATH) {
+        return trimmed.to_string();
+    }
+
+    // Determine whether the URL has a meaningful path beyond the authority.
+    // We use simple string parsing to avoid pulling in the `url` crate:
+    // strip the scheme, then skip past the authority (`//host:port`), and
+    // inspect whatever remains.
+    let path_start = trimmed
+        .find("://")
+        .map(|i| {
+            // Skip past "://"
+            let after_scheme = i + 3;
+            // Find the first '/' after the authority, if any.
+            trimmed[after_scheme..]
+                .find('/')
+                .map(|j| after_scheme + j)
+                // No '/' at all → path is empty (bare host)
+                .unwrap_or(trimmed.len())
+        })
+        // No "://" → treat the whole string as the authority; no path.
+        .unwrap_or(trimmed.len());
+
+    let path = &trimmed[path_start..];
+
+    if path.is_empty() || path == "/" {
+        // Bare host URL — append the default path.
+        format!("{trimmed}{HUB_DEFAULT_PATH}")
+    } else {
+        // Custom path present — respect the caller's intent.
+        trimmed.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public spawn function
 // ---------------------------------------------------------------------------
 
@@ -123,6 +184,9 @@ impl HubListener {
 ///
 /// The identity-file namespace defaults to `"phantom"`.  Use [`spawn_hub_ns`]
 /// to override the namespace for QA or dev instances.
+///
+/// If `hub_url` is a bare base URL (e.g. `wss://hub.example.com`) the
+/// `/phantom/connect` path is automatically appended (issue #572).
 pub fn spawn_hub(
     hub_url: &str,
     cmd_tx: Sender<AppCommand>,
@@ -143,7 +207,7 @@ pub fn spawn_hub_ns(
         return Ok(None);
     }
 
-    let hub_url_owned = hub_url.to_owned();
+    let hub_url_owned = normalize_hub_url(hub_url);
     let hub_url_for_handle = hub_url_owned.clone();
     let ns = identity_namespace
         .or_else(|| std::env::var("PHANTOM_IDENTITY_NAMESPACE").ok())

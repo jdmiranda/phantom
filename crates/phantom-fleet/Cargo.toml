@@ -1,0 +1,58 @@
+[package]
+name = "phantom-fleet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Universal app trait + registry — `phantom-fleet` is a thin orchestrator on
+# top of the existing "everything is an app" abstraction in phantom-adapter.
+phantom-adapter = { path = "../phantom-adapter" }
+
+# Loop overseer infrastructure. The fleet boots ONE
+# `LoopQueueRegistry` and ONE `SubstrateAgentDispatcher` shared across every
+# hosted app, and reuses the existing loop runner for `AppKind::Loop`.
+phantom-loop    = { path = "../phantom-loop" }
+
+# Per-target self-improvement reconciler — one shared brain across all hosted
+# apps. Each builder entry appends its target repo to the brain's
+# `goal_sources` list at fleet boot.
+phantom-brain   = { path = "../phantom-brain" }
+
+# Substrate dispatcher backend dependency: `SpawnSubagentQueue` lives here and
+# the fleet pre-allocates one to wire into the shared dispatcher + driver.
+phantom-agents  = { path = "../phantom-agents" }
+
+# Tokio mpsc bus type for the substrate driver -> completion router forwarder
+# task. Re-exported through `phantom_loop::SubstrateDriver` but the fleet owns
+# the bus construction directly.
+phantom-protocol = { path = "../phantom-protocol" }
+
+# Optional per-repo autonomous builder. Gated behind the `builder-apps`
+# feature so the fleet stays buildable with default features. The actual
+# `AppKind::Builder` wiring lives in `src/run.rs` behind matching
+# `#[cfg(feature = "builder-apps")]` blocks.
+phantom-builder = { path = "../phantom-builder", optional = true }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "signal"] }
+
+[features]
+# Wire `AppKind::Builder` to the real `phantom-builder` crate. Default OFF so
+# operators opt in explicitly. When enabled, the fleet links in the
+# `phantom-builder` dep and the shim in `run.rs` constructs a real
+# `phantom_builder::Builder` per `AppKind::Builder` entry.
+default = []
+builder-apps = ["dep:phantom-builder"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
+tempfile = "3"
+
+[lints]
+workspace = true
