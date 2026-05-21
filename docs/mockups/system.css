@@ -4,10 +4,18 @@
    Every surface in Phantom renders through the same tokens.  This file
    defines:
      1. The token vocabulary (CSS custom properties).
-     2. Six concrete themes (phosphor, amber, ice, blood, vapor, cyberpunk).
+     2. Six concrete themes (phosphor, amber, ice, blood, vapor, cyber).
      3. Reusable component classes that match the in-app widget API.
    The Rust side mirrors this shape: `phantom_ui::Tokens` carries the same
    semantic roles; `phantom_ui::themes::Theme` ships the same palettes.
+
+   NOTE on standalone files: `a-hearth.html` and `b-operator.html` are
+   intentionally standalone aesthetic studies — they roll their own local
+   `:root` variables (`--bg`, `--accent`, `--ink`, ...) rather than consuming
+   this stylesheet.  They explore emotional registers (warm hearth, sharp
+   operator) for the *concept* phase and will be re-expressed as overrides
+   on this token set once the Rust mirror lands.  `apps.html` and
+   `c-canvas.html` are the files that exercise this stylesheet.
    ========================================================================= */
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -241,6 +249,23 @@ body {
 .label  { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); }
 .eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-bright); }
 .caption { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+
+/* display + brand — the only consumers of --font-display.
+   Use .display for hero/banner-scale type, .brand for the product wordmark. */
+.display {
+  font-family: var(--font-display);
+  font-size: 28px;
+  letter-spacing: 0.04em;
+  color: var(--text-bright);
+  text-shadow: var(--glow);
+}
+.brand {
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--text-bright);
+}
 
 /* ──────────────────────────────────────────────────────────────────────────
    Component primitives — match the in-app widget API
