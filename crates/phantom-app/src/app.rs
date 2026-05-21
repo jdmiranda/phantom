@@ -513,6 +513,14 @@ pub struct App {
     pub(crate) embedding_backend:
         Option<std::sync::Arc<dyn phantom_embeddings::EmbeddingBackend>>,
 
+    // -- STT pipeline (None when no API key is configured or privacy mode is on) --
+    //    Constructed at boot via `SttPipeline::build()`. Holds the audio sender
+    //    half of the capture pipeline; drop to shut down gracefully.
+    //    Pending mic-capture integration (issue #56/#68): `push_chunk` and
+    //    `drain_stt_events` will be called here once ScreenCaptureKit audio is wired.
+    #[allow(dead_code)]
+    pub(crate) stt: Option<crate::stt::SttPipeline>,
+
     // -- Per-pane last-command tracking (issue #226).
     //    Populated from `Event::CommandStarted` so that the subsequent
     //    `Event::CommandComplete` handler in `drain_bus_to_brain` can feed
@@ -958,6 +966,22 @@ impl App {
         } else {
             info!("Bundle store unavailable — per-pane capture disabled");
         }
+
+        // -- STT pipeline (best-effort: None when no key or privacy mode) --
+        // WARNING: `SttPipeline::start` calls `tokio::spawn` internally.
+        // `with_config_scaled` runs on the winit `resumed()` callback where
+        // no tokio runtime is in scope — so this WILL panic at startup
+        // whenever `OPENAI_API_KEY` is set (same failure mode diagnosed
+        // earlier for the TTS pipeline). The fix is to move `SttPipeline::build`
+        // onto a dedicated OS thread that owns a `new_current_thread()`
+        // runtime, mirroring the `mcp-discovery` pattern at line ~1311.
+        // Tracked as a follow-up to PR #594.
+        let stt = if config.privacy_mode {
+            log::info!("STT: disabled — privacy mode is on");
+            None
+        } else {
+            crate::stt::SttPipeline::build()
+        };
 
         // -- Embedding backend (optional). Constructed from OPENAI_API_KEY when
         //    present so the capture pipeline can vector-index sealed bundles.
@@ -1569,6 +1593,7 @@ impl App {
             last_click_pos: (0.0, 0.0),
             click_count: 0,
             settings_panel: crate::settings_ui::SettingsPanel::new(),
+            stt,
             bundle_store,
             capture_state: crate::capture::CaptureState::new(),
             vision_analyzer: phantom_vision::VisionAnalyzer::from_env()
