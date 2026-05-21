@@ -12,6 +12,27 @@ use log::{debug, info, warn};
 
 use phantom_ui::themes::{self, Theme};
 
+/// A single MCP server to connect on startup.
+///
+/// Configured under `[mcp_servers.<name>]` table headers in the TOML config.
+/// Each block must provide `url`. `enabled` defaults to `true`.
+///
+/// Example:
+/// ```toml
+/// [mcp_servers.my-server]
+/// url = "ws://localhost:8765"
+/// enabled = true
+/// ```
+#[derive(Debug, Clone)]
+pub struct McpServerConfig {
+    /// The logical name used for this server in the tool registry.
+    pub name: String,
+    /// WebSocket URL for the MCP server (`ws://` or `wss://`).
+    pub url: String,
+    /// When `false` the server is skipped during discovery. Defaults to `true`.
+    pub enabled: bool,
+}
+
 /// User-configurable settings loaded from TOML.
 #[derive(Debug, Clone)]
 pub struct PhantomConfig {
@@ -50,6 +71,18 @@ pub struct PhantomConfig {
     /// or toggled at runtime with `offline on` / `offline off`.
     /// Can also be auto-enabled after 3 consecutive cloud backend failures.
     pub offline_mode: bool,
+    /// Preferred AI provider for the brain router.
+    ///
+    /// When set, the brain router promotes the named backend to the front of the
+    /// cascade so it is tried first for every task tier it supports. Valid values
+    /// are any profile ID registered in the [`ProviderCatalog`]:
+    /// `"claude-default"`, `"claude-fast"`, `"ollama-phi3.5"`, `"ollama-llama3"`,
+    /// or any custom profile added at runtime.
+    ///
+    /// Set via `preferred_provider = "claude-fast"` in
+    /// `~/.config/phantom/config.toml`. When absent or `None`, the default
+    /// cascade order (heuristic → ollama → claude) is used.
+    pub preferred_provider: Option<String>,
     /// Start in borderless fullscreen mode.
     ///
     /// Set via `fullscreen = true` in `~/.config/phantom/config.toml` or
@@ -75,6 +108,12 @@ pub struct PhantomConfig {
     /// danger = ""  # empty string = silent
     /// ```
     pub notification_sounds: HashMap<String, Option<String>>,
+    /// MCP servers to auto-connect on startup.
+    ///
+    /// Each entry is parsed from a `[mcp_servers.<name>]` TOML table.
+    /// Empty by default. Servers with `enabled = false` are skipped during
+    /// discovery.
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 /// Optional overrides for shader parameters. `None` means use theme default.
@@ -100,8 +139,10 @@ impl Default for PhantomConfig {
             nlp_llm_enabled: true,
             privacy_mode: false,
             offline_mode: false,
+            preferred_provider: None,
             fullscreen: false,
             notification_sounds: HashMap::new(),
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -133,16 +174,39 @@ impl PhantomConfig {
         // Track whether we're inside the [notification_sounds] section.
         let mut in_notification_sounds = false;
 
+        // Track the current `[mcp_servers.<name>]` block being parsed.
+        let mut current_mcp_server: Option<McpServerConfig> = None;
+        // Whether we are inside an [mcp_servers.*] section.
+        let mut in_mcp_section = false;
+
         for line in toml_str.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
 
-            // TOML section header — detect [notification_sounds] and any
-            // other section that would end it.
+            // TOML section header — detect [notification_sounds], [mcp_servers.<name>],
+            // and any other section that would end them.
             if line.starts_with('[') {
                 in_notification_sounds = line == "[notification_sounds]";
+
+                // Flush any in-progress mcp_server block.
+                if let Some(server) = current_mcp_server.take() {
+                    config.mcp_servers.push(server);
+                }
+
+                // `[mcp_servers.<name>]`
+                if line.starts_with("[mcp_servers.") && line.ends_with(']') {
+                    let name = &line["[mcp_servers.".len()..line.len() - 1];
+                    current_mcp_server = Some(McpServerConfig {
+                        name: name.to_string(),
+                        url: String::new(),
+                        enabled: true,
+                    });
+                    in_mcp_section = true;
+                } else {
+                    in_mcp_section = false;
+                }
                 continue;
             }
 
@@ -159,6 +223,22 @@ impl PhantomConfig {
                         Some(value.to_string())
                     };
                     config.notification_sounds.insert(key.to_string(), sound);
+                    continue;
+                }
+
+                // Key-value pairs inside an mcp_servers block.
+                if in_mcp_section {
+                    if let Some(ref mut server) = current_mcp_server {
+                        match key {
+                            "url" => server.url = value.to_string(),
+                            "enabled" => {
+                                server.enabled = !matches!(value, "false" | "0" | "no");
+                            }
+                            _ => {
+                                warn!("Unknown mcp_servers key: {key}");
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -221,6 +301,12 @@ impl PhantomConfig {
                     "offline_mode" => {
                         config.offline_mode = matches!(value, "true" | "1" | "yes");
                     }
+                    "preferred_provider" => {
+                        // Accept any non-empty string; validated at router construction time.
+                        if !value.is_empty() {
+                            config.preferred_provider = Some(value.to_string());
+                        }
+                    }
                     "fullscreen" => {
                         config.fullscreen = matches!(value, "true" | "1" | "yes");
                     }
@@ -229,6 +315,11 @@ impl PhantomConfig {
                     }
                 }
             }
+        }
+
+        // Flush the last mcp_server block if any.
+        if let Some(server) = current_mcp_server.take() {
+            config.mcp_servers.push(server);
         }
 
         Ok(config)
@@ -288,6 +379,15 @@ impl PhantomConfig {
     #[must_use]
     pub fn offline_mode(&self) -> bool {
         self.offline_mode
+    }
+
+    /// Returns the preferred AI provider ID, if configured.
+    ///
+    /// When `Some`, the brain router promotes the named backend to the front of
+    /// the cascade. `None` means use default cascade order.
+    #[must_use]
+    pub fn preferred_provider(&self) -> Option<&str> {
+        self.preferred_provider.as_deref()
     }
 
     /// Look up the configured sound path for a notification category.
@@ -377,6 +477,13 @@ font_size = 14.0
 # info = "/path/to/info.wav"
 # warn = "/path/to/warn.wav"
 # danger = ""
+
+# MCP servers to auto-connect on startup.
+# Add one [mcp_servers.<name>] block per server.
+# Example:
+# [mcp_servers.my-server]
+# url = "ws://localhost:8765"
+# enabled = true
 "#;
 
 // ---------------------------------------------------------------------------
@@ -568,6 +675,78 @@ mod tests {
         assert!(!config.offline_mode);
     }
 
+    // -----------------------------------------------------------------------
+    // preferred_provider — BrainConfig router wiring
+    // -----------------------------------------------------------------------
+
+    /// When `preferred_provider` is set in config, the resulting `RouterConfig`
+    /// must promote the named backend so it appears before other non-heuristic
+    /// backends in the cascade.
+    ///
+    /// This exercises the construction path used in `app.rs` without spinning
+    /// up a real brain thread.
+    #[test]
+    fn brain_config_router_uses_preferred_provider_from_config() {
+        use phantom_brain::router::{BackendKind, RouterConfig};
+
+        let config = PhantomConfig::parse("preferred_provider = \"claude-fast\"").unwrap();
+        assert_eq!(
+            config.preferred_provider(),
+            Some("claude-fast"),
+            "config must expose the parsed preferred_provider"
+        );
+
+        // Replicate the construction logic from app.rs.
+        let router_config = match config.preferred_provider() {
+            Some(id) => RouterConfig::with_preferred_provider(id),
+            None => RouterConfig::default(),
+        };
+
+        // The first non-heuristic backend must be the promoted Claude backend.
+        let first_non_heuristic = router_config
+            .backends
+            .iter()
+            .find(|b| b.name != "heuristic")
+            .expect("must have at least one non-heuristic backend");
+
+        assert!(
+            matches!(first_non_heuristic.kind, BackendKind::Claude { .. }),
+            "preferred_provider='claude-fast' must promote a Claude backend to front; got '{}'",
+            first_non_heuristic.name
+        );
+    }
+
+    /// When `preferred_provider` is absent, the router uses the default cascade
+    /// order and still constructs without panicking.
+    #[test]
+    fn brain_config_router_is_none_without_preferred_provider() {
+        use phantom_brain::router::RouterConfig;
+
+        let config = PhantomConfig::parse("").unwrap();
+        assert!(
+            config.preferred_provider().is_none(),
+            "empty config must have no preferred_provider"
+        );
+
+        // Replicate the construction logic from app.rs.
+        let router_config = match config.preferred_provider() {
+            Some(id) => RouterConfig::with_preferred_provider(id),
+            None => RouterConfig::default(),
+        };
+
+        // Default cascade: first non-heuristic is Ollama (cost 0.0, before claude's 0.003).
+        let first_non_heuristic = router_config
+            .backends
+            .iter()
+            .find(|b| b.name != "heuristic")
+            .expect("must have at least one non-heuristic backend");
+
+        assert_eq!(
+            first_non_heuristic.name, "ollama-phi3.5",
+            "default cascade must keep ollama-phi3.5 before claude-sonnet"
+        );
+    }
+
     // ------------------------------------------------------------------
     // notification_sounds tests (issue #571)
     // ------------------------------------------------------------------
@@ -641,5 +820,59 @@ info = \"/sounds/ding.wav\"
             config.notification_sound_for("info"),
             Some("/sounds/ding.wav"),
         );
+    }
+
+    // ------------------------------------------------------------------
+    // mcp_servers tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn mcp_servers_empty_by_default() {
+        let config = PhantomConfig::default();
+        assert!(config.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn parse_single_mcp_server() {
+        let toml = "[mcp_servers.my-server]\nurl = \"ws://localhost:8765\"\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "my-server");
+        assert_eq!(config.mcp_servers[0].url, "ws://localhost:8765");
+        assert!(config.mcp_servers[0].enabled);
+    }
+
+    #[test]
+    fn parse_mcp_server_disabled() {
+        let toml = "[mcp_servers.dev]\nurl = \"ws://localhost:9000\"\nenabled = false\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert!(!config.mcp_servers[0].enabled);
+    }
+
+    #[test]
+    fn parse_multiple_mcp_servers() {
+        let toml = "[mcp_servers.alpha]\nurl = \"ws://alpha:1\"\n\n[mcp_servers.beta]\nurl = \"ws://beta:2\"\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 2);
+        assert_eq!(config.mcp_servers[0].name, "alpha");
+        assert_eq!(config.mcp_servers[1].name, "beta");
+    }
+
+    #[test]
+    fn parse_mcp_server_mixed_with_top_level_keys() {
+        let toml = "theme = \"amber\"\n\n[mcp_servers.srv]\nurl = \"ws://srv:3\"\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.theme_name, "amber");
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].url, "ws://srv:3");
+    }
+
+    #[test]
+    fn parse_mcp_server_no_url_defaults_empty() {
+        let toml = "[mcp_servers.empty]\n";
+        let config = PhantomConfig::parse(toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].url, "");
     }
 }

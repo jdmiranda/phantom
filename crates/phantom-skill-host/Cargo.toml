@@ -9,7 +9,7 @@ description = "Runtime dylib loader and hot-module host for Phantom skill crates
 # Enable hot-module reload via libloading + notify.
 # Mirrored from phantom-renderer's `live-reload` feature.
 # Only active in debug builds; release builds are always the static path.
-hot-modules = ["dep:libloading", "dep:notify", "dep:serde_json"]
+hot-modules = ["dep:libloading", "dep:notify"]
 
 [dependencies]
 log.workspace = true
@@ -18,13 +18,17 @@ anyhow.workspace = true
 # Optional: only pulled in when the `hot-modules` feature is enabled.
 libloading  = { workspace = true, optional = true }
 notify      = { workspace = true, optional = true }
-# Used to deserialise `ParsedOutput` / LLM responses that cross the C ABI boundary.
-serde_json  = { version = "1", optional = true }
 
 # Always depend on phantom-semantic so callers get the concrete types.
 phantom-semantic = { path = "../phantom-semantic" }
 # Always depend on phantom-nlp so callers get the concrete LlmBackend types.
 phantom-nlp = { path = "../phantom-nlp" }
+
+# SHA-256 dylib signature verification (always present).
+sha2 = { workspace = true }
+hex  = { workspace = true }
+# Used to deserialise `ParsedOutput` / LLM responses that cross the C ABI boundary.
+serde_json = "1"
 
 [dev-dependencies]
 tempfile   = { workspace = true }

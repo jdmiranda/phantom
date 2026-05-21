@@ -54,6 +54,18 @@ pub use input_bar::{INPUT_BAR_HEIGHT, InputBar, InputKey};
 pub mod focus_ring;
 pub use focus_ring::{FADE_DURATION_MS, FocusRing};
 
+// Context menu widget — floating popup with keyboard navigation.
+pub mod context_menu;
+pub use context_menu::{ContextMenu, ContextMenuItem};
+
+// Issue #27 — full-screen keybind help overlay (F1 / ?).
+pub mod keybind_help;
+pub use keybind_help::KeybindHelp;
+
+// Find-in-terminal search bar (Cmd+F).
+pub mod search_bar;
+pub use search_bar::{SEARCH_BAR_HEIGHT, SearchBar, SearchBarAction, SearchKey};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------

@@ -538,6 +538,7 @@ impl App {
         let padding = 16.0;
         let section_gap = 8.0;
         let bar_chars = 16;
+        let has_error = self.settings_panel.validation_error.is_some();
 
         // Calculate total height.
         let mut total_lines: usize = 2; // title + separator
@@ -548,7 +549,8 @@ impl App {
                 total_lines += 1; // gap between sections
             }
         }
-        total_lines += 2; // gap + help line
+        // gap + help line + optional validation error line
+        total_lines += 2 + if has_error { 1 } else { 0 };
 
         let panel_height = (total_lines as f32) * line_height + padding * 2.0;
         let panel_x = (screen_size[0] - panel_width) / 2.0;
@@ -644,7 +646,14 @@ impl App {
                     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
                     format!("{marker}  {:<14} {bar} {value_str}", item.label)
                 } else {
-                    format!("{marker}  {:<14} ◂ {value_str} ▸", item.label)
+                    // Text items show value in brackets; choice items show ◂ ▸ arrows.
+                    use crate::settings_ui::SettingsKind;
+                    match &item.kind {
+                        SettingsKind::Text { .. } => {
+                            format!("{marker}  {:<14} [ {value_str} ]", item.label)
+                        }
+                        _ => format!("{marker}  {:<14} ◂ {value_str} ▸", item.label),
+                    }
                 };
 
                 let color = if is_selected {
@@ -665,9 +674,18 @@ impl App {
             }
         }
 
+        // Validation error line (shown above the help row in red).
+        if let Some(ref err) = self.settings_panel.validation_error.clone() {
+            text_y += line_height * 0.5;
+            let err_line = format!("! {err}");
+            self.render_overlay_text(&err_line, text_x, text_y, [1.0, 0.25, 0.2, 1.0], glyphs);
+            text_y += line_height;
+        } else {
+            text_y += line_height * 0.5;
+        }
+
         // Help line.
-        text_y += line_height * 0.5;
-        let help = "[Tab] section  [↑↓] select  [←→] adjust  [Esc] close";
+        let help = "[Tab] section  [↑↓] select  [←→] adjust  [R] revert  [Esc] close";
         self.render_overlay_text(help, text_x, text_y, [0.3, 0.5, 0.3, 0.55], glyphs);
     }
 
@@ -747,6 +765,48 @@ impl App {
             };
             let text_y = item_y + (item_h - self.cell_size.1) * 0.5;
             self.render_overlay_text(&label, menu_x + 12.0, text_y, color, glyphs);
+        }
+    }
+
+    /// Build the keybind help overlay (F1 / ? toggles it).
+    ///
+    /// Rendered above all other overlays — the panel sits centred on the screen.
+    /// Uses the [`phantom_ui::widgets::Widget`] trait so the widget owns all
+    /// layout math; this method only translates `TextSegment`s into glyph
+    /// instances.
+    pub(crate) fn build_keybind_help_overlay(
+        &mut self,
+        screen_size: [f32; 2],
+        quads: &mut Vec<QuadInstance>,
+        glyphs: &mut Vec<phantom_renderer::text::GlyphInstance>,
+    ) {
+        use phantom_ui::widgets::Widget;
+        use phantom_ui::layout::Rect;
+
+        if !self.keybind_help.visible() {
+            return;
+        }
+
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: screen_size[0],
+            height: screen_size[1],
+        };
+
+        // Quads from the widget.
+        for q in self.keybind_help.render_quads(&rect) {
+            quads.push(QuadInstance {
+                pos: q.pos,
+                size: q.size,
+                color: q.color,
+                border_radius: q.border_radius,
+            });
+        }
+
+        // Text segments → glyph instances via the shared text renderer.
+        for seg in self.keybind_help.render_text(&rect) {
+            self.render_overlay_text(&seg.text, seg.x, seg.y, seg.color, glyphs);
         }
     }
 

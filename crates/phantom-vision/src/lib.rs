@@ -15,10 +15,19 @@
 //!
 //! `fast_diff_gate` (cheap SAD on 64×64 luma) rejects near-identical frames
 //! before the more expensive `dhash` is computed.
+//!
+//! # VisionAnalyzer
+//!
+//! [`VisionAnalyzer`] is the high-level entry point for the capture pipeline.
+//! Call [`VisionAnalyzer::from_env`] once at startup; if `OPENAI_API_KEY` is
+//! present, it returns `Ok(analyzer)`. After a frame passes the dedup gate,
+//! call [`VisionAnalyzer::analyze_frame`] asynchronously — it PNG-encodes the
+//! raw RGBA buffer and forwards it to GPT-4V via [`OpenAiVisionBackend`].
 
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod dedup;
 pub mod format;
 
 // Re-export commonly used types.
@@ -27,6 +36,7 @@ pub use analysis::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use analysis::MockVisionBackend;
+pub use dedup::{DHash, FrameDedup, SadGate};
 pub use format::{Screenshot, ScreenshotSource};
 
 /// Type alias matching the issue #71 spec name for the OpenAI backend.
@@ -55,6 +65,19 @@ pub enum VisionError {
     /// Vision backend (network / API) failure.
     #[error("vision backend error: {0}")]
     Backend(String),
+    /// No API key or credentials are configured for the vision backend.
+    ///
+    /// Returned by [`VisionAnalyzer::from_env`] when `OPENAI_API_KEY` is
+    /// absent or empty, and by any backend variant that requires explicit
+    /// configuration before use.
+    #[error("vision backend not configured: no API credentials available")]
+    NotConfigured,
+    /// An analysis call exceeded the allowed wall-clock budget.
+    ///
+    /// `elapsed` carries the actual wall-clock duration so callers can
+    /// surface it in diagnostics without re-measuring.
+    #[error("vision analysis timed out after {elapsed:?}")]
+    Timeout { elapsed: std::time::Duration },
 }
 
 // ── VisionFrame ───────────────────────────────────────────────────────────────
@@ -221,7 +244,7 @@ fn rgba_to_luma(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Validate buffer size for an RGBA image of `width` x `height`.
-fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
+pub(crate) fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
     if width == 0 || height == 0 {
         return Err(VisionError::ZeroDim);
     }
@@ -242,7 +265,7 @@ fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
 }
 
 /// Box-filter downsample an RGBA image to a `target_w x target_h` grayscale buffer.
-fn box_downsample_gray(
+pub(crate) fn box_downsample_gray(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -360,6 +383,104 @@ pub fn fast_diff_gate(
         sad += (i32::from(small[i]) - i32::from(reference_64x64[i])).unsigned_abs();
     }
     Ok(sad)
+}
+
+// ── VisionAnalyzer ────────────────────────────────────────────────────────────
+
+/// High-level entry point for GPT-4V analysis of captured frames.
+///
+/// `VisionAnalyzer` owns an [`OpenAiVisionBackend`] whose API key is
+/// securely zeroed on drop via [`zeroize`]. Build with
+/// [`VisionAnalyzer::from_env`] when `OPENAI_API_KEY` is present;
+/// otherwise the capture pipeline skips analysis silently.
+///
+/// # Usage
+///
+/// ```no_run
+/// use phantom_vision::VisionAnalyzer;
+///
+/// # async fn run() -> Result<(), phantom_vision::VisionError> {
+/// let analyzer = VisionAnalyzer::from_env()?;
+/// let rgba = vec![0u8; 8 * 8 * 4];
+/// let analysis = analyzer.analyze_frame(&rgba, 8, 8, 0).await?;
+/// println!("{}", analysis.summary());
+/// # Ok(())
+/// # }
+/// ```
+pub struct VisionAnalyzer {
+    /// Holds the API key; zeroed on drop.
+    api_key: zeroize::Zeroizing<String>,
+    backend: OpenAiVisionBackend,
+}
+
+impl VisionAnalyzer {
+    /// Build from `OPENAI_API_KEY` environment variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisionError::NotConfigured`] if the variable is absent or
+    /// empty.
+    pub fn from_env() -> Result<Self, VisionError> {
+        let key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .ok_or(VisionError::NotConfigured)?;
+        let zkey = zeroize::Zeroizing::new(key.clone());
+        let backend = OpenAiVisionBackend::new(key);
+        Ok(Self { api_key: zkey, backend })
+    }
+
+    /// Build with an explicit API key (useful for tests with mock servers).
+    #[must_use]
+    pub fn with_key(api_key: String) -> Self {
+        let zkey = zeroize::Zeroizing::new(api_key.clone());
+        let backend = OpenAiVisionBackend::new(api_key);
+        Self { api_key: zkey, backend }
+    }
+
+    /// Override the base URL on the underlying backend (e.g. for tests).
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: String) -> Self {
+        self.backend = OpenAiVisionBackend::new(self.api_key.as_str().to_string())
+            .with_base_url(base_url);
+        self
+    }
+
+    /// Analyze a raw RGBA frame with GPT-4V using the
+    /// [`PromptTemplate::TerminalAnomalies`] template.
+    ///
+    /// This PNG-encodes the raw pixel data, checks the cost guard, and
+    /// calls the OpenAI API. Use [`tokio::task::spawn`] at the call site so
+    /// the capture loop is not blocked.
+    ///
+    /// # Errors
+    ///
+    /// - [`VisionError::ZeroDim`] / [`VisionError::SizeMismatch`] if the
+    ///   buffer does not match the given dimensions.
+    /// - [`VisionError::ImageTooLarge`] if the PNG exceeds the cost-guard
+    ///   limit ([`MAX_IMAGE_BYTES`]).
+    /// - [`VisionError::Backend`] for network or API errors.
+    pub async fn analyze_frame(
+        &self,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        timestamp_ms: u64,
+    ) -> Result<Analysis, VisionError> {
+        let screenshot =
+            Screenshot::new(rgba, width, height, timestamp_ms, ScreenshotSource::FullDesktop)?;
+        self.backend
+            .analyze_with_template(&screenshot, PromptTemplate::TerminalAnomalies)
+            .await
+    }
+}
+
+impl std::fmt::Debug for VisionAnalyzer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisionAnalyzer")
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -553,5 +674,73 @@ mod tests {
     fn vision_analysis_no_anomalies() {
         let a = VisionAnalysis::new("Clean terminal prompt".into(), vec![], 1.0);
         assert!(a.anomalies().is_empty());
+    }
+
+    // ── VisionError new variants ──────────────────────────────────────────────
+
+    #[test]
+    fn vision_error_not_configured_displays_correctly() {
+        let err = VisionError::NotConfigured;
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not configured"),
+            "NotConfigured display should mention 'not configured': {msg}"
+        );
+    }
+
+    #[test]
+    fn vision_error_timeout_includes_elapsed() {
+        let elapsed = std::time::Duration::from_secs(30);
+        let err = VisionError::Timeout { elapsed };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("30"),
+            "Timeout display should include elapsed seconds: {msg}"
+        );
+    }
+
+    // ── VisionAnalyzer ────────────────────────────────────────────────────────
+
+    #[test]
+    fn vision_analyzer_created_from_env_when_key_present() {
+        // If the env var is already set (e.g. in a CI environment with a real
+        // key), we can construct the analyzer. If it's absent we verify the
+        // correct error is returned.
+        match std::env::var("OPENAI_API_KEY") {
+            Ok(k) if !k.is_empty() => {
+                let analyzer = VisionAnalyzer::from_env()
+                    .expect("from_env must succeed when OPENAI_API_KEY is set");
+                // Debug impl must redact the key.
+                let dbg = format!("{analyzer:?}");
+                assert!(
+                    !dbg.contains(&k),
+                    "Debug output must not expose the raw API key"
+                );
+            }
+            _ => {
+                let err = VisionAnalyzer::from_env()
+                    .expect_err("from_env must fail when OPENAI_API_KEY is absent");
+                assert!(
+                    matches!(err, VisionError::NotConfigured),
+                    "expected NotConfigured, got {err:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zeroizing_api_key_clears_on_drop() {
+        // Verify that VisionAnalyzer holds a Zeroizing<String> by constructing
+        // one with a known key and confirming the struct can be dropped without
+        // panic. The actual memory zeroing is guaranteed by the `zeroize` crate
+        // at compile time; here we confirm the integration path compiles and the
+        // key does not appear in the Debug output.
+        let analyzer = VisionAnalyzer::with_key("sk-test-zero-me".to_string());
+        let dbg = format!("{analyzer:?}");
+        assert!(
+            !dbg.contains("sk-test-zero-me"),
+            "API key must be redacted in Debug output: {dbg}"
+        );
+        drop(analyzer); // Zeroizing::drop clears the heap allocation.
     }
 }

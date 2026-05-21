@@ -11,9 +11,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
 pub mod openai;
 pub mod store;
+
+use store::{EmbeddingStore, Metadata, StoreError};
 
 /// What kind of input an embedding represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,8 +56,20 @@ pub enum EmbedError {
     UnsupportedModality(Modality),
     #[error("backend error: {0}")]
     Backend(String),
+    /// Returned when a required environment variable or external key is missing.
     #[error("not configured: {0}")]
-    NotConfigured(String),
+    MissingConfig(String),
+    /// Returned when a modality is a planned feature but not yet wired in the
+    /// current environment. Distinguishes "will never work" from "not yet set
+    /// up here".
+    #[error("modality {modality:?} not configured: {reason}")]
+    NotConfigured {
+        modality: Modality,
+        reason: &'static str,
+    },
+    /// Wraps a [`StoreError`] that occurs while persisting embeddings.
+    #[error("store error: {0}")]
+    Store(#[from] StoreError),
 }
 
 /// Implemented by concrete embedding providers (Ollama, ONNX, OpenAI, mocks).
@@ -72,6 +87,63 @@ pub trait EmbeddingBackend: Send + Sync {
     /// Embed every item in `request`. Returns one [`Embedding`] per item,
     /// in the same order.
     async fn embed(&self, request: EmbedRequest) -> Result<Vec<Embedding>, EmbedError>;
+}
+
+/// Combinator that wires an [`EmbeddingBackend`] to an [`EmbeddingStore`].
+///
+/// Every callsite that needs to embed and then persist the results can use this
+/// type instead of manually threading the output of `embed()` into a store.
+/// The coupling is enforced at construction time.
+pub struct EmbeddingPipeline {
+    backend: Box<dyn EmbeddingBackend + Send + Sync>,
+    store: Box<dyn EmbeddingStore + Send + Sync>,
+}
+
+impl EmbeddingPipeline {
+    /// Create a new pipeline from a backend and a store.
+    #[must_use]
+    pub fn new(
+        backend: Box<dyn EmbeddingBackend + Send + Sync>,
+        store: Box<dyn EmbeddingStore + Send + Sync>,
+    ) -> Self {
+        Self { backend, store }
+    }
+
+    /// Embed `items` and write the resulting vectors into the store.
+    ///
+    /// Each embedding is stored with a UUID derived from `bundle_id` and the
+    /// item's index within the batch, along with a `bundle_id` metadata key.
+    /// Returns the produced [`Embedding`] slice in input order.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`EmbedError`] from the backend or [`EmbedError::Store`] from
+    /// the persistence layer.
+    pub async fn embed_and_store(
+        &mut self,
+        modality: Modality,
+        items: Vec<EmbedItem>,
+        bundle_id: u64,
+    ) -> Result<Vec<Embedding>, EmbedError> {
+        let result = self
+            .backend
+            .embed(EmbedRequest { modality, items })
+            .await?;
+
+        for (i, embedding) in result.iter().enumerate() {
+            // Derive a stable UUID from the bundle_id + item index so that
+            // re-embedding the same bundle overwrites rather than duplicates.
+            let uuid = Uuid::from_u128(u128::from(bundle_id) << 32 | i as u128);
+            let mut meta = Metadata::new();
+            meta.insert(
+                "bundle_id".to_string(),
+                serde_json::Value::Number(bundle_id.into()),
+            );
+            self.store.insert(uuid, embedding.vec.clone(), meta)?;
+        }
+
+        Ok(result)
+    }
 }
 
 /// Cosine similarity in `[-1.0, 1.0]`.
@@ -162,7 +234,11 @@ impl EmbeddingBackend for MockEmbeddingBackend {
 
     async fn embed(&self, request: EmbedRequest) -> Result<Vec<Embedding>, EmbedError> {
         if !self.supports(request.modality) {
-            return Err(EmbedError::UnsupportedModality(request.modality));
+            return Err(EmbedError::NotConfigured {
+                modality: request.modality,
+                reason: "Image and Audio embedding backends are not yet configured. \
+                         Set CLIP_API_KEY or IMAGEBIND_ENDPOINT to enable.",
+            });
         }
         let mut out = Vec::with_capacity(request.items.len());
         for item in &request.items {
@@ -294,7 +370,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_embed_rejects_unsupported_modality() {
+    async fn mock_embed_rejects_unsupported_modality_as_not_configured() {
         let mock = MockEmbeddingBackend::new();
         let request = EmbedRequest {
             modality: Modality::Image,
@@ -307,6 +383,91 @@ mod tests {
             .embed(request)
             .await
             .expect_err("image modality should be rejected");
-        assert!(matches!(err, EmbedError::UnsupportedModality(Modality::Image)));
+        assert!(
+            matches!(err, EmbedError::NotConfigured { modality: Modality::Image, .. }),
+            "expected NotConfigured for Image, got {err:?}",
+        );
+    }
+
+    /// Verifies that Image and Audio modalities return `NotConfigured` rather
+    /// than the generic `UnsupportedModality`, surfacing the actionable message.
+    #[tokio::test]
+    async fn image_modality_returns_not_configured_not_unsupported() {
+        let mock = MockEmbeddingBackend::new();
+        let request = EmbedRequest {
+            modality: Modality::Image,
+            items: vec![EmbedItem::Image {
+                bytes: vec![1, 2, 3],
+                mime: "image/jpeg".into(),
+            }],
+        };
+        let err = mock
+            .embed(request)
+            .await
+            .expect_err("Image should be rejected");
+
+        // Must be NotConfigured, not UnsupportedModality.
+        assert!(
+            matches!(err, EmbedError::NotConfigured { modality: Modality::Image, .. }),
+            "expected NotConfigured {{Image, ..}}, got {err:?}",
+        );
+        assert!(
+            !matches!(err, EmbedError::UnsupportedModality(_)),
+            "must not be UnsupportedModality",
+        );
+    }
+
+    /// Verifies that `EmbeddingPipeline::embed_and_store` stores every returned
+    /// embedding into the backing store.
+    #[tokio::test]
+    async fn embedding_pipeline_stores_result_on_success() {
+        use crate::store::InMemoryStore;
+
+        let backend = Box::new(MockEmbeddingBackend::with_dim(16));
+        let store = Box::new(InMemoryStore::new());
+        let mut pipeline = EmbeddingPipeline::new(backend, store);
+
+        let items = vec![
+            EmbedItem::Text("alpha".into()),
+            EmbedItem::Text("beta".into()),
+        ];
+        let result = pipeline
+            .embed_and_store(Modality::Text, items, 42)
+            .await
+            .expect("embed_and_store should succeed");
+
+        assert_eq!(result.len(), 2, "should return two embeddings");
+        assert_eq!(result[0].dim, 16);
+        assert_eq!(result[1].dim, 16);
+
+        // Verify that the store received both records.
+        assert_eq!(pipeline.store.len(), 2, "store should contain two records");
+    }
+
+    /// Verifies that a backend failure is propagated and the store is not written.
+    #[tokio::test]
+    async fn embedding_pipeline_propagates_backend_error() {
+        use crate::store::InMemoryStore;
+
+        let backend = Box::new(MockEmbeddingBackend::new());
+        let store = Box::new(InMemoryStore::new());
+        let mut pipeline = EmbeddingPipeline::new(backend, store);
+
+        // Audio modality is not supported by MockEmbeddingBackend.
+        let items = vec![EmbedItem::Audio {
+            samples: vec![0.0, 1.0],
+            sample_rate: 16_000,
+        }];
+        let err = pipeline
+            .embed_and_store(Modality::Audio, items, 99)
+            .await
+            .expect_err("audio backend should fail");
+
+        assert!(
+            matches!(err, EmbedError::NotConfigured { modality: Modality::Audio, .. }),
+            "expected NotConfigured for Audio, got {err:?}",
+        );
+        // Store must remain untouched because the backend failed.
+        assert_eq!(pipeline.store.len(), 0, "store must be empty after backend error");
     }
 }

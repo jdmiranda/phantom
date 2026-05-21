@@ -42,8 +42,19 @@ impl App {
     /// This is the main render path, called every `RedrawRequested`. It:
     /// 1. Renders the scene (boot or terminal) into the PostFx offscreen texture.
     /// 2. Composites CRT effects onto the final surface texture.
+    ///
+    /// Returns `Ok(())` immediately (skipping all GPU work) when neither the
+    /// scene graph has dirty nodes nor `force_redraw` is set.  This prevents
+    /// redundant buffer uploads on frames where nothing changed.
     pub fn render(&mut self) -> Result<()> {
         crate::profile_scope!("render");
+
+        // Skip the entire GPU pipeline when the scene is clean and no
+        // external event has requested a forced repaint.
+        if !self.scene.has_dirty_nodes() && !self.force_redraw {
+            return Ok(());
+        }
+
         let output = self.gpu.surface.get_current_texture()?;
         let surface_view = output.texture.create_view(&Default::default());
 
@@ -222,6 +233,16 @@ impl App {
                 self.build_context_menu_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
+            // -- Keybind help overlay (F1 / ?) — rendered above all other overlays --
+            if self.keybind_help.visible() {
+                self.build_keybind_help_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
+            }
+
+            // -- Find-in-terminal search bar (Cmd+F) --
+            if self.search_bar.visible {
+                self.build_search_overlay(&mut chrome_quads, &mut chrome_glyphs);
+            }
+
             // -- Alt-screen bezier tether (issue #323) --
             if !self.alt_screen_secondaries.is_empty() {
                 self.build_alt_screen_tether(&mut chrome_quads);
@@ -266,6 +287,11 @@ impl App {
         // Submit and present.
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        // Clear scene-graph dirty flags so static frames are skipped next time,
+        // and reset the force-redraw latch set by external events.
+        self.scene.clear_all_dirty();
+        self.force_redraw = false;
 
         // Return pooled Vecs for reuse next frame (retains capacity).
         self.pool_quads = all_quads;

@@ -15,7 +15,10 @@ use winit::{
 };
 
 mod auth_cli;
+mod builder_cli;
+mod fleet_cli;
 mod headless;
+mod loop_cli;
 mod path_resolver;
 
 struct Phantom {
@@ -129,6 +132,8 @@ impl ApplicationHandler for Phantom {
             WindowEvent::Resized(new_size) => {
                 if let Some(app) = &mut self.app {
                     app.handle_resize(new_size.width, new_size.height);
+                    // Resize always requires a full repaint.
+                    app.request_redraw();
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -171,6 +176,8 @@ impl ApplicationHandler for Phantom {
                         if let Err(ref panic) = result {
                             log::error!("Input panic: {}", panic_message(panic));
                         }
+                        // Any keypress requires a repaint.
+                        app.request_redraw();
                     }
                 }
                 if let Some(app) = &mut self.app
@@ -178,6 +185,9 @@ impl ApplicationHandler for Phantom {
                 {
                     app.shutdown();
                     event_loop.exit();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::Occluded(occluded) => {
@@ -199,16 +209,41 @@ impl ApplicationHandler for Phantom {
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_cursor_moved(position.x, position.y);
+                    // Mouse movement may affect hover state — request repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_mouse_click(state, button);
+                    // Click/release always requires a repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_mouse_scroll(delta);
+                    // Scroll always requires a repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Focused(focused) => {
+                if let Some(app) = &mut self.app {
+                    // Focus changes affect cursor rendering and active-pane chrome.
+                    let _ = focused;
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -258,10 +293,14 @@ impl ApplicationHandler for Phantom {
                         }
                     }
                 }
-                // Only reschedule the next frame while the window is visible.
-                // When occluded/minimised, `WindowEvent::Occluded(false)` will
-                // re-arm the loop once the window reappears.
-                if self.window_visible {
+                // Only schedule the next frame when something will actually change.
+                // Gate on (a) window visible (occluded windows skip via Occluded(false)
+                // re-arm), and (b) scene dirty / animating / force-redraw latch set.
+                // The next window event (key/mouse/PTY) re-arms the loop.
+                if self.window_visible
+                    && let Some(app) = &self.app
+                    && (app.scene_is_dirty() || app.has_active_animation() || app.needs_force_redraw())
+                {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
@@ -657,6 +696,27 @@ fn main() -> Result<()> {
     // `auth`.
     if args.get(1).map(String::as_str) == Some("auth") {
         return run_auth_subcommand(&args);
+    }
+
+    // `phantom loop` subcommand routing (issue #650 C3). Mirrors the
+    // `auth` block above — we hand the full argv to the loop_cli module
+    // which owns its own clap parsing and runtime construction.
+    if args.get(1).map(String::as_str) == Some("loop") {
+        return loop_cli::run_loop_subcommand(&args);
+    }
+
+    // `phantom builder` subcommand routing — higher-level orchestration
+    // that points the loop pipeline at any GitHub repo. The CLI surface
+    // mirrors `phantom loop run` but adds clone-or-attach, default-spec
+    // seeding, and an aggressive brain config.
+    if args.get(1).map(String::as_str) == Some("builder") {
+        return builder_cli::run_builder_subcommand(&args);
+    }
+
+    // `phantom fleet` subcommand routing — the "app of apps" meta-
+    // orchestrator. Same shape as the `loop` block above.
+    if args.get(1).map(String::as_str) == Some("fleet") {
+        return fleet_cli::run_fleet_subcommand(&args);
     }
 
     // Quick exits
