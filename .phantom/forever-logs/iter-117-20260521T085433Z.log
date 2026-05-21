@@ -1,0 +1,34 @@
+[forever 2026-05-21T08:54:33Z] ==== iteration 117 begin ====
+[forever 2026-05-21T08:54:33Z] fetching origin
+[forever 2026-05-21T08:54:34Z] branch=feat/fleet-builder-integration-shim HEAD=4da8dfe origin/main=6eca564f3417c485cc98941fc642d67708e1bb06
+[forever 2026-05-21T08:54:34Z] cargo build --release --bin phantom
+    Finished `release` profile [optimized] target(s) in 1.03s
+[forever 2026-05-21T08:54:35Z] build ok
+[forever 2026-05-21T08:54:35Z] launching: phantom loop run --repo /Users/jermiranda/Documents/Github/badass-cli --loops triager,implementer,reviewer --brain-queue triage-queue --max-runtime-min 8
+[forever 2026-05-21T08:54:35Z] daemon PID=44198
+phantom loop run: preflight checks
+  ok   gh binary present
+  ok   gh authenticated
+  ok   no MCP collisions on reserved tool names
+  ok   acquired /Users/jermiranda/Documents/GitHub/badass-cli/.phantom/loops/.runlock
+phantom loop run: starting 3 loop(s): triager, implementer, reviewer
+  started loop#1 (spec_id ↑ above)
+  started loop#2 (spec_id ↑ above)
+  started loop#3 (spec_id ↑ above)
+phantom loop run: booting brain with self-improvement against jdmiranda/phantom
+phantom loop run: brain will enqueue to `triage-queue`
+phantom loop run: brain audit log at /Users/jermiranda/Documents/GitHub/badass-cli/.phantom/brain-audit.jsonl
+phantom loop run: bounded — will exit after 8 minute(s) of runtime
+phantom loop run: all loops started. Press Ctrl-C to stop.
+[2026-05-21T08:54:38.012Z INFO  phantom_brain::brain] Ollama detected — local model dispatch enabled
+[2026-05-21T08:54:38.012Z INFO  phantom_brain::brain] AI brain online — project: badass-cli [Rust]
+phantom loop run: max-runtime reached, stopping
+phantom loop run: stopping all loops
+phantom loop run: brain forwarder signalled — process exit imminent
+phantom loop run: done
+[2026-05-21T09:02:37.592Z INFO  phantom_brain::brain] AI brain shutting down
+[2026-05-21T09:02:37.592Z INFO  phantom_brain::brain] AI brain thread exiting
+[2026-05-21T09:02:37.592Z INFO  phantom_brain::brain] AI brain exited cleanly (iteration 0)
+phantom loop run: brain forwarder exited cleanly
+[forever 2026-05-21T09:02:37Z] daemon exited with code 0
+[forever 2026-05-21T09:02:37Z] sleeping 5s before next iteration

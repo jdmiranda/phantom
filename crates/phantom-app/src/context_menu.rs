@@ -269,4 +269,49 @@ mod tests {
         menu.update_hover(50.0, 213.0);
         assert_eq!(menu.hovered, None);
     }
+
+    // ── Bug 3 acceptance criteria ─────────────────────────────────────────
+
+    /// Simulates a right-click at a cursor position: `ContextMenu::show` must
+    /// make the menu visible at the given coordinates.  This is the unit-level
+    /// acceptance test for Bug 3 — the App calls `self.context_menu.show(mx, my,
+    /// items)` inside `handle_mouse_click` when `button == MouseButton::Right`.
+    #[test]
+    fn right_click_shows_context_menu_at_cursor() {
+        let mut menu = ContextMenu::new();
+        assert!(!menu.visible, "menu must start hidden");
+
+        let cursor_x = 320.0_f32;
+        let cursor_y = 240.0_f32;
+        let items = vec![
+            MenuItem { label: "Copy".into(),  action: MenuAction::Copy,  enabled: true },
+            MenuItem { label: "Paste".into(), action: MenuAction::Paste, enabled: true },
+        ];
+        // Simulate the right-click path: App calls show(cursor_x, cursor_y, items).
+        menu.show(cursor_x, cursor_y, items);
+
+        assert!(menu.visible, "menu must be visible after right-click");
+        assert_eq!(menu.x, cursor_x, "menu x must match cursor x");
+        assert_eq!(menu.y, cursor_y, "menu y must match cursor y");
+        assert_eq!(menu.items.len(), 2, "menu must have both items");
+    }
+
+    /// Pressing Escape hides the context menu — this is the unit-level acceptance
+    /// test for Bug 3 (Escape path).  The App calls `self.context_menu.hide()` in
+    /// `handle_key_with_mods` when Escape is pressed while the menu is visible.
+    #[test]
+    fn escape_hides_context_menu() {
+        let mut menu = ContextMenu::new();
+        let items = vec![
+            MenuItem { label: "Copy".into(), action: MenuAction::Copy, enabled: true },
+        ];
+        menu.show(50.0, 50.0, items);
+        assert!(menu.visible, "pre-condition: menu must be visible");
+
+        // Simulate the Escape key path: App calls hide().
+        menu.hide();
+
+        assert!(!menu.visible, "menu must be hidden after Escape");
+        assert!(menu.items.is_empty(), "items must be cleared on hide");
+    }
 }

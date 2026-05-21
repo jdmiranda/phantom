@@ -204,9 +204,29 @@ fn forward_timeout() -> Duration {
 pub async fn forward(
     registry: &SharedRegistry,
     phantom_id: &PhantomId,
+    req: JsonRpcRequest,
+    idempotency_key: Option<&str>,
+    idem_map: &SharedIdempotencyMap,
+) -> Result<JsonRpcResponse, RouteError> {
+    forward_with_timeout(registry, phantom_id, req, idempotency_key, idem_map, forward_timeout()).await
+}
+
+/// Forward `req` to the Phantom identified by `phantom_id` with an explicit `timeout`.
+///
+/// This is the underlying implementation used by [`forward`].  Callers that need
+/// to inject a specific deadline (e.g. tests that want an instant timeout without
+/// mutating environment variables) should call this function directly.
+///
+/// # Errors
+///
+/// See [`RouteError`].
+pub async fn forward_with_timeout(
+    registry: &SharedRegistry,
+    phantom_id: &PhantomId,
     mut req: JsonRpcRequest,
     _idempotency_key: Option<&str>,
     _idem_map: &SharedIdempotencyMap,
+    timeout: Duration,
 ) -> Result<JsonRpcResponse, RouteError> {
     // Idempotency dedup deferred to issue #397 — see module-level doc.
 
@@ -236,7 +256,6 @@ pub async fn forward(
     };
 
     // --- Await the reply, racing against timeout ---
-    let timeout = forward_timeout();
     let result = tokio::time::timeout(timeout, reply_rx).await;
 
     // Clean up the pending entry on timeout (disconnect cleanup happens via
@@ -278,7 +297,7 @@ pub async fn deliver_response(registry: &SharedRegistry, phantom_id: &PhantomId,
             if let Some(u) = n.as_u64() {
                 HubId(u)
             } else {
-                log::warn!(
+                tracing::warn!(
                     "deliver_response: non-u64 response id from {}: {:?}",
                     phantom_id,
                     n
@@ -287,7 +306,7 @@ pub async fn deliver_response(registry: &SharedRegistry, phantom_id: &PhantomId,
             }
         }
         other => {
-            log::warn!(
+            tracing::warn!(
                 "deliver_response: unexpected response id from {}: {:?}",
                 phantom_id,
                 other
@@ -302,7 +321,7 @@ pub async fn deliver_response(registry: &SharedRegistry, phantom_id: &PhantomId,
         if let Some(tx) = state.pending.remove(&hub_id) {
             let _ = tx.send(resp);
         } else {
-            log::warn!(
+            tracing::warn!(
                 "deliver_response: hub_id {} not in pending table for {}",
                 hub_id.0,
                 phantom_id
@@ -443,24 +462,22 @@ mod tests {
 
     #[tokio::test]
     async fn forward_times_out_when_phantom_does_not_reply() {
-        // Override timeout to 0s for the test.
-        // SAFETY: single-threaded test with no concurrent env reads.
-        unsafe {
-            std::env::set_var("HUB_FORWARD_TIMEOUT_SECS", "0");
-        }
-
         let registry = new_shared();
         let idem_map = new_idempotency_map();
         let _phantom_rx = register_mock(&registry, "phantom-slow").await;
         // Keep _phantom_rx alive so the channel is not closed (we want Timeout, not Disconnected).
 
         let req = make_request("tools/call");
-        let result = forward(&registry, &phantom_id("phantom-slow"), req, None, &idem_map).await;
-
-        // Restore env var.
-        unsafe {
-            std::env::remove_var("HUB_FORWARD_TIMEOUT_SECS");
-        }
+        // Inject a zero-duration timeout directly — no env mutation required.
+        let result = forward_with_timeout(
+            &registry,
+            &phantom_id("phantom-slow"),
+            req,
+            None,
+            &idem_map,
+            Duration::ZERO,
+        )
+        .await;
 
         assert!(
             matches!(result, Err(RouteError::Timeout(_))),
@@ -541,9 +558,9 @@ mod tests {
         let reg_clone = Arc::clone(&registry);
         tokio::spawn(async move {
             let req = rx.recv().await.unwrap();
-            // The wire id must be a hub-local u64 (0), not Claude's 99.
+            // The wire id must be a hub-local random u64, not Claude's 99.
             let wire_id = req.id.clone().unwrap().as_u64().unwrap();
-            assert_eq!(wire_id, 0, "expected hub id 0 on the wire");
+            assert_ne!(wire_id, 99, "hub must rewrite Claude's id on the wire");
             deliver_response(&reg_clone, &phantom_id("id-test"), make_response(wire_id)).await;
         });
 

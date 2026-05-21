@@ -55,6 +55,21 @@ pub enum RelayMessage {
     /// The envelope was unsigned and the relay is configured to require
     /// signatures (see `PHANTOM_RELAY_REQUIRE_SIGNATURES`, issue #525).
     SignatureRequired { peer_id: PeerId },
+    /// The envelope payload exceeded `MAX_MESSAGE_BYTES`.
+    ///
+    /// The connection will be closed with WS close code 1009 (Message Too
+    /// Large) immediately after this reply is sent.
+    MessageTooLarge { peer_id: PeerId, limit_bytes: usize },
+    /// The sender has exceeded the per-connection sliding-window message rate.
+    ///
+    /// The connection will be closed with WS close code 1008 (Policy
+    /// Violation) immediately after this reply is sent.
+    SlidingWindowExceeded { peer_id: PeerId },
+    /// The relay has reached `MAX_CONNECTIONS` and cannot accept new peers.
+    ///
+    /// The connection will be closed with WS close code 1013 (Try Again
+    /// Later) immediately after this reply is sent.
+    TryAgainLater,
 }
 
 /// Messages a client sends to the relay after the handshake.

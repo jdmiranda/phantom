@@ -217,13 +217,13 @@ fn sweep_cleans_orphaned_vectors_and_leaked_rows_table() {
     );
 }
 
-/// Synthesize a `StoreError::Keyring` error and verify that its `Display`
+/// Synthesize a `StoreError::MasterKey` error and verify that its `Display`
 /// implementation does not panic and produces a non-empty, human-readable
 /// message. This guards against any accidental unwrap inside the display path.
 #[test]
-fn master_key_keyring_error_surfaces_cleanly_without_panic() {
-    // Construct the error directly — no need to touch the real OS keychain.
-    let err = StoreError::Keyring("simulated keychain failure".into());
+fn master_key_error_surfaces_cleanly_without_panic() {
+    // Construct the error directly — no need to touch the real disk.
+    let err = StoreError::MasterKey("simulated master-key failure".into());
 
     // Must not panic.
     let msg = err.to_string();
@@ -231,7 +231,7 @@ fn master_key_keyring_error_surfaces_cleanly_without_panic() {
     // Must produce a non-empty, human-readable string containing the detail.
     assert!(!msg.is_empty(), "error display must not be empty");
     assert!(
-        msg.contains("simulated keychain failure"),
+        msg.contains("simulated master-key failure"),
         "display must include the inner message, got: {msg:?}"
     );
 
