@@ -181,6 +181,13 @@ pub fn investigate(prompt: &str, working_dir: &str, max_rounds: u32) -> Result<S
                     pending.push((id, call));
                 }
                 Some(ApiEvent::Done) => break,
+                // Issue #646 spike: the brain's investigator path doesn't
+                // spawn `requires_complete_task` agents (it's a pure Q&A
+                // helper, not a loop-spawned executor). Treat lifecycle
+                // signals as a plain `Done` so existing flows are unchanged.
+                // Future PRs may surface the typed result here if the brain
+                // ever drives lifecycle agents.
+                Some(ApiEvent::CompleteTask { .. }) => break,
                 Some(ApiEvent::Error(e)) => return Err(e),
                 None => std::thread::sleep(std::time::Duration::from_millis(50)),
             }

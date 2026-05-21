@@ -1,0 +1,51 @@
+# Reviewer loop — drains the review-queue and decides on open PRs.
+#
+# Role
+# ----
+# Spawns an Actor agent per PR pulled off `review-queue`. The agent reads
+# the diff, runs whatever sanity checks the system prompt instructs, and
+# emits a structured decision via complete_task. The exit schema gates
+# the payload — a malformed decision quarantines that PR rather than
+# halting the entire loop.
+#
+# Tool whitelist: read-only filesystem plus the two gh PR write
+# operations the reviewer is allowed to call. Per the issue #650
+# decision note, gh_pr_* tool names are not yet ToolType variants on
+# main; C3 will need to resolve those (likely via shelled RunCommand
+# with a tightened system prompt, or by extending ToolType).
+
+id = "reviewer"
+max_concurrent = 1
+on_quarantine = "skip_and_continue"
+
+[agent]
+role = "Actor"
+allow_tools = ["read_file", "gh_pr_review", "gh_pr_merge"]
+system_prompt = """
+You are a code reviewer for the Phantom repo (jdmiranda/phantom).
+Pull the assigned PR. Read the diff. Verify the change is sound, tested, and matches the issue scope.
+You MUST call complete_task with {pr_number: <int>, decision: "approved" | "changes_requested" | "merged"}.
+"""
+
+[agent.policy]
+auto_approve = true
+timeout_seconds = 1200
+
+[agent.exit_schema]
+type = "object"
+required = ["pr_number", "decision"]
+
+[agent.exit_schema.properties.pr_number]
+type = "integer"
+
+[agent.exit_schema.properties.decision]
+type = "string"
+enum = ["approved", "changes_requested", "merged"]
+
+[source]
+kind = "queue"
+name = "review-queue"
+
+[[on_complete]]
+kind = "log_to_bus"
+event_kind = "reviewer.decision"
