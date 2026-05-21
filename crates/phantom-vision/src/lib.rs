@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod dedup;
 pub mod format;
 
 // Re-export commonly used types.
@@ -35,6 +36,7 @@ pub use analysis::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use analysis::MockVisionBackend;
+pub use dedup::{DHash, FrameDedup, SadGate};
 pub use format::{Screenshot, ScreenshotSource};
 
 /// Type alias matching the issue #71 spec name for the OpenAI backend.
@@ -242,7 +244,7 @@ fn rgba_to_luma(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Validate buffer size for an RGBA image of `width` x `height`.
-fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
+pub(crate) fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
     if width == 0 || height == 0 {
         return Err(VisionError::ZeroDim);
     }
@@ -263,7 +265,7 @@ fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
 }
 
 /// Box-filter downsample an RGBA image to a `target_w x target_h` grayscale buffer.
-fn box_downsample_gray(
+pub(crate) fn box_downsample_gray(
     rgba: &[u8],
     width: u32,
     height: u32,

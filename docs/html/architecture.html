@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · architecture</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 01 · ARCHITECTURE · CRATE TOPOLOGY</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html" class="active">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 01 · CRATE TOPOLOGY</span>
+    <span class="sysid">SYS://arch.0</span>
+  </div>
+  <h1 class="page-title">Architecture</h1>
+  <p class="page-lede">
+    Phantom is a Rust workspace with <strong>36 crates</strong> grouped into nine operational domains. Each crate
+    is either <span class="pill pill-ok">OPERATIONAL</span> (✅), <span class="pill pill-warn">SKELETAL</span> (🔧)
+    or <span class="pill pill-info">PHASE 2+</span> (🚧). The Core, Rendering, Terminal, AI, and Federation rings
+    form the substrate. The Capture, Voice, History, and Extensibility rings extend it.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Workspace Members</div><div class="value">36 crates</div></div>
+    <div class="status-cell"><div class="label">Operational</div><div class="value bright">17 ✅</div></div>
+    <div class="status-cell"><div class="label">Skeletal</div><div class="value amber">16 🔧</div></div>
+    <div class="status-cell"><div class="label">Lines (workspace)</div><div class="value">182,546</div></div>
+    <div class="status-cell"><div class="label">Edition</div><div class="value">2024</div></div>
+  </div>
+
+  <h2>The substrate at a glance</h2>
+
+<pre class="ascii">
+ +==================================================================+
+ |                          P H A N T O M                            |
+ |                     ─── cognitive substrate ───                   |
+ +==================================================================+
+ |                                                                  |
+ |   +-------- supervisor --------+    +------ phantom-protocol -+  |
+ |   | heartbeat, restart, panic  |<-->|  unix-socket IPC, events|  |
+ |   +----------------------------+    +-------------------------+  |
+ |                                                                  |
+ |   +--- phantom-app (lifecycle, panes, boot, inspector UI) ----+  |
+ |   |                                                           |  |
+ |   |   +---- phantom-terminal ----+   +---- phantom-agents +   |  |
+ |   |   | pty, alacritty, kitty    |   | roles, dispatch    |   |  |
+ |   |   +----------+---------------+   +---------+----------+   |  |
+ |   |              |                              |              |  |
+ |   |              v                              v              |  |
+ |   |   +---- phantom-semantic --+   +---- phantom-brain ---+   |  |
+ |   |   | git/cargo/etc parser   |   | ooda · ledger · fsm  |   |  |
+ |   |   +------------------------+   +----------+-----------+   |  |
+ |   |                                            |              |  |
+ |   |                                            v              |  |
+ |   |                              +---- phantom-loop ------+   |  |
+ |   |                              | overseer · substrate   |   |  |
+ |   |                              +------------------------+   |  |
+ |   +-----------------------------------------------------------+  |
+ |                                                                  |
+ |   +---- phantom-renderer (wgpu, postfx, glyph atlas) ---------+  |
+ |   +---- phantom-ui (tokens, themes, taffy, widgets) ---------+   |
+ |   +---- phantom-scene (retained graph, dirty bits) ----------+   |
+ |                                                                  |
+ +------------------------------------------------------------------+
+                  surface : winit window  ·  GPU  ·  PTY
+</pre>
+
+  <h2 id="core">Domain · Core system</h2>
+  <p class="muted">The boot kernel. Without these, nothing else loads.</p>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Main binary. winit event loop, GPU init, panic recovery, supervisor socket handshake. <code>crates/phantom/src/main.rs</code></div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-supervisor</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Erlang/OTP-style monitor. Heartbeat watch + auto-restart with back-off. Issue <code>#53</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-app</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Application lifecycle. Pane management, boot sequence, agent coordination, inspector UI. Issues <code>#97</code>, <code>#44</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-protocol</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Unix-socket IPC wire protocol between supervisor and app. Heartbeat, events, commands.</div></div>
+  </div>
+
+  <h2 id="render">Domain · Rendering</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-renderer</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">wgpu GPU pipeline. Text atlas, quad batcher, CRT post-fx, screenshot, video. Issues <code>#82</code>–<code>#84</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-ui</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Design tokens, six themes, Taffy CSS layout, widget primitives, keybinds. Issues <code>#20</code>–<code>#31</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-scene</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Retained scene graph with dirty-bit tracking, clock/cadence, frame delta clamp.</div></div>
+  </div>
+
+  <h2 id="term">Domain · Terminal emulation</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-terminal</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">PTY process management, <code>alacritty_terminal</code> VT100 wrapper, input/output routing, Kitty protocol.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-semantic</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Command classification and output parsing (git, cargo, etc.). Stub integration. Issues <code>#74</code>, <code>#94</code>.</div></div>
+  </div>
+
+  <h2 id="ai">Domain · AI &amp; intelligence</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-agents</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Agent lifecycle, tool execution, Claude API chat. <strong>12-variant <code>AgentRole</code> enum</strong>, role-based whitelisting at the capability gate, <code>complete_task</code> lifecycle tool, fast-path audit, taint levels.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-brain</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Ambient OODA loop on a dedicated thread. <code>TaskLedger::try_dispatch</code>, 9-state <code>AgentStatus</code> FSM, self-improvement reconciler, <code>GoalSource</code> trait, weighted scorer, trust bands, audit log.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-loop</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Loop overseer. Durable repo-scoped <code>LoopRunner</code> async FSM pulling typed input from a pluggable <code>LoopSource</code>. Per-loop <code>ExitSchema</code>. <code>SubstrateDriver</code> for headless agent execution.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-nlp</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Natural-language command interpreter. LLM routing stub. Issue <code>#55</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-context</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Project / git / environment detection. Assembles context for agent prompts.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-memory</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Per-project knowledge store, event log, memory blocks. Schema pending. Issues <code>#28</code>, <code>#33</code>, <code>#62</code>, <code>#78</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-dag</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Code dependency graph. DAG extraction + <code>.planning/dag.json</code> schema for agent navigation.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-recall</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Intent-anchored retrieval API. Query rewriting, score fusion, ANN routing. Issue <code>#72</code>.</div></div>
+  </div>
+
+  <h2 id="meta">Domain · Meta-orchestration</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-builder</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">Point Phantom at any GitHub repo and let it eat the issue queue. Wires brain + loop + substrate to a target slug.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-fleet</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body">App-of-apps orchestrator. One process hosts N autonomous builders sharing brain, substrate driver, and event bus.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-adapter</span><span class="pill pill-ok">✅</span></div>
+      <div class="card-body"><code>AppAdapter</code> trait. App registry, pub/sub event bus, spatial layout negotiation. The "everything is an app" abstraction. Issue <code>#17</code>.</div></div>
+  </div>
+
+  <h2 id="persist">Domain · Persistence &amp; history</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-history</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Structured JSONL command history store. Read/write + agent output capture pending. Issue <code>#75</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-session</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Session save/restore. Agent + goal/task state restore pending. Issues <code>#76</code>, <code>#77</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-bundle-store</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">SQLite (SQLCipher) + LanceDB vectors. Two-phase writes. Recovery tests pending. Issues <code>#10</code>, <code>#88</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-embeddings</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Multi-modal embedding trait + OpenAI backend + mock. Persistent storage pending. Issues <code>#72</code>, <code>#73</code>.</div></div>
+  </div>
+
+  <h2 id="ext">Domain · Extensibility</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-plugins</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Plugin lifecycle (manifest, host, registry, marketplace). WASM host is a mock. wasmtime integration pending. Issue <code>#48</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-mcp</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Model Context Protocol server + client. Client impl + registry pending. Issues <code>#52</code>, <code>#54</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-skill-host</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Runtime dylib loader. Hot-module host for Phantom skill crates. Phase 1 dylib loading. Issue <code>#382</code>.</div></div>
+  </div>
+
+  <h2 id="capture">Domain · Capture pipeline (Phase 2.G)</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-vision</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">dHash + SAD perceptual dedup. GPT-4V analysis pending. Issues <code>#70</code>, <code>#71</code>, <code>#79</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-bundles</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Schema for capture bundles (frames, audio, transcript). Serialization pending. Issues <code>#80</code>, <code>#81</code>, <code>#91</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-audio</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Audio capture primitives. Real capture pipeline integration pending.</div></div>
+  </div>
+
+  <h2 id="voice">Domain · Voice &amp; speech</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-stt</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">STT backend abstraction (Whisper/Deepgram + mock). Streaming Whisper + OpenAI integration pending. Issues <code>#56</code>, <code>#68</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-voice</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">TTS abstraction (ElevenLabs/Piper/system + mock). Real TTS pending. Issue <code>#69</code>.</div></div>
+  </div>
+
+  <h2 id="net">Domain · Federation &amp; networking (Phase 9)</h2>
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">phantom-net</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Identity bootstrap, relay handshake, opaque envelopes, heartbeat keepalive. Issue <code>#5</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-relay</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Stateless WebSocket message broker. Routes opaque envelopes by <code>PeerId</code>. Issue <code>#4</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">phantom-hub</span><span class="pill pill-warn">🔧</span></div>
+      <div class="card-body">Railway-hosted MCP fleet control hub. Connection broker, auth, JSON-RPC router. Issue <code>#394</code>.</div></div>
+  </div>
+
+  <h2>Workspace topology</h2>
+  <p class="muted">Visualized as a dependency ring. Inner rings are loaded first at boot.</p>
+
+<pre class="ascii">
+                          ┌─────────────────────────────┐
+                          │      phantom (binary)       │
+                          └──────────────┬──────────────┘
+                                         │
+              ┌──────────────────────────┼──────────────────────────┐
+              │                          │                          │
+       phantom-supervisor        phantom-protocol           phantom-app
+        (sibling proc)        (IPC, events, heartbeat)   (panes, boot, ui)
+                                         │
+              ┌──────────────────────────┼──────────────────────────┐
+              │             │            │            │             │
+      phantom-renderer  phantom-ui  phantom-scene  phantom-terminal phantom-context
+       (wgpu/postfx)   (tokens)    (graph)         (pty/vt100)      (project)
+                                         │
+              ┌──────────────────────────┼──────────────────────────┐
+              │             │            │            │             │
+       phantom-agents  phantom-brain phantom-loop phantom-nlp  phantom-semantic
+       (12 roles)      (ooda/ledger) (overseer)   (interpret)  (parser)
+                                         │
+              ┌──────────────────────────┼──────────────────────────┐
+              │             │            │            │             │
+      phantom-builder phantom-fleet phantom-adapter  phantom-mcp   phantom-plugins
+       (1 repo)      (N apps)      (app abstraction) (mcp)         (wasm)
+</pre>
+
+  <div class="callout callout-info">
+    <div class="callout-title">Pattern</div>
+    Every "outer ring" crate is replaceable behind a trait. The inner rings depend only on the traits, never the
+    concrete crates. This is what lets <code>phantom loop run</code> drive the substrate without booting wgpu/winit.
+  </div>
+
+  <footer class="footer">
+    <span>SEC 01 · ARCHITECTURE</span>
+    <span><a href="index.html">↩ index</a> · <a href="boot.html">next → SEC 02 · BOOT</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

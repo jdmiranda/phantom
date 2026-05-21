@@ -63,6 +63,7 @@ pub mod router;
 pub mod scoring;
 pub mod self_improvement;
 pub mod skill_store;
+pub mod recall;
 
 pub use attention::{Attention, PaneSnapshot};
 pub use brain::*;
@@ -78,6 +79,7 @@ pub use dispatch::ActionHandler;
 pub use events::*;
 pub use goal::{ChatBackend, ClaudeChatBackend, Goal, Step, parse_steps};
 pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};
+pub use recall::BrainRecallContext;
 pub use orchestrator::*;
 pub use persistent_skill_registry::{
     AgentRef, PersistentSkillRegistry, Skill, SkillHandler, SkillId, SkillProvenance,

@@ -330,6 +330,7 @@ fn run_command(args: &[String]) -> Result<()> {
             catalog: None,
             privacy_mode: false,
             relay_inbound_rx: None,
+            recall_context: None,
             history_context: Vec::new(),
             self_improvement: Some(state),
             goal_sources,
