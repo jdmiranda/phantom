@@ -26,6 +26,56 @@ use phantom_protocol::{
 };
 
 // ---------------------------------------------------------------------------
+// Crash observability helpers
+// ---------------------------------------------------------------------------
+
+/// Returns `~/.config/phantom/supervisor_events.jsonl`, creating the parent
+/// directory if needed.  Returns `None` on any I/O error so callers can
+/// treat logging as best-effort.
+fn supervisor_events_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = PathBuf::from(home).join(".config").join("phantom");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("supervisor_events.jsonl"))
+}
+
+/// Append one structured JSON line to `supervisor_events.jsonl`.
+///
+/// The file is opened in append mode so concurrent supervisor restarts
+/// never truncate earlier entries.  Failures are logged at WARN and
+/// silently ignored — observability must never abort the restart path.
+fn write_supervisor_event(event: &serde_json::Value) {
+    let Some(path) = supervisor_events_path() else {
+        warn!("crash-obs: could not resolve supervisor_events.jsonl path");
+        return;
+    };
+
+    let mut line = serde_json::to_string(event).unwrap_or_else(|e| {
+        format!(r#"{{"error":"serialize failed: {e}"}}"#)
+    });
+    line.push('\n');
+
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                warn!("crash-obs: failed to write supervisor event: {e}");
+            }
+        }
+        Err(e) => warn!("crash-obs: failed to open {}: {e}", path.display()),
+    }
+}
+
+/// Unix-epoch milliseconds, best-effort (0 on clock error).
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // Supervisor
 // ---------------------------------------------------------------------------
 
@@ -50,6 +100,8 @@ struct Supervisor {
     restart_timestamps: VecDeque<Instant>,
     /// When the supervisor was created.
     start_time: Instant,
+    /// When the current phantom child was spawned (reset on each restart).
+    spawn_time: Option<Instant>,
     /// Timestamp of the last clean-uptime checkpoint (used to reset restart_count).
     last_clean_checkpoint: Instant,
     /// Path to the phantom binary.
@@ -117,6 +169,7 @@ impl Supervisor {
             render_panic_count: 0,
             restart_timestamps: VecDeque::new(),
             start_time: Instant::now(),
+            spawn_time: None,
             last_clean_checkpoint: Instant::now(),
             phantom_binary,
             stdin_rx: rx,
@@ -155,10 +208,12 @@ impl Supervisor {
                 )
             })?;
 
+        let now = Instant::now();
         info!("phantom spawned -- pid {}", child.id());
         self.child_pid = Some(child.id());
         self.child = Some(child);
-        self.last_heartbeat = Instant::now();
+        self.last_heartbeat = now;
+        self.spawn_time = Some(now);
         self.app_stream = None;
         self.app_read_buf.clear();
         // Each fresh child gets a clean render-panic counter; otherwise a child
@@ -169,8 +224,38 @@ impl Supervisor {
     }
 
     fn kill_phantom(&mut self) {
+        self.kill_phantom_with_reason("explicit_kill", None);
+    }
+
+    /// Core kill implementation.  `reason` and `last_heartbeat_ms` are written
+    /// into the structured crash-event log so future analysis has full context.
+    fn kill_phantom_with_reason(&mut self, reason: &str, last_heartbeat_ms: Option<u64>) {
         if let Some(ref mut child) = self.child {
             let pid = child.id();
+            let uptime_s = self
+                .spawn_time
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let last_hb_ms = last_heartbeat_ms.unwrap_or_else(|| self.last_heartbeat.elapsed().as_millis() as u64);
+            let ts = now_epoch_ms();
+
+            // --- pre-SIGTERM state dump (requirement 3) ----------------------
+            // Write current supervisor state to disk *before* sending SIGTERM so
+            // the dump is always present even if the kill races with the process
+            // disappearing.
+            let state_dump = serde_json::json!({
+                "timestamp_ms": ts,
+                "event": "pre_sigterm_state",
+                "reason": reason,
+                "pid": pid,
+                "uptime_s": uptime_s,
+                "last_heartbeat_ms_ago": last_hb_ms,
+                "restart_count": self.restart_count,
+                "supervisor_uptime_s": self.start_time.elapsed().as_secs(),
+                "app_connected": self.app_stream.is_some(),
+            });
+            write_supervisor_event(&state_dump);
+
             info!("sending SIGTERM to phantom (pid {})", pid);
 
             // SIGTERM first.
@@ -206,11 +291,22 @@ impl Supervisor {
         }
 
         self.child = None;
+        self.spawn_time = None;
         self.app_stream = None;
         self.app_read_buf.clear();
     }
 
     fn restart_phantom(&mut self) -> Result<()> {
+        self.restart_phantom_with_reason("restart", None)
+    }
+
+    /// Rate-limited restart.  `kill_reason` and `last_heartbeat_ms` are
+    /// forwarded into the crash-event log for diagnosability.
+    fn restart_phantom_with_reason(
+        &mut self,
+        kill_reason: &str,
+        last_heartbeat_ms: Option<u64>,
+    ) -> Result<()> {
         // Rate-limit: only keep timestamps within the sliding window.
         let window = Duration::from_secs(RESTART_WINDOW_SECS);
         let now = Instant::now();
@@ -226,11 +322,11 @@ impl Supervisor {
             error!(
                 "phantom restarted {MAX_RESTARTS} times within {RESTART_WINDOW_SECS}s -- giving up"
             );
-            self.kill_phantom();
+            self.kill_phantom_with_reason("rate_limit_exceeded", last_heartbeat_ms);
             bail!("restart rate limit exceeded");
         }
 
-        self.kill_phantom();
+        self.kill_phantom_with_reason(kill_reason, last_heartbeat_ms);
         self.restart_count += 1;
         self.restart_timestamps.push_back(now);
 
@@ -378,12 +474,41 @@ impl Supervisor {
             if !waiting_on_backoff {
                 // 3. Heartbeat watchdog.
                 if self.child.is_some() && self.heartbeat_expired() {
-                    warn!("heartbeat timeout -- restarting phantom");
-                    self.write_crash_report("heartbeat_timeout");
-                    if let Err(e) = self.restart_phantom() {
+                    let last_hb_ms = self.last_heartbeat.elapsed().as_millis() as u64;
+                    warn!(
+                        "heartbeat timeout -- last heartbeat {}ms ago -- restarting phantom",
+                        last_hb_ms
+                    );
+                    // Capture fields for the structured event *before* restart
+                    // clears spawn_time / child.
+                    let uptime_s = self.spawn_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                    let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0);
+                    let ts = now_epoch_ms();
+                    let restart_count_before = self.restart_count;
+                    let app_connected = self.app_stream.is_some();
+
+                    // restart_phantom_with_reason: rate-limit check → kill (with
+                    // pre-SIGTERM dump) → restart_count++ → spawn.
+                    if let Err(e) = self.restart_phantom_with_reason(
+                        "heartbeat_timeout",
+                        Some(last_hb_ms),
+                    ) {
                         error!("{e}");
                         break;
                     }
+
+                    // Write the structured kill event (requirement 1) after
+                    // the kill so the entry is written even if spawn fails.
+                    write_supervisor_event(&serde_json::json!({
+                        "timestamp_ms": ts,
+                        "event": "heartbeat_kill",
+                        "reason": "heartbeat_timeout",
+                        "pid": pid,
+                        "last_heartbeat_ms": last_hb_ms,
+                        "phantom_uptime_s": uptime_s,
+                        "restart_count": restart_count_before,
+                        "app_connected": app_connected,
+                    }));
                 }
 
                 // 4. Check if child exited unexpectedly.

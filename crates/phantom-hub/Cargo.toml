@@ -43,6 +43,11 @@ rand = "0.8"
 # Evicts oldest entries at capacity — no full-clear, bounded memory.
 lru = "0.12"
 
+# Config-directory resolution for the persistent peer-key store (issue #527).
+# Mirrors the dependency added in PR #539 (phantom-net) and PR #636
+# (phantom-bundle-store).
+dirs = "5"
+
 [features]
 ## Enable test-only helpers (e.g. `ConnState::insert_pending_for_test`).
 ## Activated automatically for integration tests via [[test]] below.

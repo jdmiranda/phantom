@@ -140,7 +140,9 @@ impl Default for PhantomConfig {
             privacy_mode: false,
             offline_mode: false,
             preferred_provider: None,
-            fullscreen: false,
+            // Phantom IS the AI; the AI deserves the whole screen. Changed
+            // 2026-05-20 — see `feedback_agent_is_primary` memory entry.
+            fullscreen: true,
             notification_sounds: HashMap::new(),
             mcp_servers: Vec::new(),
         }
@@ -606,13 +608,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn config_fullscreen_false_starts_windowed() {
-        // Default must be windowed (false) so existing users are not suddenly
-        // forced into fullscreen on upgrade.
+    fn default_fullscreen_is_true_for_agent_first_ux() {
+        // Phantom IS the AI; the AI deserves the whole screen.  The cold-launch
+        // first impression is a full-window agent (or SetupAdapter when no API
+        // key is provisioned).  Users who want a windowed shell set
+        // `fullscreen = false` in `~/.config/phantom/config.toml`.
         let config = PhantomConfig::default();
         assert!(
-            !config.fullscreen,
-            "fullscreen must default to false so the window starts in windowed mode"
+            config.fullscreen,
+            "fullscreen must default to true so the agent owns the whole screen on cold launch"
         );
     }
 
@@ -635,9 +639,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_config_fullscreen_is_false() {
+    fn parse_empty_config_inherits_default_fullscreen_true() {
+        // An empty config TOML inherits all defaults — including the
+        // agent-first fullscreen=true cold-launch default.  See
+        // `default_fullscreen_is_true_for_agent_first_ux`.
         let config = PhantomConfig::parse("").unwrap();
-        assert!(!config.fullscreen);
+        assert!(config.fullscreen);
     }
 
     #[test]

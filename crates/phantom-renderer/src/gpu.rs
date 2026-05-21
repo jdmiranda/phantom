@@ -7,6 +7,39 @@ use wgpu::{
 };
 use winit::window::Window;
 
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during GPU initialization.
+///
+/// The "no adapter" failure mode is surfaced by `wgpu` itself via
+/// `RequestAdapterError`, so this enum only owns the surface-format
+/// negotiation error that the renderer itself constructs.
+#[derive(Debug)]
+pub enum GpuError {
+    /// The surface reported an empty list of supported texture formats.
+    ///
+    /// This should never happen on a functioning GPU/driver stack, but can
+    /// occur on headless machines, CI environments, or with broken wgpu
+    /// backends. Returning an error here is safer than an index panic.
+    NoSupportedFormat,
+}
+
+impl std::fmt::Display for GpuError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSupportedFormat => write!(
+                f,
+                "GPU surface reported no supported texture formats; \
+                 check GPU drivers or wgpu backend"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GpuError {}
+
 /// Core GPU state — device, queue, surface, and configuration.
 pub struct GpuContext {
     pub device: Device,
@@ -45,12 +78,16 @@ impl GpuContext {
         ))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
+        // Prefer an sRGB format; fall back to whatever the driver offers.
+        // `formats` can be empty on headless/CI builds — return a typed error
+        // instead of panicking with an index-out-of-bounds.
         let format = surface_caps
             .formats
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            .or_else(|| surface_caps.formats.first().copied())
+            .ok_or(GpuError::NoSupportedFormat)?;
 
         let size = window.inner_size();
         let surface_config = SurfaceConfiguration {
@@ -120,5 +157,89 @@ impl GpuContext {
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that the format-selection logic returns `GpuError::NoSupportedFormat`
+    /// when the formats list is empty.
+    ///
+    /// We cannot call `GpuContext::new` in a unit test (no real window), so
+    /// this test directly exercises the same `.or_else().ok_or()` chain used
+    /// in `GpuContext::new` to confirm the error path is reachable and typed
+    /// correctly.
+    #[test]
+    fn gpu_init_returns_error_when_no_surface_formats() {
+        let formats: Vec<TextureFormat> = vec![];
+
+        let result: Result<TextureFormat, GpuError> = formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .or_else(|| formats.first().copied())
+            .ok_or(GpuError::NoSupportedFormat);
+
+        assert!(
+            result.is_err(),
+            "empty formats list must yield GpuError::NoSupportedFormat"
+        );
+        assert!(
+            matches!(result.unwrap_err(), GpuError::NoSupportedFormat),
+            "error variant must be NoSupportedFormat"
+        );
+    }
+
+    /// Verify that an sRGB format is preferred when one is available.
+    #[test]
+    fn gpu_init_prefers_srgb_format() {
+        let formats = vec![
+            TextureFormat::Rgba8Unorm,
+            TextureFormat::Rgba8UnormSrgb,
+            TextureFormat::Bgra8Unorm,
+        ];
+
+        let format: Result<TextureFormat, GpuError> = formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .or_else(|| formats.first().copied())
+            .ok_or(GpuError::NoSupportedFormat);
+
+        assert!(format.is_ok(), "should find sRGB format");
+        assert!(format.unwrap().is_srgb(), "selected format must be sRGB");
+    }
+
+    /// Verify that the first non-sRGB format is used when no sRGB format exists.
+    #[test]
+    fn gpu_init_falls_back_to_first_format_when_no_srgb() {
+        let formats = vec![TextureFormat::Rgba8Unorm, TextureFormat::Bgra8Unorm];
+
+        let format: Result<TextureFormat, GpuError> = formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .or_else(|| formats.first().copied())
+            .ok_or(GpuError::NoSupportedFormat);
+
+        assert!(format.is_ok(), "should fall back to first format");
+        assert_eq!(
+            format.unwrap(),
+            TextureFormat::Rgba8Unorm,
+            "fallback must be the first element"
+        );
+    }
+
+    /// Verify `GpuError` variants implement `Display` and produce non-empty messages.
+    #[test]
+    fn gpu_error_display_is_non_empty() {
+        let no_fmt = GpuError::NoSupportedFormat;
+        assert!(!no_fmt.to_string().is_empty());
     }
 }

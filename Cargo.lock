@@ -6060,6 +6060,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
  "uuid",
  "winit",
 ]
@@ -6154,6 +6155,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-audio"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-core",
+ "futures-util",
+ "screencapturekit",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "phantom-brain"
 version = "0.1.0"
 dependencies = [
@@ -6162,6 +6178,7 @@ dependencies = [
  "phantom-adapter",
  "phantom-agents",
  "phantom-context",
+ "phantom-embeddings",
  "phantom-history",
  "phantom-loop",
  "phantom-memory",
@@ -6314,6 +6331,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-test",
+ "dirs 5.0.1",
  "ed25519-dalek",
  "futures-util",
  "jsonwebtoken",
@@ -6447,6 +6465,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "phantom-bundles",
+ "phantom-embeddings",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -7697,6 +7716,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "screencapturekit"
+version = "1.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99b732b2db50b25cfbcb171e1b7abda06e77873aeef493e635eb209482fdd149"
 
 [[package]]
 name = "sctk-adwaita"
