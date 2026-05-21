@@ -47,6 +47,8 @@ pub mod suggest;
 pub mod supervisor;
 pub mod system_prompt;
 pub mod taint;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod tools;
 
 pub use agent::*;

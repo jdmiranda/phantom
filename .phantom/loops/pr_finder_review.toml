@@ -1,0 +1,52 @@
+# PR-finder (review) loop — agentless watcher for PRs awaiting review.
+#
+# Role
+# ----
+# Polls `gh pr list` against jdmiranda/phantom with `review_required = true`
+# and enqueues each unseen PR onto `review-queue`. The reviewer loop drains
+# that queue and decides on each PR.
+#
+# This is one half of the split that replaced the old `pr_finder.toml`. The
+# original spec was an agentless cron loop that fan-routed to two queues
+# based on per-PR predicates, which surfaced three C1 schema gaps GAMMA
+# documented in PR #662:
+#
+# 1. No `Poll` effect for an agentless cron loop to perform an external
+#    fetch.
+# 2. No predicate on `EnqueueTo` for conditional routing of a fan-out.
+# 3. Agentless loops cannot declare `exit_schema`.
+#
+# The split eliminates all three: each new loop uses the `gh_pr` source
+# (which post-#664 owns the `gh pr list` poll-and-dedup internally),
+# targets exactly one queue (no predicate-on-effect needed), and stays
+# agentless so the `exit_schema` gap is moot.
+
+id = "pr_finder_review"
+max_concurrent = 1
+on_quarantine = "skip_and_continue"
+
+# The source itself polls `gh pr list -R jdmiranda/phantom --state open
+# --search review:required` (see GhPrReviewQueueSource) and emits one
+# unseen, predicate-passing PR per `next()` call. No agent is needed —
+# the runner forwards each input straight through `on_complete`.
+[source]
+kind = "gh_pr"
+repo = "jdmiranda/phantom"
+
+[source.predicate]
+state = "open"
+review_required = true
+
+# Forward the PR number to `review-queue`. The `key` field on the
+# `LoopInput` produced by `GhPrReviewQueueSource` looks like
+# "jdmiranda/phantom#pr-N"; the consumer is `reviewer.toml`, whose agent
+# expects `pr_number` in scope. Mapping `key → pr_number` keeps the
+# downstream contract aligned even though it ships the full key string;
+# tightening to the numeric component is a future field-map extension.
+[[on_complete]]
+kind = "enqueue_to"
+queue = "review-queue"
+
+[[on_complete.fields]]
+from = "key"
+to = "pr_number"

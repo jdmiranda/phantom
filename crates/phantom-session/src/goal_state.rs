@@ -512,6 +512,17 @@ impl GoalStatePersister {
         GoalStateFile::load(&self.path)
     }
 
+    /// Load goal snapshots from the persisted file.
+    ///
+    /// Returns an empty `Vec` when no file exists (first run).
+    /// Returns an error when the file exists but cannot be parsed.
+    pub fn load_goals(&self) -> Result<Vec<GoalSnapshot>> {
+        match GoalStateFile::load(&self.path)? {
+            Some(file) => Ok(file.goals),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Delete the file (called when user declines restore or reconciler
     /// finishes all goals).
     pub fn discard(&self) -> Result<()> {
@@ -629,15 +640,34 @@ pub fn partial_restore_goals(file: &GoalStateFile) -> Vec<GoalRestoreOutcome> {
     file.goals()
         .iter()
         .map(|snap| {
-            // Validate: each step's task must round-trip through serde.
+            // Validate: each step's task must survive a full serialize → deserialize
+            // round-trip. A one-way serialization check cannot catch unknown or
+            // renamed variants that only fail on the deserialization side.
             let bad_step = snap.plan().iter().find(|s| {
-                serde_json::to_string(&s.assigned_task).is_err()
+                let serialized = match serde_json::to_string(&s.assigned_task) {
+                    Ok(json) => json,
+                    Err(_) => return true, // can't serialize → bad
+                };
+                serde_json::from_str::<AgentTask>(&serialized).is_err()
             });
 
             if let Some(step) = bad_step {
+                let raw = serde_json::to_string(&step.assigned_task)
+                    .unwrap_or_else(|_| "<unserializable>".to_owned());
+                log::warn!(
+                    "session restore: skipping goal '{}' — step '{}' has \
+                     undeserializable task variant: {}",
+                    snap.goal(),
+                    step.description(),
+                    raw,
+                );
                 return GoalRestoreOutcome::Skipped {
                     goal: snap.goal().to_owned(),
-                    reason: format!("step '{}' has unserializable task", step.description()),
+                    reason: format!(
+                        "step '{}' has undeserializable task variant: {}",
+                        step.description(),
+                        raw,
+                    ),
                 };
             }
 

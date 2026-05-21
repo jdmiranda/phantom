@@ -3,7 +3,7 @@
 use phantom_agents::agent::AgentMessage;
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig, send_message};
 use phantom_agents::chat::{ChatBackend, ChatRequest};
-use phantom_agents::tools::{ToolCall, ToolDefinition, ToolResult, ToolType, available_tools};
+use phantom_agents::tools::{ToolCall, ToolDefinition, ToolResult, ToolType, available_tools, lifecycle_tools};
 use phantom_agents::agent::Agent;
 
 use super::{AgentPane, AgentPaneStatus, MAX_TOOL_ROUNDS};
@@ -84,16 +84,38 @@ impl AgentPane {
         use log::warn;
 
         if self.turn_count >= MAX_TOOL_ROUNDS {
+            // Issue #646: when the agent opted into the `complete_task`
+            // termination contract but exhausted its tool-round budget
+            // without ever emitting the terminal signal, the failure
+            // reason is rewritten so downstream consumers (capture
+            // sidecar, journal, supervisor) can distinguish a budget
+            // overrun from a generic iteration limit. The
+            // `completion_result` is checked instead of the agent's
+            // `AgentStatus::Done` state because the agent-loop break on
+            // `CompleteTask` may not have run yet when this branch fires
+            // — `completion_result()` is set inside
+            // `Agent::complete_with_result` and is the ground truth for
+            // "did the model ever signal completion".
+            let exited_without_complete_task =
+                self.agent.requires_complete_task()
+                    && self.agent.completion_result().is_none();
+            let reason = if exited_without_complete_task {
+                "exited without complete_task".to_string()
+            } else {
+                format!("iteration limit reached ({MAX_TOOL_ROUNDS} tool rounds)")
+            };
             if let Some(ref mut j) = self.journal
-                && let Err(e) = j.record_flatline(
-                    self.agent.id(),
-                    format!("iteration limit reached ({MAX_TOOL_ROUNDS} tool rounds)"),
-                ) {
+                && let Err(e) = j.record_flatline(self.agent.id(), reason.clone()) {
                     warn!("AgentJournal::record_flatline (limit) failed: {e}");
                 }
-            self.output.push_str(&format!(
-                "\n\n✗ Agent hit iteration limit ({MAX_TOOL_ROUNDS} tool rounds).\n"
-            ));
+            if exited_without_complete_task {
+                self.output
+                    .push_str("\n\n✗ Agent exited without complete_task.\n");
+            } else {
+                self.output.push_str(&format!(
+                    "\n\n✗ Agent hit iteration limit ({MAX_TOOL_ROUNDS} tool rounds).\n"
+                ));
+            }
             self.rollback_if_dirty();
             self.status = AgentPaneStatus::Failed;
             self.api_handle = None;
@@ -122,7 +144,7 @@ impl AgentPane {
         let calls: Vec<(String, ToolCall)> = self.pending_tools.drain(..).collect();
 
         // Execute each tool (with permission check) and append results.
-        for (_, call) in calls {
+        for (api_id, call) in calls {
             self.tool_call_count += 1;
             let start = std::time::Instant::now();
             let dispatch_ctx = self.build_dispatch_context();
@@ -168,6 +190,19 @@ impl AgentPane {
             // Drop the dispatch context borrow before mutating `self` below.
             drop(dispatch_ctx);
             let elapsed = start.elapsed();
+
+            // Bug 2 fix: backfill the output_json on the matching capture record.
+            // The capture_tool_calls and tool_use_ids vectors are parallel — both
+            // were appended together in poll() when ApiEvent::ToolUse arrived.
+            // Find the index in tool_use_ids that matches this api_id so we can
+            // update the corresponding HistoryToolCall with the real tool output.
+            if let Some(idx) = self.tool_use_ids.iter().rposition(|id| id == &api_id)
+                && let Some(record) = self.capture_tool_calls.get_mut(idx)
+            {
+                let output_str = serde_json::to_string(&result.output)
+                    .unwrap_or_else(|_| result.output.clone());
+                record.set_output_json(output_str);
+            }
 
             // Track file edits for rollback.
             if result.success && matches!(call.tool, ToolType::WriteFile | ToolType::EditFile) {
@@ -243,7 +278,13 @@ impl AgentPane {
         self.maybe_emit_blocked_event();
 
         // Re-invoke the chat backend with the updated conversation.
-        let tools = available_tools();
+        // Issue #646: extend the tool manifest with lifecycle tools when the
+        // agent opted into the `complete_task` contract so the model keeps
+        // seeing the termination affordance on every turn after the first.
+        let mut tools = available_tools();
+        if self.agent.requires_complete_task() {
+            tools.extend(lifecycle_tools());
+        }
         let handle = Self::dispatch(
             self.chat_backend.as_deref(),
             &self.claude_config,

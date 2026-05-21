@@ -191,7 +191,11 @@ pub fn register(hub_url: &str, service: &str) -> Result<()> {
     let creds_path = credentials_path_for_display(service);
     println!("Registered with hub at {hub_url}");
     println!("  peer_id : {}", payload.peer_id);
-    println!("  expires : {} (unix={})", format_expiry(parsed.exp), parsed.exp);
+    println!(
+        "  expires : {} (unix={})",
+        format_expiry(parsed.exp),
+        parsed.exp
+    );
     println!("  stored  : {creds_path}");
 
     Ok(())
@@ -204,10 +208,11 @@ pub fn register(hub_url: &str, service: &str) -> Result<()> {
 /// "not registered" message and exits successfully (status is informational,
 /// not a probe).
 pub fn status(service: &str) -> Result<()> {
-    let Some(creds) =
-        DeviceCredentials::load(service).context("failed to load credentials")?
+    let Some(creds) = DeviceCredentials::load(service).context("failed to load credentials")?
     else {
-        println!("No credentials stored for service '{service}' — run `phantom auth register --hub <url>`");
+        println!(
+            "No credentials stored for service '{service}' — run `phantom auth register --hub <url>`"
+        );
         return Ok(());
     };
 
@@ -217,7 +222,11 @@ pub fn status(service: &str) -> Result<()> {
     if let Some(peer_id) = &claims.sub {
         println!("  peer_id : {peer_id}");
     }
-    println!("  expires : {} (unix={})", format_expiry(claims.exp), claims.exp);
+    println!(
+        "  expires : {} (unix={})",
+        format_expiry(claims.exp),
+        claims.exp
+    );
 
     Ok(())
 }
