@@ -790,6 +790,7 @@ impl App {
             // relay_inbound_rx: wired by the relay task on handshake completion
             // via AiEvent::RelayConnected. None in standalone (non-relay) mode.
             relay_inbound_rx: None,
+            recall_context: None,
             history_context: initial_history_context,
             // Self-improvement defaults to OFF per design doc §5.1; the
             // operator opts in by setting `BrainConfig::self_improvement` and

@@ -59,7 +59,7 @@ pub enum Modality {
 
 /// A structured retrieval query. Produced either directly by the caller or
 /// by a [`QueryRewriter`] from a natural-language phrase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RecallQuery {
     /// Original natural-language query, preserved for reranking and audit.
     pub natural_language: String,
@@ -73,6 +73,12 @@ pub struct RecallQuery {
     pub modality_hint: Option<Modality>,
     /// Maximum number of hits to return after fusion + rerank.
     pub limit: usize,
+    /// NLP-enriched query text (e.g. with intent label + payload appended).
+    ///
+    /// Set by [`crate::nlp_rewriter::NlpQueryRewriter`] when it successfully
+    /// detects intent. `None` for raw / pass-through queries.
+    #[serde(default)]
+    pub enriched_query: Option<String>,
 }
 
 /// A single retrieval hit with both raw signals and the fused score.
@@ -217,6 +223,7 @@ impl QueryRewriter for MockRewriter {
             time_window_unix_ms: None,
             modality_hint: Some(Modality::Text),
             limit: 10,
+            enriched_query: None,
         })
     }
 }
@@ -276,6 +283,7 @@ mod tests {
             time_window_unix_ms: Some((1_700_000_000_000, 1_710_000_000_000)),
             modality_hint: Some(Modality::Text),
             limit: 25,
+            enriched_query: None,
         };
         let json = serde_json::to_string(&q).expect("serialize");
         let restored: RecallQuery = serde_json::from_str(&json).expect("deserialize");
@@ -405,6 +413,7 @@ mod tests {
             time_window_unix_ms: None,
             modality_hint: None,
             limit: 10,
+            enriched_query: None,
         };
         let results = backend.search(query).await.expect("search");
         let scores: Vec<f32> = results.iter().map(|h| h.score).collect();
@@ -421,6 +430,7 @@ mod tests {
             time_window_unix_ms: None,
             modality_hint: None,
             limit: 2,
+            enriched_query: None,
         };
         let results = backend.search(query).await.expect("search");
         assert_eq!(results.len(), 2);

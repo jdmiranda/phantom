@@ -6164,6 +6164,7 @@ dependencies = [
  "phantom-history",
  "phantom-loop",
  "phantom-memory",
+ "phantom-recall",
  "phantom-semantic",
  "serde",
  "serde_json",
