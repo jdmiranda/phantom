@@ -257,6 +257,7 @@ mod tests {
                 name: "greet".into(),
                 description: "say hi".into(),
                 usage: "greet".into(),
+                write_access: false,
             }],
             status_bar: None,
             scaffold: false,

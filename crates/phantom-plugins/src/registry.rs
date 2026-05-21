@@ -38,24 +38,6 @@ impl std::fmt::Display for PluginError {
 impl std::error::Error for PluginError {}
 
 // ---------------------------------------------------------------------------
-// Permission mapping
-// ---------------------------------------------------------------------------
-
-/// Returns the `Permission` required before dispatching `hook`, or `None`
-/// when the hook is always allowed (lifecycle hooks that need no privilege).
-#[must_use]
-fn hook_required_permission(hook: &HookType) -> Option<Permission> {
-    match hook {
-        // Lifecycle hooks — always allowed.
-        HookType::OnStartup | HookType::OnShutdown | HookType::OnInterval(_) => None,
-        // Terminal/command hooks — require RunCommands.
-        HookType::OnCommand(_) | HookType::OnOutput => Some(Permission::RunCommands),
-        // Error reporting — no privilege needed.
-        HookType::OnError => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Loaded plugin
 // ---------------------------------------------------------------------------
 
@@ -146,6 +128,15 @@ impl PluginRegistry {
     ///
     /// Returns the manifests of all successfully parsed plugins (both activated
     /// and scaffold-only).
+    ///
+    /// # Threading
+    ///
+    /// A single [`WasmHost`] is built once and reused across every plugin
+    /// loaded in this scan. This is sound today because `scan` is invoked
+    /// synchronously from a single thread (typically the boot path in
+    /// `phantom-app`). If `WasmHost` ever becomes `Send + !Sync`, or `scan`
+    /// is ever moved off-thread, this shared-host pattern needs to change to
+    /// either build a host per-iteration or guard the host behind a `Mutex`.
     pub fn scan(&mut self) -> Result<Vec<PluginManifest>> {
         let mut manifests = Vec::new();
         let entries = fs::read_dir(&self.plugin_dir)
@@ -172,10 +163,9 @@ impl PluginRegistry {
                     m
                 }
                 Err(e) => {
-                    log::warn!(
-                        "skipping {}: {e:#}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    );
+                    // Use full path: `file_name()` is `None` for `/`, which would
+                    // produce an unhelpful "skipping : ..." log line.
+                    log::warn!("skipping {}: {e:#}", path.display());
                     continue;
                 }
             };
@@ -290,7 +280,7 @@ impl PluginRegistry {
         hook: &HookType,
         context: &HookContext,
     ) -> Vec<HookResponse> {
-        let required_perm = hook_required_permission(hook);
+        let required_perm = hook.required_permission();
         let mut responses = Vec::new();
 
         for plugin in &mut self.plugins {
@@ -343,12 +333,18 @@ impl PluginRegistry {
     ///
     /// Unlike [`dispatch_hook`], this method stops at the first permission
     /// violation and returns without processing remaining plugins.
-    pub fn dispatch_hook_strict(
+    ///
+    /// Visibility is intentionally `pub(crate)` until a real caller exists — the
+    /// public dispatch path is [`dispatch_hook`], which keeps the
+    /// "warn-and-continue" semantics that the app/test surface expects. Promote
+    /// to `pub` when an external caller is wired in.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn dispatch_hook_strict(
         &mut self,
         hook: &HookType,
         context: &HookContext,
     ) -> std::result::Result<Vec<HookResponse>, PluginError> {
-        let required_perm = hook_required_permission(hook);
+        let required_perm = hook.required_permission();
         let mut responses = Vec::new();
 
         for plugin in &mut self.plugins {
@@ -391,38 +387,37 @@ impl PluginRegistry {
     }
 
     /// Execute a plugin-registered command. Searches all enabled plugins for
-    /// a matching command name and runs the first match.
+    /// a matching command name and runs the first plugin that both registers
+    /// the command and holds the required permissions.
     ///
-    /// Commands require the `RunCommands` permission. Commands whose name
-    /// suggests file-writing (contains "write", "save", "create", or "delete")
-    /// additionally require `WriteFiles`. A plugin that lacks the required
-    /// permission receives `Err(PluginError::PermissionDenied)` instead of
-    /// being invoked, and the command search continues to the next plugin.
+    /// Every command requires [`Permission::RunCommands`]. Commands whose
+    /// [`CommandDef::write_access`] flag is `true` additionally require
+    /// [`Permission::WriteFiles`]. A plugin that lacks the required permission
+    /// is **skipped** (a warning is logged) and the search continues — so if a
+    /// later plugin registers the same name with sufficient privilege, it
+    /// still runs. This means a denied plugin never silently swallows a
+    /// command intended for a peer.
     pub fn execute_command(
         &mut self,
         command: &str,
         args: &[String],
     ) -> Option<String> {
-        // Determine the permissions needed for this command.
-        let needs_write = command.contains("write")
-            || command.contains("save")
-            || command.contains("create")
-            || command.contains("delete");
-
         for plugin in &mut self.plugins {
             if !plugin.enabled {
                 continue;
             }
 
-            let has_cmd = plugin
+            let Some(cmd_def) = plugin
                 .manifest
                 .commands
                 .iter()
-                .any(|c| c.name == command);
-
-            if !has_cmd {
+                .find(|c| c.name == command)
+            else {
                 continue;
-            }
+            };
+
+            // Per-command write_access flag decides whether WriteFiles is needed.
+            let needs_write = cmd_def.write_access;
 
             // All commands require RunCommands.
             if !plugin.manifest.has_permission(&Permission::RunCommands) {
@@ -431,7 +426,7 @@ impl PluginRegistry {
                     required: Permission::RunCommands,
                 };
                 log::warn!("{err}");
-                return None;
+                continue;
             }
 
             // File-writing commands additionally require WriteFiles.
@@ -441,7 +436,7 @@ impl PluginRegistry {
                     required: Permission::WriteFiles,
                 };
                 log::warn!("{err}");
-                return None;
+                continue;
             }
 
             match plugin.runtime.call_command(command, args) {
@@ -601,6 +596,7 @@ mod tests {
                 name: format!("{name}-cmd"),
                 description: "a command".into(),
                 usage: format!("{name}-cmd [args]"),
+                write_access: false,
             }],
             status_bar: Some(StatusBarDef {
                 position: StatusBarPosition::Right,
@@ -1015,6 +1011,124 @@ mod tests {
             reg.len(),
             0,
             "no plugins loaded: scaffold has no binary, real plugin's binary is absent"
+        );
+    }
+
+    /// Review fix: `execute_command` must `continue` past a permission-denied
+    /// plugin instead of swallowing the call. A second plugin registering the
+    /// same command name with sufficient permission must still receive the
+    /// invocation.
+    #[test]
+    fn execute_command_falls_through_denied_plugin_to_authorised_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut reg = PluginRegistry::with_dir(tmp.path()).unwrap();
+
+        // Plugin "denied" registers `shared-cmd` but has NO RunCommands.
+        let mut denied_manifest = test_manifest("denied");
+        denied_manifest.permissions = vec![Permission::ReadFiles]; // no RunCommands
+        denied_manifest.commands = vec![CommandDef {
+            name: "shared-cmd".into(),
+            description: "shared command".into(),
+            usage: "shared-cmd".into(),
+            write_access: false,
+        }];
+        let denied_runtime =
+            MockRuntime::new().on_command("shared-cmd", "denied output");
+        reg.register(denied_manifest, Box::new(denied_runtime)).unwrap();
+
+        // Plugin "allowed" registers the same command WITH RunCommands.
+        let mut allowed_manifest = test_manifest("allowed");
+        allowed_manifest.permissions = vec![Permission::RunCommands];
+        allowed_manifest.commands = vec![CommandDef {
+            name: "shared-cmd".into(),
+            description: "shared command".into(),
+            usage: "shared-cmd".into(),
+            write_access: false,
+        }];
+        let allowed_runtime =
+            MockRuntime::new().on_command("shared-cmd", "allowed output");
+        reg.register(allowed_manifest, Box::new(allowed_runtime)).unwrap();
+
+        let result = reg.execute_command("shared-cmd", &[]);
+        assert_eq!(
+            result.as_deref(),
+            Some("allowed output"),
+            "denied plugin must not swallow the command; the next authorised \
+             plugin must receive it",
+        );
+    }
+
+    /// Review fix: a command flagged `write_access = true` requires the
+    /// plugin to declare `Permission::WriteFiles` in addition to `RunCommands`.
+    #[test]
+    fn execute_command_enforces_write_access_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut reg = PluginRegistry::with_dir(tmp.path()).unwrap();
+
+        // Plugin with RunCommands but no WriteFiles registers a write_access cmd.
+        let mut manifest = test_manifest("writer");
+        manifest.permissions = vec![Permission::RunCommands]; // no WriteFiles
+        manifest.commands = vec![CommandDef {
+            name: "typewriter".into(),
+            description: "writes nothing actually".into(),
+            usage: "typewriter".into(),
+            write_access: true, // explicit declaration that this writes
+        }];
+        let runtime = MockRuntime::new().on_command("typewriter", "wrote stuff");
+        reg.register(manifest, Box::new(runtime)).unwrap();
+
+        let result = reg.execute_command("typewriter", &[]);
+        assert!(
+            result.is_none(),
+            "write_access=true must require Permission::WriteFiles"
+        );
+    }
+
+    /// Smoke test for the `pub(crate)` `dispatch_hook_strict` variant — keeps it
+    /// honest while no external caller exists.
+    #[test]
+    fn dispatch_hook_strict_returns_err_on_denial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut reg = PluginRegistry::with_dir(tmp.path()).unwrap();
+
+        let mut manifest = test_manifest("no-perm");
+        manifest.permissions = vec![Permission::ReadFiles]; // no RunCommands
+        manifest.hooks = vec![HookType::OnOutput];
+        let runtime = MockRuntime::new()
+            .on_hook("OnOutput", HookResponse::DisplayText("never".into()));
+        reg.register(manifest, Box::new(runtime)).unwrap();
+
+        let ctx = HookContext::output("ls", "file.txt\n", 0, "/tmp");
+        let result = reg.dispatch_hook_strict(&HookType::OnOutput, &ctx);
+        assert!(matches!(result, Err(PluginError::PermissionDenied { .. })));
+    }
+
+    /// Review fix: a `write_access = false` command must NOT require
+    /// WriteFiles even if its name happens to contain a substring the old
+    /// heuristic would have flagged (e.g. "typewriter" contains "write").
+    #[test]
+    fn execute_command_name_substring_no_longer_implies_write_access() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut reg = PluginRegistry::with_dir(tmp.path()).unwrap();
+
+        // Old heuristic would have demanded WriteFiles because the command name
+        // contains "write"; the per-command flag must override that.
+        let mut manifest = test_manifest("readonly-writer");
+        manifest.permissions = vec![Permission::RunCommands]; // no WriteFiles
+        manifest.commands = vec![CommandDef {
+            name: "typewriter".into(),
+            description: "read-only despite the name".into(),
+            usage: "typewriter".into(),
+            write_access: false,
+        }];
+        let runtime = MockRuntime::new().on_command("typewriter", "ok");
+        reg.register(manifest, Box::new(runtime)).unwrap();
+
+        let result = reg.execute_command("typewriter", &[]);
+        assert_eq!(
+            result.as_deref(),
+            Some("ok"),
+            "name-substring must not imply WriteFiles when write_access=false"
         );
     }
 }

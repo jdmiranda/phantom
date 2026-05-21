@@ -978,6 +978,14 @@ impl App {
         }
 
         // Dispatch OnStartup to all loaded plugins now that the registry is ready.
+        //
+        // TODO(#48): Phase-1 limitation — responses are logged but not acted on.
+        // `HookResponse::RunCommand`, `ModifyOutput`, and `Notification` returned
+        // from `OnStartup` are intentionally dropped here because the agent /
+        // terminal / notification dispatch surfaces are not wired into this boot
+        // path. When the plugin host gains a typed response router, route the
+        // matched arms (`RunCommand` -> command bus, `Notification` -> notifier,
+        // etc.) instead of unconditionally logging.
         {
             let startup_ctx = phantom_plugins::HookContext::startup(&project_dir);
             let responses = plugin_registry
