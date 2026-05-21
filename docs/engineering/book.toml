@@ -43,4 +43,6 @@ exclude = [
     # Links will auto-resolve once the corresponding feature PRs land.
     ".*adapters/setup\\.rs$",
     ".*\\.phantom/loops/triager\\.toml$",
+    # Operator manual lands in a parallel PR — see docs/README.md row 2.
+    ".*html/index\\.html$",
 ]

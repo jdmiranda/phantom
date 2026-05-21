@@ -126,7 +126,7 @@ The headless autonomy pipeline (Flow 3).
 |---|---|
 | Brain thread | [`crates/phantom-brain/src/brain.rs`](../../../../crates/phantom-brain/src/brain.rs) |
 | OODA tick | [`crates/phantom-brain/src/ooda.rs`](../../../../crates/phantom-brain/src/ooda.rs) |
-| TaskLedger | [`crates/phantom-brain/src/reconciler.rs`](../../../../crates/phantom-brain/src/reconciler.rs) |
+| TaskLedger | [`crates/phantom-brain/src/orchestrator.rs`](../../../../crates/phantom-brain/src/orchestrator.rs) |
 | Self-improvement | [`crates/phantom-brain/src/self_improvement.rs`](../../../../crates/phantom-brain/src/self_improvement.rs) |
 | GoalSource impls | [`crates/phantom-brain/src/goal_source/mod.rs`](../../../../crates/phantom-brain/src/goal_source/mod.rs) |
 | LoopRunner FSM | [`crates/phantom-loop/src/runner/fsm.rs`](../../../../crates/phantom-loop/src/runner/fsm.rs) |

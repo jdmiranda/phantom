@@ -74,7 +74,7 @@ Build locally:
 ```bash
 cargo install mdbook mdbook-mermaid mdbook-linkcheck
 cd docs/engineering && mdbook build
-open book/index.html
+open book/html/index.html
 ```
 
 A CI workflow (Phase 1b) publishes `book/` to GitHub Pages so non-contributors

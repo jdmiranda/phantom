@@ -20,7 +20,7 @@ The substrate is the layer everything else runs on. It owns:
   owns everything else.
 - **`phantom-supervisor`** — the Erlang-style heartbeat watcher. Lives in
   its own process; spawns `phantom`, watches heartbeats, restarts on
-  timeout. See [Flow 7](../flows/01-cold-launch.md) (cold launch goes
+  timeout. See [Flow 1 · Cold launch](../flows/01-cold-launch.md) (cold launch goes
   through the supervisor handshake) and `docs/research/supervisor-architecture.md`.
 - **`phantom-protocol`** — the wire types shared between phantom + supervisor
   + the future federation. Pub-sub `Event` enum lives here. Also the typed
