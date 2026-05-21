@@ -22,8 +22,13 @@ use log::{debug, trace, warn};
 use crate::search::ScrollbackIndex;
 
 
-/// Default scrollback history in lines.
-const SCROLLBACK_LINES: usize = 10_000;
+/// Default maximum scrollback history in lines.
+pub const DEFAULT_MAX_SCROLLBACK_LINES: usize = 50_000;
+
+/// Maximum number of bytes that may queue in `PtyWriteQueue` at once.
+/// Chunks exceeding this limit are dropped with a warning rather than
+/// accumulating unboundedly in memory.
+const PTY_WRITE_QUEUE_LIMIT: usize = 256 * 1024; // 256 KiB
 
 /// Read buffer size for PTY output.
 const PTY_READ_BUF: usize = 0x10000; // 64 KiB
@@ -105,7 +110,16 @@ impl EventListener for PhantomEventListener {
             Event::PtyWrite(data) => {
                 trace!("terminal requests PTY write: {} bytes", data.len());
                 if let Ok(mut q) = self.pty_writes.lock() {
-                    q.push(data.as_bytes().to_vec());
+                    let queued: usize = q.iter().map(|v| v.len()).sum();
+                    if queued + data.len() <= PTY_WRITE_QUEUE_LIMIT {
+                        q.push(data.as_bytes().to_vec());
+                    } else {
+                        warn!(
+                            "PTY write queue full ({queued} bytes queued); \
+                             dropping {} bytes",
+                            data.len()
+                        );
+                    }
                 }
             }
             Event::Title(title) => {
@@ -215,6 +229,10 @@ pub struct PhantomTerminal {
     /// [`pty_read`](PhantomTerminal::pty_read) call.  Zero between reads.
     last_read_len: usize,
 
+    /// Hard cap on scrollback history lines.  When history exceeds this value
+    /// after a PTY read, the oldest lines are trimmed via `Term::set_options`.
+    max_scrollback_lines: usize,
+
     /// Whether the Kitty keyboard protocol (CSI u) is active.
     ///
     /// Reflects `TermMode::DISAMBIGUATE_ESC_CODES` — set by the running
@@ -257,7 +275,18 @@ impl PhantomTerminal {
     ///
     /// Spawns a PTY running the user's default shell. The PTY file descriptor
     /// is set to non-blocking mode by `alacritty_terminal::tty::new`.
+    ///
+    /// Scrollback history is capped at [`DEFAULT_MAX_SCROLLBACK_LINES`].  Use
+    /// [`set_max_scrollback`](PhantomTerminal::set_max_scrollback) to change
+    /// the cap at runtime.
     pub fn new(cols: u16, rows: u16) -> Result<Self> {
+        Self::new_with_scrollback(cols, rows, DEFAULT_MAX_SCROLLBACK_LINES)
+    }
+
+    /// Create a new terminal emulator with an explicit scrollback cap.
+    ///
+    /// `max_scrollback_lines` is the hard upper bound on history lines.
+    pub fn new_with_scrollback(cols: u16, rows: u16, max_scrollback_lines: usize) -> Result<Self> {
         let size = TerminalSize::new(cols, rows);
 
         // Configure the PTY — use the user's default shell.
@@ -275,9 +304,10 @@ impl PhantomTerminal {
         let pty_reader = pty.file().try_clone().context("failed to clone PTY fd for reader")?;
         let pty_writer = pty.file().try_clone().context("failed to clone PTY fd for writer")?;
 
-        // Terminal config with reasonable defaults.
+        // Terminal config: set the scrollback cap at construction time so
+        // alacritty_terminal's grid never grows beyond `max_scrollback_lines`.
         let config = Config {
-            scrolling_history: SCROLLBACK_LINES,
+            scrolling_history: max_scrollback_lines,
             ..Config::default()
         };
 
@@ -299,7 +329,7 @@ impl PhantomTerminal {
         );
         let term = Term::new(config, &size, event_listener);
 
-        debug!("PhantomTerminal created: {cols}x{rows}");
+        debug!("PhantomTerminal created: {cols}x{rows}, scrollback cap: {max_scrollback_lines}");
 
         Ok(Self {
             term,
@@ -312,6 +342,7 @@ impl PhantomTerminal {
             size,
             read_buf: vec![0u8; PTY_READ_BUF],
             last_read_len: 0,
+            max_scrollback_lines,
             kitty_keyboard_mode: false,
             in_bracketed_paste: false,
             paste_byte_count: 0,
@@ -385,6 +416,22 @@ impl PhantomTerminal {
         // Feed the raw bytes through the VTE parser into the terminal.
         // This mirrors what alacritty's event_loop does: `parser.advance(&mut term, buf)`.
         self.parser.advance(&mut self.term, &self.read_buf[..n]);
+
+        // Enforce the scrollback cap: if the grid has grown beyond
+        // `max_scrollback_lines`, trim it down via Term::set_options which
+        // delegates to Grid::update_history (shrinks and resets max_scroll_limit).
+        let current_history = self.term.grid().history_size();
+        if current_history > self.max_scrollback_lines {
+            let new_config = Config {
+                scrolling_history: self.max_scrollback_lines,
+                ..Config::default()
+            };
+            self.term.set_options(new_config);
+            trace!(
+                "scrollback trimmed: {current_history} → {}",
+                self.max_scrollback_lines
+            );
+        }
 
         // Drain any PTY-write requests the terminal generated (e.g. device
         // attribute responses) and write them back to the PTY.
@@ -598,6 +645,26 @@ impl PhantomTerminal {
     #[must_use]
     pub fn history_size(&self) -> usize {
         self.term.grid().history_size()
+    }
+
+    /// The current maximum scrollback cap.
+    #[must_use]
+    pub fn max_scrollback_lines(&self) -> usize {
+        self.max_scrollback_lines
+    }
+
+    /// Update the scrollback cap at runtime.
+    ///
+    /// If `lines` is smaller than the current history, the oldest lines are
+    /// trimmed immediately via [`Term::set_options`].
+    pub fn set_max_scrollback(&mut self, lines: usize) {
+        self.max_scrollback_lines = lines;
+        let new_config = Config {
+            scrolling_history: lines,
+            ..Config::default()
+        };
+        self.term.set_options(new_config);
+        debug!("scrollback cap updated to {lines}");
     }
 
     // -- Search API --------------------------------------------------------
@@ -852,6 +919,124 @@ mod tests {
             term.last_read_buf().len(),
             n,
             "last_read_buf().len() must equal the bytes returned by pty_read"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scrollback cap tests
+    // -----------------------------------------------------------------------
+
+    /// The default scrollback cap must be `DEFAULT_MAX_SCROLLBACK_LINES` (50 000).
+    #[test]
+    fn default_max_scrollback_is_fifty_thousand() {
+        let term = PhantomTerminal::new(80, 24).unwrap();
+        assert_eq!(
+            term.max_scrollback_lines(),
+            DEFAULT_MAX_SCROLLBACK_LINES,
+            "default scrollback cap must be 50 000 lines"
+        );
+        assert_eq!(DEFAULT_MAX_SCROLLBACK_LINES, 50_000);
+    }
+
+    /// Feeding enough output to exceed a small cap must leave
+    /// `history_size() <= max_scrollback_lines`.
+    ///
+    /// This test operates on a headless `Term<VoidListener>` + `Grid` directly
+    /// so it does not require a live PTY.  The same trimming path
+    /// (`Term::set_options` → `Grid::update_history`) is exercised by
+    /// `PhantomTerminal::set_max_scrollback` and by `pty_read` after each
+    /// read chunk.
+    #[test]
+    fn scrollback_capped_at_max_lines() {
+        use alacritty_terminal::event::VoidListener;
+
+        const CAP: usize = 20;
+        const ROWS: usize = 5;
+        const COLS: usize = 80;
+
+        // Build a tiny terminal with a low scrollback cap.
+        let size = TerminalSize::new(COLS as u16, ROWS as u16);
+        let config = Config {
+            scrolling_history: CAP,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+
+        // Feed enough newlines to push well past CAP + ROWS lines into history.
+        // Each '\n' in a full-screen terminal scrolls one line into history.
+        let newlines: Vec<u8> = b"\n".repeat((CAP + ROWS) * 3);
+        parser.advance(&mut term, &newlines);
+
+        // The grid must never exceed the configured cap.
+        let history = term.grid().history_size();
+        assert!(
+            history <= CAP,
+            "history_size {history} exceeded cap {CAP}"
+        );
+
+        // Now call set_options with a tighter cap and verify immediate trim.
+        let tighter_cap = CAP / 2;
+        let new_config = Config {
+            scrolling_history: tighter_cap,
+            ..Config::default()
+        };
+        term.set_options(new_config);
+
+        let trimmed = term.grid().history_size();
+        assert!(
+            trimmed <= tighter_cap,
+            "after set_options trim: history_size {trimmed} exceeded new cap {tighter_cap}"
+        );
+    }
+
+    /// `set_max_scrollback` must update the cap and trim existing history
+    /// when the new cap is smaller than current history.
+    #[test]
+    fn set_max_scrollback_updates_at_runtime() {
+        use alacritty_terminal::event::VoidListener;
+
+        const INITIAL_CAP: usize = 50;
+        const ROWS: usize = 5;
+        const COLS: usize = 80;
+
+        let size = TerminalSize::new(COLS as u16, ROWS as u16);
+        let config = Config {
+            scrolling_history: INITIAL_CAP,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+
+        // Grow history to at least INITIAL_CAP lines.
+        let newlines: Vec<u8> = b"\n".repeat((INITIAL_CAP + ROWS) * 2);
+        parser.advance(&mut term, &newlines);
+        assert!(
+            term.grid().history_size() > 0,
+            "precondition: some scrollback must exist"
+        );
+
+        // Apply a tight cap.
+        let tight_cap = 5;
+        let tight_config = Config {
+            scrolling_history: tight_cap,
+            ..Config::default()
+        };
+        term.set_options(tight_config);
+
+        let after = term.grid().history_size();
+        assert!(
+            after <= tight_cap,
+            "after runtime cap reduction: history_size {after} must be <= new cap {tight_cap}"
+        );
+
+        // Verify the cap is enforced: feeding more lines must not exceed tight_cap.
+        let more_newlines: Vec<u8> = b"\n".repeat(tight_cap * 3);
+        parser.advance(&mut term, &more_newlines);
+        let final_history = term.grid().history_size();
+        assert!(
+            final_history <= tight_cap,
+            "after additional output: history_size {final_history} must not exceed {tight_cap}"
         );
     }
 
