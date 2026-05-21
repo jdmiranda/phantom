@@ -5942,6 +5942,7 @@ dependencies = [
  "dirs 5.0.1",
  "ed25519-dalek",
  "futures-util",
+ "hkdf",
  "log",
  "rand 0.8.6",
  "serde",

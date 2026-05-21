@@ -16,8 +16,17 @@
 //! # Payload encryption
 //!
 //! [`encrypt_payload`] and [`decrypt_payload`] provide authenticated
-//! confidentiality via X25519 ECDH + ChaCha20-Poly1305.  The wire format for
-//! an encrypted payload is:
+//! confidentiality via X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305.  The
+//! raw X25519 shared secret is *not* used as an AEAD key directly; it is
+//! passed through HKDF-SHA256 with a fixed `info` string for domain
+//! separation.  This defends against low-order-point inputs that could
+//! otherwise produce predictable shared secrets.  See [`derive_aead_key`].
+//!
+//! AEAD additional data binds `from || to || nonce` to the ciphertext, so a
+//! ciphertext lifted out of one envelope cannot be replayed inside an
+//! envelope addressed to a different recipient even if the relay is hostile.
+//!
+//! The wire format for an encrypted payload is:
 //!
 //! ```text
 //! 12-byte nonce || ChaCha20-Poly1305 ciphertext (includes 16-byte tag)
@@ -25,21 +34,38 @@
 //!
 //! Callers use [`Envelope::with_encrypted_payload`] to build an envelope whose
 //! payload is encrypted, and [`Envelope::decrypt`] to recover the plaintext.
-//! For a gradual rollout, [`Envelope::decrypt`] falls back to returning the
-//! raw payload bytes if AEAD decryption fails — callers should migrate senders
-//! before removing the fallback.
+//! [`Envelope::decrypt`] returns [`Result`] — there is no silent fallback to
+//! raw payload bytes.  Callers that expect either ciphertext or plaintext
+//! must distinguish at a higher protocol layer.
+//!
+//! # Security limitations
+//!
+//! This implementation uses **static-static X25519** (the sender's long-lived
+//! [`x25519_dalek::StaticSecret`] and the recipient's long-lived
+//! [`x25519_dalek::PublicKey`]).  It does *not* provide forward secrecy:
+//! compromise of either long-lived secret retroactively decrypts past
+//! envelopes.  A follow-up that extends the envelope schema with an ephemeral
+//! sender public key would provide forward secrecy; that work is out of
+//! scope for this change and tracked separately.
 
 use anyhow::{Context, Result};
 use chacha20poly1305::{
     AeadCore, AeadInPlace, ChaCha20Poly1305, Key, KeyInit, Nonce,
 };
 use ed25519_dalek::{Signature, SignatureError};
+use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::identity::{Identity, PeerId};
+
+/// HKDF `info` string for the AEAD key derivation.  Domain-separates the
+/// derived key from any other use of an X25519 shared secret in this
+/// codebase.  Bump the version suffix if the wire format changes.
+const HKDF_INFO: &[u8] = b"phantom-relay-envelope-v1 aead key";
 
 // ---------------------------------------------------------------------------
 // EnvelopeError
@@ -48,7 +74,13 @@ use crate::identity::{Identity, PeerId};
 /// Errors produced by envelope crypto operations.
 #[derive(Debug, Error)]
 pub enum EnvelopeError {
-    /// AEAD decryption failed (wrong key, truncated ciphertext, or corruption).
+    /// AEAD encryption failed.  In practice only happens on catastrophic RNG
+    /// failure or a buffer-allocation panic.
+    #[error("payload encryption failed")]
+    EncryptionFailed,
+
+    /// AEAD decryption failed (wrong key, truncated ciphertext, mismatched
+    /// associated data, or corruption).
     #[error("payload decryption failed: authentication tag mismatch or truncated ciphertext")]
     DecryptionFailed,
 
@@ -100,10 +132,13 @@ impl Envelope {
     }
 
     /// Build and sign an envelope whose payload is **encrypted** via X25519
-    /// ECDH + ChaCha20-Poly1305.
+    /// ECDH + HKDF-SHA256 + ChaCha20-Poly1305.
     ///
-    /// The signature covers the *encrypted* payload bytes, so the relay can
-    /// validate authenticity without being able to read the contents.
+    /// `from`, `to`, and `nonce` are bound into the AEAD associated data so
+    /// the ciphertext is not transferable between identities at the AEAD
+    /// layer.  The signature covers the *encrypted* payload bytes, so the
+    /// relay can validate authenticity without being able to read the
+    /// contents.
     ///
     /// # Errors
     ///
@@ -117,31 +152,49 @@ impl Envelope {
         recipient_public_key: &[u8; 32],
         sender_secret_key: &[u8; 32],
     ) -> Result<Self> {
-        let ciphertext = encrypt_payload(plaintext, recipient_public_key, sender_secret_key)
-            .context("failed to encrypt envelope payload")?;
+        let from = identity.peer_id.to_string();
+        let to_str = to.to_string();
+        let aad = aead_associated_data(&from, &to_str, nonce);
+        let ciphertext = encrypt_payload_with_aad(
+            plaintext,
+            recipient_public_key,
+            sender_secret_key,
+            &aad,
+        )
+        .context("failed to encrypt envelope payload")?;
         Ok(Self::new(identity, to, ciphertext, nonce))
     }
 
     /// Decrypt this envelope's payload using the sender's X25519 public key
     /// and the recipient's X25519 secret key.
     ///
-    /// On success returns the plaintext bytes.
+    /// The envelope's `from`, `to`, and `nonce` fields are re-bound into the
+    /// AEAD associated data — a ciphertext spliced out of a different
+    /// envelope will fail authentication.
     ///
-    /// **Fallback behaviour**: if AEAD decryption fails the raw payload bytes
-    /// are returned unchanged, allowing a gradual rollout where some senders
-    /// have not yet enabled encryption.  Remove this fallback once all senders
-    /// are upgraded.
-    #[must_use]
+    /// # Errors
+    ///
+    /// - [`EnvelopeError::CiphertextTooShort`] if the payload is shorter than
+    ///   the 12-byte nonce prefix.
+    /// - [`EnvelopeError::DecryptionFailed`] if the AEAD tag does not verify
+    ///   (wrong key, corrupted bytes, mismatched associated data, replay
+    ///   with the wrong nonce).
+    ///
+    /// There is no silent fallback to raw payload bytes; callers that need
+    /// to handle a mix of encrypted and plaintext senders must distinguish
+    /// at a higher protocol layer.
     pub fn decrypt(
         &self,
         sender_public_key: &[u8; 32],
         recipient_secret_key: &[u8; 32],
-    ) -> Vec<u8> {
-        match decrypt_payload(&self.payload, sender_public_key, recipient_secret_key) {
-            Ok(plaintext) => plaintext,
-            // Decryption failed — treat as unencrypted plaintext (gradual rollout).
-            Err(_) => self.payload.clone(),
-        }
+    ) -> Result<Vec<u8>, EnvelopeError> {
+        let aad = aead_associated_data(&self.from, &self.to, self.nonce);
+        decrypt_payload_with_aad(
+            &self.payload,
+            sender_public_key,
+            recipient_secret_key,
+            &aad,
+        )
     }
 
     /// Verify the envelope's signature against the provided verifying key.
@@ -173,11 +226,11 @@ impl Envelope {
 // Payload encryption / decryption
 // ---------------------------------------------------------------------------
 
-/// Encrypt `payload` using X25519 ECDH + ChaCha20-Poly1305.
+/// Encrypt `payload` using X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305.
 ///
-/// Derives a shared secret from `recipient_public_key` and
-/// `sender_secret_key` via X25519, uses it as the ChaCha20-Poly1305 key,
-/// and encrypts the payload with a fresh random 12-byte nonce.
+/// Convenience wrapper around [`encrypt_payload_with_aad`] with empty
+/// associated data.  Prefer the AAD variant whenever there is contextual
+/// metadata (peer identifiers, nonce) to bind to the ciphertext.
 ///
 /// # Wire format
 ///
@@ -187,15 +240,32 @@ impl Envelope {
 ///
 /// # Errors
 ///
-/// Returns [`EnvelopeError::DecryptionFailed`] if AEAD encryption fails.
+/// Returns [`EnvelopeError::EncryptionFailed`] if AEAD encryption fails.
 /// In practice this only occurs on catastrophic RNG failure.
 pub fn encrypt_payload(
     payload: &[u8],
     recipient_public_key: &[u8; 32],
     sender_secret_key: &[u8; 32],
 ) -> Result<Vec<u8>, EnvelopeError> {
-    let shared_secret = ecdh_shared_secret(sender_secret_key, recipient_public_key);
-    let key = Key::from_slice(&shared_secret);
+    encrypt_payload_with_aad(payload, recipient_public_key, sender_secret_key, b"")
+}
+
+/// Encrypt `payload` with explicit AEAD associated data.
+///
+/// The associated data is authenticated but not encrypted; decryption must
+/// be performed with byte-identical AAD or the tag check will fail.
+///
+/// # Errors
+///
+/// Returns [`EnvelopeError::EncryptionFailed`] on AEAD failure.
+pub fn encrypt_payload_with_aad(
+    payload: &[u8],
+    recipient_public_key: &[u8; 32],
+    sender_secret_key: &[u8; 32],
+    associated_data: &[u8],
+) -> Result<Vec<u8>, EnvelopeError> {
+    let aead_key = derive_aead_key(sender_secret_key, recipient_public_key);
+    let key = Key::from_slice(&aead_key);
     let cipher = ChaCha20Poly1305::new(key);
 
     let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
@@ -203,8 +273,8 @@ pub fn encrypt_payload(
     // Encrypt in-place on a copy of the payload.
     let mut buf = payload.to_vec();
     cipher
-        .encrypt_in_place(&nonce, b"", &mut buf)
-        .map_err(|_| EnvelopeError::DecryptionFailed)?;
+        .encrypt_in_place(&nonce, associated_data, &mut buf)
+        .map_err(|_| EnvelopeError::EncryptionFailed)?;
 
     // Prepend the 12-byte nonce.
     let mut out = Vec::with_capacity(12 + buf.len());
@@ -213,21 +283,35 @@ pub fn encrypt_payload(
     Ok(out)
 }
 
-/// Decrypt `ciphertext` (nonce || ciphertext) using X25519 ECDH +
-/// ChaCha20-Poly1305.
+/// Decrypt `ciphertext` (nonce || ciphertext) using X25519 ECDH → HKDF-SHA256
+/// → ChaCha20-Poly1305.
 ///
-/// Derives the shared secret from `sender_public_key` and
-/// `recipient_secret_key`, then decrypts and authenticates the payload.
+/// Convenience wrapper around [`decrypt_payload_with_aad`] with empty
+/// associated data.
 ///
 /// # Errors
 ///
 /// - [`EnvelopeError::CiphertextTooShort`] if `ciphertext` is less than 12 bytes.
 /// - [`EnvelopeError::DecryptionFailed`] if the AEAD tag does not verify
-///   (wrong key, corrupted bytes, or replay with wrong nonce).
+///   (wrong key, corrupted bytes, mismatched AAD, or replay with wrong nonce).
 pub fn decrypt_payload(
     ciphertext: &[u8],
     sender_public_key: &[u8; 32],
     recipient_secret_key: &[u8; 32],
+) -> Result<Vec<u8>, EnvelopeError> {
+    decrypt_payload_with_aad(ciphertext, sender_public_key, recipient_secret_key, b"")
+}
+
+/// Decrypt with explicit AEAD associated data.
+///
+/// # Errors
+///
+/// Same as [`decrypt_payload`].
+pub fn decrypt_payload_with_aad(
+    ciphertext: &[u8],
+    sender_public_key: &[u8; 32],
+    recipient_secret_key: &[u8; 32],
+    associated_data: &[u8],
 ) -> Result<Vec<u8>, EnvelopeError> {
     const NONCE_LEN: usize = 12;
     if ciphertext.len() < NONCE_LEN {
@@ -235,32 +319,70 @@ pub fn decrypt_payload(
     }
 
     let nonce = Nonce::from_slice(&ciphertext[..NONCE_LEN]);
-    let shared_secret = ecdh_shared_secret(recipient_secret_key, sender_public_key);
-    let key = Key::from_slice(&shared_secret);
+    let aead_key = derive_aead_key(recipient_secret_key, sender_public_key);
+    let key = Key::from_slice(&aead_key);
     let cipher = ChaCha20Poly1305::new(key);
 
     let mut buf = ciphertext[NONCE_LEN..].to_vec();
     cipher
-        .decrypt_in_place(nonce, b"", &mut buf)
+        .decrypt_in_place(nonce, associated_data, &mut buf)
         .map_err(|_| EnvelopeError::DecryptionFailed)?;
 
     Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
-// X25519 ECDH helper
+// X25519 ECDH + HKDF helper
 // ---------------------------------------------------------------------------
 
-/// Perform X25519 Diffie-Hellman and return the 32-byte raw shared secret.
+/// Derive a 32-byte ChaCha20-Poly1305 key from an X25519 shared secret via
+/// HKDF-SHA256.
 ///
-/// The caller is responsible for using this secret as a key directly (here:
-/// as a ChaCha20-Poly1305 key).  The shared secret is the output of the
-/// X25519 field operation and is 32 bytes of high-entropy uniformly random
-/// material suitable for direct use as an AEAD key.
-fn ecdh_shared_secret(secret_key_bytes: &[u8; 32], peer_public_key_bytes: &[u8; 32]) -> [u8; 32] {
+/// X25519 produces a 32-byte point coordinate, not uniformly random bytes,
+/// and pathological peer public keys (low-order points on Curve25519) can
+/// produce an all-zero shared secret.  HKDF-SHA256 extracts uniformly
+/// distributed key material from the raw output and domain-separates it
+/// from any other use of the same shared secret elsewhere in the codebase
+/// via [`HKDF_INFO`].
+///
+/// The function is symmetric: Alice's `(alice_sk, bob_pk)` and Bob's
+/// `(bob_sk, alice_pk)` derive the same key.
+fn derive_aead_key(
+    secret_key_bytes: &[u8; 32],
+    peer_public_key_bytes: &[u8; 32],
+) -> [u8; 32] {
     let secret = StaticSecret::from(*secret_key_bytes);
     let public = X25519PublicKey::from(*peer_public_key_bytes);
-    secret.diffie_hellman(&public).to_bytes()
+    let shared = secret.diffie_hellman(&public);
+
+    // No salt — the static-static DH output is itself the IKM, and the
+    // info string provides domain separation.
+    let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(HKDF_INFO, &mut okm)
+        .expect("HKDF-SHA256 expand of 32 bytes never fails");
+    okm
+}
+
+// ---------------------------------------------------------------------------
+// AEAD associated-data helper
+// ---------------------------------------------------------------------------
+
+/// Encode `from || to || nonce` as length-prefixed AEAD associated data.
+///
+/// Reusing the same length-prefixed layout as [`canonical_signed_bytes`]
+/// (sans `payload`, which is what we are encrypting) ensures the AAD is
+/// unambiguously bound to a specific `(from, to, nonce)` triple.
+fn aead_associated_data(from: &str, to: &str, nonce: u64) -> Vec<u8> {
+    let from_b = from.as_bytes();
+    let to_b = to.as_bytes();
+    let mut out = Vec::with_capacity(4 + from_b.len() + 4 + to_b.len() + 8);
+    out.extend_from_slice(&(from_b.len() as u32).to_le_bytes());
+    out.extend_from_slice(from_b);
+    out.extend_from_slice(&(to_b.len() as u32).to_le_bytes());
+    out.extend_from_slice(to_b);
+    out.extend_from_slice(&nonce.to_le_bytes());
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +408,7 @@ fn ecdh_shared_secret(secret_key_bytes: &[u8; 32], peer_public_key_bytes: &[u8; 
 /// containing a NUL byte (unlikely but possible for raw-string identifiers)
 /// could produce the same signed bytes as a different pair of identifiers
 /// under the old concatenate-with-NUL scheme.
-pub(crate) fn canonical_signed_bytes(from: &str, to: &str, nonce: u64, payload: &[u8]) -> Vec<u8> {
+fn canonical_signed_bytes(from: &str, to: &str, nonce: u64, payload: &[u8]) -> Vec<u8> {
     let from_b = from.as_bytes();
     let to_b = to.as_bytes();
     let mut out = Vec::with_capacity(
@@ -595,13 +717,15 @@ mod tests {
         assert_ne!(env.payload.as_slice(), plaintext.as_slice());
 
         // Bob decrypts.
-        let recovered = env.decrypt(&alice_pk, &bob_sk);
+        let recovered = env.decrypt(&alice_pk, &bob_sk).expect("decryption must succeed");
         assert_eq!(recovered, plaintext);
     }
 
     #[test]
-    fn envelope_decrypt_fallback_on_plaintext() {
-        // Simulate receiving an unencrypted envelope (from an old sender).
+    fn envelope_decrypt_returns_error_on_plaintext_payload() {
+        // A receiver that calls decrypt() on a plaintext envelope must get a
+        // hard error, not a silent fallback to the raw bytes — the previous
+        // fallback was a downgrade oracle.
         let a = alice();
         let b = bob();
         let plaintext = b"unencrypted payload";
@@ -611,9 +735,78 @@ mod tests {
         let (_, alice_pk) = x25519_keypair();
         let (bob_sk, _) = x25519_keypair();
 
-        // decrypt() should fall back and return the raw payload unchanged.
         let result = env.decrypt(&alice_pk, &bob_sk);
-        assert_eq!(result, plaintext);
+        assert!(
+            result.is_err(),
+            "decrypting a plaintext payload must return an error, not the raw bytes"
+        );
+    }
+
+    #[test]
+    fn envelope_decrypt_aad_binds_from_to_nonce() {
+        // A ciphertext crafted for envelope (from=A, to=B, nonce=N) must not
+        // be decryptable when spliced into an envelope addressed differently:
+        // the AEAD associated data binds from/to/nonce so a relay-side splice
+        // attack fails the AEAD tag check.
+        let a = alice();
+        let b = bob();
+        let c = alice(); // third identity, different from b
+
+        let (alice_sk, alice_pk) = x25519_keypair();
+        let (bob_sk, bob_pk) = x25519_keypair();
+
+        let env_to_b =
+            Envelope::with_encrypted_payload(&a, &b.peer_id, b"secret", 1, &bob_pk, &alice_sk)
+                .unwrap();
+
+        // Splice: keep the encrypted payload but pretend it was sent to C.
+        let mut spliced = env_to_b.clone();
+        spliced.to = c.peer_id.to_string();
+
+        let result = spliced.decrypt(&alice_pk, &bob_sk);
+        assert!(
+            result.is_err(),
+            "splicing ciphertext into an envelope with a different recipient must fail AEAD auth"
+        );
+
+        // And mutating `nonce` similarly fails.
+        let mut spliced_nonce = env_to_b.clone();
+        spliced_nonce.nonce = 999;
+        let result = spliced_nonce.decrypt(&alice_pk, &bob_sk);
+        assert!(
+            result.is_err(),
+            "splicing ciphertext into an envelope with a different nonce must fail AEAD auth"
+        );
+    }
+
+    #[test]
+    fn derive_aead_key_is_symmetric() {
+        // Alice's (alice_sk, bob_pk) and Bob's (bob_sk, alice_pk) must derive
+        // the same AEAD key after HKDF — otherwise no message could ever be
+        // decrypted by the intended recipient.
+        let (alice_sk, alice_pk) = x25519_keypair();
+        let (bob_sk, bob_pk) = x25519_keypair();
+
+        let k1 = derive_aead_key(&alice_sk, &bob_pk);
+        let k2 = derive_aead_key(&bob_sk, &alice_pk);
+
+        assert_eq!(k1, k2, "HKDF-derived AEAD key must be symmetric");
+    }
+
+    #[test]
+    fn derive_aead_key_low_order_public_key_does_not_panic() {
+        // The all-zero X25519 public key is a low-order point that yields an
+        // all-zero raw DH output.  HKDF over that zero IKM is well-defined
+        // (it just produces a deterministic but unique-to-this-context key)
+        // and must not panic; without HKDF the raw zero bytes would have been
+        // used directly as an AEAD key, which is catastrophic.
+        let (alice_sk, _alice_pk) = x25519_keypair();
+        let low_order_pk = [0u8; 32];
+
+        let key = derive_aead_key(&alice_sk, &low_order_pk);
+        // Sanity: the derived bytes are not the raw all-zero DH output —
+        // HKDF mixes in the info string.
+        assert_ne!(key, [0u8; 32]);
     }
 
     // -----------------------------------------------------------------------
