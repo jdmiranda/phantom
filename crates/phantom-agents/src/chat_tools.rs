@@ -23,9 +23,14 @@
 //!   ones that get this — Watcher and Capturer cannot mass-broadcast.
 //!
 //! All three operate via the [`ChatToolContext`] which carries the calling
-//! agent's [`AgentRef`], an `Arc<Mutex<AgentRegistry>>`, and (optionally)
-//! an `Arc<Mutex<EventLog>>` so the test/legacy paths that don't have a log
-//! still work — log emission is best-effort, never load-bearing.
+//! agent's [`AgentRef`], an `Arc<Mutex<AgentRegistry>>`, and an
+//! `Arc<Mutex<EventLog>>`.
+//!
+//! Issue #645: the log is **non-optional**. Log emission is load-bearing
+//! for inter-agent causality — an I/O error or poisoned lock surfaces to
+//! the caller as `Err(_)` rather than being silently dropped. Production
+//! callers wire the log via `AgentPane::set_substrate_handles`; tests use
+//! [`crate::test_support::fresh_log`].
 
 use std::sync::{Arc, Mutex};
 
@@ -108,14 +113,18 @@ impl ChatTool {
 /// - `registry` is the live agent directory used for label lookup and
 ///   broadcast.
 /// - `event_log` is the shared append-only log; the `agent.speak` envelope
-///   is appended best-effort so peers and the inspector can see traffic.
-///   `None` means "skip log emission" — useful for tests that don't open a
-///   log file and for the legacy CLI paths that haven't been wired yet.
+///   is appended so peers and the inspector can see traffic.
+///
+/// Issue #645: `event_log` is **non-optional**. Production callers wire
+/// the runtime's log via `AgentPane::set_substrate_handles` before the
+/// pane is allowed to dispatch (`AgentPane::build_dispatch_context`
+/// returns `None` until the handle is present). Tests construct an
+/// isolated fixture via [`crate::test_support::fresh_log`].
 #[derive(Clone)]
 pub struct ChatToolContext {
     pub self_ref: AgentRef,
     pub registry: Arc<Mutex<AgentRegistry>>,
-    pub event_log: Option<Arc<Mutex<EventLog>>>,
+    pub event_log: Arc<Mutex<EventLog>>,
 }
 
 impl ChatToolContext {
@@ -124,7 +133,7 @@ impl ChatToolContext {
     pub fn new(
         self_ref: AgentRef,
         registry: Arc<Mutex<AgentRegistry>>,
-        event_log: Option<Arc<Mutex<EventLog>>>,
+        event_log: Arc<Mutex<EventLog>>,
     ) -> Self {
         Self {
             self_ref,
@@ -236,23 +245,29 @@ fn parse_role(name: &str) -> Option<AgentRole> {
     }
 }
 
-/// Best-effort append of a [`SpeakEvent`] to the shared event log.
+/// Append a [`SpeakEvent`] to the shared event log, surfacing failure as an
+/// error.
 ///
-/// Any failure (poisoned mutex, I/O error) is swallowed — chat traffic must
-/// not stall on log persistence. Returns `Some(envelope.id)` on success so
-/// callers (and tests) can correlate the produced id back to a follow-up
-/// `read_from_agent`.
+/// Issue #645 made the log non-`Option` at the dispatch boundary and
+/// required these emitters to propagate I/O errors instead of silently
+/// no-op'ing. Two failure modes are surfaced:
+///
+/// - `Err("event log poisoned")` when the shared `Mutex` is poisoned.
+/// - `Err("event log append failed: <io-error>")` when [`EventLog::append`]
+///   itself fails (e.g. ENOSPC).
+///
+/// Returns the envelope `id` on success so callers (and tests) can correlate
+/// the produced id back to a follow-up `read_from_agent`.
 fn append_speak_to_log(
-    log: &Option<Arc<Mutex<EventLog>>>,
+    log: &Arc<Mutex<EventLog>>,
     source_id: u64,
     ev: &SpeakEvent,
-) -> Option<u64> {
-    let log = log.as_ref()?;
-    let mut g = log.lock().ok()?;
+) -> Result<u64, String> {
+    let mut g = log.lock().map_err(|_| "event log poisoned".to_string())?;
     let payload = encode_speak_event(ev);
     g.append(LogEventSource::Agent { id: source_id }, AGENT_SPEAK_EVENT_KIND, payload)
-        .ok()
         .map(|env| env.id)
+        .map_err(|e| format!("event log append failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +320,12 @@ pub fn send_to_agent(
         importance: 0.5,
         at_unix_ms: now_unix_ms(),
     };
-    let _ = append_speak_to_log(&ctx.event_log, ctx.self_ref.id, &ev);
+    // #645: log emission is now load-bearing for inter-agent causality —
+    // an I/O error or poisoned lock must surface to the caller rather
+    // than be silently dropped. The inbox delivery succeeded above, so
+    // the message is in flight regardless; the error tells the model
+    // (and ultimately the user) that the audit trail is broken.
+    append_speak_to_log(&ctx.event_log, ctx.self_ref.id, &ev)?;
 
     Ok(format!("delivered to {}", parsed.label))
 }
@@ -327,9 +347,11 @@ pub fn send_to_agent(
 /// element's `id` for the next poll.
 ///
 /// Errors:
-/// - `Err("event log not configured")` when the context wasn't given a log
-///   (legacy / test path).
 /// - `Err("event log poisoned")` if the underlying mutex was poisoned.
+///
+/// Issue #645: there is no longer an "event log not configured" branch —
+/// the dispatch boundary refuses to construct a [`ChatToolContext`]
+/// without one.
 pub fn read_from_agent(
     args: &serde_json::Value,
     ctx: &ChatToolContext,
@@ -337,12 +359,10 @@ pub fn read_from_agent(
     let parsed: ReadArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid read_from_agent args: {e}"))?;
 
-    let log = ctx
+    let g = ctx
         .event_log
-        .as_ref()
-        .ok_or_else(|| "event log not configured".to_string())?;
-
-    let g = log.lock().map_err(|_| "event log poisoned".to_string())?;
+        .lock()
+        .map_err(|_| "event log poisoned".to_string())?;
     // Pull a generous tail so callers reading after the fact don't miss
     // older traffic. The in-memory tail is bounded (~4096 envelopes) so
     // this is a constant-bounded scan.
@@ -421,7 +441,10 @@ pub fn broadcast_to_role(
         importance: 0.5,
         at_unix_ms: now_unix_ms(),
     };
-    let _ = append_speak_to_log(&ctx.event_log, ctx.self_ref.id, &ev);
+    // #645: same causality guarantee as `send_to_agent` — the broadcast
+    // already fanned out, but the audit envelope must surface its append
+    // failure if the log is broken.
+    append_speak_to_log(&ctx.event_log, ctx.self_ref.id, &ev)?;
 
     Ok(delivered)
 }
@@ -471,30 +494,30 @@ mod tests {
 
     /// Build a `ChatToolContext` whose calling agent is the supplied
     /// (id, role, label) and whose registry contains the supplied handles.
-    /// Optionally opens a temp event log.
+    ///
+    /// Issue #645: every context now carries a real event log (built via a
+    /// scoped `tempdir`). The previous `with_log: bool` toggle has been
+    /// removed — the dispatch boundary forbids `None`. Callers receive
+    /// the [`tempfile::TempDir`] back so the on-disk file lives at least
+    /// as long as the test that owns it.
     fn build_ctx(
         self_id: u64,
         self_role: AgentRole,
         self_label: &str,
         handles: Vec<AgentHandle>,
-        with_log: bool,
-    ) -> (ChatToolContext, Option<tempfile::TempDir>) {
+    ) -> (ChatToolContext, tempfile::TempDir) {
         let mut reg = AgentRegistry::new();
         for h in handles {
             reg.register(h);
         }
         let registry = Arc::new(Mutex::new(reg));
-        let (log, dir) = if with_log {
-            let d = tempdir().expect("tempdir");
-            let path = d.path().join("events.jsonl");
-            let log = EventLog::open(&path).expect("open");
-            (Some(Arc::new(Mutex::new(log))), Some(d))
-        } else {
-            (None, None)
-        };
+        let d = tempdir().expect("tempdir");
+        let path = d.path().join("events.jsonl");
+        let log = EventLog::open(&path).expect("open");
+        let log = Arc::new(Mutex::new(log));
         let self_ref = AgentRef::new(self_id, self_role, self_label, SpawnSource::User);
         let ctx = ChatToolContext::new(self_ref, registry, log);
-        (ctx, dir)
+        (ctx, d)
     }
 
     // ---- ChatTool catalog tests --------------------------------------------
@@ -537,7 +560,6 @@ mod tests {
             AgentRole::Conversational,
             "speaker",
             vec![target_handle],
-            true,
         );
 
         let result = send_to_agent(
@@ -568,7 +590,6 @@ mod tests {
             AgentRole::Conversational,
             "speaker",
             Vec::new(),
-            true,
         );
 
         let err = send_to_agent(
@@ -592,7 +613,6 @@ mod tests {
             AgentRole::Conversational,
             "speaker",
             vec![target_handle],
-            true,
         );
 
         send_to_agent(
@@ -601,8 +621,9 @@ mod tests {
         )
         .expect("send should succeed");
 
-        // Pull the log tail and find the speak envelope.
-        let log = ctx.event_log.clone().expect("log present");
+        // Pull the log tail and find the speak envelope. #645: `event_log`
+        // is non-`Option`, so no `expect("log present")` is needed.
+        let log = ctx.event_log.clone();
         let g = log.lock().unwrap();
         let tail = g.tail(64);
         drop(g);
@@ -618,33 +639,6 @@ mod tests {
             speak.payload["body"]["text"].as_str(),
             Some("logged body"),
         );
-    }
-
-    #[tokio::test]
-    async fn send_to_agent_works_without_event_log() {
-        // Legacy / test paths that don't have a log open must still deliver
-        // inbox messages — log emission is best-effort.
-        let (target_handle, mut target_rx) =
-            fake_agent(2, AgentRole::Watcher, "target");
-        let (ctx, _dir) = build_ctx(
-            1,
-            AgentRole::Conversational,
-            "speaker",
-            vec![target_handle],
-            false,
-        );
-
-        send_to_agent(
-            &json!({"label": "target", "body": "no-log"}),
-            &ctx,
-        )
-        .expect("send should succeed without a log");
-
-        let got = timeout(Duration::from_millis(100), target_rx.recv())
-            .await
-            .expect("receive timed out")
-            .expect("channel closed");
-        assert!(matches!(got, InboxMessage::AgentSpeak { .. }));
     }
 
     // ---- read_from_agent ----------------------------------------------------
@@ -670,9 +664,9 @@ mod tests {
         let log = Arc::new(Mutex::new(EventLog::open(&path).expect("open")));
 
         let a_ref = AgentRef::new(1, AgentRole::Conversational, "A", SpawnSource::User);
-        let a_ctx = ChatToolContext::new(a_ref, registry.clone(), Some(log.clone()));
+        let a_ctx = ChatToolContext::new(a_ref, registry.clone(), log.clone());
         let b_ref = AgentRef::new(2, AgentRole::Conversational, "B", SpawnSource::User);
-        let b_ctx = ChatToolContext::new(b_ref, registry.clone(), Some(log.clone()));
+        let b_ctx = ChatToolContext::new(b_ref, registry.clone(), log.clone());
 
         send_to_agent(&json!({"label": "C", "body": "from A"}), &a_ctx)
             .expect("A send");
@@ -731,12 +725,12 @@ mod tests {
             AgentRole::Conversational,
             "reader",
             vec![noisy_handle],
-            true,
         );
 
         // Synthesize 25 envelopes via direct log appends (instead of routing
-        // 25 inbox messages, which would back up the channel).
-        let log = ctx.event_log.clone().unwrap();
+        // 25 inbox messages, which would back up the channel). #645: log
+        // is non-`Option` so no `.unwrap()` is needed.
+        let log = ctx.event_log.clone();
         for i in 0..25 {
             let mut g = log.lock().unwrap();
             g.append(
@@ -771,21 +765,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn read_from_agent_without_log_returns_err() {
-        let (ctx, _dir) =
-            build_ctx(1, AgentRole::Conversational, "reader", Vec::new(), false);
-        let err = read_from_agent(
-            &json!({"label": "anyone", "since_event_id": 0u64}),
-            &ctx,
-        )
-        .expect_err("should fail without a log");
-        assert!(
-            err.contains("event log not configured"),
-            "wrong error: {err}",
-        );
-    }
-
     // ---- broadcast_to_role --------------------------------------------------
 
     #[tokio::test]
@@ -798,7 +777,6 @@ mod tests {
             AgentRole::Composer,
             "boss",
             vec![w1, w2, a1],
-            true,
         );
 
         let count = broadcast_to_role(
@@ -830,7 +808,7 @@ mod tests {
     #[tokio::test]
     async fn broadcast_to_role_unknown_role_returns_err() {
         let (ctx, _dir) =
-            build_ctx(1, AgentRole::Composer, "boss", Vec::new(), true);
+            build_ctx(1, AgentRole::Composer, "boss", Vec::new());
         let err = broadcast_to_role(
             &json!({"role": "warlock", "body": "x"}),
             &ctx,
@@ -843,7 +821,7 @@ mod tests {
     async fn broadcast_to_role_with_no_matches_returns_zero() {
         let (a1, _rx) = fake_agent(1, AgentRole::Actor, "a1");
         let (ctx, _dir) =
-            build_ctx(10, AgentRole::Composer, "boss", vec![a1], true);
+            build_ctx(10, AgentRole::Composer, "boss", vec![a1]);
 
         let count = broadcast_to_role(
             &json!({"role": "watcher", "body": "hello"}),

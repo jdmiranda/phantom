@@ -785,7 +785,17 @@ fn parse_openai_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                 }
             };
 
-            if let Some(tool) = ToolType::from_api_name(name) {
+            // ---- Issue #646: lifecycle pre-parser filter ---------------------
+            //
+            // Mirror the Claude path in `api.rs`: `complete_task` is a
+            // lifecycle signal, not a tool. Divert it ahead of
+            // `ToolType::from_api_name` so the agent loop sees it as a
+            // dedicated `ApiEvent::CompleteTask { result }` event. Both
+            // backends must agree on this filter or one path silently
+            // refuses the model's terminal signal.
+            if name == "complete_task" {
+                let _ = tx.send(ApiEvent::CompleteTask { id, result: args });
+            } else if let Some(tool) = ToolType::from_api_name(name) {
                 let _ = tx.send(ApiEvent::ToolUse {
                     id,
                     call: ToolCall { tool, args },
@@ -1339,6 +1349,9 @@ mod tests {
                 Some(ApiEvent::TextDelta(t)) => text.push_str(&t),
                 Some(ApiEvent::ToolUse { .. }) => {
                     panic!("unexpected tool use in live hello test");
+                }
+                Some(ApiEvent::CompleteTask { .. }) => {
+                    panic!("unexpected complete_task in live hello test");
                 }
                 Some(ApiEvent::Done) => break,
                 Some(ApiEvent::Error(e)) => panic!("live test error: {e}"),
