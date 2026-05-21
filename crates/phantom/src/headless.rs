@@ -59,6 +59,12 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         privacy_mode: false,
         // Headless mode has no relay connection by default.
         relay_inbound_rx: None,
+        // Headless boot has no prior history snapshot to seed the brain with.
+        history_context: Vec::new(),
+        // Self-improvement defaults to OFF per design doc §5.1; the operator
+        // opts in by supplying a `SelfImprovementState` and `goal_sources`.
+        self_improvement: None,
+        goal_sources: Vec::new(),
     });
 
     // Agent manager (max 5 concurrent agents).
@@ -97,27 +103,27 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
             "status" => print_status(&context, &agents, &memory),
             "context" => println!("{}", context.agent_context()),
             "memory" => println!("{}", memory.agent_context()),
-            "history" => {
-                match history.recent(20) {
-                    Ok(entries) => {
-                        if entries.is_empty() {
-                            println!("No history yet.");
-                        } else {
-                            for entry in &entries {
-                                let code = entry
-                                    .exit_code()
-                                    .map(|c| format!(" [exit {c}]"))
-                                    .unwrap_or_default();
-                                println!("  $ {}{code}", entry.command());
-                            }
+            "history" => match history.recent(20) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        println!("No history yet.");
+                    } else {
+                        for entry in &entries {
+                            let code = entry
+                                .exit_code()
+                                .map(|c| format!(" [exit {c}]"))
+                                .unwrap_or_default();
+                            println!("  $ {}{code}", entry.command());
                         }
                     }
-                    Err(e) => println!("Error reading history: {e}"),
                 }
-            }
+                Err(e) => println!("Error reading history: {e}"),
+            },
             "render" => {
                 println!("Opening GUI window...");
-                println!("(not yet implemented \u{2014} run `cargo run --bin phantom` in another terminal)");
+                println!(
+                    "(not yet implemented \u{2014} run `cargo run --bin phantom` in another terminal)"
+                );
             }
             "help" => print_help(),
             _ => handled = false,
@@ -141,7 +147,16 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
             };
 
             if let Some(ref cfg) = claude_config {
-                run_chat(cfg, msg, &context, &memory, &mut chat_history, &mut agents, &project_dir, &mut tool_use_ids);
+                run_chat(
+                    cfg,
+                    msg,
+                    &context,
+                    &memory,
+                    &mut chat_history,
+                    &mut agents,
+                    &project_dir,
+                    &mut tool_use_ids,
+                );
             } else {
                 println!("[PHANTOM]: ANTHROPIC_API_KEY not set. Cannot chat.");
             }
@@ -176,7 +191,9 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
                     tool_use_ids.clear();
                     run_agent_loop(&mut agents, cfg, &project_dir, &mut tool_use_ids);
                 } else {
-                    println!("Warning: ANTHROPIC_API_KEY not set. Agent spawned but cannot reason.");
+                    println!(
+                        "Warning: ANTHROPIC_API_KEY not set. Agent spawned but cannot reason."
+                    );
                 }
             }
 
@@ -218,7 +235,10 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
             ResolvedAction::ShowInfo(info) => {
                 println!("{info}");
             }
-            ResolvedAction::Ambiguous { input: inp, options } => {
+            ResolvedAction::Ambiguous {
+                input: inp,
+                options,
+            } => {
                 println!("Ambiguous: {inp}");
                 for opt in &options {
                     println!("  - {opt}");
@@ -296,12 +316,8 @@ fn run_shell_command(
             }
 
             // Append to history.
-            let mut builder = HistoryEntry::builder(
-                &parsed.command,
-                project_dir,
-                Uuid::new_v4(),
-            )
-            .semantic_type(parsed.command_type.clone());
+            let mut builder = HistoryEntry::builder(&parsed.command, project_dir, Uuid::new_v4())
+                .semantic_type(parsed.command_type.clone());
             if let Some(code) = parsed.exit_code {
                 builder = builder.exit_code(code);
             }
@@ -340,7 +356,9 @@ fn run_agent_loop(
 
     // Ensure the agent has a system prompt and initial user message.
     {
-        let Some(agent) = agents.get_mut(agent_id) else { return };
+        let Some(agent) = agents.get_mut(agent_id) else {
+            return;
+        };
         if agent.messages().is_empty() {
             let sys = agent.system_prompt();
             agent.push_message(AgentMessage::System(sys));
@@ -382,7 +400,9 @@ fn run_agent_loop(
                 Some(ApiEvent::TextDelta(text)) => {
                     print!("{text}");
                     io::stdout().flush().ok();
-                    let Some(agent) = agents.get_mut(agent_id) else { break };
+                    let Some(agent) = agents.get_mut(agent_id) else {
+                        break;
+                    };
                     agent.push_message(AgentMessage::Assistant(text.clone()));
                     agent.log(&text);
                 }
@@ -409,7 +429,9 @@ fn run_agent_loop(
 
                     tool_use_ids.push(id);
 
-                    let Some(agent) = agents.get_mut(agent_id) else { break };
+                    let Some(agent) = agents.get_mut(agent_id) else {
+                        break;
+                    };
                     agent.push_message(AgentMessage::ToolCall(call));
                     agent.push_message(AgentMessage::ToolResult(result));
                     // Agent remains Working — no status change needed here.
@@ -417,16 +439,26 @@ fn run_agent_loop(
                 }
                 Some(ApiEvent::Done) => {
                     println!("\n[AGENT #{}]: turn complete", agent_id);
-                    if !got_tool_use
-                        && let Some(a) = agents.get_mut(agent_id)
-                    {
+                    if !got_tool_use && let Some(a) = agents.get_mut(agent_id) {
                         a.complete(true);
                     }
                     break;
                 }
                 Some(ApiEvent::Error(e)) => {
                     println!("\n[AGENT #{}]: error: {e}", agent_id);
-                    if let Some(a) = agents.get_mut(agent_id) { a.complete(false); }
+                    if let Some(a) = agents.get_mut(agent_id) {
+                        a.complete(false);
+                    }
+                    break;
+                }
+                Some(ApiEvent::CompleteTask { id: _, result }) => {
+                    // Headless REPL does not yet propagate complete_task
+                    // payloads. Treat the lifecycle signal as a normal
+                    // completion and continue.
+                    println!("\n[AGENT #{}]: complete_task: {result}", agent_id);
+                    if let Some(a) = agents.get_mut(agent_id) {
+                        a.complete_with_result(result);
+                    }
                     break;
                 }
                 None => {
@@ -436,14 +468,18 @@ fn run_agent_loop(
         }
 
         // If the agent completed or failed, stop looping.
-        let Some(agent) = agents.get(agent_id) else { break };
+        let Some(agent) = agents.get(agent_id) else {
+            break;
+        };
         if agent.status() != AgentStatus::Working {
             break;
         }
         // Otherwise the agent made a tool call -- loop back for the next turn.
     }
 
-    let Some(agent) = agents.get(agent_id) else { return };
+    let Some(agent) = agents.get(agent_id) else {
+        return;
+    };
     let status_tag = match agent.status() {
         AgentStatus::Done => "DONE",
         AgentStatus::Failed => "FAILED",
@@ -479,7 +515,9 @@ impl ActionHandler for HeadlessActionHandler {
         spawn_tag: Option<u64>,
         disposition: phantom_agents::dispatch::Disposition,
     ) {
-        println!("[BRAIN]: suggested agent: {task:?} (spawn_tag={spawn_tag:?}, disposition={disposition:?})");
+        println!(
+            "[BRAIN]: suggested agent: {task:?} (spawn_tag={spawn_tag:?}, disposition={disposition:?})"
+        );
     }
 
     fn console_reply(&mut self, reply: String) {
@@ -510,7 +548,11 @@ impl ActionHandler for HeadlessActionHandler {
         println!("[BRAIN]: agent {agent_id} quarantined after {denial_count} denials");
     }
 
-    fn pause_agent(&mut self, agent_id: phantom_agents::AgentId, reason: phantom_agents::agent::PauseReason) {
+    fn pause_agent(
+        &mut self,
+        agent_id: phantom_agents::AgentId,
+        reason: phantom_agents::agent::PauseReason,
+    ) {
         println!("[BRAIN]: pausing agent {agent_id} ({reason:?})");
     }
 
@@ -535,10 +577,7 @@ fn drain_brain(brain: &phantom_brain::brain::BrainHandle) {
 
 fn print_status(context: &ProjectContext, agents: &AgentManager, memory: &MemoryStore) {
     println!("PHANTOM STATUS");
-    println!(
-        "  project:  {} [{:?}]",
-        context.name, context.project_type
-    );
+    println!("  project:  {} [{:?}]", context.name, context.project_type);
     println!(
         "  branch:   {}",
         context
@@ -623,9 +662,12 @@ fn run_chat(
     };
 
     // Build temp agent with chat history.
-    let mut temp_agent = Agent::new(9999, AgentTask::FreeForm {
-        prompt: user_msg.to_string(),
-    });
+    let mut temp_agent = Agent::new(
+        9999,
+        AgentTask::FreeForm {
+            prompt: user_msg.to_string(),
+        },
+    );
     for msg in chat_history.iter() {
         temp_agent.push_message(msg.clone());
     }
@@ -647,20 +689,33 @@ fn run_chat(
             }
             Some(ApiEvent::ToolUse { id, call }) => {
                 // Chat wants to spawn an agent.
-                let task_str = call.args.get("task")
+                let task_str = call
+                    .args
+                    .get("task")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown task")
                     .to_string();
 
-                let perms: Vec<String> = call.args.get("permissions")
+                let perms: Vec<String> = call
+                    .args
+                    .get("permissions")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
-                println!("\n[PHANTOM]: Spawning agent: \"{task_str}\" [perms: {}]", perms.join(", "));
+                println!(
+                    "\n[PHANTOM]: Spawning agent: \"{task_str}\" [perms: {}]",
+                    perms.join(", ")
+                );
 
                 // Spawn the agent.
-                let agent_task = AgentTask::FreeForm { prompt: task_str.clone() };
+                let agent_task = AgentTask::FreeForm {
+                    prompt: task_str.clone(),
+                };
                 let agent_id = agents.spawn(agent_task);
 
                 // Drive the agent with full tools (filtered by permissions).
@@ -706,13 +761,19 @@ fn run_chat(
                     ..Default::default()
                 }));
 
-                println!("[AGENT RESULT]: {}", &agent_output[..agent_output.len().min(500)]);
+                println!(
+                    "[AGENT RESULT]: {}",
+                    &agent_output[..agent_output.len().min(500)]
+                );
 
                 // Continue the chat conversation with the tool result.
                 // Rebuild and resend.
-                let mut followup_agent = Agent::new(9999, AgentTask::FreeForm {
-                    prompt: user_msg.to_string(),
-                });
+                let mut followup_agent = Agent::new(
+                    9999,
+                    AgentTask::FreeForm {
+                        prompt: user_msg.to_string(),
+                    },
+                );
                 for msg in chat_history.iter() {
                     followup_agent.push_message(msg.clone());
                 }
@@ -733,6 +794,13 @@ fn run_chat(
             }
             Some(ApiEvent::Error(e)) => {
                 println!("\n[ERROR]: {e}");
+                break;
+            }
+            Some(ApiEvent::CompleteTask { id: _, result }) => {
+                // Chat-level complete_task: surface the payload and end
+                // the conversation turn. The headless REPL does not
+                // distinguish complete_task from a normal Done.
+                println!("\n[PHANTOM]: complete_task: {result}");
                 break;
             }
             None => {
@@ -795,7 +863,9 @@ fn load_dotenv() {
                 let value = value.trim();
                 if std::env::var(key).is_err() {
                     // SAFETY: single-threaded at this point (before brain spawn).
-                    unsafe { std::env::set_var(key, value); }
+                    unsafe {
+                        std::env::set_var(key, value);
+                    }
                 }
             }
         }

@@ -57,6 +57,7 @@ pub mod swap_manager;
 pub mod watcher;
 
 pub use drain_reaper::all_swap_states;
+#[doc(hidden)]
 pub use drain_reaper::tick_reaper_for_test;
 pub use host::{SemanticSkill, SkillHost};
 pub use llm_host::{LlmHost, LlmSkill, LlmSkillAdapter};
