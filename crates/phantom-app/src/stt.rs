@@ -84,11 +84,18 @@ impl SttPipeline {
 
     /// Start the STT pipeline with the given backend and config.
     ///
-    /// Spawns two tokio tasks:
+    /// Spawns a dedicated OS thread that owns a single-threaded Tokio runtime
+    /// and drives two async tasks inside it:
     /// * The [`SttStream::run`] loop — reads audio, emits partials.
     /// * The event-forwarding loop — converts final partials to
     ///   [`CaptureEvent::SpeechTranscribed`] and sends them on an internal
     ///   channel whose receiver is stored in `self.event_rx`.
+    ///
+    /// A dedicated OS thread (rather than `tokio::spawn`) is required because
+    /// `SttPipeline::start` is called from `App::with_config_scaled`, which
+    /// runs on the winit GUI thread where no ambient Tokio runtime exists.
+    /// This mirrors the pattern used by `relay_task_body` and `mcp-discovery`
+    /// in `crate::app`.
     ///
     /// `audio_channel_capacity` controls the depth of the audio mpsc channel.
     /// 64 is a reasonable default for 10 ms chunks at 16 kHz.
@@ -106,11 +113,30 @@ impl SttPipeline {
         // FIXME(#56/#68): these tasks are live but produce no output until mic
         // capture is wired. They idle on `audio_rx.recv()` with zero CPU cost
         // and shut down cleanly when `audio_tx` is dropped (pipeline dropped).
-        tokio::spawn(async move {
-            stream.run(audio_rx, partial_tx).await;
-        });
-
-        tokio::spawn(forward_partials(partial_rx, event_tx));
+        //
+        // The worker thread builds its own current-thread Tokio runtime and
+        // joins both async tasks via `tokio::join!` so they share one runtime.
+        let _worker = std::thread::Builder::new()
+            .name("phantom-stt".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        log::error!("phantom-stt: failed to build Tokio runtime: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    tokio::join!(
+                        stream.run(audio_rx, partial_tx),
+                        forward_partials(partial_rx, event_tx),
+                    );
+                });
+            })
+            .expect("phantom-stt thread spawn failed");
 
         Self { audio_tx, event_rx }
     }

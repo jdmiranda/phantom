@@ -63,7 +63,7 @@ impl SemanticSkill for StaticSemanticSkill {
 // ---------------------------------------------------------------------------
 
 #[cfg(all(debug_assertions, feature = "hot-modules"))]
-mod dylib_impl {
+pub(crate) mod dylib_impl {
     use super::SemanticSkill;
     use crate::ffi::SemanticSkillVtable;
     use phantom_semantic::{CommandType, ParsedOutput};
