@@ -238,16 +238,20 @@ impl ProjectContext {
 
 /// Builds [`ProjectContext`] with an optional cached [`CodeDag`].
 ///
-/// For Rust projects, the assembler runs `cargo metadata` once and caches the
-/// resulting [`CodeDag`].  The cache is invalidated whenever the `mtime` of
-/// `Cargo.toml` in the workspace root changes.  If `cargo metadata` fails (not
-/// a Rust project, `cargo` not on `PATH`, etc.) the topology section is
-/// silently omitted.
+/// For Rust projects, the assembler reads a pre-existing
+/// `<root>/.planning/dag.json` once and caches the resulting [`CodeDag`].  The
+/// cache is invalidated whenever the `mtime` of either `Cargo.toml` or
+/// `.planning/dag.json` in the workspace root changes.  DAG *generation* is
+/// out of scope here — this type is a reader only; an external extractor is
+/// expected to maintain `.planning/dag.json`.  If the file is missing or
+/// malformed the topology section is silently omitted.
 #[derive(Debug, Default)]
 pub struct ContextAssembler {
     dag: Option<CodeDag>,
-    /// mtime of `Cargo.toml` at the time the DAG was last built.
+    /// mtime of `Cargo.toml` at the time the DAG was last loaded.
     cargo_toml_mtime: Option<SystemTime>,
+    /// mtime of `.planning/dag.json` at the time the DAG was last loaded.
+    dag_json_mtime: Option<SystemTime>,
 }
 
 impl ContextAssembler {
@@ -269,6 +273,7 @@ impl ContextAssembler {
             // Non-Rust project: drop any stale cached DAG.
             self.dag = None;
             self.cargo_toml_mtime = None;
+            self.dag_json_mtime = None;
         }
 
         ctx
@@ -285,27 +290,43 @@ impl ContextAssembler {
     /// Return the upstream (dependencies) and downstream (dependents) neighbours
     /// of `crate_name` from the cached DAG as a short human-readable string.
     ///
-    /// Returns `None` when no DAG has been built yet or the crate is not found.
+    /// Symbol-level nodes are aggregated by their crate prefix (the leading
+    /// `::`-separated component of the fully-qualified id, e.g.
+    /// `phantom_agents::dispatch::dispatch_tool` → `phantom_agents`).  The
+    /// returned crate list is deduplicated and self-references are stripped.
+    ///
+    /// Returns `None` when no DAG has been built yet or no node in the DAG
+    /// belongs to `crate_name`.
     #[must_use]
     pub fn crate_summary(&self, crate_name: &str) -> Option<String> {
         let dag = self.dag.as_ref()?;
 
-        // Check the crate exists in the DAG.
-        dag.get_node(crate_name)?;
+        // Confirm the crate is referenced by at least one node.  We accept both
+        // a literal crate-name node and any symbol whose crate prefix matches,
+        // because real extractors produce symbol-level ids.
+        let crate_present = dag.get_node(crate_name).is_some()
+            || dag.nodes().any(|n| crate_prefix(n.id()) == crate_name);
+        if !crate_present {
+            return None;
+        }
 
-        // Upstream: edges where crate_name is the *from* end (crate depends on these).
-        let upstream: Vec<&str> = dag
+        let mut upstream: Vec<&str> = dag
             .edges()
-            .filter(|e| e.from() == crate_name)
-            .map(|e| e.to())
+            .filter(|e| crate_prefix(e.from()) == crate_name)
+            .map(|e| crate_prefix(e.to()))
+            .filter(|c| *c != crate_name)
             .collect();
+        upstream.sort_unstable();
+        upstream.dedup();
 
-        // Downstream: edges where crate_name is the *to* end (these depend on crate_name).
-        let downstream: Vec<&str> = dag
+        let mut downstream: Vec<&str> = dag
             .edges()
-            .filter(|e| e.to() == crate_name)
-            .map(|e| e.from())
+            .filter(|e| crate_prefix(e.to()) == crate_name)
+            .map(|e| crate_prefix(e.from()))
+            .filter(|c| *c != crate_name)
             .collect();
+        downstream.sort_unstable();
+        downstream.dedup();
 
         let mut parts = Vec::new();
         if upstream.is_empty() {
@@ -326,24 +347,40 @@ impl ContextAssembler {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    /// Reload `.planning/dag.json` when the workspace manifest or the DAG file
+    /// itself has changed.
+    ///
+    /// This is a reader only — it never invokes `cargo metadata` or any
+    /// generator.  An external extractor is expected to maintain
+    /// `.planning/dag.json`; if the file is missing the topology section is
+    /// simply omitted.
     fn refresh_dag_if_stale(&mut self, dir: &Path) {
-        let mtime = cargo_toml_mtime(dir);
-        let stale = match (mtime, self.cargo_toml_mtime) {
-            (Some(m), Some(cached)) => m != cached,
+        let cargo_mtime = file_mtime(&dir.join("Cargo.toml"));
+        let dag_path = dir.join(".planning/dag.json");
+        let dag_mtime = file_mtime(&dag_path);
+
+        let stale = match (cargo_mtime, self.cargo_toml_mtime, dag_mtime, self.dag_json_mtime) {
+            (Some(c), Some(cached_c), Some(d), Some(cached_d)) => c != cached_c || d != cached_d,
             _ => true,
         };
-        if stale {
-            let dag_path = dir.join(".planning/dag.json");
-            match std::fs::read_to_string(&dag_path).map_err(anyhow::Error::from).and_then(|s| CodeDag::from_json(&s)) {
-                Ok(dag) => {
-                    self.dag = Some(dag);
-                    self.cargo_toml_mtime = mtime;
-                }
-                Err(e) => {
-                    log::debug!("phantom-context: DAG load failed (skipping topology): {e}");
-                    self.dag = None;
-                    self.cargo_toml_mtime = None;
-                }
+        if !stale {
+            return;
+        }
+
+        match std::fs::read_to_string(&dag_path)
+            .map_err(anyhow::Error::from)
+            .and_then(|s| CodeDag::from_json(&s))
+        {
+            Ok(dag) => {
+                self.dag = Some(dag);
+                self.cargo_toml_mtime = cargo_mtime;
+                self.dag_json_mtime = dag_mtime;
+            }
+            Err(e) => {
+                log::debug!("phantom-context: DAG load failed (skipping topology): {e}");
+                self.dag = None;
+                self.cargo_toml_mtime = None;
+                self.dag_json_mtime = None;
             }
         }
     }
@@ -355,16 +392,28 @@ impl ContextAssembler {
 
 /// Build the `## Crate Topology` markdown section from a [`CodeDag`].
 ///
-/// Lists the top 5 crates by in-degree (most depended-upon) in descending
-/// order.  Returns `None` when the DAG has no edges.
+/// `CodeDag` nodes are symbol-level (e.g.
+/// `phantom_agents::dispatch::dispatch_tool`), so this function aggregates
+/// in-degree by the leading `::`-separated component to produce a true
+/// crate-level ranking.  Self-edges between symbols in the same crate are
+/// excluded.  The top 5 crates by aggregated in-degree are listed in
+/// descending order, ties broken alphabetically.
+///
+/// Returns `None` when the DAG has no nodes.
 fn topology_section(dag: &CodeDag) -> Option<String> {
-    // Count in-degree: how many edges point *to* each node.
+    // Seed every observed crate so isolated crates appear with in-degree 0.
     let mut in_degree: HashMap<&str, usize> = HashMap::new();
     for node in dag.nodes() {
-        in_degree.entry(node.id()).or_insert(0);
+        in_degree.entry(crate_prefix(node.id())).or_insert(0);
     }
+    // Aggregate edge counts by crate prefix; ignore intra-crate edges.
     for edge in dag.edges() {
-        *in_degree.entry(edge.to()).or_insert(0) += 1;
+        let from_crate = crate_prefix(edge.from());
+        let to_crate = crate_prefix(edge.to());
+        if from_crate == to_crate {
+            continue;
+        }
+        *in_degree.entry(to_crate).or_insert(0) += 1;
     }
 
     if in_degree.is_empty() {
@@ -372,27 +421,37 @@ fn topology_section(dag: &CodeDag) -> Option<String> {
     }
 
     // Sort by descending in-degree, then alphabetically for determinism.
-    let mut ranked: Vec<(&&str, &usize)> = in_degree.iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let mut ranked: Vec<_> = in_degree.iter().map(|(k, v)| (*k, *v)).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
-    let top5: Vec<String> = ranked
+    let total = ranked.len();
+    let take = ranked.len().min(5);
+    let top: Vec<String> = ranked
         .into_iter()
-        .take(5)
-        .map(|(name, count)| format!("  {name} (in-degree: {count})"))
+        .take(take)
+        .map(|(name, count)| format!("- {name} (in-degree: {count})"))
         .collect();
 
-    Some(format!("## Crate Topology\nTop crates by dependents:\n{}", top5.join("\n")))
+    Some(format!(
+        "## Crate Topology ({total} crates, top {take} by dependents)\n\n{}",
+        top.join("\n")
+    ))
+}
+
+/// Return the leading `::`-separated component of a symbol id, i.e. the crate
+/// prefix.  For ids without `::` the entire id is returned unchanged.
+fn crate_prefix(id: &str) -> &str {
+    id.split_once("::").map(|(head, _)| head).unwrap_or(id)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Return the `mtime` of `Cargo.toml` in `dir`, or `None` on any I/O error.
-fn cargo_toml_mtime(dir: &Path) -> Option<SystemTime> {
-    std::fs::metadata(dir.join("Cargo.toml"))
-        .ok()
-        .and_then(|m| m.modified().ok())
+/// Return the `mtime` of `path`, or `None` on any I/O error (file missing,
+/// platform with no mtime, etc.).
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 /// Extract the project name from the manifest file, falling back to dir name.
@@ -644,7 +703,193 @@ mod tests {
         );
     }
 
-    /// The top-5 list must be sorted by descending in-degree.
+    /// Symbol-level node ids (e.g. `phantom_agents::dispatch::dispatch_tool`)
+    /// must be aggregated by their crate prefix so the topology output ranks
+    /// crates, not individual symbols.  Intra-crate edges are excluded.
+    #[test]
+    fn topology_section_aggregates_symbols_by_crate_prefix() {
+        let mut dag = CodeDag::new();
+        let node = |id: &str, kind: NodeKind| {
+            DagNode::new(id.to_owned(), kind, PathBuf::from("src/lib.rs"), 1)
+        };
+
+        // Three symbols in phantom_core, two in phantom_app, one in phantom_brain.
+        dag.add_node(node("phantom_core::api::run", NodeKind::Function));
+        dag.add_node(node("phantom_core::api::stop", NodeKind::Function));
+        dag.add_node(node("phantom_core::util::log", NodeKind::Function));
+        dag.add_node(node("phantom_app::main", NodeKind::Function));
+        dag.add_node(node("phantom_app::pane", NodeKind::Module));
+        dag.add_node(node("phantom_brain::loop_fn", NodeKind::Function));
+
+        // Cross-crate edges (4 total point into phantom_core).
+        dag.add_edge(DagEdge::new(
+            "phantom_app::main".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_app::pane".into(),
+            "phantom_core::api::stop".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_brain::loop_fn".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_brain::loop_fn".into(),
+            "phantom_core::util::log".into(),
+            EdgeKind::Calls,
+        ));
+        // Intra-crate edge (must be excluded from the aggregated count).
+        dag.add_edge(DagEdge::new(
+            "phantom_core::api::run".into(),
+            "phantom_core::util::log".into(),
+            EdgeKind::Calls,
+        ));
+
+        let section = topology_section(&dag).expect("section must be present");
+
+        // Header reports total *crates* (3), not symbols (6).
+        assert!(
+            section.contains("(3 crates, top 3 by dependents)"),
+            "expected aggregated crate header, got:\n{section}"
+        );
+        // phantom_core aggregates to in-degree 4, no individual symbol does.
+        assert!(
+            section.contains("phantom_core (in-degree: 4)"),
+            "expected aggregated phantom_core count of 4, got:\n{section}"
+        );
+        // Symbol-level ids must NOT leak into the listing.
+        assert!(
+            !section.contains("phantom_core::api::run"),
+            "symbol-level id leaked into crate topology:\n{section}"
+        );
+    }
+
+    /// `topology_section` must return `None` when the DAG has no nodes (regardless
+    /// of whether edges are present), matching the doc-comment contract.
+    #[test]
+    fn topology_section_none_when_no_nodes() {
+        let dag = CodeDag::new();
+        assert!(topology_section(&dag).is_none());
+    }
+
+    /// `crate_summary` must walk symbol-level edges, aggregate by crate prefix,
+    /// and exclude self-references / duplicates.
+    #[test]
+    fn crate_summary_aggregates_by_crate_prefix() {
+        let mut dag = CodeDag::new();
+        let node = |id: &str| {
+            DagNode::new(id.to_owned(), NodeKind::Function, PathBuf::from("src/lib.rs"), 1)
+        };
+        dag.add_node(node("phantom_core::api::run"));
+        dag.add_node(node("phantom_app::main"));
+        dag.add_node(node("phantom_brain::loop_fn"));
+
+        // phantom_core depends on phantom_brain twice; phantom_app + phantom_brain
+        // both depend on phantom_core.
+        dag.add_edge(DagEdge::new(
+            "phantom_core::api::run".into(),
+            "phantom_brain::loop_fn".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_core::api::run".into(),
+            "phantom_brain::loop_fn".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_app::main".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_brain::loop_fn".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+
+        let mut asm = ContextAssembler::new();
+        asm.dag = Some(dag);
+
+        let summary = asm
+            .crate_summary("phantom_core")
+            .expect("crate_summary must find phantom_core");
+
+        assert!(summary.contains("depends on: phantom_brain"), "got:\n{summary}");
+        // Both phantom_app and phantom_brain depend on phantom_core.
+        assert!(
+            summary.contains("depended on by: phantom_app, phantom_brain"),
+            "expected sorted, deduped dependents, got:\n{summary}"
+        );
+    }
+
+    /// A change to `.planning/dag.json` alone (Cargo.toml untouched) must
+    /// invalidate the cached DAG so the assembler reloads it.
+    #[test]
+    fn refresh_dag_invalidates_on_dag_json_mtime_change() {
+        let dir = tmp();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".planning")).unwrap();
+
+        // Seed the first DAG: just phantom_a.
+        let mut dag_v1 = CodeDag::new();
+        dag_v1.add_node(DagNode::new(
+            "phantom_a::lib".into(),
+            NodeKind::Module,
+            PathBuf::from("src/lib.rs"),
+            1,
+        ));
+        std::fs::write(
+            root.join(".planning/dag.json"),
+            dag_v1.to_json().expect("serialise dag_v1"),
+        )
+        .unwrap();
+
+        let mut asm = ContextAssembler::new();
+        let _ = asm.assemble(root);
+        let first = asm.agent_context(root);
+        assert!(first.contains("phantom_a"), "first load missing phantom_a:\n{first}");
+        assert!(!first.contains("phantom_b"), "first load should not have phantom_b yet");
+
+        // Rewrite dag.json with a new node, deliberately bumping the mtime so
+        // even coarse-grained filesystems register a change.
+        let mut dag_v2 = CodeDag::new();
+        dag_v2.add_node(DagNode::new(
+            "phantom_b::lib".into(),
+            NodeKind::Module,
+            PathBuf::from("src/lib.rs"),
+            1,
+        ));
+        std::fs::write(
+            root.join(".planning/dag.json"),
+            dag_v2.to_json().expect("serialise dag_v2"),
+        )
+        .unwrap();
+        let new_mtime = SystemTime::now() + std::time::Duration::from_secs(60);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(".planning/dag.json"))
+            .expect("open dag.json for mtime bump");
+        f.set_modified(new_mtime).expect("set_modified");
+        drop(f);
+
+        let second = asm.agent_context(root);
+        assert!(
+            second.contains("phantom_b"),
+            "second load missing phantom_b after dag.json change:\n{second}"
+        );
+    }
+
+    /// Helper retained from the original suite: the top-5 list must be sorted
+    /// by descending in-degree.
     #[test]
     fn top_five_depended_crates_sorted_by_in_degree() {
         let mut dag = CodeDag::new();
