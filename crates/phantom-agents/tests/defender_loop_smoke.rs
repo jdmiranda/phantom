@@ -87,7 +87,7 @@ async fn defender_challenge_loop_smoke() {
         role: AgentRole::Watcher,
         working_dir: dir.path(),
         registry: registry.clone(),
-        event_log: Some(event_log.clone()),
+        event_log: event_log.clone(),
         pending_spawn: new_spawn_queue(),
         source_event_id: None,
         quarantine: None,
@@ -95,6 +95,7 @@ async fn defender_challenge_loop_smoke() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let denied_result = dispatch_tool(
@@ -227,7 +228,7 @@ async fn defender_challenge_loop_smoke() {
         role: AgentRole::Defender,
         working_dir: dir.path(),
         registry: registry.clone(),
-        event_log: Some(event_log.clone()),
+        event_log: event_log.clone(),
         pending_spawn: new_spawn_queue(),
         source_event_id: None,
         quarantine: None,
@@ -235,6 +236,7 @@ async fn defender_challenge_loop_smoke() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let challenge_result = dispatch_tool(
@@ -353,7 +355,8 @@ fn offender_cannot_call_challenge_agent() {
         role: AgentRole::Watcher,
         working_dir: dir.path(),
         registry,
-        event_log: None,
+        // #645: DispatchContext::event_log is non-optional.
+        event_log: phantom_agents::test_support::fresh_log(),
         pending_spawn: new_spawn_queue(),
         source_event_id: None,
         quarantine: None,
@@ -361,6 +364,7 @@ fn offender_cannot_call_challenge_agent() {
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     };
 
     let result = dispatch_tool(

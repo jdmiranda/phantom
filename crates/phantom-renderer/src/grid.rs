@@ -387,6 +387,10 @@ pub struct GridCell {
     pub fg: [f32; 4],
     /// Background color (RGBA, linear). Fully transparent = no background quad.
     pub bg: [f32; 4],
+    /// Render this cell in bold weight.
+    pub bold: bool,
+    /// Render this cell in italic style.
+    pub italic: bool,
 }
 
 impl Default for GridCell {
@@ -395,6 +399,8 @@ impl Default for GridCell {
             ch: ' ',
             fg: [1.0, 1.0, 1.0, 1.0],
             bg: [0.0, 0.0, 0.0, 0.0], // transparent — no quad emitted
+            bold: false,
+            italic: false,
         }
     }
 }
@@ -405,6 +411,8 @@ impl GridCell {
         TerminalCell {
             ch: self.ch,
             fg: self.fg,
+            bold: self.bold,
+            italic: self.italic,
         }
     }
 }
@@ -638,6 +646,8 @@ mod tests {
             ch: 'A',
             fg: [1.0, 0.0, 0.0, 1.0],
             bg: [0.0, 0.0, 0.0, 1.0],
+            bold: false,
+            italic: false,
         };
         let tc = gc.as_terminal_cell();
         assert_eq!(tc.ch, 'A');

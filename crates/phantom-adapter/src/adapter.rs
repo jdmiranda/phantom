@@ -85,6 +85,24 @@ pub trait AppCore: Send {
     /// `attach_alt_screen_snapshot`.  Called when the secondary pane is
     /// collapsed.  The default is a no-op.
     fn detach_alt_screen_snapshot(&mut self) {}
+
+    /// Consume and return the most recent OSC 2 window title emitted by the
+    /// running program since the last call, if any.
+    ///
+    /// Terminal adapters override this to drain the title queue populated by
+    /// `Event::Title`.  The main event loop calls this each frame and forwards
+    /// the result to `winit_window.set_title()`.  Non-terminal adapters return
+    /// `None` (the default) and are silently skipped.
+    fn take_pending_window_title(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Drain any OSC 52 clipboard texts that the terminal has buffered since
+    /// the last call.  Terminal adapters override this to return decoded text;
+    /// all other adapters use the default empty-vec return.
+    fn drain_osc52(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Visual adapters that render into a rect.
@@ -263,6 +281,10 @@ pub struct TerminalCell {
     pub ch: char,
     pub fg: [f32; 4],
     pub bg: [f32; 4],
+    /// Whether this cell should be rendered in bold weight.
+    pub bold: bool,
+    /// Whether this cell should be rendered in italic style.
+    pub italic: bool,
 }
 
 /// Cursor position and appearance.

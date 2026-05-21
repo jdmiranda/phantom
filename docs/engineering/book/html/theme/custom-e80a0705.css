@@ -1,0 +1,307 @@
+/* =========================================================================
+   PHANTOM ENGINEERING DOCS · token vocabulary + 6 palette overrides
+   --------------------------------------------------------------------------
+   Single source of truth for color / spacing / typography tokens shared
+   between the docs site and (future) live Phantom UI work.  Six themes
+   selectable via the [data-theme] attribute on <html>; phosphor is the
+   default.
+   ========================================================================= */
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Default = phosphor
+   ────────────────────────────────────────────────────────────────────────── */
+:root,
+[data-theme="phosphor"] {
+  --pf-surface-recessed:  #060a10;
+  --pf-surface-base:      #0a0e14;
+  --pf-surface-raised:    #0d1219;
+  --pf-surface-floating:  #11171f;
+
+  --pf-frame-dim:         #1a2a18;
+  --pf-frame-active:      #33ff00;
+  --pf-divider:           #15281a;
+
+  --pf-text-dim:          #4a8048;
+  --pf-text-secondary:    #6f9f6a;
+  --pf-text-primary:      #b8ffb8;
+  --pf-text-bright:       #33ff00;
+  --pf-text-accent:       #5fff20;
+
+  --pf-status-ok:         #33ff00;
+  --pf-status-warn:       #ffb000;
+  --pf-status-danger:     #ff3344;
+  --pf-status-info:       #66ddff;
+
+  --pf-role-user:         #c4ff66;
+  --pf-role-agent:        #33ff00;
+  --pf-role-tool:         #66ddff;
+  --pf-role-system:       #ffb000;
+
+  --pf-glow:              0 0 12px rgba(51, 255, 0, 0.32);
+  --pf-selection:         rgba(51, 255, 0, 0.22);
+}
+
+[data-theme="amber"] {
+  --pf-surface-recessed:  #0a0500;
+  --pf-surface-base:      #110800;
+  --pf-surface-raised:    #170c01;
+  --pf-surface-floating:  #1e1004;
+  --pf-frame-dim:         #3a2304;
+  --pf-frame-active:      #ffb000;
+  --pf-divider:           #2a1903;
+  --pf-text-dim:          #806430;
+  --pf-text-secondary:    #b88f4e;
+  --pf-text-primary:      #ffd9a3;
+  --pf-text-bright:       #ffb000;
+  --pf-text-accent:       #ffc94d;
+  --pf-status-ok:         #c4ff66;
+  --pf-status-warn:       #ffb000;
+  --pf-status-danger:     #ff5544;
+  --pf-status-info:       #ffce5f;
+  --pf-role-user:         #ffd9a3;
+  --pf-role-agent:        #ffb000;
+  --pf-role-tool:         #ffce5f;
+  --pf-role-system:       #ff5544;
+  --pf-glow:              0 0 14px rgba(255, 176, 0, 0.32);
+  --pf-selection:         rgba(255, 176, 0, 0.22);
+}
+
+[data-theme="ice"] {
+  --pf-surface-recessed:  #04080d;
+  --pf-surface-base:      #060c14;
+  --pf-surface-raised:    #08111b;
+  --pf-surface-floating:  #0c1924;
+  --pf-frame-dim:         #18324a;
+  --pf-frame-active:      #66ddff;
+  --pf-divider:           #14283c;
+  --pf-text-dim:          #4a7d99;
+  --pf-text-secondary:    #6fa3c4;
+  --pf-text-primary:      #b8e0ff;
+  --pf-text-bright:       #66ddff;
+  --pf-text-accent:       #5fc4ff;
+  --pf-status-ok:         #5fffb8;
+  --pf-status-warn:       #ffce5f;
+  --pf-status-danger:     #ff5fa3;
+  --pf-status-info:       #66ddff;
+  --pf-role-user:         #b8e0ff;
+  --pf-role-agent:        #66ddff;
+  --pf-role-tool:         #5fffb8;
+  --pf-role-system:       #ffce5f;
+  --pf-glow:              0 0 14px rgba(102, 221, 255, 0.32);
+  --pf-selection:         rgba(102, 221, 255, 0.22);
+}
+
+[data-theme="blood"] {
+  --pf-surface-recessed:  #0c0405;
+  --pf-surface-base:      #110608;
+  --pf-surface-raised:    #18090c;
+  --pf-surface-floating:  #1f0c10;
+  --pf-frame-dim:         #3c1820;
+  --pf-frame-active:      #ff3344;
+  --pf-divider:           #2a1218;
+  --pf-text-dim:          #8a4048;
+  --pf-text-secondary:    #b8666d;
+  --pf-text-primary:      #ffd0d4;
+  --pf-text-bright:       #ff3344;
+  --pf-text-accent:       #ff6680;
+  --pf-status-ok:         #66ff80;
+  --pf-status-warn:       #ffaa44;
+  --pf-status-danger:     #ff3344;
+  --pf-status-info:       #ff80c4;
+  --pf-role-user:         #ffd0d4;
+  --pf-role-agent:        #ff3344;
+  --pf-role-tool:         #ff80c4;
+  --pf-role-system:       #ffaa44;
+  --pf-glow:              0 0 14px rgba(255, 51, 68, 0.36);
+  --pf-selection:         rgba(255, 51, 68, 0.22);
+}
+
+[data-theme="vapor"] {
+  --pf-surface-recessed:  #0a0418;
+  --pf-surface-base:      #0e0626;
+  --pf-surface-raised:    #150a36;
+  --pf-surface-floating:  #1c1048;
+  --pf-frame-dim:         #3a1c5e;
+  --pf-frame-active:      #ff44dd;
+  --pf-divider:           #2a1444;
+  --pf-text-dim:          #8a4ec4;
+  --pf-text-secondary:    #c08eff;
+  --pf-text-primary:      #f0e2ff;
+  --pf-text-bright:       #ff44dd;
+  --pf-text-accent:       #5fc4ff;
+  --pf-status-ok:         #5fffd0;
+  --pf-status-warn:       #ffc94d;
+  --pf-status-danger:     #ff5fa3;
+  --pf-status-info:       #5fc4ff;
+  --pf-role-user:         #ff44dd;
+  --pf-role-agent:        #5fc4ff;
+  --pf-role-tool:         #5fffd0;
+  --pf-role-system:       #ffc94d;
+  --pf-glow:              0 0 18px rgba(255, 68, 221, 0.42);
+  --pf-selection:         rgba(95, 196, 255, 0.24);
+}
+
+[data-theme="cyber"] {
+  --pf-surface-recessed:  #050208;
+  --pf-surface-base:      #0a0410;
+  --pf-surface-raised:    #130820;
+  --pf-surface-floating:  #1c0e30;
+  --pf-frame-dim:         #3a1850;
+  --pf-frame-active:      #ff007a;
+  --pf-divider:           #221038;
+  --pf-text-dim:          #7a3c8a;
+  --pf-text-secondary:    #c44ed8;
+  --pf-text-primary:      #f0d4ff;
+  --pf-text-bright:       #ff007a;
+  --pf-text-accent:       #00ffd0;
+  --pf-status-ok:         #00ffd0;
+  --pf-status-warn:       #ffe44d;
+  --pf-status-danger:     #ff4444;
+  --pf-status-info:       #00b4ff;
+  --pf-role-user:         #00ffd0;
+  --pf-role-agent:        #ff007a;
+  --pf-role-tool:         #ffe44d;
+  --pf-role-system:       #ff4444;
+  --pf-glow:              0 0 18px rgba(255, 0, 122, 0.5);
+  --pf-selection:         rgba(0, 255, 208, 0.24);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Apply tokens to mdBook's default theme — overrides for the active palette
+   ────────────────────────────────────────────────────────────────────────── */
+html[data-theme] body,
+html[data-theme] .content {
+  background-color: var(--pf-surface-base) !important;
+  color: var(--pf-text-primary) !important;
+}
+
+html[data-theme] .menu-bar,
+html[data-theme] .sidebar {
+  background-color: var(--pf-surface-recessed) !important;
+  color: var(--pf-text-secondary) !important;
+  border-color: var(--pf-divider) !important;
+}
+
+html[data-theme] .sidebar .chapter li.chapter-item {
+  color: var(--pf-text-secondary);
+}
+html[data-theme] .chapter li.chapter-item a {
+  color: var(--pf-text-secondary) !important;
+}
+html[data-theme] .chapter li.chapter-item a:hover,
+html[data-theme] .chapter li.chapter-item a.active {
+  color: var(--pf-text-bright) !important;
+}
+
+html[data-theme] a,
+html[data-theme] .content a {
+  color: var(--pf-text-accent) !important;
+}
+html[data-theme] a:hover {
+  color: var(--pf-text-bright) !important;
+  text-shadow: var(--pf-glow);
+}
+
+html[data-theme] h1, html[data-theme] h2, html[data-theme] h3,
+html[data-theme] h4, html[data-theme] h5, html[data-theme] h6 {
+  color: var(--pf-text-bright) !important;
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  letter-spacing: 0.01em;
+}
+html[data-theme] h1 { text-shadow: var(--pf-glow); }
+
+html[data-theme] code {
+  background-color: var(--pf-surface-recessed) !important;
+  color: var(--pf-text-accent) !important;
+  border: 1px solid var(--pf-frame-dim) !important;
+}
+html[data-theme] pre {
+  background-color: var(--pf-surface-recessed) !important;
+  border: 1px solid var(--pf-frame-dim) !important;
+}
+html[data-theme] pre code {
+  background: transparent !important;
+  border: 0 !important;
+}
+
+html[data-theme] table thead {
+  background-color: var(--pf-surface-floating) !important;
+  color: var(--pf-text-bright) !important;
+}
+html[data-theme] table tr {
+  border-color: var(--pf-divider) !important;
+}
+html[data-theme] table td,
+html[data-theme] table th {
+  border-color: var(--pf-divider) !important;
+}
+
+html[data-theme] hr {
+  border-color: var(--pf-divider) !important;
+}
+
+html[data-theme] blockquote {
+  border-left-color: var(--pf-frame-active) !important;
+  background-color: var(--pf-surface-raised) !important;
+  color: var(--pf-text-secondary) !important;
+}
+
+html[data-theme] ::selection {
+  background-color: var(--pf-selection);
+  color: var(--pf-text-bright);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Custom 6-palette switcher (injected by theme-switch.js)
+   ────────────────────────────────────────────────────────────────────────── */
+.pf-theme-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+}
+.pf-theme-switch .pf-sw {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--pf-frame-dim);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+}
+.pf-theme-switch .pf-sw.active {
+  border-color: var(--pf-frame-active);
+  box-shadow: var(--pf-glow);
+  transform: scale(1.15);
+}
+.pf-theme-switch .pf-sw[data-pf-set="phosphor"] { background: #33ff00; }
+.pf-theme-switch .pf-sw[data-pf-set="amber"]    { background: #ffb000; }
+.pf-theme-switch .pf-sw[data-pf-set="ice"]      { background: #66ddff; }
+.pf-theme-switch .pf-sw[data-pf-set="blood"]    { background: #ff3344; }
+.pf-theme-switch .pf-sw[data-pf-set="vapor"]    { background: linear-gradient(135deg, #ff44dd 0%, #5fc4ff 100%); }
+.pf-theme-switch .pf-sw[data-pf-set="cyber"]    { background: linear-gradient(135deg, #ff007a 0%, #00ffd0 100%); }
+
+/* Mermaid: tone the default white background to the active palette */
+html[data-theme] .mermaid {
+  background: var(--pf-surface-raised) !important;
+  border: 1px solid var(--pf-frame-dim);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+/* Chips for status / role tagging in markdown (`{:.chip-warn}` pattern) */
+.chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid var(--pf-frame-dim);
+  color: var(--pf-text-secondary);
+}
+.chip.ok      { color: var(--pf-status-ok);     border-color: var(--pf-status-ok); }
+.chip.warn    { color: var(--pf-status-warn);   border-color: var(--pf-status-warn); }
+.chip.danger  { color: var(--pf-status-danger); border-color: var(--pf-status-danger); }
+.chip.info    { color: var(--pf-status-info);   border-color: var(--pf-status-info); }

@@ -15,7 +15,7 @@ mod tests;
 
 use std::sync::{Arc, Mutex};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use phantom_agents::agent::{Agent, AgentMessage, allocate_agent_id};
 use phantom_agents::api::{ApiEvent, ApiHandle, ClaudeConfig};
@@ -23,7 +23,7 @@ use phantom_agents::chat::{ChatBackend, ChatError, ChatModel, build_backend_with
 use phantom_agents::permissions::PermissionSet;
 use phantom_agents::role::{AgentRole, CapabilityClass};
 use phantom_agents::spawn_rules::SubstrateEvent;
-use phantom_agents::tools::{ToolCall, available_tools};
+use phantom_agents::tools::{ToolCall, available_tools, lifecycle_tools};
 use phantom_agents::{AgentSpawnOpts, AgentTask};
 use phantom_history::{AgentOutputCapture, ToolCall as HistoryToolCall};
 use phantom_session::AgentSnapshot;
@@ -44,7 +44,14 @@ pub(crate) use events::{new_blocked_event_sink, new_denied_event_sink};
 const DEFAULT_AGENT_PANE_ROLE: AgentRole = AgentRole::Conversational;
 
 /// Maximum number of tool-use rounds before the agent is force-stopped.
-const MAX_TOOL_ROUNDS: u32 = 25;
+pub(super) const MAX_TOOL_ROUNDS: u32 = 25;
+
+/// Issue #646: consecutive `complete_task` schema validation failures that
+/// trigger an [`AgentPaneStatus::Failed`] transition with the canonical
+/// `"complete_task: schema validation failed 3x"` reason. Per the issue's
+/// acceptance criteria this is a hard 3-strike — there is no exponential
+/// back-off or recovery window beyond the consecutive-failure reset.
+pub(super) const COMPLETE_TASK_VALIDATION_FLATLINE: u8 = 3;
 
 /// Number of consecutive tool-call failures before the pane emits a substrate
 /// `AgentBlocked` event.
@@ -89,6 +96,43 @@ pub(crate) type AgentSnapshotQueue = Arc<Mutex<Vec<AgentSnapshot>>>;
 /// Construct a fresh, empty [`AgentSnapshotQueue`].
 pub(crate) fn new_agent_snapshot_queue() -> AgentSnapshotQueue {
     Arc::new(Mutex::new(Vec::new()))
+}
+
+// ---------------------------------------------------------------------------
+// PaneMessage — structured UI-layer message log
+// ---------------------------------------------------------------------------
+
+/// Role of a message in the agent pane's structured message log.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // ToolResult variant constructed by execute.rs; tool_name consumed by future adapter
+pub(crate) enum PaneMessageRole {
+    Assistant,
+    ToolCall { tool_name: String },
+    ToolResult,
+    System,
+}
+
+/// A single entry in the agent pane's structured message history.
+#[derive(Debug, Clone)]
+pub(crate) struct PaneMessage {
+    pub(crate) role: PaneMessageRole,
+    pub(crate) content: String,
+    #[allow(dead_code)] // timestamp_ms read by the timeline adapter (Phase 2)
+    pub(crate) timestamp_ms: u64,
+}
+
+impl PaneMessage {
+    fn now(role: PaneMessageRole, content: impl Into<String>) -> Self {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Self {
+            role,
+            content: content.into(),
+            timestamp_ms,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +303,45 @@ pub(crate) struct AgentPane {
     /// string instead of panicking — the graceful fallback is always preserved.
     pub(super) dag_explorer:
         Option<phantom_agents::dag_explorer::DagExplorerContext>,
+
+    /// Structured UI-layer message log. Each `PaneMessage` captures a role
+    /// transition (Assistant text delta, ToolCall, ToolResult, System) with a
+    /// millisecond-precision timestamp. The adapter reads this to render a
+    /// richer message timeline instead of the raw `output` string.
+    #[allow(dead_code)] // Read by the timeline adapter (Phase 2) and tests
+    pub(super) pane_messages: Vec<PaneMessage>,
+
+    /// Optional TTS sender: when `Some`, every completed assistant message is
+    /// forwarded here for audio playback.  `None` when TTS is disabled or
+    /// unavailable.  The pipeline's background worker is the only consumer;
+    /// `try_send` is used (non-blocking) so a slow audio device never stalls
+    /// the agent pane's render loop.
+    pub(super) tts_tx: Option<tokio::sync::mpsc::Sender<String>>,
+
+    /// Issue #646: consecutive `complete_task` schema validation failures.
+    ///
+    /// Incremented every time the agent emits a `complete_task` lifecycle
+    /// signal whose `result` payload fails the must-be-an-object gate.
+    /// Reset to 0 on either a successful `complete_task` call OR any
+    /// non-`complete_task` tool call — consecutive-failure semantics so a
+    /// single bad call followed by recovery does not flatline.
+    ///
+    /// When the counter reaches [`COMPLETE_TASK_VALIDATION_FLATLINE`], the
+    /// pane transitions to [`AgentPaneStatus::Failed`] with the reason
+    /// `"complete_task: schema validation failed 3x"`. Per-loop `exit_schema`
+    /// binding (beyond the must-be-object gate) is out of scope here and
+    /// deferred to the loop overseer.
+    pub(super) validation_failure_count: u8,
+
+    /// Shared MCP tool registry for external tool fallback.
+    ///
+    /// Set at spawn time by [`App::spawn_agent_pane_with_opts`] via
+    /// [`AgentPane::set_mcp_registry`]. When `Some`, `build_dispatch_context`
+    /// forwards it into [`phantom_agents::dispatch::DispatchContext::mcp_registry`]
+    /// so unknown tool names are routed to connected MCP servers.
+    /// `None` disables MCP fallback (legacy / test paths).
+    pub(super) mcp_registry:
+        Option<std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +402,10 @@ impl AgentPane {
             capture_session_uuid: uuid::Uuid::nil(),
             capture_tool_calls: Vec::new(),
             dag_explorer: None,
+            pane_messages: Vec::new(),
+            tts_tx: None,
+            mcp_registry: None,
+            validation_failure_count: 0,
         }
     }
 
@@ -405,6 +492,9 @@ impl AgentPane {
         // Allocate from the process-global counter so the id is distinct from
         // any id produced via AgentManager::spawn on another path (fixes #513).
         let mut agent = Agent::new(allocate_agent_id(), task.clone());
+        // Issue #646: forward the spawn-opt opt-in to the agent so the loop
+        // can enforce the `complete_task` termination contract end-to-end.
+        agent.set_requires_complete_task(opts.requires_complete_task());
         let sys_prompt = agent.system_prompt();
         agent.push_message(AgentMessage::System(sys_prompt));
 
@@ -438,7 +528,14 @@ impl AgentPane {
         };
         agent.push_message(AgentMessage::User(user_prompt));
 
-        let tools = available_tools();
+        // Issue #646: agents that opt in to the lifecycle contract see
+        // `complete_task` and `abort_task` in their LLM tool manifest so the
+        // model can emit the terminal signal. The parser diverts these names
+        // ahead of `ToolType::from_api_name` into `ApiEvent::CompleteTask`.
+        let mut tools = available_tools();
+        if agent.requires_complete_task() {
+            tools.extend(lifecycle_tools());
+        }
 
         info!(
             "Agent pane spawning: {} messages (system={}, user={}, backend={})",
@@ -502,6 +599,13 @@ impl AgentPane {
             capture_tool_calls: Vec::new(),
             quarantine: None,
             dag_explorer: None,
+            pane_messages: vec![PaneMessage::now(
+                PaneMessageRole::System,
+                "● Agent working...",
+            )],
+            tts_tx: None,
+            mcp_registry: None,
+            validation_failure_count: 0,
         }
     }
 
@@ -537,6 +641,15 @@ impl AgentPane {
         self.snapshot_sink = Some(sink);
     }
 
+    /// Wire the TTS sender so completed assistant messages are spoken aloud.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` when a [`TtsPipeline`] is
+    /// active. When `None` (no TTS available) this is never called; the field
+    /// stays `None` and the TTS path is silently skipped on every `poll()`.
+    pub(crate) fn set_tts_tx(&mut self, tx: tokio::sync::mpsc::Sender<String>) {
+        self.tts_tx = Some(tx);
+    }
+
     /// Wire the shared [`GhTicketDispatcher`] handle for Dispatcher-role panes.
     ///
     /// Called by `App::spawn_agent_pane_with_opts` immediately after
@@ -570,6 +683,20 @@ impl AgentPane {
     }
 
     /// Wire the history capture sidecar into this pane.
+    /// Wire the shared MCP tool registry into this pane.
+    ///
+    /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
+    /// When wired, unknown tool names in dispatch are forwarded to the
+    /// connected MCP servers instead of returning an immediate error.
+    /// `None` (the default) disables MCP fallback — correct for legacy / test
+    /// paths that have not connected any external servers.
+    pub(crate) fn set_mcp_registry(
+        &mut self,
+        registry: std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>,
+    ) {
+        self.mcp_registry = Some(registry);
+    }
+
     ///
     /// Called by `App::spawn_agent_pane_with_opts` after `spawn_with_opts`.
     /// When `None` is held (legacy / test path), tool calls and output are
@@ -595,6 +722,18 @@ impl AgentPane {
                     self.output_tokens += (text.len() / 4) as u32;
                     self.output.push_str(&text);
                     self.current_assistant_text.push_str(&text);
+                    // Accumulate into the last Assistant message or start a new one.
+                    match self.pane_messages.last_mut() {
+                        Some(PaneMessage { role: PaneMessageRole::Assistant, content, .. }) => {
+                            content.push_str(&text);
+                        }
+                        _ => {
+                            self.pane_messages.push(PaneMessage::now(
+                                PaneMessageRole::Assistant,
+                                &text,
+                            ));
+                        }
+                    }
                     if let Some(ref mut j) = self.journal {
                         let first_line = text.lines().next().unwrap_or("").to_string();
                         if !first_line.is_empty()
@@ -615,6 +754,18 @@ impl AgentPane {
                 }
                 Some(ApiEvent::ToolUse { id, call }) => {
                     let args_display = format_tool_args(&call.tool, &call.args);
+                    {
+                        let tool_name = call.tool.api_name().to_string();
+                        let tool_display = if args_display.is_empty() {
+                            tool_name.clone()
+                        } else {
+                            format!("{tool_name} {args_display}")
+                        };
+                        self.pane_messages.push(PaneMessage::now(
+                            PaneMessageRole::ToolCall { tool_name },
+                            tool_display,
+                        ));
+                    }
                     if let Some(ref mut j) = self.journal
                         && let Err(e) = j.record_tool_call(self.agent.id(), call.tool.api_name(), &args_display) {
                             warn!("AgentJournal::record_tool_call failed: {e}");
@@ -638,12 +789,110 @@ impl AgentPane {
                     ));
                     self.tool_use_ids.push(id.clone());
                     self.pending_tools.push((id, call));
+                    // Issue #646: any non-`complete_task` tool call resets the
+                    // consecutive validation-failure streak. The counter only
+                    // tracks back-to-back invalid `complete_task` calls; a
+                    // single bad call followed by recovery should not
+                    // flatline the pane.
+                    self.validation_failure_count = 0;
                     got_content = true;
+                }
+                Some(ApiEvent::CompleteTask { id: _, result }) => {
+                    // Issue #646 broader implementation: schema-validate the
+                    // payload, count consecutive failures, and flatline after
+                    // three back-to-back invalid calls.
+                    //
+                    // Validation gate: `result` must be a JSON Object. The
+                    // parser at `phantom_agents::api::parse_response` lets
+                    // non-object inputs through specifically for
+                    // `complete_task` so this consumer-side gate can count
+                    // them. Per-loop `exit_schema` binding (beyond
+                    // must-be-object) is out of scope.
+                    if !result.is_object() {
+                        self.validation_failure_count =
+                            self.validation_failure_count.saturating_add(1);
+                        warn!(
+                            "AgentPane #{}: complete_task schema validation failed (count={}/{}, got {result})",
+                            self.agent.id(),
+                            self.validation_failure_count,
+                            COMPLETE_TASK_VALIDATION_FLATLINE
+                        );
+                        self.output.push_str(&format!(
+                            "\n⚠ complete_task: result must be a JSON object (failure {}/{})\n",
+                            self.validation_failure_count,
+                            COMPLETE_TASK_VALIDATION_FLATLINE
+                        ));
+
+                        if self.validation_failure_count >= COMPLETE_TASK_VALIDATION_FLATLINE {
+                            let reason = "complete_task: schema validation failed 3x".to_string();
+                            if let Some(ref mut j) = self.journal
+                                && let Err(e) = j.record_flatline(self.agent.id(), reason.clone()) {
+                                    warn!("AgentJournal::record_flatline (validation) failed: {e}");
+                                }
+                            self.output.push_str(&format!("\n\n✗ {reason}\n"));
+                            self.rollback_if_dirty();
+                            self.flush_capture_record();
+                            self.status = AgentPaneStatus::Failed;
+                            self.api_handle = None;
+                            self.push_snapshot();
+                            self.save_conversation();
+                            got_content = true;
+                            break;
+                        }
+
+                        // Sub-threshold failure: do NOT end the loop. The
+                        // model may emit a valid `complete_task` next turn.
+                        // Surface the validation error back to the model via
+                        // the conversation so it can self-correct.
+                        self.agent.push_message(AgentMessage::User(format!(
+                            "Your last complete_task call's result was not a JSON object \
+                             (got {result}). Try again — `result` must be an object."
+                        )));
+                        got_content = true;
+                        continue;
+                    }
+
+                    // Valid schema. Reset the counter, capture the payload
+                    // on the agent, and end the loop. The pane transitions
+                    // to `Done` to mirror the bookkeeping the `ApiEvent::Done`
+                    // arm performs for state-implicit termination.
+                    self.validation_failure_count = 0;
+                    self.agent.complete_with_result(result);
+
+                    if let Some(ref mut j) = self.journal {
+                        let summary = format!(
+                            "complete_task; ~{}in/~{}out tokens, {} tool calls",
+                            self.input_tokens, self.output_tokens, self.tool_call_count
+                        );
+                        if let Err(e) = j.record_completion(self.agent.id(), true, summary) {
+                            warn!("AgentJournal::record_completion failed: {e}");
+                        }
+                    }
+                    self.output.push_str(&format!(
+                        "\n\n✓ Agent completed (complete_task) | ~{}in / ~{}out tokens | {} tool calls\n",
+                        self.input_tokens, self.output_tokens, self.tool_call_count,
+                    ));
+                    self.status = AgentPaneStatus::Done;
+                    self.api_handle = None;
+                    self.push_snapshot();
+                    self.flush_capture_record();
+                    self.save_conversation();
+                    got_content = true;
+                    break;
                 }
                 Some(ApiEvent::Done) => {
                     // Flush accumulated assistant text into the conversation.
                     if !self.current_assistant_text.is_empty() {
                         let text = std::mem::take(&mut self.current_assistant_text);
+                        // Forward to TTS pipeline (non-blocking; drops silently
+                        // if the channel is full or TTS is disabled).
+                        if self
+                            .tts_tx
+                            .as_ref()
+                            .is_some_and(|tx| tx.try_send(text.clone()).is_err())
+                        {
+                            debug!("TTS channel full or closed — skipping speech");
+                        }
                         self.agent.push_message(AgentMessage::Assistant(text));
                     }
 
@@ -700,6 +949,26 @@ impl AgentPane {
         &self.task
     }
 
+    /// Return the agent's full conversation message history.
+    ///
+    /// Used by `AgentAdapter::render` to build `MessageBlock` widgets for
+    /// each turn instead of rendering raw cached output lines (Bug 4 fix).
+    pub(crate) fn messages(&self) -> &[AgentMessage] {
+        self.agent.messages()
+    }
+
+    /// Format a `ToolCall`'s args as a compact human-readable string.
+    ///
+    /// Delegates to `execute::format_tool_args`; exposed at `pub(crate)` so
+    /// `adapters/agent.rs` can use it when building `MessageBlock` widgets for
+    /// `ToolUse` messages without needing access to the private `execute` module.
+    pub(crate) fn format_tool_args_for_display(
+        tool: &phantom_agents::tools::ToolType,
+        args: &serde_json::Value,
+    ) -> String {
+        execute::format_tool_args(tool, args)
+    }
+
     /// Return the stable [`phantom_agents::AgentId`] assigned at spawn time.
     ///
     /// Used by `phantom.spawn_agent` (issue #399) to return a stable id to
@@ -727,6 +996,16 @@ impl AgentPane {
     /// driven by `AgentAdapter::update`.
     pub(crate) fn cached_lines(&self) -> &[String] {
         &self.cached_lines
+    }
+
+    /// Return the structured message history for this pane.
+    ///
+    /// Each entry carries a [`PaneMessageRole`], content string, and
+    /// millisecond-precision timestamp so adapters can render a rich timeline
+    /// instead of scanning the raw `output` string.
+    #[allow(dead_code)] // Called by the timeline adapter (Phase 2) and tests
+    pub(crate) fn pane_messages(&self) -> &[PaneMessage] {
+        &self.pane_messages
     }
 
     /// Override the status field from adapter-side command handling.
@@ -812,7 +1091,12 @@ impl AgentPane {
         self.agent.push_message(AgentMessage::User(message));
 
         // Re-invoke the chat backend with the updated conversation.
-        let tools = available_tools();
+        // Issue #646: extend the tool manifest with lifecycle tools when the
+        // agent opted into the `complete_task` contract.
+        let mut tools = available_tools();
+        if self.agent.requires_complete_task() {
+            tools.extend(lifecycle_tools());
+        }
         let handle = Self::dispatch(
             self.chat_backend.as_deref(),
             &self.claude_config,
