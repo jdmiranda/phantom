@@ -59,6 +59,7 @@ pub fn run_headless(_config: PhantomConfig) -> Result<()> {
         privacy_mode: false,
         // Headless mode has no relay connection by default.
         relay_inbound_rx: None,
+        recall_context: None,
         // Headless boot has no prior history snapshot to seed the brain with.
         history_context: Vec::new(),
         // Self-improvement defaults to OFF per design doc §5.1; the operator

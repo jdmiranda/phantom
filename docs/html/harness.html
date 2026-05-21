@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · harness control</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 07 · HARNESS CONTROL · STRUCTURE OVER PROMPTING</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html" class="active">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 07 · HARNESS CONTROL</span>
+    <span class="sysid">SYS://harness.0</span>
+  </div>
+  <h1 class="page-title">Harness Control</h1>
+  <p class="page-lede">
+    Agent constraints belong in the harness, not the prompt. "Prompt it better" is never the answer because the
+    model can always be talked out of a rule. The harness can't be talked out of anything. Phantom's design
+    pushes every constraint that <em>can</em> be enforced structurally <em>down</em> to the substrate — tool
+    whitelists, state machines, typed messages, schema validation — and reserves the prompt for taste, not
+    contracts.
+  </p>
+
+  <div class="callout callout-danger">
+    <div class="callout-title">The anti-pattern</div>
+    Every "AI agent that goes off the rails" story has the same shape: the developer's only enforcement
+    mechanism was the system prompt. <em>"You MUST NOT delete files outside of …"</em> is not a constraint;
+    it's a wish. If <code>rm -rf /</code> is reachable through a tool the agent has, the constraint is structural,
+    not textual. Prompt it better is not the fix.
+  </div>
+
+  <h2>The four properties</h2>
+  <p>
+    All four are landed on <code>main</code>. The five audit gaps tracked under issue <code>#650</code> are closed.
+  </p>
+
+  <div class="grid grid-2">
+    <div class="card panel-active">
+      <div class="card-h">
+        <span class="card-title">Property 1 · Per-role tool whitelists</span>
+        <span class="pill pill-ok">LANDED</span>
+      </div>
+      <div class="card-body">
+        Every tool-use routes through the capability gate at <code>phantom-agents/src/dispatch/mod.rs</code>:
+<pre class="code-rust" style="margin-top:8px"><code>capability::<span class="fn">check_capability</span>(ctx.role, tool.<span class="fn">class</span>())?;</code></pre>
+        Denial returns a canonical <code>"capability denied: &lt;Class&gt; not in &lt;Role&gt; manifest"</code> ToolResult.
+        PR <code>#655</code> made the event log non-optional at this boundary — the gate cannot be silently
+        bypassed.
+      </div>
+    </div>
+
+    <div class="card panel-active">
+      <div class="card-h">
+        <span class="card-title">Property 2 · External state machine</span>
+        <span class="pill pill-ok">LANDED</span>
+      </div>
+      <div class="card-body">
+        <code>phantom-brain::TaskLedger</code> with the <code>try_dispatch</code> guarded mutator. The agent
+        cannot transition its own plan-step status — only the ledger can, and only through a typed call that
+        returns <code>Result&lt;&amp;PlanStep, DispatchBlocked&gt;</code>. The 9-state <code>AgentStatus</code> FSM
+        makes illegal transitions unrepresentable. PR <code>#654</code> + PR <code>#657</code> closed the
+        relevant gaps.
+      </div>
+    </div>
+
+    <div class="card panel-active">
+      <div class="card-h">
+        <span class="card-title">Property 3 · Structured exit</span>
+        <span class="pill pill-ok">LANDED</span>
+      </div>
+      <div class="card-body">
+        The <code>complete_task</code> lifecycle tool with typed JSON payload validated against the per-loop
+        <code>ExitSchema</code>. The legacy stringly-typed PARTIAL exit is gone. A 3-strike
+        <code>validation_failure_count</code> on the pane flatlines after three consecutive schema-invalid
+        calls. PRs <code>#652</code> + <code>#656</code>.
+      </div>
+    </div>
+
+    <div class="card panel-active">
+      <div class="card-h">
+        <span class="card-title">Property 4 · Typed inter-agent messaging</span>
+        <span class="pill pill-ok">LANDED</span>
+      </div>
+      <div class="card-body">
+        <code>phantom-protocol::Event</code> bus with 22 typed variants + <code>EventTopic</code> routing.
+        <code>FastPathTaken</code> envelope (PR <code>#653</code>) audits every gate skip.
+        <code>phantom-loop::LoopMessage</code> with <code>LoopQueueRegistry</code> handles cross-loop fan-out.
+        Strings between agents are no longer first-class.
+      </div>
+    </div>
+  </div>
+
+  <h2>The 22 typed Event variants</h2>
+  <p>Strings die at the wire format. Every event is a tagged variant.</p>
+
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-h"><span class="card-title amber">Terminal I/O · 5</span></div>
+      <div class="card-body" style="font-size:12px">
+        <code>TerminalOutput { app_id, bytes }</code><br>
+        <code>CommandStarted { app_id, command }</code><br>
+        <code>CommandComplete { app_id, exit_code }</code><br>
+        <code>SubprocessTakeoverDetected</code><br>
+        <code>SubprocessTakeoverCleared</code>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title amber">Agent lifecycle · 5</span></div>
+      <div class="card-body" style="font-size:12px">
+        <code>AgentSpawned</code><br>
+        <code>AgentProgress { fraction, message }</code><br>
+        <code>AgentTaskComplete { success, summary, result }</code><br>
+        <code>AgentError</code><br>
+        <code>FastPathTaken { kind, reason }</code>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title amber">Session &amp; focus · 2</span></div>
+      <div class="card-body" style="font-size:12px">
+        <code>SessionSwitched</code><br>
+        <code>FocusChanged</code>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title amber">Brain &amp; NLP · 2</span></div>
+      <div class="card-body" style="font-size:12px">
+        <code>BrainDecision { action, confidence }</code><br>
+        <code>NlpInterpreted { input, action }</code>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title amber">Media &amp; FX · 3</span></div>
+      <div class="card-body" style="font-size:12px">
+        <code>VideoPlaybackStateChanged</code><br>
+        <code>FrameCaptured</code><br>
+        <code>GlitchFxTriggered</code>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title amber">System · 3</span></div>
+      <div class="card-body" style="font-size:12px">
+        <code>MemoryPressure { bytes_free }</code><br>
+        <code>JobCompleted</code><br>
+        <code>Shutdown</code>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title amber">Custom · 1</span></div>
+      <div class="card-body" style="font-size:12px">
+        <code>Custom { kind, data }</code> — escape hatch for plugin events.
+      </div>
+    </div>
+  </div>
+
+  <p class="muted">
+    Plus <code>EventTopic</code> routing (8 categories): Terminal, Agents, Sessions, Brain, Video, Fx,
+    System, Custom. Subscribers filter by topic, not by ad-hoc string match.
+  </p>
+
+  <h2>Why a state machine and not a "plan as text"</h2>
+  <p>
+    The model has no concept of monotonicity. Ask it "did you finish step 3?" and it will tell you yes whether
+    or not step 3 finished. The state machine doesn't ask the model. It tracks the answer itself.
+    <code>PlanStep.status</code> is a typed enum the agent cannot mutate. The only transition path is through
+    <code>TaskLedger::try_dispatch</code>, which checks dependencies, status, and quarantine before allowing
+    the change.
+  </p>
+
+  <h2>The fast-path audit pattern</h2>
+  <p>
+    Sometimes you <em>want</em> to skip a gate — auto-approving low-risk Actor calls in a trusted repo, or
+    skipping planning for one-line tasks. The harness rule is: <em>if you skip, audit</em>. PR
+    <code>#653</code> introduced this pattern:
+  </p>
+
+<pre class="code-rust"><code><span class="k">if</span> opts.auto_approve {
+    event_log.<span class="fn">push</span>(<span class="t">Event</span>::<span class="n">FastPathTaken</span> {
+        agent_id,
+        kind:   <span class="t">FastPathKind</span>::<span class="n">AutoApprove</span>,
+        reason: <span class="s">"caller passed AgentSpawnOpts::with_auto_approve(true)"</span>.<span class="fn">into</span>(),
+    });
+    transition_to(<span class="t">AgentStatus</span>::<span class="n">Working</span>);
+} <span class="k">else</span> {
+    transition_to(<span class="t">AgentStatus</span>::<span class="n">AwaitingApproval</span>);
+}</code></pre>
+
+  <p>
+    Now you can grep the event log for <code>FastPathTaken</code> and see <em>every</em> gate skip, with
+    the reason the harness was given. Regressions surface as visible audit entries, not invisible silent
+    advancements.
+  </p>
+
+  <h2>The five audit gaps (all closed)</h2>
+  <table class="table">
+    <thead><tr><th>Gap</th><th>PR</th><th>What it added</th></tr></thead>
+    <tbody>
+      <tr><td>complete_task spike delivery</td><td><code>#652</code></td><td>Initial structured-exit pipeline.</td></tr>
+      <tr><td>FastPathTaken audit envelope</td><td><code>#653</code></td><td>Every gate skip leaves a typed trace.</td></tr>
+      <tr><td>TaskLedger guarded dispatch</td><td><code>#654</code></td><td><code>try_dispatch</code> + <code>DispatchBlocked</code> enum.</td></tr>
+      <tr><td>Event log non-optional at gate</td><td><code>#655</code></td><td>Capability gate cannot be silently bypassed.</td></tr>
+      <tr><td>Production tool-list wiring + 3-strike flatline</td><td><code>#656</code></td><td>Schema validation enforced end-to-end.</td></tr>
+      <tr><td>Quarantine policy cascade</td><td><code>#657</code></td><td>Typed <code>StepFailureCause</code> + <code>QuarantinePolicy</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <div class="callout-title">Why this is sufficient</div>
+    The four properties form a closed system. A misbehaving agent <em>cannot</em>: (1) call a tool outside its
+    role's manifest, (2) advance a plan step it shouldn't, (3) exit without a schema-valid payload, or
+    (4) communicate with another agent through anything but a typed message. Inside that envelope the agent has
+    full creative latitude. Outside that envelope it has no latitude at all.
+  </div>
+
+  <footer class="footer">
+    <span>SEC 07 · HARNESS</span>
+    <span><a href="brain.html">↩ SEC 06 · BRAIN</a> · <a href="loop.html">next → SEC 08 · LOOP</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

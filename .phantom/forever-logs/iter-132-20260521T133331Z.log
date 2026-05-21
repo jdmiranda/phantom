@@ -1,0 +1,23 @@
+[forever 2026-05-21T13:33:31Z] ==== iteration 132 begin ====
+[forever 2026-05-21T13:33:31Z] fetching origin
+[forever 2026-05-21T13:33:32Z] branch=docs/engineering-site-phase-1 HEAD=6eca564 origin/main=6eca564f3417c485cc98941fc642d67708e1bb06
+[forever 2026-05-21T13:33:32Z] cargo build --release --bin phantom
+   Compiling phantom-agents v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom-agents)
+   Compiling phantom-brain v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom-brain)
+   Compiling phantom-session v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom-session)
+   Compiling phantom-loop v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom-loop)
+   Compiling phantom-app v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom-app)
+   Compiling phantom-builder v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom-builder)
+   Compiling phantom-fleet v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom-fleet)
+   Compiling phantom v0.1.0 (/Users/jermiranda/Documents/GitHub/badass-cli/crates/phantom)
+    Finished `release` profile [optimized] target(s) in 12.86s
+[forever 2026-05-21T13:33:45Z] build ok
+[forever 2026-05-21T13:33:45Z] launching: phantom loop run --repo /Users/jermiranda/Documents/Github/badass-cli --loops triager,implementer,reviewer --brain-queue triage-queue --max-runtime-min 8
+[forever 2026-05-21T13:33:45Z] daemon PID=55998
+error: unexpected argument '--brain-queue' found
+
+Usage: phantom loop run --loops <LOOPS> --repo <REPO>
+
+For more information, try '--help'.
+[forever 2026-05-21T13:33:46Z] daemon exited with code 2
+[forever 2026-05-21T13:33:46Z] sleeping 5s before next iteration
