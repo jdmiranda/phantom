@@ -39,10 +39,33 @@ use phantom_bundles::events::CaptureEvent;
 use phantom_stt::{AudioChunk, TranscriptBackend};
 use phantom_stt::stream::{PartialTranscript, SttStream, SttStreamConfig};
 
+/// JoinHandles for the two background tokio tasks spawned by [`SttPipeline::start`].
+///
+/// Storing the handles allows callers to abort both tasks on shutdown rather
+/// than relying on the channel-close cascade, which can delay termination when
+/// the STT backend is blocked in a long I/O call.
+pub struct SttTaskHandles {
+    /// Handle for the [`SttStream::run`] loop.
+    pub audio_task: tokio::task::JoinHandle<()>,
+    /// Handle for the partial-transcript event-forwarding loop.
+    pub forward_task: tokio::task::JoinHandle<()>,
+}
+
+impl SttTaskHandles {
+    /// Abort both background tasks immediately.
+    pub fn abort(self) {
+        self.audio_task.abort();
+        self.forward_task.abort();
+    }
+}
+
 /// Handle to a running STT pipeline.
 ///
 /// Drop this value to stop the pipeline gracefully (audio channel closes →
 /// remaining segment flushed → event-forwarding task exits).
+///
+/// For immediate cancellation on shutdown, use the [`SttTaskHandles`] returned
+/// by [`SttPipeline::start`] and call [`SttTaskHandles::abort`].
 pub struct SttPipeline {
     /// Sender half of the audio ingestion channel.
     /// `push_chunk` will be the primary call site once mic capture is wired.

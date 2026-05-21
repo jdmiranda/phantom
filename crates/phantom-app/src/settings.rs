@@ -138,14 +138,60 @@ impl PhantomSettings {
         Ok(path)
     }
 
-    /// Save settings to a specific path.
+    /// Save settings to a specific path using an atomic write (write to tmp,
+    /// then rename).
+    ///
+    /// Writing via a temp file and renaming guarantees that the config watcher
+    /// never sees a half-written file. On POSIX, `rename(2)` is atomic.
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let tmp = path.with_extension("toml.tmp");
         let contents = toml::to_string_pretty(self)?;
-        std::fs::write(path, contents)?;
+        std::fs::write(&tmp, &contents)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// Build a [`PhantomSettings`] from a UI snapshot produced by
+    /// [`SettingsPanel::to_snapshot`](crate::settings_ui::SettingsPanel::to_snapshot),
+    /// preserving any settings the snapshot does not cover.
+    ///
+    /// The settings UI only edits theme, font size, and CRT shader params.
+    /// Fields the panel does not surface (e.g. [`ScrollSettings`]) must carry
+    /// through from `base` — otherwise an Escape-save would silently reset
+    /// any value the user had hand-edited in `settings.toml`.
+    ///
+    /// Pass the currently-loaded `PhantomSettings` as `base` so the resulting
+    /// struct merges the snapshot over the existing on-disk state.
+    #[must_use]
+    pub(crate) fn from_snapshot(
+        snap: &crate::settings_ui::SettingsSnapshot,
+        base: &PhantomSettings,
+    ) -> Self {
+        Self {
+            theme: snap.theme_name.clone(),
+            font_size: snap.font_size,
+            // Preserve fields the UI does not edit (history_lines, scroll_lines).
+            scroll: base.scroll.clone(),
+            crt: CrtSettings {
+                scanline_intensity: snap.scanline_intensity,
+                bloom_intensity: snap.bloom_intensity,
+                chromatic_aberration: snap.chromatic_aberration,
+                curvature: snap.curvature,
+                vignette_intensity: snap.vignette_intensity,
+                noise_intensity: snap.noise_intensity,
+            },
+            // Agent settings are edited by the UI panel; pull them from the
+            // snapshot, not from `base`.
+            agents: AgentSettings {
+                api_key_env_var: snap.api_key_env_var.clone(),
+                shell: snap.shell.clone(),
+                agent_timeout_seconds: snap.agent_timeout_seconds,
+                max_concurrent_agents: snap.max_concurrent_agents,
+            },
+        }
     }
 }
 
@@ -196,6 +242,99 @@ mod tests {
         assert_eq!(settings.theme, "ice");
         assert_eq!(settings.font_size, 18.0);
         assert_eq!(settings.scroll.history_lines, 10_000);
+    }
+
+    /// `save_to` must write atomically: the final file must not pass through
+    /// an intermediate state where the path exists but is empty/truncated.
+    #[test]
+    fn save_to_is_atomic_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.toml");
+        let tmp = path.with_extension("toml.tmp");
+
+        let settings = PhantomSettings {
+            theme: "vapor".into(),
+            ..PhantomSettings::default()
+        };
+        settings.save_to(&path).unwrap();
+
+        assert!(
+            !tmp.exists(),
+            "atomic write must remove the .toml.tmp sentinel"
+        );
+        let loaded = PhantomSettings::load_from(&path);
+        assert_eq!(loaded.theme, "vapor", "loaded theme must match saved value");
+    }
+
+    /// [`PhantomSettings::from_snapshot`] must faithfully transfer every field
+    /// from the snapshot into the resulting struct.
+    #[test]
+    fn from_snapshot_maps_all_fields() {
+        use crate::settings_ui::SettingsSnapshot;
+
+        let snap = SettingsSnapshot {
+            theme_name: "ice".into(),
+            font_size: 22.0,
+            scanline_intensity: 0.42,
+            bloom_intensity: 0.55,
+            chromatic_aberration: 0.007,
+            curvature: 0.12,
+            vignette_intensity: 0.33,
+            noise_intensity: 0.04,
+            api_key_env_var: "ANTHROPIC_API_KEY".into(),
+            shell: "/bin/zsh".into(),
+            agent_timeout_seconds: 30,
+            max_concurrent_agents: 3,
+        };
+
+        let base = PhantomSettings::default();
+        let settings = PhantomSettings::from_snapshot(&snap, &base);
+
+        assert_eq!(settings.theme, "ice");
+        assert!((settings.font_size - 22.0).abs() < f32::EPSILON);
+        assert!((settings.crt.scanline_intensity - 0.42).abs() < f32::EPSILON);
+        assert!((settings.crt.bloom_intensity - 0.55).abs() < f32::EPSILON);
+        assert!((settings.crt.chromatic_aberration - 0.007).abs() < f32::EPSILON);
+        assert!((settings.crt.curvature - 0.12).abs() < f32::EPSILON);
+        assert!((settings.crt.vignette_intensity - 0.33).abs() < f32::EPSILON);
+        assert!((settings.crt.noise_intensity - 0.04).abs() < f32::EPSILON);
+    }
+
+    /// Regression: the settings UI does not edit [`ScrollSettings`], so an
+    /// Escape-save must preserve any user-edited `history_lines` /
+    /// `scroll_lines` from disk rather than resetting them to defaults.
+    #[test]
+    fn from_snapshot_preserves_scroll_settings_from_base() {
+        use crate::settings_ui::SettingsSnapshot;
+
+        let base = PhantomSettings {
+            scroll: ScrollSettings {
+                history_lines: 50_000,
+                scroll_lines: 7,
+            },
+            ..PhantomSettings::default()
+        };
+
+        let snap = SettingsSnapshot {
+            theme_name: "amber".into(),
+            font_size: 20.0,
+            scanline_intensity: 0.2,
+            bloom_intensity: 0.3,
+            chromatic_aberration: 0.003,
+            curvature: 0.05,
+            vignette_intensity: 0.3,
+            noise_intensity: 0.02,
+            api_key_env_var: "ANTHROPIC_API_KEY".into(),
+            shell: "/bin/zsh".into(),
+            agent_timeout_seconds: 30,
+            max_concurrent_agents: 3,
+        };
+
+        let merged = PhantomSettings::from_snapshot(&snap, &base);
+
+        assert_eq!(merged.scroll.history_lines, 50_000);
+        assert_eq!(merged.scroll.scroll_lines, 7);
+        assert_eq!(merged.theme, "amber");
     }
 
     // -----------------------------------------------------------------------

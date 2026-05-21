@@ -132,6 +132,8 @@ impl ApplicationHandler for Phantom {
             WindowEvent::Resized(new_size) => {
                 if let Some(app) = &mut self.app {
                     app.handle_resize(new_size.width, new_size.height);
+                    // Resize always requires a full repaint.
+                    app.request_redraw();
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -174,6 +176,8 @@ impl ApplicationHandler for Phantom {
                         if let Err(ref panic) = result {
                             log::error!("Input panic: {}", panic_message(panic));
                         }
+                        // Any keypress requires a repaint.
+                        app.request_redraw();
                     }
                 }
                 if let Some(app) = &mut self.app
@@ -181,6 +185,9 @@ impl ApplicationHandler for Phantom {
                 {
                     app.shutdown();
                     event_loop.exit();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::Occluded(occluded) => {
@@ -202,16 +209,41 @@ impl ApplicationHandler for Phantom {
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_cursor_moved(position.x, position.y);
+                    // Mouse movement may affect hover state — request repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_mouse_click(state, button);
+                    // Click/release always requires a repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some(app) = &mut self.app {
                     app.handle_mouse_scroll(delta);
+                    // Scroll always requires a repaint.
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Focused(focused) => {
+                if let Some(app) = &mut self.app {
+                    // Focus changes affect cursor rendering and active-pane chrome.
+                    let _ = focused;
+                    app.request_redraw();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -243,10 +275,11 @@ impl ApplicationHandler for Phantom {
                     Ok(()) => self.consecutive_panics = 0,
                     Err(panic) => {
                         self.consecutive_panics += 1;
+                        let msg = panic_message(&panic);
                         log::error!(
                             "Frame panic #{}: {}",
                             self.consecutive_panics,
-                            panic_message(&panic),
+                            msg,
                         );
                         if self.consecutive_panics > 10 {
                             log::error!(
@@ -254,6 +287,10 @@ impl ApplicationHandler for Phantom {
                                 self.consecutive_panics,
                             );
                             if let Some(app) = &mut self.app {
+                                // Notify the supervisor before shutting down so it
+                                // can distinguish a panic-escalation crash from a
+                                // silent heartbeat-timeout crash (GPU hang, SIGKILL).
+                                app.notify_render_panic(self.consecutive_panics, &msg);
                                 app.shutdown();
                             }
                             event_loop.exit();
@@ -261,10 +298,14 @@ impl ApplicationHandler for Phantom {
                         }
                     }
                 }
-                // Only reschedule the next frame while the window is visible.
-                // When occluded/minimised, `WindowEvent::Occluded(false)` will
-                // re-arm the loop once the window reappears.
-                if self.window_visible {
+                // Only schedule the next frame when something will actually change.
+                // Gate on (a) window visible (occluded windows skip via Occluded(false)
+                // re-arm), and (b) scene dirty / animating / force-redraw latch set.
+                // The next window event (key/mouse/PTY) re-arms the loop.
+                if self.window_visible
+                    && let Some(app) = &self.app
+                    && (app.scene_is_dirty() || app.has_active_animation() || app.needs_force_redraw())
+                {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
@@ -916,6 +957,17 @@ fn main() -> Result<()> {
         log::info!("Supervisor mode: socket at {}", sock.display());
     }
 
+    // Build and enter a multi-thread tokio runtime before constructing the App.
+    // phantom-app calls `tokio::spawn` from inside winit's `resumed` callback
+    // (TTS pipeline, MCP discovery), which panics without an entered runtime.
+    // `_tokio_guard` must outlive `event_loop.run_app` — it does, since both
+    // are dropped at the end of `main`.
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build tokio runtime: {e}"))?;
+    let _tokio_guard = tokio_rt.enter();
+
     let event_loop = EventLoop::new()?;
     let mut app = Phantom::new(config, supervisor_socket);
 
@@ -989,26 +1041,28 @@ mod tests {
         );
     }
 
-    /// `--fullscreen` CLI flag sets config.fullscreen = true.
+    /// `--fullscreen` CLI flag remains idempotent given the new fullscreen-by-default cold-launch UX.
     #[test]
     fn cli_fullscreen_flag_sets_config() {
         let mut config = PhantomConfig::default();
-        assert!(!config.fullscreen, "should start windowed by default");
-        // Simulate `--fullscreen` CLI parsing.
+        assert!(config.fullscreen, "should start fullscreen by default — agent is king");
+        // Simulate `--fullscreen` CLI parsing. Already true; this is a no-op
+        // (and that's the point: the flag must not break when the default
+        // is already on).
         config.fullscreen = true;
         assert!(
             config.fullscreen,
-            "--fullscreen flag must enable fullscreen"
+            "--fullscreen flag must keep fullscreen enabled"
         );
     }
 
-    /// `config_fullscreen_false_starts_windowed` — default config has fullscreen=false.
+    /// Default config starts in fullscreen so the agent pane owns the whole screen.
     #[test]
-    fn config_fullscreen_false_starts_windowed() {
+    fn default_fullscreen_is_true_for_agent_first_ux() {
         let config = PhantomConfig::default();
         assert!(
-            !config.fullscreen,
-            "default config must not start in fullscreen"
+            config.fullscreen,
+            "default config must start in fullscreen — Phantom IS the AI; the AI owns the screen"
         );
     }
 

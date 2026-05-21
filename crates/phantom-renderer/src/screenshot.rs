@@ -6,6 +6,96 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during GPU-side screenshot capture.
+#[derive(Debug)]
+pub enum ScreenshotError {
+    /// The staging buffer could not be mapped (driver-side error).
+    MapFailed(wgpu::BufferAsyncError),
+    /// The GPU did not complete the readback within the timeout window.
+    ///
+    /// This typically indicates a GPU hang or a severely overloaded driver.
+    /// The caller should treat the screenshot as unavailable and continue.
+    GpuTimeout,
+    /// The channel used to receive the map result was unexpectedly closed.
+    ChannelClosed,
+}
+
+impl std::fmt::Display for ScreenshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MapFailed(e) => write!(f, "GPU buffer mapping failed: {e}"),
+            Self::GpuTimeout => write!(f, "GPU readback timed out (possible GPU hang)"),
+            Self::ChannelClosed => write!(f, "GPU buffer map channel disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for ScreenshotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MapFailed(e) => Some(e),
+            Self::GpuTimeout | Self::ChannelClosed => None,
+        }
+    }
+}
+
+/// How long to wait for the GPU to complete a readback before giving up.
+const GPU_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Interval between non-blocking poll calls while waiting for a readback.
+///
+/// The wgpu `map_async` callback only fires during a `poll` invocation, so the
+/// wait loop must tick `device.poll(PollType::Poll)` periodically. 2 ms is
+/// short enough to keep typical Metal/DX12/Vulkan readbacks (sub-millisecond)
+/// from being throttled by the sleep, and long enough to avoid a CPU spin.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Map a staging buffer with a timeout, returning `ScreenshotError` on failure.
+///
+/// Drives `device.poll(PollType::Poll)` in a loop until the `map_async`
+/// callback fires (via the `mpsc` channel) or until `GPU_READBACK_TIMEOUT`
+/// elapses. The continuous polling is required because on Metal / DX12 the
+/// callback is only delivered during a `poll` call — a single `Poll` tick is
+/// not guaranteed to land it, so a one-shot poll would cause healthy hardware
+/// to wait the full timeout. The loop bounds the worst case (true GPU hang)
+/// to `GPU_READBACK_TIMEOUT` without penalising the common path.
+fn map_buffer_with_timeout(
+    device: &wgpu::Device,
+    buffer_slice: wgpu::BufferSlice<'_>,
+) -> Result<(), ScreenshotError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+
+    let deadline = std::time::Instant::now() + GPU_READBACK_TIMEOUT;
+    loop {
+        // Tick the GPU so the map_async callback has a chance to fire.
+        // Poll errors are ignored — a real failure surfaces either via the
+        // channel (MapFailed) or the deadline (GpuTimeout).
+        let _ = device.poll(wgpu::PollType::Poll);
+
+        match rx.try_recv() {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) => return Err(ScreenshotError::MapFailed(e)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err(ScreenshotError::ChannelClosed);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(ScreenshotError::GpuTimeout);
+        }
+
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Metadata
 // ---------------------------------------------------------------------------
 
@@ -91,14 +181,8 @@ pub fn capture_frame(
 
     // Map the staging buffer and read the data.
     let buffer_slice = staging_buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    let _ = device.poll(wgpu::PollType::Wait);
-    rx.recv()
-        .map_err(|_| anyhow::anyhow!("GPU buffer map channel disconnected"))?
-        .map_err(|e| anyhow::anyhow!("GPU buffer mapping failed: {e}"))?;
+    map_buffer_with_timeout(device, buffer_slice)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mapped = buffer_slice.get_mapped_range();
 
@@ -187,14 +271,8 @@ pub fn capture_frame_sub(
     queue.submit(std::iter::once(encoder.finish()));
 
     let buffer_slice = staging_buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    let _ = device.poll(wgpu::PollType::Wait);
-    rx.recv()
-        .map_err(|_| anyhow::anyhow!("GPU buffer map channel disconnected"))?
-        .map_err(|e| anyhow::anyhow!("GPU buffer mapping failed: {e}"))?;
+    map_buffer_with_timeout(device, buffer_slice)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mapped = buffer_slice.get_mapped_range();
     let mut pixels = Vec::with_capacity((ew * eh * bytes_per_pixel) as usize);
@@ -369,5 +447,41 @@ mod tests {
         let loaded: ScreenshotMetadata = serde_json::from_str(&meta_json).unwrap();
         assert_eq!(loaded.timestamp, 1700000000);
         assert_eq!(loaded.theme, "test");
+    }
+
+    /// Verify the wait-loop bookkeeping the screenshot path relies on:
+    /// a dropped sender surfaces as `TryRecvError::Disconnected` (mapped to
+    /// `ScreenshotError::ChannelClosed` in `map_buffer_with_timeout`) without
+    /// blocking, and an empty channel surfaces as `TryRecvError::Empty` so the
+    /// loop can re-poll the GPU.
+    ///
+    /// We cannot construct a real wgpu device in a unit-test environment, so
+    /// this test exercises the channel primitives the timeout helper uses
+    /// rather than the helper itself; the `Display` impls for the two error
+    /// variants are also verified.
+    #[test]
+    fn screenshot_channel_states_map_to_error_variants() {
+        use std::sync::mpsc;
+
+        // Dropped sender -> Disconnected (mapped to ChannelClosed).
+        let (tx, rx) = mpsc::channel::<Result<(), wgpu::BufferAsyncError>>();
+        drop(tx);
+        let disconnected = rx.try_recv();
+        assert!(
+            matches!(disconnected, Err(mpsc::TryRecvError::Disconnected)),
+            "dropped sender must surface as TryRecvError::Disconnected"
+        );
+
+        // Live sender, no message yet -> Empty (drives the wait loop).
+        let (_tx_live, rx_live) = mpsc::channel::<Result<(), wgpu::BufferAsyncError>>();
+        let empty = rx_live.try_recv();
+        assert!(
+            matches!(empty, Err(mpsc::TryRecvError::Empty)),
+            "live channel with no message must surface as TryRecvError::Empty"
+        );
+
+        // Confirm the error types compile and have non-empty Display output.
+        assert!(ScreenshotError::GpuTimeout.to_string().contains("GPU"));
+        assert!(!ScreenshotError::ChannelClosed.to_string().is_empty());
     }
 }

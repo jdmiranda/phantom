@@ -271,6 +271,52 @@ impl AppCoordinator {
         id
     }
 
+    /// Kill an adapter and free its pane / scene slot for re-use by a
+    /// replacement adapter. Unlike [`remove_adapter`], this does NOT remove
+    /// the underlying layout pane or scene node — the caller is expected to
+    /// re-register a new adapter at the returned `(PaneId, NodeId)` via
+    /// [`register_adapter_at_pane`].
+    ///
+    /// Returns `None` if the adapter has no pane mapping (should not happen
+    /// in normal flow).
+    ///
+    /// Used by the post-boot agent-full-size path to swap the terminal out
+    /// for an agent at the same pane slot without going through a
+    /// split-then-collapse layout dance (which left the agent pane half
+    /// the window height — see `feedback_agent_is_primary` memory).
+    pub fn kill_keeping_pane(
+        &mut self,
+        app_id: AppId,
+    ) -> Option<(PaneId, NodeId)> {
+        self.registry.kill(app_id);
+
+        let pane_id = self.app_pane_map.remove(&app_id)?;
+        // Detach from pane_map so a fresh register_adapter_at_pane can claim
+        // the same PaneId without collision.
+        self.pane_map.remove(&pane_id);
+
+        let scene_node = self.scene_map.remove(&app_id)?;
+
+        self.cadences.remove(&app_id);
+        self.render_cache.remove(&app_id);
+        self.dirty_adapters.remove(&app_id);
+        self.floating.remove(&app_id);
+        self.float_rects.remove(&app_id);
+        self.lineage.remove(app_id);
+
+        // The caller will typically `register_adapter_at_pane` immediately
+        // and set focus on the replacement. If there is no replacement (or
+        // a second adapter already existed — possible in tests and
+        // multi-pane scenarios), fall back to the first remaining adapter
+        // so focus does not silently disappear. Mirrors `remove_adapter`'s
+        // `validate_focus()` policy.
+        if self.focused == Some(app_id) {
+            self.focused = self.registry.all_running().into_iter().next();
+        }
+
+        Some((pane_id, scene_node))
+    }
+
     /// Remove an adapter: kill it, strip layout pane and scene node,
     /// shift focus if the removed adapter was focused.
     ///
@@ -895,6 +941,24 @@ impl AppCoordinator {
             return Err(anyhow::anyhow!("adapter not found: {app_id}"));
         };
         adapter.accept_command(cmd, args)
+    }
+
+    /// Query whether a terminal cell at `(col, row)` carries a hyperlink.
+    ///
+    /// Routes the `"hyperlink_at"` command to the adapter. Returns the URL
+    /// string when the cell is annotated with an OSC 8 hyperlink (or URL regex
+    /// fallback); returns `None` when the cell is plain or the adapter does not
+    /// support hyperlink querying.
+    pub fn hyperlink_at(&mut self, app_id: AppId, col: usize, row: usize) -> Option<String> {
+        let result = self.send_command(
+            app_id,
+            "hyperlink_at",
+            &serde_json::json!({"col": col, "row": row}),
+        );
+        match result {
+            Ok(url) if !url.is_empty() => Some(url),
+            _ => None,
+        }
     }
 
     /// Number of adapters currently registered (including dead, pre-GC).

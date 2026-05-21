@@ -437,6 +437,14 @@ impl PhantomTerminal {
         // attribute responses) and write them back to the PTY.
         self.flush_pty_write_queue();
 
+        // Note: OSC 8 hyperlink parsing is handled natively by
+        // `alacritty_terminal` inside `parser.advance(&mut self.term, ..)`
+        // above. Each `Cell` covered by a hyperlink block ends up with
+        // `cell.hyperlink()` set, which `output::extract_grid_themed`
+        // surfaces onto every `RenderCell`. Click handling reads the URI
+        // directly from the grid via `hyperlink_at(col, row)` — no
+        // shadow byte parsing needed.
+
         // Refresh the Kitty keyboard mode cache.  The running program may
         // have sent `CSI > 1 h` / `CSI > 1 l` inside this chunk; the VTE
         // parser already updated TermMode, so we just mirror it here.
@@ -812,6 +820,36 @@ impl PhantomTerminal {
         let end_col = range.end.column.0;
         let end_row = range.end.line.0.max(0) as usize;
         Some((start_col, start_row, end_col, end_row))
+    }
+
+    // -- Hyperlink API --------------------------------------------------------
+
+    /// Look up the OSC 8 hyperlink URI at the given viewport cell.
+    ///
+    /// Returns `Some(uri)` when the cell at `(col, row)` — where `row` is a
+    /// **viewport row** (`0` = top of the visible screen) — is covered by an
+    /// OSC 8 hyperlink emitted by the terminal program. Returns `None` for
+    /// plain cells, out-of-bounds coordinates, or cells inside scrollback that
+    /// no longer have a hyperlink attached.
+    ///
+    /// The hyperlink is read directly from `alacritty_terminal`'s native cell
+    /// storage (set during VTE parsing), so this is always consistent with the
+    /// rendered grid and is naturally invalidated when cells scroll off the
+    /// top of the buffer.
+    #[must_use]
+    pub fn hyperlink_at(&self, col: usize, row: usize) -> Option<String> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        let grid = self.term.grid();
+        if col >= grid.columns() || row >= grid.screen_lines() {
+            return None;
+        }
+        // Convert viewport row -> grid line.
+        let display_offset = grid.display_offset() as i32;
+        let grid_line = Line(row as i32 - display_offset);
+        let point = Point::new(grid_line, Column(col));
+        grid[point].hyperlink().map(|h| h.uri().to_owned())
     }
 
     // -- Private helpers ---------------------------------------------------
@@ -1253,5 +1291,68 @@ mod tests {
             drained.is_empty(),
             "no OSC 52 events before any PTY output — drain must be empty"
         );
+    }
+
+    // =========================================================================
+    // OSC 8 hyperlink tests
+    // =========================================================================
+
+    /// `hyperlink_at` returns `None` for a fresh terminal with no hyperlinks.
+    #[test]
+    fn hyperlink_at_returns_none_for_plain_cell() {
+        let term = PhantomTerminal::new(80, 24).expect("create terminal");
+        assert!(term.hyperlink_at(5, 2).is_none());
+        assert!(term.hyperlink_at(0, 0).is_none());
+    }
+
+    /// Out-of-bounds coordinates must return `None`, not panic.
+    #[test]
+    fn hyperlink_at_out_of_bounds_returns_none() {
+        let term = PhantomTerminal::new(80, 24).expect("create terminal");
+        assert!(term.hyperlink_at(9999, 0).is_none(), "col overflow");
+        assert!(term.hyperlink_at(0, 9999).is_none(), "row overflow");
+    }
+
+    /// Driving an OSC 8 hyperlink block through the VTE parser must surface
+    /// the URI on every covered cell via `hyperlink_at`.
+    ///
+    /// This test bypasses the PTY and writes the bytes directly through the
+    /// alacritty parser so the unit test is hermetic. It exercises the full
+    /// integration: parser -> cell.set_hyperlink -> grid -> hyperlink_at.
+    #[test]
+    fn hyperlink_at_returns_uri_after_osc8_block() {
+        let mut term = PhantomTerminal::new(80, 24).expect("create terminal");
+
+        // ESC ] 8 ; ; https://example.com BEL  click  ESC ] 8 ; ; BEL
+        let seq = b"\x1b]8;;https://example.com\x07click\x1b]8;;\x07";
+        term.parser.advance(&mut term.term, seq);
+
+        // The five characters of "click" should each carry the URI.
+        for col in 0..5 {
+            assert_eq!(
+                term.hyperlink_at(col, 0).as_deref(),
+                Some("https://example.com"),
+                "col {col} must carry the hyperlink URI"
+            );
+        }
+        // The cell immediately after "click" must NOT carry it.
+        assert!(term.hyperlink_at(5, 0).is_none(), "col 5 must be plain");
+    }
+
+    /// ESC-\\ string terminator must be accepted in place of BEL.
+    #[test]
+    fn hyperlink_at_works_with_st_terminator() {
+        let mut term = PhantomTerminal::new(80, 24).expect("create terminal");
+
+        // ESC ] 8 ; ; https://esc.io ESC \  X  ESC ] 8 ; ; ESC \
+        let seq = b"\x1b]8;;https://esc.io\x1b\\X\x1b]8;;\x1b\\";
+        term.parser.advance(&mut term.term, seq);
+
+        assert_eq!(
+            term.hyperlink_at(0, 0).as_deref(),
+            Some("https://esc.io"),
+            "ST-terminated OSC 8 open must apply to the next written cell"
+        );
+        assert!(term.hyperlink_at(1, 0).is_none(), "cell after close must be plain");
     }
 }

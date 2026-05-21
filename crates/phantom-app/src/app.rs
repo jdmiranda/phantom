@@ -140,6 +140,21 @@ pub struct App {
     pub(crate) demo_mode: bool,
     pub(crate) demo_post_boot_done: bool,
 
+    // -- Post-boot agent spawn --
+    /// Set to `true` the first time we enter AppState::Terminal so we spawn
+    /// one agent pane as the default view instead of leaving the user staring
+    /// at a raw terminal.
+    pub(crate) post_boot_agent_spawned: bool,
+
+    /// Shared flag between the live `SetupAdapter` (when present) and the
+    /// App's update loop. `SetupAdapter::update` flips this to `true` on a
+    /// `NONE → SOME` `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` transition.
+    /// `App::update` drains the flag each tick and, when set, calls
+    /// `spawn_agent_pane(...)` whose `adapter_count() == 1` replace-focused
+    /// path swaps the SetupAdapter out for the real agent at the same pane
+    /// slot. This avoids any cross-thread `AppCommand` plumbing.
+    pub(crate) post_setup_upgrade: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
@@ -165,6 +180,11 @@ pub struct App {
 
     // -- Whether a quit has been requested --
     pub(crate) quit_requested: bool,
+
+    // -- Force-redraw latch set by external events (key/mouse/resize/focus).
+    //    Cleared after every GPU submit. Ensures at least one repaint happens
+    //    even when the scene graph is fully clean.
+    pub(crate) force_redraw: bool,
 
     // -- Supervisor connection (None when running standalone) --
     pub(crate) supervisor: Option<SupervisorClient>,
@@ -423,6 +443,16 @@ pub struct App {
     /// finished within `GIT_REFRESH_TIMEOUT` we log a warning and drop it so
     /// the next 30-second tick can spawn a fresh one.
     pub(crate) git_refresh_spawned_at: Option<Instant>,
+    /// Cooperative cancellation flag for the running git-refresh thread.
+    ///
+    /// Set to `true` on timeout so the thread can exit early rather than
+    /// sending a stale GitStateChanged event after the handle is dropped.
+    pub(crate) git_refresh_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
+    // -- STT task handles (for abort on shutdown) --
+    /// JoinHandles for the two background tokio tasks spawned by the STT
+    /// pipeline.  Stored here so `shutdown()` can abort them immediately.
+    pub(crate) stt_task_handles: Option<crate::stt::SttTaskHandles>,
 
     // -- Reusable overlay text buffer (avoids per-frame alloc in console render) --
     pub(crate) overlay_line_buf: Vec<(String, [f32; 4])>,
@@ -501,6 +531,12 @@ pub struct App {
     // -- Live shader reloader (debug + `live-reload` feature only).
     //    No-op stub in release builds; zero overhead on the hot path.
     pub(crate) shader_reloader: phantom_renderer::shader_loader::ShaderReloader,
+
+    // -- Config-file watcher: monitors `settings.toml` for on-disk changes
+    //    and triggers `apply_config_reload` in `App::update`. `None` when
+    //    `notify` setup fails (unsupported path, permissions); the app boots
+    //    normally without live-reload in that case.
+    pub(crate) config_watcher: Option<crate::config_watcher::ConfigWatcher>,
 
     // -- Command history store (JSONL, one entry per completed command). --
     //    `None` on open failure; production paths never `.unwrap()`.
@@ -817,6 +853,23 @@ impl App {
         let (relay_inbound_rx, relay_connected_rx, relay_task) = build_relay_channels();
 
         // -- AI Brain thread --
+        // Build a RouterConfig that respects the user's preferred_provider setting.
+        // When preferred_provider is set, the named backend is promoted to the front
+        // of the cascade so it is tried first. When absent, the default order is used.
+        let brain_router_config = match config.preferred_provider() {
+            Some(id) => {
+                info!("AI brain: preferred_provider = '{id}' — promoting backend in cascade");
+                phantom_brain::router::RouterConfig::with_preferred_provider(id)
+            }
+            None => phantom_brain::router::RouterConfig::default(),
+        };
+        // Always apply privacy/offline mode from the application config into the
+        // router config so the router enforces the policy from the very first event.
+        let brain_router_config = phantom_brain::router::RouterConfig {
+            privacy_mode: config.privacy_mode,
+            offline_mode: config.offline_mode,
+            ..brain_router_config
+        };
         // Seed the brain's initial history snapshot (up to 20 most recent commands).
         let initial_history_context: Vec<phantom_history::HistoryEntry> = history
             .as_ref()
@@ -826,9 +879,9 @@ impl App {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
             enable_memory: true,
-            quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real evrs
-            router: None,
-            catalog: None,
+            quiet_threshold: 0.35, // Tuned: high enough to suppress noise, low enough for real events
+            router: Some(brain_router_config),
+            catalog: Some(phantom_brain::provider_catalog::ProviderCatalog::with_builtins()),
             privacy_mode: config.privacy_mode,
             // relay_inbound_rx is Some when PHANTOM_RELAY_URL is configured
             // (wired by build_relay_channels above), None in standalone mode.
@@ -1131,7 +1184,7 @@ impl App {
         );
 
         // -- Plugin registry --
-        let plugin_registry = match PluginRegistry::new() {
+        let mut plugin_registry = match PluginRegistry::new() {
             Ok(reg) => reg,
             Err(e) => {
                 warn!("Failed to create plugin registry: {e}");
@@ -1148,6 +1201,39 @@ impl App {
             }
         };
 
+        // Scan for installed plugins and auto-load them; errors per-plugin are
+        // logged as warnings inside scan() so one bad plugin cannot block boot.
+        match plugin_registry.scan() {
+            Ok(manifests) => {
+                info!(
+                    "Plugin scan complete: {} manifest(s) found, {} plugin(s) loaded",
+                    manifests.len(),
+                    plugin_registry.len()
+                );
+            }
+            Err(e) => {
+                warn!("Plugin scan failed: {e}");
+            }
+        }
+
+        // Dispatch OnStartup to all loaded plugins now that the registry is ready.
+        //
+        // TODO(#48): Phase-1 limitation — responses are logged but not acted on.
+        // `HookResponse::RunCommand`, `ModifyOutput`, and `Notification` returned
+        // from `OnStartup` are intentionally dropped here because the agent /
+        // terminal / notification dispatch surfaces are not wired into this boot
+        // path. When the plugin host gains a typed response router, route the
+        // matched arms (`RunCommand` -> command bus, `Notification` -> notifier,
+        // etc.) instead of unconditionally logging.
+        {
+            let startup_ctx = phantom_plugins::HookContext::startup(&project_dir);
+            let responses = plugin_registry
+                .dispatch_hook(&phantom_plugins::HookType::OnStartup, &startup_ctx);
+            for resp in &responses {
+                info!("[plugin startup]: {resp:?}");
+            }
+        }
+
         // -- Job pool (4 workers for async brain queries, resource loading, etc.) --
         let job_pool = crate::jobs::JobPool::start_up(4);
         info!("Job pool initialized: 4 workers");
@@ -1155,19 +1241,32 @@ impl App {
         // -- App coordinator (owns all adapters, dispatches update/render/input) --
         let mut coordinator = AppCoordinator::new(event_bus);
 
-        // -- Register initial terminal as adapter (Phase 3 — coordinator-managed) --
-        {
-            use crate::adapters::terminal::TerminalAdapter;
-            use phantom_scene::clock::Cadence;
-            use phantom_terminal::output::TerminalThemeColors;
+        // -- Register initial SetupAdapter as the sole pane --
+        //
+        // The cold-launch first impression is "Phantom IS the AI", not "Phantom
+        // is a terminal" (see `feedback_agent_is_primary` memory).  We
+        // register a dependency-free `SetupAdapter` here.  On the first
+        // `update.rs` tick the post-boot agent-spawn code runs; if an API key
+        // is available the existing `adapter_count() == 1 → kill_keeping_pane`
+        // replace-focused path swaps SetupAdapter out for the real agent at
+        // the SAME pane slot — no split, no half-window agent.  If no key is
+        // available SetupAdapter stays put with a "needs API key" message.
+        //
+        // The early `terminal: PhantomTerminal` built above at line ~679 is
+        // now unused at init; we drop it.  Cmd+T constructs a fresh terminal
+        // via `PhantomTerminal::new` in `pane.rs` when the user actually wants
+        // one.  Letting `terminal` go out of scope releases the PTY cleanly
+        // via `Drop`.
+        drop(terminal);
 
-            let theme_colors = TerminalThemeColors {
-                foreground: theme.colors.foreground,
-                background: theme.colors.background,
-                cursor: theme.colors.cursor,
-                ansi: Some(theme.colors.ansi),
-            };
-            let adapter = TerminalAdapter::with_theme(terminal, theme_colors);
+        let post_setup_upgrade = std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        );
+        {
+            use crate::adapters::setup::SetupAdapter;
+            use phantom_scene::clock::Cadence;
+
+            let adapter = SetupAdapter::new(std::sync::Arc::clone(&post_setup_upgrade));
             let _app_id = coordinator.register_adapter_at_pane(
                 Box::new(adapter),
                 pane_id,
@@ -1175,7 +1274,7 @@ impl App {
                 Cadence::unlimited(),
                 &mut layout,
             );
-            info!("Initial terminal registered as adapter (AppId {_app_id})");
+            info!("Initial SetupAdapter registered (AppId {_app_id}) — agent is king");
         }
 
         // Configure the arbiter with window content area and cell metrics.
@@ -1401,6 +1500,8 @@ impl App {
             state: initial_state,
             demo_mode: config.demo_mode,
             demo_post_boot_done: false,
+            post_boot_agent_spawned: false,
+            post_setup_upgrade,
             start_time: now,
             last_frame: now,
             dt_clamp: phantom_scene::DtClamp::default_60fps(),
@@ -1408,6 +1509,7 @@ impl App {
             cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
+            force_redraw: true,
             supervisor,
             console: crate::console::Console::new(),
             debug_hud: false,
@@ -1475,6 +1577,8 @@ impl App {
             git_refresh_last: now,
             git_refresh_handle: None,
             git_refresh_spawned_at: None,
+            git_refresh_cancel: None,
+            stt_task_handles: None,
             overlay_line_buf: Vec::with_capacity(128),
             video_renderer,
             video_playback: None,
@@ -1499,6 +1603,9 @@ impl App {
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
             shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),
+            config_watcher: crate::config_watcher::ConfigWatcher::new(
+                &crate::settings::PhantomSettings::default_path(),
+            ),
             history,
             agent_capture,
             session_uuid,
@@ -1523,6 +1630,55 @@ impl App {
     /// Returns `true` if the app has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Returns `true` when the scene graph has at least one dirty node,
+    /// meaning the GPU pipeline has pending work to upload this frame.
+    pub fn scene_is_dirty(&self) -> bool {
+        self.scene.has_dirty_nodes()
+    }
+
+    /// Returns `true` when a visual animation is in progress that requires
+    /// the render loop to keep running even if the scene graph is clean.
+    pub fn has_active_animation(&self) -> bool {
+        // Boot sequence is animating.
+        if self.state == AppState::Boot && !self.boot.is_done() {
+            return true;
+        }
+        // Terminal mode: cursor blinking requires continuous repaints.
+        if self.state == AppState::Terminal {
+            return true;
+        }
+        // Quake console is visible (slide animation or idle — keeps animating).
+        if self.console.visible() {
+            return true;
+        }
+        // Per-keystroke glitch effect is running.
+        if self.keystroke_fx.is_active() {
+            return true;
+        }
+        // Alt-screen fade-in/out.
+        if !self.alt_screen_fade.is_empty() {
+            return true;
+        }
+        false
+    }
+
+    /// Set the force-redraw latch so at least one render happens this frame
+    /// even if the scene graph is clean.
+    ///
+    /// Call this from event handlers (key, mouse, resize, focus, OODA action)
+    /// to ensure the frame loop re-arms itself.
+    pub fn request_redraw(&mut self) {
+        self.force_redraw = true;
+    }
+
+    /// Returns the current value of the force-redraw latch.
+    ///
+    /// Used by the winit event loop to decide whether to re-arm
+    /// `window.request_redraw()` after a static frame.
+    pub fn needs_force_redraw(&self) -> bool {
+        self.force_redraw
     }
 
     /// Drain the latest OSC 2 window title from the focused terminal adapter.
@@ -1559,6 +1715,16 @@ impl App {
                 .filter(|e| e.app_type == "agent")
                 .count(),
         ))
+    }
+
+    /// Notify the supervisor that the render loop is escalating past the
+    /// consecutive-panic threshold and is about to force-exit.
+    ///
+    /// Best-effort: if the socket is broken the error is silently ignored.
+    pub fn notify_render_panic(&mut self, count: u32, last_message: &str) {
+        if let Some(ref mut sv) = self.supervisor {
+            sv.notify_render_panic(count, last_message);
+        }
     }
 
     /// Graceful shutdown: save session, dispatch plugin hooks, shut down brain,
@@ -1652,6 +1818,13 @@ impl App {
             info!("[plugin shutdown]: {resp:?}");
         }
         self.plugin_registry.shutdown_all();
+
+        // Abort STT background tasks immediately so the pipeline does not
+        // block shutdown waiting for the channel-close cascade to propagate
+        // through a long STT backend call.
+        if let Some(handles) = self.stt_task_handles.take() {
+            handles.abort();
+        }
 
         // Shut down the brain thread.
         if let Some(ref brain) = self.brain {
@@ -1865,6 +2038,56 @@ impl App {
     // Pane management (see pane.rs for split/close)
     // Capture (see capture.rs for per-pane GPU readback + bundle persistence)
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Config live-reload
+    // -----------------------------------------------------------------------
+
+    /// Apply a freshly-loaded [`PhantomSettings`] to the live app state.
+    ///
+    /// Called from `App::update` when [`ConfigWatcher::drain_changes`] returns
+    /// `true`. Updates the theme name, shader params, and font size from the
+    /// new settings so changes written to `settings.toml` from an external
+    /// editor (or via the settings panel) are reflected immediately.
+    pub(crate) fn apply_config_reload(&mut self, settings: &crate::settings::PhantomSettings) {
+        use phantom_ui::themes;
+
+        // Theme: resolve the named built-in and swap if it changed.
+        if !settings.theme.eq_ignore_ascii_case(&self.theme.name) {
+            if let Some(new_theme) = themes::builtin_by_name(&settings.theme) {
+                self.theme = new_theme;
+                info!("Config live-reload: theme → {}", settings.theme);
+            } else {
+                warn!(
+                    "Config live-reload: unknown theme '{}', keeping current",
+                    settings.theme
+                );
+            }
+        }
+
+        // CRT shader params.
+        let sp = &mut self.theme.shader_params;
+        let crt = &settings.crt;
+        sp.scanline_intensity = crt.scanline_intensity;
+        sp.bloom_intensity = crt.bloom_intensity;
+        sp.chromatic_aberration = crt.chromatic_aberration;
+        sp.curvature = crt.curvature;
+        sp.vignette_intensity = crt.vignette_intensity;
+        sp.noise_intensity = crt.noise_intensity;
+
+        // Font size: only change if it actually differs (avoid atlas churn).
+        let current_size = self.text_renderer.font_size();
+        if (settings.font_size - current_size).abs() > 0.5 {
+            self.text_renderer.set_font_size(settings.font_size);
+            self.cell_size = self.text_renderer.measure_cell();
+            self.atlas.clear();
+            info!(
+                "Config live-reload: font_size → {:.0}pt",
+                settings.font_size
+            );
+        }
+
+    }
 }
 
 /// Construct a [`GhTicketDispatcher`] backed by the real `gh` CLI.
@@ -2223,7 +2446,10 @@ mod tests {
         with_env_var("OPENAI_API_KEY", None, || {
             let result = phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env();
             assert!(
-                matches!(result, Err(phantom_embeddings::EmbedError::NotConfigured { .. })),
+                matches!(
+                    result,
+                    Err(phantom_embeddings::EmbedError::NotConfigured { .. })
+                ),
                 "expected NotConfigured, got {result:?}"
             );
         });

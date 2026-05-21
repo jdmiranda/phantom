@@ -3892,6 +3892,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "is-docker"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928bae27f42bc99b60d9ac7334e3a21d10ad8f1835a4e12ec3ec0464765ed1b3"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
+name = "is-wsl"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173609498df190136aa7dea1a91db051746d339e18476eed5ca40521f02d7aa5"
+dependencies = [
+ "is-docker",
+ "once_cell",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5831,6 +5850,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "open"
+version = "5.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fbaa89d2ddc8473c78a3adf69eea8cffa28c483b8e02a971ef31527cd0fc92c"
+dependencies = [
+ "is-wsl",
+ "libc",
+ "pathdiff",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.78"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5990,6 +6020,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pathdiff"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
 name = "pem"
 version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6060,6 +6096,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
  "uuid",
  "winit",
 ]
@@ -6114,6 +6151,8 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "notify",
+ "open",
  "phantom-adapter",
  "phantom-agents",
  "phantom-brain",
@@ -6153,6 +6192,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-audio"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-core",
+ "futures-util",
+ "screencapturekit",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "phantom-brain"
 version = "0.1.0"
 dependencies = [
@@ -6161,6 +6215,7 @@ dependencies = [
  "phantom-adapter",
  "phantom-agents",
  "phantom-context",
+ "phantom-embeddings",
  "phantom-history",
  "phantom-loop",
  "phantom-memory",
@@ -6313,6 +6368,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-test",
+ "dirs 5.0.1",
  "ed25519-dalek",
  "futures-util",
  "jsonwebtoken",
@@ -6385,9 +6441,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bs58",
+ "chacha20poly1305",
  "dirs 5.0.1",
  "ed25519-dalek",
  "futures-util",
+ "hkdf",
  "log",
  "rand 0.8.6",
  "serde",
@@ -6396,6 +6454,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -6443,6 +6502,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "phantom-bundles",
+ "phantom-embeddings",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -6530,12 +6590,14 @@ name = "phantom-skill-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "libloading",
  "log",
  "notify",
  "phantom-nlp",
  "phantom-semantic",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -6560,6 +6622,7 @@ name = "phantom-supervisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "env_logger",
  "libc",
  "log",
@@ -7690,6 +7753,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "screencapturekit"
+version = "1.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99b732b2db50b25cfbcb171e1b7abda06e77873aeef493e635eb209482fdd149"
 
 [[package]]
 name = "sctk-adwaita"
@@ -10751,6 +10820,18 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
+]
 
 [[package]]
 name = "xcursor"

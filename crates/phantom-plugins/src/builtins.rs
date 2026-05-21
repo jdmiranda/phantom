@@ -52,11 +52,13 @@ fn git_enhanced() -> PluginManifest {
                 name: "git-graph".into(),
                 description: "Interactive commit graph with branch topology.".into(),
                 usage: "git-graph [--all] [--since <date>]".into(),
+                write_access: false,
             },
             CommandDef {
                 name: "git-review".into(),
                 description: "AI-assisted pull request review.".into(),
                 usage: "git-review [<pr-number>]".into(),
+                write_access: false,
             },
         ],
         status_bar: None,
@@ -84,11 +86,13 @@ fn docker_dashboard() -> PluginManifest {
                 name: "docker-dash".into(),
                 description: "Live container dashboard with resource usage.".into(),
                 usage: "docker-dash [--watch]".into(),
+                write_access: false,
             },
             CommandDef {
                 name: "docker-logs".into(),
                 description: "Streaming container log viewer with filtering.".into(),
                 usage: "docker-logs <container> [--follow] [--filter <pattern>]".into(),
+                write_access: false,
             },
         ],
         status_bar: Some(StatusBarDef {
@@ -120,6 +124,7 @@ fn api_inspector() -> PluginManifest {
             name: "api".into(),
             description: "Interactive HTTP request builder with history.".into(),
             usage: "api <method> <url> [--header <k:v>] [--body <json>]".into(),
+            write_access: false,
         }],
         status_bar: None,
         scaffold: false,
@@ -175,6 +180,7 @@ fn github_notifications() -> PluginManifest {
             name: "gh-notif".into(),
             description: "Show GitHub notifications with filtering and mark-as-read.".into(),
             usage: "gh-notif [--unread] [--repo <owner/repo>]".into(),
+            write_access: false,
         }],
         status_bar: Some(StatusBarDef {
             position: StatusBarPosition::Right,

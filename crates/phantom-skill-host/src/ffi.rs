@@ -36,12 +36,31 @@ pub enum CommandTypeTag {
     Shell    = 6,
 }
 
+/// ABI version stamped into every vtable.
+///
+/// Increment this constant whenever the layout of [`SemanticSkillVtable`]
+/// changes in any way (field added, removed, reordered, or resized).
+/// The loader rejects dylibs whose `abi_version` does not equal this value.
+pub const CURRENT_ABI_VERSION: u32 = 1;
+
 /// The C-ABI vtable exported by every skill dylib.
 ///
 /// Obtain one by calling `phantom_skill_register()` in the dylib.
 /// All function pointers must be non-null.
+///
+/// # Layout stability
+///
+/// `abi_version` is the **first** field so the loader can read it safely
+/// before trusting any of the function-pointer fields.  Any layout change
+/// requires bumping [`CURRENT_ABI_VERSION`].
 #[repr(C)]
 pub struct SemanticSkillVtable {
+    /// ABI version written by the dylib at registration time.
+    ///
+    /// Must equal [`CURRENT_ABI_VERSION`]; the loader returns
+    /// `LoadError::AbiVersionMismatch` otherwise.
+    pub abi_version: u32,
+
     /// Return a `CommandTypeTag` discriminant for `cmd[..cmd_len]`.
     ///
     /// # Safety

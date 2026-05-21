@@ -1,5 +1,6 @@
 pub mod adapters;
 mod action_context;
+pub mod config_watcher;
 mod agent_pane;
 pub mod mcp_discovery;
 pub mod dag_commands;
@@ -36,7 +37,7 @@ mod selftest;
 pub mod session;
 pub mod settings;
 pub(crate) mod settings_ui;
-mod stt;
+pub mod stt;
 pub mod supervisor_client;
 mod sysmon;
 pub mod tts;

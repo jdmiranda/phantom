@@ -99,6 +99,7 @@ use crate::dispatcher::{
     DispatcherTool, DispatcherToolContext, mark_ticket_done, mark_ticket_in_progress,
     request_next_ticket,
 };
+use crate::self_extension_tools::{SelfExtensionTool, propose_skill};
 use crate::tools::{ToolResult, ToolType, execute_tool};
 
 use capability::{check_capability, class_for};
@@ -397,6 +398,30 @@ pub fn dispatch_tool(
                     };
                     match r {
                         Ok(msg) => result(PLACEHOLDER_TOOL, true, msg),
+                        Err(e) => result(PLACEHOLDER_TOOL, false, e),
+                    }
+                }
+            }
+        }
+    } else if let Some(ext_tool) = SelfExtensionTool::from_api_name(name) {
+        // ---- Self-extension tools (propose_skill) --------------------------
+        //
+        // Scoped install primitive: an agent with Reflect can stage a new
+        // skill markdown for human promotion. See
+        // `docs/design/self-extension-primitive.md` for the full design and
+        // `crates/phantom-agents/src/self_extension_tools.rs` for the
+        // sanitize/audit/concurrency contract.
+        if let Err(msg) = check_capability(ctx.role, ext_tool.class()) {
+            result(PLACEHOLDER_TOOL, false, msg)
+        } else {
+            match ext_tool {
+                SelfExtensionTool::ProposeSkill => {
+                    match propose_skill(args, &ctx.self_ref, ctx.working_dir) {
+                        Ok(path) => result(
+                            PLACEHOLDER_TOOL,
+                            true,
+                            format!("proposed: {}", path.display()),
+                        ),
                         Err(e) => result(PLACEHOLDER_TOOL, false, e),
                     }
                 }

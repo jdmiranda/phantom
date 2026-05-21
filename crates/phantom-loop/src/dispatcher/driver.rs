@@ -63,6 +63,7 @@ use phantom_agents::chat::{
     ChatBackend, ChatError, ChatModel, ChatRequest, build_backend_with_privacy,
 };
 use phantom_agents::composer_tools::{SpawnSubagentQueue, SpawnSubagentRequest};
+use phantom_agents::self_extension_tools::self_extension_tools;
 use phantom_agents::tools::{
     ToolDefinition, available_tools, execute_tool_with_provenance, lifecycle_tools,
 };
@@ -181,6 +182,7 @@ impl ChatBackedSubstrateBackend {
 
         let mut tools = available_tools();
         tools.extend(lifecycle_tools());
+        tools.extend(self_extension_tools());
 
         let working_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
@@ -213,6 +215,13 @@ impl ChatBackedSubstrateBackend {
                         current_assistant.push_str(&text);
                     }
                     Some(ApiEvent::ToolUse { id, call }) => {
+                        tracing::info!(
+                            agent_id = req.assigned_id,
+                            round,
+                            tool = ?call.tool,
+                            args = %serde_json::to_string(&call.args).unwrap_or_default(),
+                            "agent tool use",
+                        );
                         tool_use_ids.push(id.clone());
                         pending_calls.push((id, call));
                     }
