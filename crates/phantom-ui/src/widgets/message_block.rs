@@ -54,6 +54,11 @@ pub enum LineKind {
     /// A line inside a fenced ``` code block.
     CodeLine,
     /// A line that is part of a tool call / tool result.
+    ///
+    /// Reserved for a future phase that classifies tool-call fences (e.g.
+    /// `<tool_use>` blocks) so the renderer can style them distinctly from
+    /// regular code. Currently `wrapped_lines` does not emit this variant.
+    #[allow(dead_code)]
     ToolCall,
 }
 
@@ -131,25 +136,56 @@ impl MessageRole {
 
 /// Strip ANSI escape sequences from `s`, returning clean text.
 ///
-/// Handles `ESC [ ... final_byte` (CSI sequences including SGR color codes)
-/// and two-character `ESC <byte>` sequences (e.g. `ESC O`, `ESC ]`).
+/// Handles:
+/// - `ESC [ ... final_byte` — CSI sequences (including SGR color codes), drained
+///   until the first ASCII alphabetic final byte.
+/// - `ESC ]` (OSC), `ESC P` (DCS), `ESC ^` (PM), `ESC _` (APC), `ESC X` (SOS) —
+///   string-terminator sequences drained until BEL (`\x07`) or ST (`ESC \`).
+///   Without this, hyperlinks (`ESC]8;;URL BEL text ESC]8;; BEL`) and
+///   tmux/iTerm2 passthrough would bleed through verbatim.
+/// - Other two-character `ESC <byte>` sequences (e.g. `ESC (B`, `ESC =`,
+///   `ESC >`, `ESC M`) — consume the single following byte.
 fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
-                // Skip until we hit an ASCII letter (the final byte).
-                while let Some(&next) = chars.peek() {
-                    chars.next();
-                    if next.is_ascii_alphabetic() {
-                        break;
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next(); // consume '['
+                    // Skip until we hit an ASCII letter (the final byte).
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
                     }
                 }
-            } else {
-                // Two-character ESC sequence: consume one more byte.
-                let _ = chars.next();
+                // OSC / DCS / PM / APC / SOS: drain until BEL or ST (ESC \).
+                Some(']' | 'P' | '^' | '_' | 'X') => {
+                    chars.next(); // consume introducer
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '\x07' {
+                            // BEL terminator.
+                            break;
+                        }
+                        if next == '\x1b' {
+                            // ST = ESC \ — consume the trailing '\' if present.
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Two-character ESC sequence: consume one more byte.
+                    let _ = chars.next();
+                }
+                None => {
+                    // Lone ESC at end of input — drop it.
+                }
             }
         } else {
             result.push(c);
@@ -225,20 +261,31 @@ impl MessageBlock {
     pub fn advance_spinner(&mut self) {
         let next = match self.spinner_frame {
             None => 0,
-            Some(f) => (f + 1) % SPINNER_FRAMES.len() as u8,
+            // Compute the modulo in `usize` so a future `SPINNER_FRAMES.len()`
+            // beyond 255 cannot silently truncate via `as u8`. The current
+            // 10-element table can never exceed `u8::MAX`, so the cast back
+            // is always lossless.
+            Some(f) => {
+                let next_idx = (f as usize + 1) % SPINNER_FRAMES.len();
+                next_idx as u8
+            }
         };
         self.spinner_frame = Some(next);
     }
 
     /// Compute the pixel height this block occupies for a given `rect_width`.
     ///
-    /// Height = `(1 + wrapped_line_count) * cell_h`, where the leading `1`
-    /// accounts for the role-label row.
+    /// Height = `(1 + body_rows) * cell_h`, where the leading `1` accounts
+    /// for the role-label row and `body_rows` is the wrapped line count.
+    /// When the body is empty but a spinner is active, one extra row is
+    /// reserved for the standalone spinner segment so the next widget in a
+    /// vertical list does not overlap it.
     #[must_use]
     pub fn compute_height(&self, rect_width: f32) -> f32 {
         let line_count = self.wrapped_lines(rect_width).len();
-        // role-label row (1) + body rows
-        (1 + line_count) as f32 * self.ctx.cell_h()
+        let spinner_row = usize::from(line_count == 0 && self.spinner_frame.is_some());
+        // role-label row (1) + body rows (+ optional spinner row)
+        (1 + line_count + spinner_row) as f32 * self.ctx.cell_h()
     }
 
     /// Wrap `body` into classified lines that fit within `rect_width`,
@@ -333,10 +380,17 @@ impl Widget for MessageBlock {
         let body_x = rect.x + AVATAR_W + AVATAR_GAP;
         let body_width = (rect.width - AVATAR_W - AVATAR_GAP).max(0.0);
 
+        // Compute wrapped lines once. `compute_height` would otherwise wrap
+        // a second time on the very next line — wasteful for long streaming
+        // messages where the spinner forces a redraw every tick.
+        let body_lines = self.wrapped_lines(rect.width);
+        let spinner_row = usize::from(body_lines.is_empty() && self.spinner_frame.is_some());
+        let total_height = (1 + body_lines.len() + spinner_row) as f32 * cell_h;
+
         // Full-block background.
         let mut quads = vec![QuadInstance {
             pos: [rect.x, rect.y],
-            size: [rect.width, self.compute_height(rect.width)],
+            size: [rect.width, total_height],
             color: t.colors.surface_recessed,
             border_radius: 0.0,
         }];
@@ -345,7 +399,6 @@ impl Widget for MessageBlock {
         // surface_recessed to give code blocks a subtle inset appearance.
         let code_bg: [f32; 4] = [0.05, 0.08, 0.05, 0.6];
 
-        let body_lines = self.wrapped_lines(rect.width);
         for (i, (kind, _)) in body_lines.iter().enumerate() {
             if *kind == LineKind::CodeLine {
                 let line_y = rect.y + (i + 1) as f32 * cell_h;
@@ -1097,6 +1150,90 @@ mod tests {
         assert!(
             texts[2].text.contains('⠋'),
             "standalone spinner segment must contain the spinner char"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // PR #596 review fixes
+    // ----------------------------------------------------------------
+
+    /// OSC hyperlink sequences (`ESC ] 8 ; ; URL BEL text ESC ] 8 ; ; BEL`)
+    /// must be drained entirely; the visible text must remain.
+    #[test]
+    fn strip_ansi_drains_osc_hyperlink() {
+        let input = "\x1b]8;;https://example.com\x07link text\x1b]8;;\x07 tail";
+        assert_eq!(
+            strip_ansi(input),
+            "link text tail",
+            "OSC hyperlink sequences must be drained to their BEL terminator"
+        );
+    }
+
+    /// OSC sequences terminated by ST (`ESC \`) instead of BEL must also be
+    /// drained completely.
+    #[test]
+    fn strip_ansi_drains_osc_with_string_terminator() {
+        let input = "\x1b]0;window title\x1b\\hello";
+        assert_eq!(
+            strip_ansi(input),
+            "hello",
+            "OSC sequences terminated by ST (ESC \\) must be drained"
+        );
+    }
+
+    /// DCS (`ESC P ... ESC \`) sequences must be drained.
+    #[test]
+    fn strip_ansi_drains_dcs() {
+        let input = "before\x1b\x50tmux;\x1b\\after";
+        assert_eq!(strip_ansi(input), "beforeafter");
+    }
+
+    /// `MessageBlock` body containing an OSC hyperlink must wrap to clean
+    /// visible text only.
+    #[test]
+    fn wrapped_lines_strips_osc_hyperlink() {
+        let body = "\x1b]8;;https://example.com\x07click here\x1b]8;;\x07";
+        let mut block = MessageBlock::new(MessageRole::Agent, body, 0);
+        block.set_render_ctx(fallback_ctx());
+        let lines = block.wrapped_lines(800.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].1, "click here");
+    }
+
+    /// `compute_height` must reserve a row for the standalone spinner when
+    /// the body is empty so the next widget in a vertical list does not
+    /// overlap it.
+    #[test]
+    fn compute_height_reserves_row_for_standalone_spinner() {
+        let cell_h = fallback_ctx().cell_h();
+
+        let mut without = MessageBlock::new(MessageRole::Agent, "", 0);
+        without.set_render_ctx(fallback_ctx());
+        assert_eq!(without.compute_height(800.0), cell_h, "no spinner: 1 row");
+
+        let mut with = MessageBlock::new(MessageRole::Agent, "", 0);
+        with.set_render_ctx(fallback_ctx());
+        with.advance_spinner();
+        assert_eq!(
+            with.compute_height(800.0),
+            2.0 * cell_h,
+            "empty body + spinner: 2 rows (label + standalone spinner)"
+        );
+    }
+
+    /// `render_quads` must report the same height as `compute_height` even
+    /// when only a spinner is rendered (no body lines).
+    #[test]
+    fn render_quads_height_includes_standalone_spinner() {
+        let mut block = MessageBlock::new(MessageRole::Agent, "", 0);
+        block.set_render_ctx(fallback_ctx());
+        block.advance_spinner();
+        let rect = make_rect(800.0);
+        let quads = block.render_quads(&rect);
+        assert_eq!(
+            quads[0].size[1],
+            block.compute_height(rect.width),
+            "background quad height must match compute_height when spinner is active"
         );
     }
 }
