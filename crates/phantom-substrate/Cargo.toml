@@ -1,0 +1,37 @@
+[package]
+name = "phantom-substrate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ----------------------------------------------------------------------------
+# phantom-substrate (Phase 3, issue #386):
+#
+# Leaf crate that owns durable / cross-subsystem state — `EventLog`,
+# `AgentRegistry`, `MemoryStore`, `SpawnRuleRegistry`, pending event queue.
+# Hot-swappable crates pass `Arc<Substrate>` (or `&Substrate`) as their first
+# argument; the substrate never gets hot-swapped, which is what gives the
+# whole hot-reload story TypeId stability.
+#
+# Hot reload contract:
+#   - This crate MUST NOT depend on `wgpu`, `winit`, `taffy`, `phantom-renderer`,
+#     `phantom-ui`, `phantom-app`, or anything else that pulls in graphics /
+#     windowing.
+#   - Every type that crosses a hot-swap boundary must be defined here or in
+#     a crate this crate depends on (today: phantom-memory, phantom-agents).
+# ----------------------------------------------------------------------------
+
+[dependencies]
+phantom-memory = { path = "../phantom-memory" }
+phantom-agents = { path = "../phantom-agents" }
+
+log.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

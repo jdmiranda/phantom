@@ -143,6 +143,8 @@ mod tests {
             ch: 'A',
             fg: [1.0; 4],
             bg: [0.0; 4],
+            bold: false,
+            italic: false,
         }];
 
         fx.apply(&mut grid, 1);
@@ -160,6 +162,8 @@ mod tests {
             ch: ' ',
             fg: [1.0; 4],
             bg: [0.0; 4],
+            bold: false,
+            italic: false,
         }];
 
         fx.apply(&mut grid, 1);
@@ -176,6 +180,8 @@ mod tests {
             ch: 'X',
             fg: [1.0; 4],
             bg: [0.0; 4],
+            bold: false,
+            italic: false,
         }];
 
         fx.apply(&mut grid, 1);

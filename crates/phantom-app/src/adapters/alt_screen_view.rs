@@ -222,6 +222,8 @@ mod tests {
             ch: 'A',
             fg: [1.0; 4],
             bg: [0.0; 4],
+            bold: false,
+            italic: false,
         }];
         let grid = GridData {
             cells,

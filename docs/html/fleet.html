@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · fleet</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 10 · FLEET · APP-OF-APPS</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html" class="active">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 10 · FLEET ORCHESTRATOR</span>
+    <span class="sysid">SYS://fleet.0</span>
+  </div>
+  <h1 class="page-title">Fleet · App-of-Apps</h1>
+  <p class="page-lede">
+    One Phantom process can host <strong>N autonomous apps</strong> — typically builders, one per target GitHub
+    repo — all sharing the same event bus, brain, and substrate driver. <code>phantom-fleet</code> is the
+    headless orchestrator that loads a <code>FleetSpec</code> from TOML and runs every entry concurrently.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Crate</div><div class="value">phantom-fleet</div></div>
+    <div class="status-cell"><div class="label">App kinds</div><div class="value">3</div></div>
+    <div class="status-cell"><div class="label">Shared state</div><div class="value">brain · substrate · bus</div></div>
+    <div class="status-cell"><div class="label">Spec format</div><div class="value">TOML</div></div>
+  </div>
+
+  <h2>Mental model</h2>
+
+<pre class="ascii bright">
+ ┌─────────────── one Phantom process ───────────────┐
+ │                                                   │
+ │   FleetRunner                                     │
+ │      ├── LoopQueueRegistry        (Arc)           │
+ │      ├── SubstrateAgentDispatcher (shared)        │
+ │      ├── SubstrateDriver          (shared)        │
+ │      ├── BrainHandle              (shared)        │
+ │      │                                            │
+ │      └── N hosted AppAdapter tasks                │
+ │           ├── builder: jdmiranda/phantom          │
+ │           ├── builder: jdmiranda/badass-cli       │
+ │           ├── builder: your-org/your-service      │
+ │           └── loop:    /path/to/.phantom/loops    │
+ └───────────────────────────────────────────────────┘
+</pre>
+
+  <h2>Why share infrastructure</h2>
+  <p>
+    Three reasons. <strong>Brain coherence:</strong> one brain sees work across all repos and can pick the highest-utility
+    candidate globally, not locally. <strong>Rate-limit pooling:</strong> the per-hour cap applies to <em>the brain</em>,
+    not per-repo, preventing N parallel builders from all firing at once. <strong>Cost:</strong> one Claude API
+    pool, one substrate driver, one tokio runtime — N builders for the price of one.
+  </p>
+
+  <h2>FleetSpec TOML</h2>
+<pre class="code-toml"><code><span class="c"># ~/.phantom/fleet.toml</span>
+
+<span class="a">[shared]</span>
+<span class="n">brain_audit_log</span>      = <span class="s">"~/.phantom/audit/brain.jsonl"</span>
+<span class="n">max_concurrent_agents</span> = <span class="lit">6</span>
+<span class="n">trust_band</span>            = <span class="s">"Conservative"</span>
+
+<span class="a">[[apps]]</span>
+<span class="n">kind</span> = <span class="s">"builder"</span>
+<span class="n">id</span>   = <span class="s">"phantom-self"</span>
+
+<span class="a">[apps.builder]</span>
+<span class="n">target_slug</span>     = <span class="s">"jdmiranda/phantom"</span>
+<span class="n">trust_band</span>      = <span class="s">"Standard"</span>
+<span class="n">label_filter</span>    = <span class="s">"good-first-issue"</span>
+
+<span class="a">[[apps]]</span>
+<span class="n">kind</span> = <span class="s">"builder"</span>
+<span class="n">id</span>   = <span class="s">"badass-cli"</span>
+
+<span class="a">[apps.builder]</span>
+<span class="n">target_slug</span>  = <span class="s">"jdmiranda/badass-cli"</span>
+<span class="n">trust_band</span>   = <span class="s">"Conservative"</span>
+
+<span class="a">[[apps]]</span>
+<span class="n">kind</span> = <span class="s">"loop"</span>
+<span class="n">id</span>   = <span class="s">"local-experiments"</span>
+
+<span class="a">[apps.loop]</span>
+<span class="n">repo</span>  = <span class="s">"~/code/sandbox"</span>
+<span class="n">loops</span> = [<span class="s">"implementer"</span>, <span class="s">"reviewer"</span>]</code></pre>
+
+  <h2>AppKind variants</h2>
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-h"><span class="card-title">AppKind::Builder</span><span class="pill pill-warn">cargo feature</span></div>
+      <div class="card-body">A <code>phantom-builder</code> instance pointed at a single GitHub repo. Auto-eats the issue queue at its configured trust band. Gated behind <code>builder-apps</code>.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">AppKind::Loop</span></div>
+      <div class="card-body">A repo with a local <code>.phantom/loops/*.toml</code> directory. The fleet drives those loops directly, no GitHub dependency.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">AppKind::Custom</span></div>
+      <div class="card-body">Pluggable factory pattern. The operator provides a <code>CustomFactory</code> returning a <code>BoxedLifecycle</code> handle. Used for hosted research adapters.</div>
+    </div>
+  </div>
+
+  <h2>FleetRunner</h2>
+  <p>
+    The orchestrator. Constructs shared state once, then spawns one <code>tokio::task</code> per app. Each task
+    holds an <code>AppAdapter</code> trait object and a <code>FleetContext</code> handle. Tasks communicate
+    with the shared brain through the same <code>LoopQueueRegistry</code> — so a builder for repo A can in
+    principle enqueue work for a builder of repo B if the brain decides that's useful.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub struct</span> <span class="t">FleetRunner</span> { … }
+
+<span class="k">impl</span> <span class="t">FleetRunner</span> {
+    <span class="k">pub async fn</span> <span class="fn">run</span>(<span class="k">self</span>) -&gt; <span class="t">FleetResult</span>&lt;()&gt; {
+        <span class="k">for</span> app <span class="k">in</span> &amp;<span class="k">self</span>.spec.apps {
+            <span class="k">let</span> ctx    = <span class="k">self</span>.<span class="fn">context_for</span>(app);
+            <span class="k">let</span> handle = <span class="k">match</span> &amp;app.kind {
+                <span class="t">AppKind</span>::<span class="n">Builder</span>(b) =&gt; <span class="fn">spawn_builder</span>(b, ctx).<span class="k">await</span>?,
+                <span class="t">AppKind</span>::<span class="n">Loop</span>(l)    =&gt; <span class="fn">spawn_loop</span>(l, ctx).<span class="k">await</span>?,
+                <span class="t">AppKind</span>::<span class="n">Custom</span>(c)  =&gt; <span class="fn">spawn_custom</span>(c, ctx).<span class="k">await</span>?,
+            };
+            <span class="k">self</span>.registry.<span class="fn">register</span>(app.id.<span class="fn">clone</span>(), handle);
+        }
+        <span class="k">self</span>.registry.<span class="fn">join_all</span>().<span class="k">await</span>
+    }
+}</code></pre>
+
+  <h2>FleetRegistry &amp; observability</h2>
+  <p>
+    Every running app has a <code>FleetAppHandle</code> tracked in the <code>FleetRegistry</code>. Snapshots
+    expose <code>FleetAppStatus</code> (Running, Paused, Errored, ExitedClean) and last-tick timestamps. A
+    future hub surface tails the registry to render fleet-wide status.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub struct</span> <span class="t">FleetAppSnapshot</span> {
+    <span class="k">pub</span> <span class="n">id</span>:             <span class="t">FleetAppId</span>,
+    <span class="k">pub</span> <span class="n">kind_name</span>:      <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">status</span>:         <span class="t">FleetAppStatus</span>,
+    <span class="k">pub</span> <span class="n">started_at</span>:     <span class="t">SystemTime</span>,
+    <span class="k">pub</span> <span class="n">last_tick</span>:      <span class="t">Option</span>&lt;<span class="t">SystemTime</span>&gt;,
+    <span class="k">pub</span> <span class="n">in_flight</span>:      <span class="t">u32</span>,
+    <span class="k">pub</span> <span class="n">enqueued_total</span>: <span class="t">u64</span>,
+}</code></pre>
+
+  <h2>Quick start</h2>
+
+<pre class="code-rust"><code><span class="k">use</span> <span class="t">phantom_fleet</span>::{<span class="t">FleetSpec</span>, <span class="fn">run_fleet</span>};
+
+<span class="c">// load spec from canonical config path</span>
+<span class="k">let</span> spec = <span class="t">FleetSpec</span>::<span class="fn">load</span>(<span class="t">Path</span>::<span class="fn">new</span>(<span class="s">"~/.phantom/fleet.toml"</span>))?;
+<span class="fn">run_fleet</span>(spec).<span class="k">await</span>?;</code></pre>
+
+<pre class="code-bash"><code><span class="c"># build with builder-apps feature</span>
+cargo build <span class="k">--release</span> <span class="k">--features</span> phantom-fleet/builder-apps
+
+<span class="c"># run a fleet</span>
+phantom-fleet run --config ~/.phantom/fleet.toml</code></pre>
+
+  <h2>Compile-time gating</h2>
+  <div class="callout">
+    <div class="callout-title">The builder-apps cargo feature</div>
+    <code>AppKind::Builder</code> entries are gated behind the optional <code>builder-apps</code> Cargo
+    feature on <code>phantom-fleet</code>. The fleet compiles cleanly without it. Trying to <em>run</em>
+    a builder entry on a binary built without the feature returns a clear
+    <code>FleetError::Unsupported</code> pointing at the exact rebuild command — no silent fallback.
+  </div>
+
+  <h2>The path forward</h2>
+  <p>
+    Today: fleet hosts builders + local loop apps. Tomorrow: the <code>AppAdapter</code> trait + pub/sub
+    event bus (<code>phantom-adapter</code>) means <em>anything</em> can be hosted — a vision-capture app, a
+    voice-driven app, a federation relay, an MCP server endpoint. Each app sees the shared event stream and
+    can subscribe to whatever topics it cares about. The fleet is the substrate's <em>kernel</em>; everything
+    above it is an app.
+  </p>
+
+  <footer class="footer">
+    <span>SEC 10 · FLEET</span>
+    <span><a href="self-improvement.html">↩ SEC 09 · SELF-IMPROVE</a> · <a href="build-run.html">next → SEC 11 · BUILD/RUN</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

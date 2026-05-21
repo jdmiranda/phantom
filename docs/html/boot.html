@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · boot sequence</title>
+<link rel="stylesheet" href="assets/phantom.css">
+<style>
+  /* boot timeline */
+  .timeline {
+    position: relative;
+    border-left: 2px solid var(--color-frame);
+    padding-left: var(--space-5);
+    margin: var(--space-5) 0;
+  }
+  .timeline-step {
+    position: relative;
+    margin-bottom: var(--space-5);
+    padding-left: var(--space-3);
+  }
+  .timeline-step::before {
+    content: '';
+    position: absolute;
+    width: 14px; height: 14px;
+    background: var(--color-bg);
+    border: 2px solid var(--color-accent);
+    border-radius: 50%;
+    left: -34px;
+    top: 4px;
+    box-shadow: var(--glow);
+  }
+  .timeline-step .when {
+    color: var(--color-amber);
+    font-size: var(--type-caption);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    margin-bottom: 4px;
+  }
+  .timeline-step .what {
+    color: var(--color-text-bright);
+    font-size: var(--type-h3);
+    margin-bottom: 6px;
+  }
+  .timeline-step .why { color: var(--color-text); font-size: var(--type-label); }
+</style>
+</head>
+<body>
+<div class="ribbon">SEC 02 · CINEMATIC BOOT · STATE MACHINE</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html" class="active">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 02 · CINEMATIC BOOT</span>
+    <span class="sysid">SYS://boot.0</span>
+  </div>
+  <h1 class="page-title">Boot Sequence</h1>
+  <p class="page-lede">
+    Phantom doesn't open. It <em>boots</em>. A 7-phase state machine drives a 6-second cinematic warm-up:
+    static noise, CRT warm-up, glitch-typed logo reveal, animated system check, welcome handoff. The bezel
+    flickers, the scan beam sweeps, the phosphor settles, and only then does the terminal accept your input.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Phases</div><div class="value">7</div></div>
+    <div class="status-cell"><div class="label">Total duration</div><div class="value">6.5 sec</div></div>
+    <div class="status-cell"><div class="label">Driver</div><div class="value">phantom-app/src/boot.rs</div></div>
+    <div class="status-cell"><div class="label">Skippable</div><div class="value">--no-boot</div></div>
+  </div>
+
+  <h2>State machine</h2>
+  <p>The <code>BootSequence</code> state at <code>boot.rs:1</code> is a tagged enum advanced by frame
+    delta. Each variant carries its own progress timer (in seconds).</p>
+
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">BootSequence</span> {
+    <span class="n">BlackScreen</span>      { t: <span class="t">f32</span> },     <span class="c">// 0.0 — 0.5s  static noise</span>
+    <span class="n">CrtWarmup</span>        { t: <span class="t">f32</span> },     <span class="c">// 0.5 — 1.5s  centre-out clear, scan beam</span>
+    <span class="n">LogoReveal</span>       { t: <span class="t">f32</span> },     <span class="c">// 1.5 — 3.5s  glitch-typed PHANTOM</span>
+    <span class="n">SystemCheck</span>      { t: <span class="t">f32</span> },     <span class="c">// 3.5 — 6.0s  4 status lines w/ bars</span>
+    <span class="n">Welcome</span>          { t: <span class="t">f32</span> },     <span class="c">// 6.0+        cursor blink, waits key</span>
+    <span class="n">TransitionToTerm</span> { t: <span class="t">f32</span> },     <span class="c">// 0.5s        fade to terminal</span>
+    <span class="n">Done</span>,
+}
+</code></pre>
+
+  <h2>Timeline</h2>
+
+  <div class="timeline">
+    <div class="timeline-step">
+      <div class="when">[ T = 0.0s ] · phase 1</div>
+      <div class="what">BlackScreen</div>
+      <div class="why">
+        Static noise on a CRT interference field. Half a second of pure void to disorient — your eyes adjust to
+        the bezel before the tube warms. <code>boot.rs::render_black_screen</code> draws full-coverage random
+        block-element glyphs (<code>▓ ▒ ░</code>) at random alpha.
+      </div>
+    </div>
+    <div class="timeline-step">
+      <div class="when">[ T = 0.5s ] · phase 2</div>
+      <div class="what">CrtWarmup</div>
+      <div class="why">
+        The noise clears center-out, sweeping outward as a phosphor scan beam crosses from top to bottom. This is the
+        tube coming alive. The post-fx <code>scanline_intensity</code> uniform ramps from <code>0.0</code> to its
+        theme default over the 1.0s of this phase.
+      </div>
+    </div>
+    <div class="timeline-step">
+      <div class="when">[ T = 1.5s ] · phase 3</div>
+      <div class="what">LogoReveal</div>
+      <div class="why">
+        The PHANTOM logo glitches in character-by-character. Each cell flickers through 2–4 random Unicode
+        block-element glyphs before settling on its final character. Uses
+        <code>boot.rs:74-79</code> glitch chars (<code>█ ▓ ▒ ░ ▀ ▄ ▌ ▐</code>) and box-drawing logo at
+        <code>boot.rs:85-93</code>.
+      </div>
+    </div>
+    <div class="timeline-step">
+      <div class="when">[ T = 3.5s ] · phase 4</div>
+      <div class="what">SystemCheck</div>
+      <div class="why">
+        Four status lines reveal in succession with animated 20-character progress bars. Each line takes 0.4s to fill;
+        lines stagger every <code>SYSCHECK_LINE_DELAY = 0.3s</code>. The bars are pure glyph composition —
+        <code>[████████░░░░░░░░░░░░] 38%</code> — no GPU primitives needed.
+        <pre class="code-asci" style="margin-top:10px"><code>[ NEURAL CORE   ] ████████████████████ 100%  ONLINE
+[ RENDER ENGINE ] ████████████████████ 100%  wgpu/metal
+[ AGENT MESH    ] ████████████████████ 100%  12 roles registered
+[ MEMORY BANKS  ] ████████████████████ 100%  per-project · jsonl</code></pre>
+      </div>
+    </div>
+    <div class="timeline-step">
+      <div class="when">[ T = 6.0s ] · phase 5</div>
+      <div class="what">Welcome</div>
+      <div class="why">
+        <code>SYSTEM READY</code> appears with a blinking cursor (0.6s period). The boot loop now polls for input:
+        the next keystroke advances to the transition. Idle here forever and the terminal does not.
+      </div>
+    </div>
+    <div class="timeline-step">
+      <div class="when">[ T = 6.0s + key ] · phase 6</div>
+      <div class="what">TransitionToTerminal</div>
+      <div class="why">
+        A quick 0.5s fade. The cinematic surface dissolves into the terminal cell grid. The scene-graph dirty bit
+        flips; <code>App</code> takes input authority from boot.
+      </div>
+    </div>
+    <div class="timeline-step">
+      <div class="when">[ T = 6.5s ]</div>
+      <div class="what">Done</div>
+      <div class="why">Boot state is dropped. The terminal is yours.</div>
+    </div>
+  </div>
+
+  <h2>The logo</h2>
+  <p>
+    Defined as a static <code>&amp;[&amp;str]</code> at <code>boot.rs:85-93</code>. Unicode box-drawing,
+    9 rows tall. During reveal, each glyph position is replaced with a randomly-chosen glitch char that
+    settles after a per-cell timer expires.
+  </p>
+
+<pre class="ascii">
+ ██████╗ ██╗  ██╗ █████╗ ███╗   ██╗████████╗ ██████╗ ███╗   ███╗
+ ██╔══██╗██║  ██║██╔══██╗████╗  ██║╚══██╔══╝██╔═══██╗████╗ ████║
+ ██████╔╝███████║███████║██╔██╗ ██║   ██║   ██║   ██║██╔████╔██║
+ ██╔═══╝ ██╔══██║██╔══██║██║╚██╗██║   ██║   ██║   ██║██║╚██╔╝██║
+ ██║     ██║  ██║██║  ██║██║ ╚████║   ██║   ╚██████╔╝██║ ╚═╝ ██║
+ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝
+</pre>
+
+  <h2>Skipping boot</h2>
+  <p>For development iteration:</p>
+<pre class="code-bash"><code><span class="c"># skip the cinematic, go straight to the prompt</span>
+cargo run -- --no-boot
+
+<span class="c"># or, in code, App is constructed with boot=Done</span>
+App::with_config_scaled(gpu, config, sock, scale).<span class="fn">skip_boot</span>();</code></pre>
+
+  <div class="callout callout-info">
+    <div class="callout-title">Aesthetic</div>
+    Phantom is a <em>diegetic computing surface</em>: a piece of in-world hardware the operator boots up — not
+    an app that opens. Phosphor type on a CRT, a deliberate cold-start, and a power-on self-test that means
+    something. The boot sequence is part of the product, not a splash screen.
+  </div>
+
+  <h2>Why this matters</h2>
+  <p>
+    The boot sequence is not decoration. It exercises the renderer's hot path before the user's first command,
+    warms the glyph atlas (every box-drawing char it'll ever use lands during the logo reveal), and lets the
+    supervisor confirm the heartbeat handshake before any real work flows through. By the time you see
+    <code>SYSTEM READY</code>, the GPU, the PTY, the agent mesh, and the supervisor socket are all hot.
+  </p>
+
+  <footer class="footer">
+    <span>SEC 02 · CINEMATIC BOOT</span>
+    <span><a href="architecture.html">↩ SEC 01 · ARCH</a> · <a href="rendering.html">next → SEC 03 · RENDER</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

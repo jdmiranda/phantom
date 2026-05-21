@@ -74,6 +74,10 @@ pub struct TerminalAdapter {
     alt_screen_snapshot: Option<Arc<Mutex<Option<RenderOutput>>>>,
     /// Edge-detector for subprocess takeover events (issue #364).
     takeover_detector: TakeoverDetector,
+    /// Most recent OSC 2 window title received from the running program.
+    /// Set during `update()` when the terminal emits `Event::Title`; consumed
+    /// (and cleared) by `take_pending_title()`.
+    pending_title: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +108,7 @@ impl TerminalAdapter {
             outbox: Vec::new(),
             alt_screen_snapshot: None,
             takeover_detector: TakeoverDetector::default(),
+            pending_title: None,
         }
     }
 
@@ -141,9 +146,17 @@ impl TerminalAdapter {
     }
 
     /// Whether the terminal is detached (alt-screen program running).
-    #[must_use] 
+    #[must_use]
     pub fn is_detached(&self) -> bool {
         self.is_detached
+    }
+
+    /// Consume and return the latest OSC 2 window title emitted since the last call.
+    ///
+    /// Returns `None` when no new title has arrived. The caller (typically the
+    /// main event loop) should forward this to `window.set_title()`.
+    pub fn take_pending_title(&mut self) -> Option<String> {
+        self.pending_title.take()
     }
 
     /// Label of the detached foreground process (e.g. "vim", "htop").
@@ -181,6 +194,8 @@ impl TerminalAdapter {
                 ch: rc.ch,
                 fg: rc.fg,
                 bg: rc.bg,
+                bold: rc.flags.contains(phantom_terminal::output::CellFlags::BOLD),
+                italic: rc.flags.contains(phantom_terminal::output::CellFlags::ITALIC),
             })
             .collect();
 
@@ -263,6 +278,17 @@ impl AppCore for TerminalAdapter {
                 self.pty_dead = true;
             }
         }
+
+        // -- OSC 2 title drain (Bug 3) -----------------------------------------
+        // Drain any window title changes emitted by the running program and keep
+        // the most recent one. The caller retrieves it via `take_pending_title()`.
+        let titles = self.terminal.drain_title_queue();
+        if let Some(latest) = titles.into_iter().last() {
+            self.pending_title = Some(latest);
+        }
+
+        // -- Bracketed-paste timeout tick (Bug 1) --------------------------------
+        self.terminal.tick_paste_timeout();
 
         let is_alt = phantom_terminal::alt_screen::is_alt_screen(self.terminal.term());
 
@@ -369,6 +395,10 @@ impl AppCore for TerminalAdapter {
             // Structured takeover state (issue #364): true when the edge-detector
             // considers a subprocess to be actively taking over this terminal.
             "takeover_active": self.takeover_detector.is_active(),
+            // Kitty keyboard protocol (CSI u) state. True when the running
+            // program has enabled Kitty mode via `CSI > 1 h`. The input
+            // dispatch layer reads this to select the encoding path.
+            "kitty_keyboard_mode": self.terminal.is_kitty_keyboard_mode(),
         })
     }
 
@@ -376,6 +406,20 @@ impl AppCore for TerminalAdapter {
     /// `ParsedOutput::raw_output` when a `CommandComplete` event fires (#226).
     fn output_buf_snapshot(&self) -> Option<String> {
         Some(self.output_buf.clone())
+    }
+
+    /// Drain the latest OSC 2 window title received from the running program.
+    ///
+    /// The main event loop (in `main.rs`) calls this each frame and forwards
+    /// the value to `winit_window.set_title()` so the OS window title tracks
+    /// whatever the shell / TUI program sets via `\x1b]2;<title>\x07`.
+    fn take_pending_window_title(&mut self) -> Option<String> {
+        self.pending_title.take()
+    }
+
+    /// Drain any OSC 52 clipboard texts decoded by the terminal since the last call.
+    fn drain_osc52(&mut self) -> Vec<String> {
+        self.terminal.drain_osc52()
     }
 }
 
@@ -392,6 +436,8 @@ impl Renderable for TerminalAdapter {
                 ch: rc.ch,
                 fg: rc.fg,
                 bg: rc.bg,
+                bold: rc.flags.contains(phantom_terminal::output::CellFlags::BOLD),
+                italic: rc.flags.contains(phantom_terminal::output::CellFlags::ITALIC),
             })
             .collect();
 
@@ -591,6 +637,52 @@ impl Commandable for TerminalAdapter {
                     .start_selection(SelectionType::Simple, start, Side::Left);
                 self.terminal.update_selection(end, Side::Right);
                 Ok("all selected".into())
+            }
+            "update_search" => {
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                self.terminal.update_search(query);
+                Ok(format!(
+                    "search updated: {} matches",
+                    self.terminal.search_index.total_matches()
+                ))
+            }
+            "search_info" => {
+                let total = self.terminal.search_index.total_matches();
+                let active = self.terminal.search_active;
+                Ok(serde_json::json!({ "total": total, "active": active }).to_string())
+            }
+            "scroll_to_search_match" => {
+                let idx = args
+                    .get("index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                if let Some((row, _col)) = self.terminal.search_index.nth_match(idx) {
+                    // Convert the signed row (Line) to a display offset.
+                    // Negative rows are above the viewport (in scrollback);
+                    // positive rows are within the viewport.
+                    // To centre the match we scroll so the row lands roughly
+                    // in the middle of the visible area.
+                    let rows = self.terminal.size().rows as i32;
+                    let margin = (rows / 2).max(1);
+                    if row < 0 {
+                        // row = -(distance from top of viewport), so we need
+                        // display_offset = |row| + margin to bring it into view.
+                        let target_offset = ((-row) + margin) as usize;
+                        let current = self.terminal.display_offset();
+                        if target_offset > current {
+                            self.terminal.scroll_up(target_offset - current);
+                        } else if target_offset < current {
+                            self.terminal.scroll_down(current - target_offset);
+                        }
+                    } else {
+                        // Row is within the viewport — scroll to bottom to show it.
+                        self.terminal.scroll_to_bottom();
+                    }
+                }
+                Ok("scrolled to match".into())
             }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
