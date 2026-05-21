@@ -9,13 +9,14 @@ mod orphan;
 use std::collections::VecDeque;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write as _};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use log::{error, info, warn};
@@ -93,18 +94,29 @@ struct Supervisor {
     last_heartbeat: Instant,
     /// Lifetime restart counter.
     restart_count: u32,
+    /// Cumulative render-thread panic count; triggers forced restart at >= 3.
+    render_panic_count: u32,
     /// Recent restart timestamps for rate limiting.
     restart_timestamps: VecDeque<Instant>,
     /// When the supervisor was created.
     start_time: Instant,
     /// When the current phantom child was spawned (reset on each restart).
     spawn_time: Option<Instant>,
+    /// Timestamp of the last clean-uptime checkpoint (used to reset restart_count).
+    last_clean_checkpoint: Instant,
     /// Path to the phantom binary.
     phantom_binary: PathBuf,
     /// Receiver end of the stdin-reader thread channel.
     stdin_rx: mpsc::Receiver<String>,
     /// Shared flag to request graceful shutdown.
     shutdown: Arc<AtomicBool>,
+    /// PID of the running child (cached for crash reports).
+    child_pid: Option<u32>,
+    /// Deadline for a deferred restart spawn (used by `restart_phantom` to
+    /// implement non-blocking exponential backoff). When `Some`, the main loop
+    /// will not poll heartbeats or stdin restart requests; it polls this
+    /// deadline each tick and calls `spawn_phantom` once it elapses.
+    pending_restart_at: Option<Instant>,
 }
 
 impl Supervisor {
@@ -154,12 +166,16 @@ impl Supervisor {
             app_read_buf: String::new(),
             last_heartbeat: Instant::now(),
             restart_count: 0,
+            render_panic_count: 0,
             restart_timestamps: VecDeque::new(),
             start_time: Instant::now(),
             spawn_time: None,
+            last_clean_checkpoint: Instant::now(),
             phantom_binary,
             stdin_rx: rx,
             shutdown,
+            child_pid: None,
+            pending_restart_at: None,
         })
     }
 
@@ -194,11 +210,16 @@ impl Supervisor {
 
         let now = Instant::now();
         info!("phantom spawned -- pid {}", child.id());
+        self.child_pid = Some(child.id());
         self.child = Some(child);
         self.last_heartbeat = now;
         self.spawn_time = Some(now);
         self.app_stream = None;
         self.app_read_buf.clear();
+        // Each fresh child gets a clean render-panic counter; otherwise a child
+        // that inherits a count >= 3 from a previous lifetime would re-trigger
+        // a forced restart on its first panic. See PR #589 review.
+        self.render_panic_count = 0;
         Ok(())
     }
 
@@ -308,11 +329,108 @@ impl Supervisor {
         self.kill_phantom_with_reason(kill_reason, last_heartbeat_ms);
         self.restart_count += 1;
         self.restart_timestamps.push_back(now);
+
+        // Note: the "5 minutes of clean uptime forgives the restart count"
+        // reset fires inside `handle_app_message(Ready)` once the new child is
+        // up — not here. Resetting at restart time would zero the counter
+        // *during* a crash storm, which is the opposite of the intent.
+
+        // Exponential backoff to avoid tight restart loops during cascading
+        // failures. The sleep is deferred to the main loop so the supervisor
+        // stays responsive to SIGINT / shutdown requests during the wait.
+        let delay = Self::backoff_delay(self.restart_count);
+        let deadline = now + delay;
         info!(
-            "restarting phantom (total restarts: {})",
-            self.restart_count
+            "restarting phantom (total restarts: {}) -- backoff {:?}",
+            self.restart_count, delay
         );
-        self.spawn_phantom()
+        self.pending_restart_at = Some(deadline);
+        Ok(())
+    }
+
+    /// Returns the exponential backoff delay for the given restart count.
+    /// Starts at 500 ms, doubles each restart, caps at 30 s, with ±10% jitter
+    /// to avoid thundering-herd if two supervisors restart simultaneously.
+    fn backoff_delay(restart_count: u32) -> Duration {
+        let base = Duration::from_millis(500);
+        let max = Duration::from_secs(30);
+        let raw = base * 2u32.saturating_pow(restart_count.saturating_sub(1));
+        let capped = raw.min(max);
+        Self::apply_jitter(capped)
+    }
+
+    /// Applies ±10% jitter to a base delay. Uses the current nanosecond clock
+    /// as a cheap entropy source; this is good enough for restart de-syncing
+    /// and avoids pulling in a `rand` dependency.
+    fn apply_jitter(delay: Duration) -> Duration {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        // Map nanos into the range [-10%, +10%].
+        let pct: i64 = (nanos as i64 % 21) - 10; // -10 ..= 10
+        let base_millis = delay.as_millis() as i64;
+        let delta = base_millis * pct / 100;
+        let jittered = base_millis.saturating_add(delta).max(0) as u64;
+        Duration::from_millis(jittered)
+    }
+
+    /// If a backoff deadline has elapsed, spawn the new child. Returns `true`
+    /// if a restart is still pending (i.e. caller should skip other work).
+    fn poll_pending_restart(&mut self) -> Result<bool> {
+        let Some(deadline) = self.pending_restart_at else {
+            return Ok(false);
+        };
+        if Instant::now() < deadline {
+            return Ok(true);
+        }
+        self.pending_restart_at = None;
+        self.spawn_phantom()?;
+        Ok(false)
+    }
+
+    // ----- crash reporting --------------------------------------------------
+
+    fn write_crash_report(&self, reason: &str) {
+        // Use nanosecond granularity so two crashes in the same second do not
+        // overwrite each other.
+        let report_path = std::env::temp_dir().join(format!(
+            "phantom-crash-{}.json",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let report = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": reason,
+            "restart_count": self.restart_count,
+            "render_panic_count": self.render_panic_count,
+            "pid": self.child_pid,
+            "phantom_version": env!("CARGO_PKG_VERSION"),
+        });
+        match std::fs::write(&report_path, report.to_string()) {
+            Ok(()) => {
+                // Tighten permissions to owner-only (0600). Crash reports are
+                // not secret today, but the JSON may grow to include
+                // user-identifying fields; future-proof now.
+                if let Err(e) =
+                    std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600))
+                {
+                    warn!("failed to chmod crash report: {e}");
+                }
+                info!("crash report written to {:?}", report_path);
+            }
+            Err(e) => warn!("failed to write crash report: {e}"),
+        }
+    }
+
+    /// Trigger a forced restart (used by render-panic escalation).
+    fn request_restart(&mut self) {
+        if let Err(e) = self.restart_phantom() {
+            error!("forced restart failed: {e}");
+            self.shutdown.store(true, Ordering::Relaxed);
+        }
     }
 
     // ----- send to app ------------------------------------------------------
@@ -336,55 +454,69 @@ impl Supervisor {
         info!("supervisor main loop starting");
 
         while !self.shutdown.load(Ordering::Relaxed) {
+            // 0. If a backoff-deferred restart is due, spawn the new child.
+            //    Skip watchdog / child-exit checks while the deadline is still
+            //    pending; the child is intentionally dead during this window.
+            let waiting_on_backoff = match self.poll_pending_restart() {
+                Ok(pending) => pending,
+                Err(e) => {
+                    error!("deferred restart failed: {e}");
+                    break;
+                }
+            };
+
             // 1. Accept new connections (non-blocking).
             self.accept_connections();
 
             // 2. Read messages from the app stream.
             self.read_app_messages();
 
-            // 3. Heartbeat watchdog.
-            if self.child.is_some() && self.heartbeat_expired() {
-                let last_hb_ms = self.last_heartbeat.elapsed().as_millis() as u64;
-                warn!(
-                    "heartbeat timeout -- last heartbeat {}ms ago -- restarting phantom",
-                    last_hb_ms
-                );
-                // Capture fields for the structured event *before* restart
-                // clears spawn_time / child.
-                let uptime_s = self.spawn_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-                let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0);
-                let ts = now_epoch_ms();
-                let restart_count_before = self.restart_count;
-                let app_connected = self.app_stream.is_some();
+            if !waiting_on_backoff {
+                // 3. Heartbeat watchdog.
+                if self.child.is_some() && self.heartbeat_expired() {
+                    let last_hb_ms = self.last_heartbeat.elapsed().as_millis() as u64;
+                    warn!(
+                        "heartbeat timeout -- last heartbeat {}ms ago -- restarting phantom",
+                        last_hb_ms
+                    );
+                    // Capture fields for the structured event *before* restart
+                    // clears spawn_time / child.
+                    let uptime_s = self.spawn_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                    let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0);
+                    let ts = now_epoch_ms();
+                    let restart_count_before = self.restart_count;
+                    let app_connected = self.app_stream.is_some();
 
-                // restart_phantom_with_reason: rate-limit check → kill (with
-                // pre-SIGTERM dump) → restart_count++ → spawn.
-                if let Err(e) = self.restart_phantom_with_reason(
-                    "heartbeat_timeout",
-                    Some(last_hb_ms),
-                ) {
-                    error!("{e}");
-                    break;
+                    // restart_phantom_with_reason: rate-limit check → kill (with
+                    // pre-SIGTERM dump) → restart_count++ → spawn.
+                    if let Err(e) = self.restart_phantom_with_reason(
+                        "heartbeat_timeout",
+                        Some(last_hb_ms),
+                    ) {
+                        error!("{e}");
+                        break;
+                    }
+
+                    // Write the structured kill event (requirement 1) after
+                    // the kill so the entry is written even if spawn fails.
+                    write_supervisor_event(&serde_json::json!({
+                        "timestamp_ms": ts,
+                        "event": "heartbeat_kill",
+                        "reason": "heartbeat_timeout",
+                        "pid": pid,
+                        "last_heartbeat_ms": last_hb_ms,
+                        "phantom_uptime_s": uptime_s,
+                        "restart_count": restart_count_before,
+                        "app_connected": app_connected,
+                    }));
                 }
 
-                // Write the structured kill event (requirement 1) after the
-                // kill so the entry is written even if spawn fails.
-                write_supervisor_event(&serde_json::json!({
-                    "timestamp_ms": ts,
-                    "event": "heartbeat_kill",
-                    "reason": "heartbeat_timeout",
-                    "pid": pid,
-                    "last_heartbeat_ms": last_hb_ms,
-                    "phantom_uptime_s": uptime_s,
-                    "restart_count": restart_count_before,
-                    "app_connected": app_connected,
-                }));
+                // 4. Check if child exited unexpectedly.
+                self.check_child_exit()?;
             }
 
-            // 4. Check if child exited unexpectedly.
-            self.check_child_exit()?;
-
-            // 5. Read and handle stdin commands.
+            // 5. Read and handle stdin commands (always — `kill` must work
+            //    even mid-backoff).
             self.read_stdin_commands();
 
             // 6. Brief sleep to avoid busy-waiting.
@@ -476,6 +608,20 @@ impl Supervisor {
             AppMessage::Ready => {
                 info!("phantom reports READY");
                 self.last_heartbeat = Instant::now();
+                // Forgive prior restarts after 5 minutes of sustained healthy
+                // operation. We measure that elapsed time at the *moment* the
+                // app is healthy (here), not during a restart — the latter
+                // would clear the counter while the system is on fire.
+                if self.last_clean_checkpoint.elapsed() >= Duration::from_secs(300)
+                    && self.restart_count > 0
+                {
+                    info!(
+                        "5+ minutes of clean uptime -- forgiving {} prior restarts",
+                        self.restart_count
+                    );
+                    self.restart_count = 0;
+                }
+                self.last_clean_checkpoint = Instant::now();
             }
             AppMessage::Pong => {
                 info!("phantom PONG");
@@ -486,6 +632,17 @@ impl Supervisor {
             AppMessage::ExitClean => {
                 info!("phantom requested clean exit — supervisor standing down");
                 self.shutdown.store(true, Ordering::Relaxed);
+            }
+            AppMessage::RenderPanic { count, last_message } => {
+                warn!(
+                    "render thread panic reported -- count={count} msg={last_message}"
+                );
+                self.render_panic_count += count;
+                if self.render_panic_count >= 3 {
+                    error!("3+ render panics — forcing restart");
+                    self.write_crash_report("render_panic");
+                    self.request_restart();
+                }
             }
         }
     }
@@ -838,4 +995,228 @@ fn print_banner() {
     eprintln!("|   Erlang/OTP-style process monitor    |");
     eprintln!("|   pid {pid:<6}                          |");
     eprintln!("+=======================================+");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phantom_protocol::AppMessage;
+
+    // -- backoff_delay -------------------------------------------------------
+
+    #[test]
+    fn backoff_delay_doubles_each_restart() {
+        // Each restart_count step roughly doubles the base delay; the actual
+        // returned value is in [base * 0.9, base * 1.1] due to jitter. Verify
+        // monotonic growth band-by-band rather than exact equality.
+        fn band(restart_count: u32, base_ms: u64) -> bool {
+            let d = Supervisor::backoff_delay(restart_count).as_millis() as u64;
+            d >= base_ms * 9 / 10 && d <= base_ms * 11 / 10
+        }
+        assert!(band(1, 500));
+        assert!(band(2, 1_000));
+        assert!(band(3, 2_000));
+        assert!(band(4, 4_000));
+    }
+
+    #[test]
+    fn backoff_delay_caps_at_30_seconds() {
+        // Large restart count must never exceed 30 s, even with the +10%
+        // jitter ceiling layered on top.
+        let upper = Duration::from_millis(33_000); // 30s + 10%
+        assert!(Supervisor::backoff_delay(100) <= upper);
+        assert!(Supervisor::backoff_delay(u32::MAX) <= upper);
+    }
+
+    #[test]
+    fn backoff_delay_within_jitter_window() {
+        // For restart_count=3 the un-jittered delay is 2_000 ms; ±10% is the
+        // allowed window. Sample several times to defeat the time-seeded PRNG.
+        for _ in 0..32 {
+            let d = Supervisor::backoff_delay(3);
+            assert!(
+                d >= Duration::from_millis(1_800) && d <= Duration::from_millis(2_200),
+                "delay {d:?} outside ±10% of 2 s",
+            );
+            // Burn a few nanos so the next sample sees a different clock value.
+            std::thread::sleep(Duration::from_micros(1));
+        }
+    }
+
+    // -- RenderPanic protocol round-trip ------------------------------------
+
+    #[test]
+    fn render_panic_message_round_trips() {
+        let msg = AppMessage::RenderPanic {
+            count: 1,
+            last_message: "thread 'render' panicked at 'wgpu error'".into(),
+        };
+        let line = msg.to_line();
+        assert!(line.starts_with("RENDER_PANIC:"));
+        assert_eq!(AppMessage::from_line(&line), Some(msg));
+    }
+
+    // -- render_panic exercises the real handler ----------------------------
+    //
+    // Builds a minimal `Supervisor` (no spawned child) and dispatches
+    // `AppMessage::RenderPanic` through `handle_app_message`, then asserts
+    // both the accumulating counter and the deferred-restart deadline.
+
+    /// Build a Supervisor without binding to the global `/tmp/phantom-*.sock`
+    /// path so tests can run in parallel. Each test gets its own unique socket
+    /// derived from `gettid()` + a monotonic counter; the socket file is
+    /// cleaned up when the Supervisor drops via `cleanup()`.
+    fn build_test_supervisor() -> Supervisor {
+        use std::sync::atomic::AtomicU32;
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let sock = std::env::temp_dir().join(format!("phantom-test-{pid}-{n}.sock"));
+        if sock.exists() {
+            std::fs::remove_file(&sock).ok();
+        }
+        let listener = UnixListener::bind(&sock).expect("bind test socket");
+        listener.set_nonblocking(true).ok();
+        let (_tx, rx) = mpsc::channel::<String>();
+        Supervisor {
+            child: None,
+            listener,
+            socket_path: sock,
+            app_stream: None,
+            app_read_buf: String::new(),
+            last_heartbeat: Instant::now(),
+            restart_count: 0,
+            render_panic_count: 0,
+            restart_timestamps: VecDeque::new(),
+            start_time: Instant::now(),
+            last_clean_checkpoint: Instant::now(),
+            // `true(1)` is the simplest binary that always exists on a POSIX
+            // system; `/usr/bin/true` covers macOS, `/bin/true` covers most
+            // Linux distros.
+            phantom_binary: ["/usr/bin/true", "/bin/true"]
+                .iter()
+                .map(PathBuf::from)
+                .find(|p| p.exists())
+                .expect("a `true` binary exists on this platform"),
+            stdin_rx: rx,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
+            pending_restart_at: None,
+        }
+    }
+
+    #[test]
+    fn render_panic_under_threshold_does_not_schedule_restart() {
+        let mut sup = build_test_supervisor();
+        sup.handle_app_message(AppMessage::RenderPanic {
+            count: 1,
+            last_message: "wgpu lost device".into(),
+        });
+        sup.handle_app_message(AppMessage::RenderPanic {
+            count: 1,
+            last_message: "wgpu lost device".into(),
+        });
+        assert_eq!(sup.render_panic_count, 2);
+        assert!(
+            sup.pending_restart_at.is_none(),
+            "must not schedule a restart below the 3-panic threshold",
+        );
+    }
+
+    #[test]
+    fn render_panic_threshold_schedules_deferred_restart() {
+        let mut sup = build_test_supervisor();
+        for _ in 0..3 {
+            sup.handle_app_message(AppMessage::RenderPanic {
+                count: 1,
+                last_message: "wgpu lost device".into(),
+            });
+        }
+        assert!(sup.render_panic_count >= 3);
+        assert!(
+            sup.pending_restart_at.is_some(),
+            "crossing the 3-panic threshold must schedule a deferred restart",
+        );
+        assert_eq!(sup.restart_count, 1, "restart_count increments once");
+    }
+
+    #[test]
+    fn ready_after_clean_uptime_forgives_restart_count() {
+        let mut sup = build_test_supervisor();
+        sup.restart_count = 4;
+        // Pretend the last clean checkpoint was 6 minutes ago.
+        sup.last_clean_checkpoint = Instant::now() - Duration::from_secs(360);
+        sup.handle_app_message(AppMessage::Ready);
+        assert_eq!(
+            sup.restart_count, 0,
+            "Ready after >5min of clean uptime forgives prior restarts",
+        );
+    }
+
+    #[test]
+    fn ready_during_crash_storm_does_not_forgive() {
+        let mut sup = build_test_supervisor();
+        sup.restart_count = 4;
+        // Recent checkpoint -- the app just came up.
+        sup.last_clean_checkpoint = Instant::now();
+        sup.handle_app_message(AppMessage::Ready);
+        assert_eq!(
+            sup.restart_count, 4,
+            "Ready during a crash storm must NOT zero the counter",
+        );
+    }
+
+    #[test]
+    fn spawn_phantom_resets_render_panic_counter() {
+        // Use `/bin/true` as a dummy phantom binary so spawn_phantom succeeds
+        // without launching the real terminal. The dummy exits immediately;
+        // we only care that spawn_phantom zeroed the panic counter.
+        let mut sup = build_test_supervisor();
+        sup.render_panic_count = 7;
+        sup.spawn_phantom().expect("spawn /bin/true succeeds");
+        assert_eq!(
+            sup.render_panic_count, 0,
+            "spawning a fresh child must reset the render panic counter",
+        );
+        // Reap the short-lived `/bin/true` so the test does not leak a zombie.
+        if let Some(mut child) = sup.child.take() {
+            let _ = child.wait();
+        }
+    }
+
+    // -- crash report -------------------------------------------------------
+
+    #[test]
+    fn crash_report_written_on_heartbeat_timeout() {
+        // Write a crash report and verify the file exists with expected fields.
+        let report_path = std::env::temp_dir().join(format!(
+            "phantom-crash-test-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
+
+        let report = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": "heartbeat_timeout",
+            "restart_count": 1u32,
+            "pid": Option::<u32>::None,
+        });
+
+        std::fs::write(&report_path, report.to_string()).expect("write crash report");
+        assert!(report_path.exists(), "crash report file must exist");
+
+        let contents = std::fs::read_to_string(&report_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["reason"], "heartbeat_timeout");
+        assert!(parsed["timestamp"].as_str().is_some());
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&report_path);
+    }
 }

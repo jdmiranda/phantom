@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · event protocol</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 12 · EVENT PROTOCOL · WIRE FORMAT</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+      <a href="protocol.html" class="active">PROTOCOL</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 12 · EVENT PROTOCOL</span>
+    <span class="sysid">SYS://protocol.0</span>
+  </div>
+  <h1 class="page-title">Event Protocol</h1>
+  <p class="page-lede">
+    Everything that happens in Phantom is an <code>Event</code>. The bus is typed — 22 variants, 8 topic
+    categories — and routed through <code>EventTopic</code>. Subscribers filter by topic, not by ad-hoc string
+    matching. The supervisor/app IPC reuses the same envelope.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Crate</div><div class="value">phantom-protocol</div></div>
+    <div class="status-cell"><div class="label">Event variants</div><div class="value">22</div></div>
+    <div class="status-cell"><div class="label">Topic categories</div><div class="value">8</div></div>
+    <div class="status-cell"><div class="label">Transport</div><div class="value">Unix domain socket · JSON</div></div>
+  </div>
+
+  <h2>The Event enum</h2>
+  <p>Defined at <code>phantom-protocol/src/events.rs:39</code>.</p>
+
+<pre class="code-rust"><code><span class="k">#[derive(Clone, Debug, Serialize, Deserialize)]</span>
+<span class="k">#[serde(tag = "kind")]</span>
+<span class="k">pub enum</span> <span class="t">Event</span> {
+    <span class="c">// Terminal I/O · 5</span>
+    <span class="n">TerminalOutput</span>             { app_id: <span class="t">AppId</span>, bytes: <span class="t">Bytes</span> },
+    <span class="n">CommandStarted</span>             { app_id: <span class="t">AppId</span>, command: <span class="t">String</span> },
+    <span class="n">CommandComplete</span>            { app_id: <span class="t">AppId</span>, exit_code: <span class="t">i32</span> },
+    <span class="n">SubprocessTakeoverDetected</span> { app_id: <span class="t">AppId</span>, process_name: <span class="t">String</span>,
+                                   pgid: <span class="t">u32</span>, alt_screen: <span class="t">bool</span> },
+    <span class="n">SubprocessTakeoverCleared</span>  { app_id: <span class="t">AppId</span> },
+
+    <span class="c">// Agent lifecycle · 5</span>
+    <span class="n">AgentSpawned</span>               { agent_id: <span class="t">AgentId</span>, task: <span class="t">String</span> },
+    <span class="n">AgentProgress</span>              { agent_id: <span class="t">AgentId</span>, fraction: <span class="t">f32</span>,
+                                   message: <span class="t">String</span> },
+    <span class="n">AgentTaskComplete</span>          { agent_id: <span class="t">AgentId</span>, success: <span class="t">bool</span>,
+                                   summary: <span class="t">String</span>, spawn_tag: <span class="t">String</span>,
+                                   result: <span class="t">Option</span>&lt;<span class="t">serde_json</span>::<span class="t">Value</span>&gt; },
+    <span class="n">AgentError</span>                 { agent_id: <span class="t">AgentId</span>, error: <span class="t">String</span> },
+    <span class="n">FastPathTaken</span>              { agent_id: <span class="t">AgentId</span>, kind: <span class="t">FastPathKind</span>,
+                                   reason: <span class="t">String</span> },
+
+    <span class="c">// Session &amp; focus · 2</span>
+    <span class="n">SessionSwitched</span>            { from: <span class="t">SessionId</span>, to: <span class="t">SessionId</span> },
+    <span class="n">FocusChanged</span>               { from: <span class="t">PaneId</span>, to: <span class="t">PaneId</span> },
+
+    <span class="c">// Brain &amp; NLP · 2</span>
+    <span class="n">BrainDecision</span>              { action: <span class="t">String</span>, confidence: <span class="t">f32</span> },
+    <span class="n">NlpInterpreted</span>             { input: <span class="t">String</span>, action: <span class="t">String</span> },
+
+    <span class="c">// Media &amp; FX · 3</span>
+    <span class="n">VideoPlaybackStateChanged</span>  { app_id: <span class="t">AppId</span>, playing: <span class="t">bool</span> },
+    <span class="n">FrameCaptured</span>              { pane_id: <span class="t">PaneId</span>, timestamp_ms: <span class="t">u64</span> },
+    <span class="n">GlitchFxTriggered</span>          { origin: <span class="t">PaneId</span>, intensity: <span class="t">f32</span> },
+
+    <span class="c">// System · 3</span>
+    <span class="n">MemoryPressure</span>             { bytes_free: <span class="t">u64</span> },
+    <span class="n">JobCompleted</span>               { job_id: <span class="t">JobId</span> },
+    <span class="n">Shutdown</span>,
+
+    <span class="c">// Extension · 1</span>
+    <span class="n">Custom</span>                     { kind: <span class="t">String</span>, data: <span class="t">serde_json</span>::<span class="t">Value</span> },
+}</code></pre>
+
+  <h2>EventTopic routing</h2>
+  <p>
+    Every <code>Event</code> maps to exactly one <code>EventTopic</code>. Subscribers ask for a topic set, not
+    a regex. This makes routing cheap and the dispatch table compile-time complete.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">EventTopic</span> {
+    <span class="n">Terminal</span>,    <span class="c">// TerminalOutput · CommandStarted · CommandComplete · …</span>
+    <span class="n">Agents</span>,      <span class="c">// AgentSpawned · AgentProgress · AgentTaskComplete · …</span>
+    <span class="n">Sessions</span>,    <span class="c">// SessionSwitched</span>
+    <span class="n">Focus</span>,       <span class="c">// FocusChanged</span>
+    <span class="n">Brain</span>,       <span class="c">// BrainDecision · NlpInterpreted</span>
+    <span class="n">Video</span>,       <span class="c">// VideoPlaybackStateChanged · FrameCaptured</span>
+    <span class="n">Fx</span>,          <span class="c">// GlitchFxTriggered</span>
+    <span class="n">System</span>,      <span class="c">// MemoryPressure · JobCompleted · Shutdown</span>
+    <span class="n">Custom</span>,      <span class="c">// Custom escape hatch</span>
+}</code></pre>
+
+  <h2>Wire format</h2>
+  <p>
+    Length-prefixed JSON over Unix domain socket. The supervisor/app messages wrap an inner <code>Event</code>:
+  </p>
+
+<pre class="code-rust"><code><span class="k">#[derive(Serialize, Deserialize)]</span>
+<span class="k">#[serde(tag = "type")]</span>
+<span class="k">pub enum</span> <span class="t">AppMessage</span> {
+    <span class="n">Heartbeat</span>,                      <span class="c">// liveness ping</span>
+    <span class="n">Event</span>     { event: <span class="t">Event</span> },        <span class="c">// forward an event for monitoring</span>
+    <span class="n">Shutdown</span>,                       <span class="c">// clean exit; do not respawn</span>
+}
+
+<span class="k">pub enum</span> <span class="t">SupervisorMessage</span> {
+    <span class="n">Restart</span>,                        <span class="c">// graceful restart (config reload etc.)</span>
+    <span class="n">Quit</span>,                           <span class="c">// final shutdown request</span>
+}</code></pre>
+
+  <h2>Constants</h2>
+<pre class="code-rust"><code><span class="c">// phantom-protocol/src/lib.rs:29-35</span>
+<span class="k">pub const</span> <span class="n">HEARTBEAT_TIMEOUT_MS</span>: <span class="t">u64</span>    = <span class="lit">10_000</span>;
+<span class="k">pub const</span> <span class="n">MAX_RESTARTS</span>:         <span class="t">u32</span>    = <span class="lit">5</span>;
+<span class="k">pub const</span> <span class="n">RESTART_WINDOW_SECS</span>:  <span class="t">u64</span>    = <span class="lit">60</span>;
+<span class="k">pub const</span> <span class="n">GRACE_PERIOD_MS</span>:      <span class="t">u64</span>    = <span class="lit">1_000</span>;</code></pre>
+
+  <h2>The bus pattern</h2>
+
+<pre class="ascii">
+    ┌────────────────── publishers ──────────────────┐
+    │                                                │
+    │   phantom-terminal  ──► CommandComplete        │
+    │   phantom-agents    ──► AgentTaskComplete      │
+    │   phantom-brain     ──► BrainDecision          │
+    │   phantom-renderer  ──► FrameCaptured          │
+    │   phantom-loop      ──► JobCompleted           │
+    │                                                │
+    └─────────────────────┬──────────────────────────┘
+                          ▼
+              ┌────────────────────────┐
+              │   EventBus (broadcast) │
+              │   topic → Vec&lt;sub&gt;     │
+              └───────────┬────────────┘
+                          ▼
+    ┌────────────────── subscribers ──────────────────┐
+    │                                                 │
+    │   phantom-app       Topic::Terminal             │
+    │   phantom-brain     Topic::Agents · Brain       │
+    │   inspector UI      Topic::Agents · System      │
+    │   supervisor        Topic::System               │
+    │                                                 │
+    └─────────────────────────────────────────────────┘
+</pre>
+
+  <h2>Worked example: a single agent run</h2>
+  <p>
+    The events that fire for one autonomous implementer cycle, in order:
+  </p>
+
+<pre class="code-asci"><code> t=0.000   JobCompleted        { job_id: gh_issue_poll }
+ t=0.020   BrainDecision       { action: enqueue, confidence: 0.87 }
+ t=0.024   FastPathTaken       { kind: AutoApprove, reason: loop spec policy }
+ t=0.025   AgentSpawned        { agent_id: 50_023, task: "Issue #642 …" }
+ t=0.110   AgentProgress       { fraction: 0.05, message: "reading source" }
+ t=12.341  AgentProgress       { fraction: 0.42, message: "running cargo test" }
+ t=78.220  AgentProgress       { fraction: 0.88, message: "opening PR" }
+ t=84.910  AgentTaskComplete   { success: true,
+                                 result: { issue_number: 642,
+                                           pr_url: ".../pull/681",
+                                           summary: "Fixed…" } }
+ t=84.911  JobCompleted        { job_id: implementer_50_023 }
+</code></pre>
+
+  <h2>FastPathKind</h2>
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">FastPathKind</span> {
+    <span class="n">AutoApprove</span>,    <span class="c">// AwaitingApproval skipped because auto_approve=true</span>
+    <span class="n">SkipPlanning</span>,   <span class="c">// Planning skipped because the task was simple enough</span>
+}</code></pre>
+
+  <p>
+    Every emission carries a human-readable <code>reason</code>. The audit log is grep-able for regressions —
+    if a gate skip ever happens for the wrong reason, it surfaces here, not silently in code.
+  </p>
+
+  <h2>LoopMessage (cross-loop)</h2>
+  <p>
+    Separate but related: typed messages between loops live in <code>phantom-loop::LoopMessage</code>. They
+    use the same tagged-enum + JSON pattern, routed through <code>LoopQueueRegistry</code> rather than the
+    main event bus.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub struct</span> <span class="t">LoopMessage</span> {
+    <span class="k">pub</span> <span class="n">from_loop</span>:    <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">to_queue</span>:     <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">message_kind</span>: <span class="t">String</span>,             <span class="c">// schema discriminator</span>
+    <span class="k">pub</span> <span class="n">payload</span>:      <span class="t">serde_json</span>::<span class="t">Value</span>,    <span class="c">// validated against the queue's schema</span>
+    <span class="k">pub</span> <span class="n">trace_id</span>:     <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">timestamp</span>:    <span class="t">SystemTime</span>,
+}</code></pre>
+
+  <div class="callout">
+    <div class="callout-title">Why a typed event bus matters</div>
+    Untyped event buses degrade into RPCs disguised as broadcasts. With <code>Event</code> as a tagged union,
+    every consumer must handle every variant — or explicitly opt out via <code>_</code>. New variants force
+    compile errors at every subscriber. The match is the contract.
+  </div>
+
+  <footer class="footer">
+    <span>SEC 12 · PROTOCOL</span>
+    <span><a href="build-run.html">↩ SEC 11 · BUILD/RUN</a> · <a href="index.html">↩ index</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

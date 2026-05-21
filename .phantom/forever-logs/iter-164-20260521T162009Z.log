@@ -1,0 +1,15 @@
+[forever 2026-05-21T16:20:09Z] ==== iteration 164 begin ====
+[forever 2026-05-21T16:20:09Z] fetching origin
+[forever 2026-05-21T16:20:09Z] branch=feat/ux-mockups-exploration HEAD=241c8ea origin/main=6eca564f3417c485cc98941fc642d67708e1bb06
+[forever 2026-05-21T16:20:09Z] cargo build --release --bin phantom
+    Finished `release` profile [optimized] target(s) in 0.48s
+[forever 2026-05-21T16:20:10Z] build ok
+[forever 2026-05-21T16:20:10Z] launching: phantom loop run --repo /Users/jermiranda/Documents/Github/badass-cli --loops triager,implementer,reviewer --brain-queue triage-queue --max-runtime-min 8
+[forever 2026-05-21T16:20:10Z] daemon PID=15382
+error: unexpected argument '--brain-queue' found
+
+Usage: phantom loop run --loops <LOOPS> --repo <REPO>
+
+For more information, try '--help'.
+[forever 2026-05-21T16:20:11Z] daemon exited with code 2
+[forever 2026-05-21T16:20:11Z] sleeping 5s before next iteration

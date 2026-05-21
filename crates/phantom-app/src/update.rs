@@ -10,7 +10,6 @@ use log::{debug, info, warn};
 
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::WorldState;
-use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AgentStatusInfo, AppCommand, PaneInfo, ScreenshotReply, SpawnAgentReply};
 use phantom_protocol::Event;
@@ -417,11 +416,17 @@ impl App {
                 self.git_refresh_last = now;
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
+                let assembler_arc = self.context_assembler.clone();
                 self.git_refresh_handle = std::thread::Builder::new()
                     .name("git-refresh".into())
                     .spawn(move || {
-                        let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
-                        fresh.refresh_git();
+                        // Use the shared ContextAssembler so DAG caching is
+                        // preserved across periodic git refreshes rather than
+                        // calling ProjectContext::detect() on every 30s tick.
+                        let path = std::path::Path::new(&project_dir);
+                        if let Ok(mut asm) = assembler_arc.lock() {
+                            let _ = asm.assemble(path);
+                        }
                         if let Some(tx) = brain_tx {
                             let _ = tx.send(AiEvent::GitStateChanged);
                         }
@@ -447,6 +452,30 @@ impl App {
                     warn!("MCP command channel disconnected");
                     break;
                 }
+            }
+        }
+
+        // Federation relay: poll for handshake completion.
+        // The relay task sends a RelayHandshakeInfo once the WebSocket
+        // handshake is complete. We emit AiEvent::RelayConnected to the brain
+        // so the AgentRouter can start routing cross-peer messages.
+        // After the first message we set relay_connected_rx to None —
+        // handshake is a one-shot event.
+        if self.relay_connected_rx.is_some() {
+            let info = {
+                let rx = self.relay_connected_rx.as_ref().unwrap();
+                rx.try_recv().ok()
+            };
+            if let Some(handshake) = info {
+                info!("Federation relay connected (peer id = {})", handshake.local_peer_id);
+                if let Some(ref brain) = self.brain {
+                    let _ = brain.send_event(AiEvent::RelayConnected {
+                        outbound_tx: handshake.outbound_tx,
+                        local_peer_id: handshake.local_peer_id,
+                    });
+                }
+                // One-shot: discard the receiver so we do not poll again.
+                self.relay_connected_rx = None;
             }
         }
 

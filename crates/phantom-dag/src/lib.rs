@@ -146,6 +146,83 @@ impl CodeDag {
     pub fn from_json(json: &str) -> Result<Self> {
         persist::from_json(json)
     }
+
+    // -----------------------------------------------------------------------
+    // Cargo workspace extraction
+    // -----------------------------------------------------------------------
+
+    /// Build a [`CodeDag`] from the current Cargo workspace by running
+    /// `cargo metadata --no-deps --format-version 1`.
+    ///
+    /// Each workspace member is added as a [`NodeKind::Module`] node keyed by
+    /// its crate name (e.g. `phantom-brain`).  Because `--no-deps` only returns
+    /// workspace packages, every package in the output is a workspace member.
+    /// An edge (`EdgeKind::Uses`) is added for every dependency that names
+    /// another workspace member; external crates are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `cargo` is not on `PATH`, the command fails, or the
+    /// JSON output cannot be parsed.
+    pub fn from_cargo_metadata() -> Result<Self> {
+        let output = std::process::Command::new("cargo")
+            .args(["metadata", "--no-deps", "--format-version", "1"])
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to run cargo metadata: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("cargo metadata failed: {stderr}");
+        }
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| anyhow::anyhow!("failed to parse cargo metadata output: {e}"))?;
+
+        let mut dag = CodeDag::new();
+
+        // With `--no-deps`, `packages` contains only workspace members.
+        // Pre-collect their names so we can filter edges to intra-workspace
+        // connections only.
+        let workspace_names: std::collections::HashSet<String> = json["packages"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|pkg| pkg["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if let Some(packages) = json["packages"].as_array() {
+            for pkg in packages {
+                let name = pkg["name"].as_str().unwrap_or("").to_owned();
+                if name.is_empty() {
+                    continue;
+                }
+
+                let manifest = pkg["manifest_path"]
+                    .as_str()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from("Cargo.toml"));
+
+                dag.add_node(DagNode::new(name.clone(), NodeKind::Module, manifest, 1));
+
+                if let Some(deps) = pkg["dependencies"].as_array() {
+                    for dep in deps {
+                        let dep_name = dep["name"].as_str().unwrap_or("").to_owned();
+                        if !dep_name.is_empty() && workspace_names.contains(&dep_name) {
+                            dag.add_edge(DagEdge::new(
+                                name.clone(),
+                                dep_name,
+                                EdgeKind::Uses,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(dag)
+    }
 }
 
 // ---------------------------------------------------------------------------
