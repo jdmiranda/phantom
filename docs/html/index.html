@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · operator manual</title>
+<meta name="description" content="Phantom is an AI-native terminal emulator. Not a terminal with AI bolted on — an AI system with a terminal built in.">
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">PHANTOM · operator manual · v0.1.0</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html" class="active">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <section class="hero">
+    <div class="hero-eyebrow">PHANTOM · operator manual · v0.1.0</div>
+<pre class="hero-logo">
+ ██████╗ ██╗  ██╗ █████╗ ███╗   ██╗████████╗ ██████╗ ███╗   ███╗
+ ██╔══██╗██║  ██║██╔══██╗████╗  ██║╚══██╔══╝██╔═══██╗████╗ ████║
+ ██████╔╝███████║███████║██╔██╗ ██║   ██║   ██║   ██║██╔████╔██║
+ ██╔═══╝ ██╔══██║██╔══██║██║╚██╗██║   ██║   ██║   ██║██║╚██╔╝██║
+ ██║     ██║  ██║██║  ██║██║ ╚████║   ██║   ╚██████╔╝██║ ╚═╝ ██║
+ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝</pre>
+    <div class="hero-tagline">THE TERMINAL IS DEAD. LONG LIVE THE TERMINAL.</div>
+    <p class="hero-sub">
+      An AI-native terminal emulator built in Rust. GPU-accelerated rendering, semantic command
+      understanding, and integrated AI agents. Not a terminal with AI features bolted on — an
+      AI system with a terminal built in.
+    </p>
+  </section>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Crates</div><div class="value">36</div></div>
+    <div class="status-cell"><div class="label">Lines of Rust</div><div class="value">182,546</div></div>
+    <div class="status-cell"><div class="label">Agent Roles</div><div class="value">12</div></div>
+    <div class="status-cell"><div class="label">Event Variants</div><div class="value">22</div></div>
+    <div class="status-cell"><div class="label">Themes</div><div class="value">6</div></div>
+    <div class="status-cell"><div class="label">Status</div><div class="value"><span class="dot" style="color:#33ff00"></span>OPERATIONAL</div></div>
+  </div>
+
+  <div class="panel panel-active">
+    <div class="panel-header">
+      <span class="title">SYSTEM BOOT TRACE</span>
+      <span class="meta"><span>sys=phantom</span><span>tty=doc0</span><span>uptime=live</span></span>
+    </div>
+    <div class="panel-body">
+      <div data-boot style="font-size:13px;line-height:1.85"></div>
+    </div>
+  </div>
+
+  <h2>The Manifesto</h2>
+  <p>
+    Every terminal emulator in 2026 is a <strong>dumb glass window</strong>. WezTerm is beautiful glass. Ghostty is
+    faster glass. Kitty is glass with pictures. Alacritty is the fastest glass that ever glassed. Forty-eight years
+    of innovation gave us… faster font rendering.
+  </p>
+  <p>
+    The AI terminals didn't fix this. <em>Warp</em> bolted a chatbot onto a terminal. <em>Wave</em> tried inline widgets
+    and got abandoned. <em>Fig</em> sold to AWS and died. None of them asked the question: <em>what if the terminal
+    wasn't a window you type into, but a living system that thinks alongside you?</em>
+  </p>
+
+  <h2>The Four Properties</h2>
+  <p class="muted">All four are landed on <code>main</code>. The 5 audit gaps tracked under issue <code>#650</code> are closed.</p>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-h"><span class="card-title">1 · Per-role tool whitelists</span><span class="pill pill-ok">LANDED</span></div>
+      <div class="card-body">
+        Every tool-use routes through <code>capability::check_capability(ctx.role, tool.class())</code> in
+        <code>phantom-agents/src/dispatch/mod.rs</code>. Denials return a canonical
+        <code>"capability denied: &lt;Class&gt; not in &lt;Role&gt; manifest"</code> so the model self-corrects.
+        PR <code>#655</code> made the event log non-optional at the gate so it cannot be silently bypassed.
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">2 · External state machine</span><span class="pill pill-ok">LANDED</span></div>
+      <div class="card-body">
+        <code>phantom-brain::TaskLedger</code> with <code>try_dispatch(idx) → Result&lt;&amp;PlanStep, DispatchBlocked&gt;</code>
+        and the 9-state <code>AgentStatus</code> FSM. <code>StepFailureCause</code> + <code>QuarantinePolicy</code>
+        give typed cascade semantics on each <code>PlanStep</code>.
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">3 · Structured exit</span><span class="pill pill-ok">LANDED</span></div>
+      <div class="card-body">
+        The <code>complete_task</code> lifecycle tool fires only when spawned with
+        <code>AgentSpawnOpts::with_requires_complete_task(true)</code>. Payload validated against the per-loop
+        <code>ExitSchema</code>. 3 consecutive invalid calls flatline the pane. The legacy stringly-typed PARTIAL
+        exit is gone.
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">4 · Typed inter-agent messaging</span><span class="pill pill-ok">LANDED</span></div>
+      <div class="card-body">
+        <code>phantom-protocol::Event</code> bus with 22 typed variants and <code>EventTopic</code> routing.
+        <code>FastPathTaken { agent_id, kind, reason }</code> audits every gate skip.
+        <code>phantom-loop::LoopMessage</code> handles cross-loop fan-out through <code>LoopQueueRegistry</code>.
+      </div>
+    </div>
+  </div>
+
+  <h2>Navigate</h2>
+  <p class="muted">Twelve operating sections. Each panel below opens a dedicated page.</p>
+
+  <div class="grid grid-3">
+    <a href="architecture.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 01</div>
+      <div class="nav-card-title">Architecture</div>
+      <div class="nav-card-desc">36 crates organized into 9 domains. The "everything is an app" substrate. Workspace topology.</div>
+    </a>
+    <a href="boot.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 02</div>
+      <div class="nav-card-title">Boot Sequence</div>
+      <div class="nav-card-desc">A 7-phase cinematic warm-up — black screen, CRT warm-up, logo reveal, system check, welcome, transition.</div>
+    </a>
+    <a href="rendering.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 03</div>
+      <div class="nav-card-title">Rendering Stack</div>
+      <div class="nav-card-desc">wgpu pipeline, glyph atlases, mixed-content compositor, the CRT post-fx pass. Six built-in themes.</div>
+    </a>
+    <a href="supervisor.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 04</div>
+      <div class="nav-card-title">Supervisor</div>
+      <div class="nav-card-desc">Erlang/OTP-style two-process model. 10-second heartbeat. 5-restart-per-60-second rate limit.</div>
+    </a>
+    <a href="agents.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 05</div>
+      <div class="nav-card-title">Agent System</div>
+      <div class="nav-card-desc">12 agent roles. 5 orthogonal capability axes. The dispatch gate. The complete_task lifecycle contract.</div>
+    </a>
+    <a href="brain.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 06</div>
+      <div class="nav-card-title">Brain · OODA</div>
+      <div class="nav-card-desc">Ambient OODA loop. TaskLedger guarded mutator. 9-state AgentStatus FSM. Quarantine policy cascades.</div>
+    </a>
+    <a href="harness.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 07</div>
+      <div class="nav-card-title">Harness Control</div>
+      <div class="nav-card-desc">Why "prompt it better" is never the answer. The four properties. The event bus. The state machine.</div>
+    </a>
+    <a href="loop.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 08</div>
+      <div class="nav-card-title">Loop Overseer</div>
+      <div class="nav-card-desc">LoopRunner FSM. Source/dispatcher/effects pipeline. The four shipped loops. The substrate driver.</div>
+    </a>
+    <a href="self-improvement.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 09</div>
+      <div class="nav-card-title">Self-Improvement</div>
+      <div class="nav-card-desc">Phantom-on-Phantom. GoalSource + weighted scorer + Trust bands. The audit log JSONL envelope.</div>
+    </a>
+    <a href="fleet.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 10</div>
+      <div class="nav-card-title">Fleet · App-of-Apps</div>
+      <div class="nav-card-desc">One process hosts N autonomous builders. Shared brain, shared substrate, shared event bus.</div>
+    </a>
+    <a href="build-run.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 11</div>
+      <div class="nav-card-title">Build &amp; Run</div>
+      <div class="nav-card-desc">Cargo, themes, keybindings, config, troubleshooting. Get from <code>git clone</code> to running in 90 seconds.</div>
+    </a>
+    <a href="protocol.html" class="card card-link nav-card">
+      <div class="nav-card-no">SEC 12</div>
+      <div class="nav-card-title">Event Protocol</div>
+      <div class="nav-card-desc">22 typed Event variants. EventTopic routing. The IPC heartbeat protocol. Crash event JSONL.</div>
+    </a>
+  </div>
+
+  <h2>The thesis, in one diagram</h2>
+
+<pre class="ascii bright">
+ TRADITIONAL TERMINAL          PHANTOM
+ +------------------------+    +----------------------------------+
+ |                        |    |                                  |
+ |   You type.            |    |   You work.                      |
+ |   It renders.          |    |   It watches, learns, acts.      |
+ |   That's it.           |    |   Agents live here.              |
+ |                        |    |   It remembers everything.       |
+ |   A dumb pipe.         |    |   It renders anything.           |
+ |                        |    |   It knows your world.           |
+ |                        |    |                                  |
+ |   -------------------- |    |   It's not a terminal.           |
+ |   $ echo "hello"       |    |   It's a cognitive interface.    |
+ |   hello                |    |                                  |
+ |   $                    |    |   You're not typing commands.    |
+ |                        |    |   You're thinking out loud.      |
+ +------------------------+    +----------------------------------+
+</pre>
+
+  <h2>The closed loop</h2>
+  <p>
+    The four harness properties sum to a closed feedback loop. The brain auto-discovers work in its own
+    repository, scores it for utility, and forwards the highest-scoring candidates to the loop overseer for
+    autonomous implementation. Phantom-on-Phantom.
+  </p>
+
+<pre class="ascii">
+ phantom-brain GoalSource polls jdmiranda/phantom
+     -> score_candidate weighted-sum scorer
+     -> HardExclusions + TrustBand + RateLimiter window
+     -> AiAction::EnqueueLoopMessage
+     -> LoopQueueRegistry.push(implementer-queue, LoopMessage{...})
+     -> LoopRunner pulls via LoopMessageQueueSource
+     -> SubstrateAgentDispatcher builds AgentSpawnOpts with requires_complete_task=true
+     -> SubstrateDriver.tick drains SpawnSubagentQueue
+     -> ChatBackedSubstrateBackend streams TextDelta / ToolUse to Claude
+     -> agent calls complete_task with typed payload
+     -> Event::AgentTaskComplete fulfils dispatcher oneshot
+     -> LoopRunner validates payload against ExitSchema
+     -> on_complete LoopEffects fire (typically EnqueueTo review-queue)
+</pre>
+
+  <div class="callout callout-info">
+    <div class="callout-title">Tip</div>
+    Try the konami code (<code>↑↑↓↓←→←→ b a</code>) on this page.
+  </div>
+
+  <footer class="footer">
+    <span>PHANTOM · v0.1.0 · doc-build live</span>
+    <span>built with ❤ by Jeremy Miranda + Claude</span>
+    <span>MIT</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

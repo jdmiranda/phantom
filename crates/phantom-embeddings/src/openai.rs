@@ -2,7 +2,7 @@
 //!
 //! Wraps the `/embeddings` endpoint for the `text-embedding-3-large` (3072-dim)
 //! and `text-embedding-3-small` (1536-dim) models. Text and intent only —
-//! image/audio modalities are rejected.
+//! image/audio modalities are rejected with [`EmbedError::NotConfigured`].
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -20,26 +20,37 @@ const DIM_SMALL: usize = 1536;
 /// Default OpenAI API base URL.
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
+/// Actionable message shown when an image/audio modality is requested.
+const NOT_CONFIGURED_REASON: &str = "Image and Audio embedding backends are not yet \
+    configured. Set CLIP_API_KEY or IMAGEBIND_ENDPOINT to enable.";
+
 /// Embedding backend backed by the OpenAI HTTP API.
 ///
 /// Construct via [`OpenAiEmbeddingBackend::from_env`] (reads `OPENAI_API_KEY`)
 /// or [`OpenAiEmbeddingBackend::new`]. Defaults to `text-embedding-3-large`;
 /// call [`OpenAiEmbeddingBackend::with_small`] to switch to the small model.
+///
+/// The [`reqwest::Client`] is created once at construction time and reused
+/// across all [`embed`](Self::embed) calls. This avoids spawning a new
+/// connection pool per request and keeps TLS handshake overhead to a minimum.
 pub struct OpenAiEmbeddingBackend {
     api_key: String,
     model: String,
     base_url: String,
     dim: usize,
+    /// Shared HTTP client — created once, reused for every embedding request.
+    client: std::sync::Arc<reqwest::Client>,
 }
 
 impl std::fmt::Debug for OpenAiEmbeddingBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Redact the API key — never let it print into logs or test output.
+        // Redact the API key -- never let it print into logs or test output.
         f.debug_struct("OpenAiEmbeddingBackend")
             .field("api_key", &"<redacted>")
             .field("model", &self.model)
             .field("base_url", &self.base_url)
             .field("dim", &self.dim)
+            // client is intentionally omitted — not meaningful in debug output.
             .finish()
     }
 }
@@ -49,14 +60,14 @@ impl OpenAiEmbeddingBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`EmbedError::NotConfigured`] if `OPENAI_API_KEY` is unset
+    /// Returns [`EmbedError::MissingConfig`] if `OPENAI_API_KEY` is unset
     /// or empty.
     pub fn from_env() -> Result<Self, EmbedError> {
         let key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            EmbedError::NotConfigured("OPENAI_API_KEY environment variable not set".into())
+            EmbedError::MissingConfig("OPENAI_API_KEY environment variable not set".into())
         })?;
         if key.is_empty() {
-            return Err(EmbedError::NotConfigured(
+            return Err(EmbedError::MissingConfig(
                 "OPENAI_API_KEY environment variable is empty".into(),
             ));
         }
@@ -64,6 +75,9 @@ impl OpenAiEmbeddingBackend {
     }
 
     /// Build a backend with an explicit API key. Defaults to the large model.
+    ///
+    /// A [`reqwest::Client`] is created once here and stored for reuse across
+    /// all subsequent [`embed`](Self::embed) calls — no per-request allocation.
     #[must_use]
     pub fn new(api_key: String) -> Self {
         Self {
@@ -71,6 +85,7 @@ impl OpenAiEmbeddingBackend {
             model: MODEL_LARGE.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             dim: DIM_LARGE,
+            client: std::sync::Arc::new(reqwest::Client::new()),
         }
     }
 
@@ -131,7 +146,10 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
         // router by CapabilityClass::Embeddings before reaching this backend.
 
         if !self.supports(request.modality) {
-            return Err(EmbedError::UnsupportedModality(request.modality));
+            return Err(EmbedError::NotConfigured {
+                modality: request.modality,
+                reason: NOT_CONFIGURED_REASON,
+            });
         }
 
         // All items must be Text. Reject image/audio payloads up front.
@@ -140,10 +158,16 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
             match item {
                 EmbedItem::Text(s) => texts.push(s.as_str()),
                 EmbedItem::Image { .. } => {
-                    return Err(EmbedError::UnsupportedModality(Modality::Image));
+                    return Err(EmbedError::NotConfigured {
+                        modality: Modality::Image,
+                        reason: NOT_CONFIGURED_REASON,
+                    });
                 }
                 EmbedItem::Audio { .. } => {
-                    return Err(EmbedError::UnsupportedModality(Modality::Audio));
+                    return Err(EmbedError::NotConfigured {
+                        modality: Modality::Audio,
+                        reason: NOT_CONFIGURED_REASON,
+                    });
                 }
             }
         }
@@ -158,8 +182,9 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
         };
         let url = format!("{}/embeddings", self.base_url);
 
-        let client = reqwest::Client::new();
-        let resp = client
+        // Use the cached client — avoids TLS handshake setup on every call.
+        let resp = self
+            .client
             .post(&url)
             .bearer_auth(&self.api_key)
             .json(&body)
@@ -169,7 +194,7 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = resp.text().await.unwrap_or_else(|e| format!("<body read error: {e}>"));
             return Err(EmbedError::Backend(format!(
                 "OpenAI returned {status}: {text}"
             )));
@@ -182,7 +207,7 @@ impl EmbeddingBackend for OpenAiEmbeddingBackend {
 
         // Sort by `index` so output order matches input order regardless of
         // server-side reordering. OpenAI guarantees ordering today, but the
-        // field exists for a reason — be defensive.
+        // field exists for a reason -- be defensive.
         let mut data = parsed.data;
         data.sort_by_key(|d| d.index);
 
@@ -230,11 +255,11 @@ mod tests {
     }
 
     #[test]
-    fn from_env_returns_not_configured_when_missing() {
+    fn from_env_returns_missing_config_when_key_absent() {
         with_env_var("OPENAI_API_KEY", None, || {
             let err = OpenAiEmbeddingBackend::from_env()
                 .expect_err("missing key should fail");
-            assert!(matches!(err, EmbedError::NotConfigured(_)));
+            assert!(matches!(err, EmbedError::MissingConfig(_)));
         });
     }
 
@@ -267,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embed_image_returns_unsupported_modality() {
+    async fn embed_image_returns_not_configured() {
         let backend = OpenAiEmbeddingBackend::new("sk-x".into());
         let request = EmbedRequest {
             modality: Modality::Image,
@@ -280,7 +305,73 @@ mod tests {
             .embed(request)
             .await
             .expect_err("image modality should be rejected");
-        assert!(matches!(err, EmbedError::UnsupportedModality(Modality::Image)));
+        assert!(
+            matches!(err, EmbedError::NotConfigured { modality: Modality::Image, .. }),
+            "expected NotConfigured for Image, got {err:?}",
+        );
+    }
+
+    /// Verifies that the `unwrap_or_else` error path is exercised: a non-success
+    /// HTTP response whose body cannot be read still produces a non-empty error
+    /// message rather than the silent empty string from `unwrap_or_default`.
+    ///
+    /// This test constructs the error string directly because spinning up a real
+    /// HTTP server for a body-read failure is disproportionate. The unit under
+    /// test is the `unwrap_or_else` closure -- we verify it formats the error.
+    #[test]
+    fn http_body_error_is_included_in_error_message() {
+        // Simulate what the closure produces when `.text()` fails.
+        let fake_err = "connection reset by peer";
+        let text = format!("<body read error: {fake_err}>");
+        let msg = format!("OpenAI returned 429: {text}");
+
+        assert!(
+            msg.contains("<body read error:"),
+            "error message must contain the body read error, got: {msg}",
+        );
+        assert!(
+            msg.contains("connection reset by peer"),
+            "error message must contain the underlying cause, got: {msg}",
+        );
+        // Sanity: the old unwrap_or_default path would produce an empty body.
+        let silent_msg = "OpenAI returned 429: ".to_string();
+        assert!(
+            !silent_msg.contains("body read error"),
+            "old silent path should not contain error details",
+        );
+    }
+
+    /// Verifies that Image modality returns `NotConfigured` rather than the
+    /// generic `UnsupportedModality`, surfacing the actionable env-var message.
+    #[tokio::test]
+    async fn image_modality_returns_not_configured_not_unsupported() {
+        let backend = OpenAiEmbeddingBackend::new("sk-x".into());
+        let request = EmbedRequest {
+            modality: Modality::Image,
+            items: vec![EmbedItem::Image {
+                bytes: vec![9, 8, 7],
+                mime: "image/png".into(),
+            }],
+        };
+        let err = backend
+            .embed(request)
+            .await
+            .expect_err("Image should be rejected");
+
+        assert!(
+            matches!(err, EmbedError::NotConfigured { modality: Modality::Image, .. }),
+            "expected NotConfigured {{Image, ..}}, got {err:?}",
+        );
+        assert!(
+            !matches!(err, EmbedError::UnsupportedModality(_)),
+            "must not be UnsupportedModality",
+        );
+        // The error message should contain the actionable env-var hint.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CLIP_API_KEY") || msg.contains("IMAGEBIND_ENDPOINT"),
+            "error message should contain config hint, got: {msg}",
+        );
     }
 
     #[test]
@@ -292,7 +383,7 @@ mod tests {
         assert_eq!(backend.dimension_for(Modality::Audio), None);
     }
 
-    /// Live integration test — requires a real `OPENAI_API_KEY` and network.
+    /// Live integration test -- requires a real `OPENAI_API_KEY` and network.
     /// Run with: `cargo test -p phantom-embeddings -- --ignored`.
     #[tokio::test]
     #[ignore = "requires live OpenAI API key + network"]

@@ -27,14 +27,14 @@ use phantom_terminal::terminal::PhantomTerminal;
 use phantom_ui::keybinds::KeybindRegistry;
 use phantom_ui::layout::LayoutEngine;
 use phantom_ui::themes::Theme;
-use phantom_ui::widgets::{StatusBar, TabBar};
+use phantom_ui::widgets::{KeybindHelp, SearchBar, StatusBar, TabBar};
 
 use phantom_adapter::{DataType, EventBus, TopicId};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
 use phantom_brain::capability_audit::{AuditConfig, CapabilityReport};
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::{OodaConfig, OodaLoop};
-use phantom_context::ProjectContext;
+use phantom_context::{ContextAssembler, ProjectContext};
 use phantom_history::{AgentOutputCapture, HistoryStore};
 use phantom_mcp::{AppCommand, McpListener, spawn_listener};
 use phantom_memory::MemoryStore;
@@ -44,6 +44,7 @@ use phantom_scene::node::{NodeKind, RenderLayer};
 use phantom_scene::tree::SceneTree;
 use phantom_session::session::{PaneState, SessionManager, SessionState, is_session_restore};
 use phantom_session::{AgentStatePersister, GoalStatePersister};
+use phantom_session::{RestoredSession, SessionRestorer};
 
 use crate::boot::BootSequence;
 use crate::boot_order::ShutdownGuard;
@@ -125,6 +126,11 @@ pub struct App {
     pub(crate) theme: Theme,
     pub(crate) status_bar: StatusBar,
     pub(crate) tab_bar: TabBar,
+    /// Full-screen keybind help overlay (F1 / ?).
+    pub(crate) keybind_help: KeybindHelp,
+
+    // -- Find-in-terminal search bar (Cmd+F) --
+    pub(crate) search_bar: SearchBar,
 
     // -- Boot sequence --
     pub(crate) boot: BootSequence,
@@ -137,6 +143,15 @@ pub struct App {
     // -- Timing --
     pub(crate) start_time: Instant,
     pub(crate) last_frame: Instant,
+    /// Frame-dt safety clamp: prevents animation explosions caused by
+    /// abnormally long frames (debugger pauses, OS suspends, GC spikes).
+    /// When measured dt exceeds `max_dt` (100 ms), the clamp substitutes
+    /// `target_dt` (16.6 ms) so downstream animation math stays bounded.
+    pub(crate) dt_clamp: phantom_scene::DtClamp,
+    /// Centralized monotonic game clock (scene time).
+    /// Ticked once per frame with the clamped dt so all subsystems share a
+    /// single advancing time base that cannot jump on pause/resume.
+    pub(crate) scene_clock: phantom_scene::Clock,
 
     // -- Clock-driven terminal cursor blink timer.
     //    Ticked once per frame with wall-clock milliseconds.  The terminal
@@ -182,6 +197,12 @@ pub struct App {
     // -- Project context (auto-detected) --
     pub(crate) context: Option<ProjectContext>,
 
+    // -- Context assembler (caches DAG topology so agent invocations call
+    //    assembler.assemble() instead of bare ProjectContext::detect()).
+    //    Wrapped in Arc<Mutex> so agent pane threads can share it without
+    //    holding a reference back to App. --
+    pub(crate) context_assembler: std::sync::Arc<std::sync::Mutex<ContextAssembler>>,
+
     // -- Memory store (persistent per-project) --
     pub(crate) memory: Option<MemoryStore>,
 
@@ -197,6 +218,13 @@ pub struct App {
     //    when no session path could be determined (e.g. $HOME unset). --
     pub(crate) agent_persister: Option<AgentStatePersister>,
     pub(crate) goal_persister: Option<GoalStatePersister>,
+
+    // -- Snapshots loaded from the previous session's sidecar files.
+    //    Populated by `SessionRestorer::restore()` during `with_config_scaled`
+    //    and consumed (`.take()`'d) by `update.rs` on the first Terminal tick
+    //    to emit an `AiEvent::Interrupt` resume prompt when non-empty.
+    //    `None` after the prompt has been fired or when there is nothing to restore. --
+    pub(crate) restored_session: Option<RestoredSession>,
 
     // -- Shared queue that agent panes push an AgentSnapshot into whenever
     //    they reach a terminal state (Done / Failed). The App drains this at
@@ -260,6 +288,30 @@ pub struct App {
     pub(crate) _mcp_listener: Option<McpListener>,
     // -- Hub registration listener (outbound WSS to phantom-hub, issue #395) --
     pub(crate) _hub_listener: Option<phantom_mcp::HubListener>,
+
+    // -- Federation relay task handle (kept alive for the process lifetime).
+    //    `Some` when PHANTOM_RELAY_URL is set and the relay task was spawned.
+    //    The relay task owns the tokio runtime and drives the relay WebSocket
+    //    connection; this JoinHandle prevents the thread from being silently
+    //    detached while the App is alive.
+    pub(crate) _relay_task: Option<std::thread::JoinHandle<()>>,
+
+    // -- One-shot relay handshake notification channel.
+    //    The relay task sends a RelayHandshakeInfo on this when the WebSocket
+    //    handshake completes. update.rs drains it and emits
+    //    AiEvent::RelayConnected to the brain. Set to None after the
+    //    first message is received (one-shot semantics).
+    pub(crate) relay_connected_rx:
+        Option<std::sync::mpsc::Receiver<crate::app::RelayHandshakeInfo>>,
+
+    // -- MCP external-server discovery barrier.
+    //    Set to `true` by the async discovery task once all servers listed in
+    //    `$PHANTOM_MCP_SERVERS` have been connected and their `tools/list`
+    //    responses indexed into the tool registry.  Agent spawn waits up to
+    //    500 ms for this flag before proceeding (non-blocking: if discovery
+    //    is still running the agent gets an empty external tool list and can
+    //    still function).
+    pub(crate) mcp_discovery_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     // -- Render pools (reused each frame via clear() to avoid per-frame allocs) --
     pub(crate) pool_quads: Vec<QuadInstance>,
@@ -414,6 +466,22 @@ pub struct App {
     //    jobs can hold their own handle without an extra clone-of-clone.
     pub(crate) bundle_store: Option<std::sync::Arc<phantom_bundle_store::BundleStore>>,
     pub(crate) capture_state: crate::capture::CaptureState,
+    /// GPT-4V analyzer. `None` when `OPENAI_API_KEY` is absent or the
+    /// capture pipeline is disabled. When present, frames that pass the
+    /// dHash+SAD dedup gate are forwarded to GPT-4V asynchronously.
+    ///
+    /// Stored behind `Arc` so the capture loop can clone a cheap handle
+    /// into each spawned tokio task without blocking the render thread.
+    pub(crate) vision_analyzer: Option<std::sync::Arc<phantom_vision::VisionAnalyzer>>,
+
+    // -- Embedding backend (optional, initialized from OPENAI_API_KEY).
+    //    `None` when `OPENAI_API_KEY` is absent or empty — the capture
+    //    pipeline persists bundles without vector indexing in that case.
+    //    Stored as `Arc<dyn EmbeddingBackend>` so it can be shared with
+    //    off-thread persistence jobs via `Arc::clone` without holding a
+    //    reference back to the `App`.
+    pub(crate) embedding_backend:
+        Option<std::sync::Arc<dyn phantom_embeddings::EmbeddingBackend>>,
 
     // -- Per-pane last-command tracking (issue #226).
     //    Populated from `Event::CommandStarted` so that the subsequent
@@ -468,6 +536,14 @@ pub struct App {
     // `tick_alt_screen_fade` into `collapse_alt_screen_pane`.
     pub(crate) alt_screen_pending_collapses: Vec<phantom_adapter::AppId>,
 
+    // -- TTS pipeline (optional: None when OPENAI_API_KEY is absent or TTS
+    //    is otherwise unavailable). Receives full assistant messages from
+    //    agent panes and speaks them aloud via the system audio device.
+    pub(crate) tts: Option<crate::tts::TtsPipeline>,
+    // Keeps the background worker task alive for the process lifetime.
+    #[allow(dead_code)]
+    pub(crate) _tts_handles: Option<crate::tts::TtsTaskHandles>,
+
     // -- Privacy mode: hard block on cloud API calls.
     //    Mirrors `PhantomConfig::privacy_mode`. Toggled at runtime by the
     //    `ghost privacy on/off` command. When `true`:
@@ -501,6 +577,19 @@ pub struct App {
     // `ooda_git_changed` — set to `true` when `GitStateChanged` is received;
     //   cleared after one OODA tick (same single-frame pulse pattern).
     pub(crate) ooda_git_changed: bool,
+
+    // -- MCP tool registry: shared across all agent panes for external tool
+    //    fallback. Populated by `mcp_discovery::discover_and_connect` running
+    //    in a background tokio task at startup. Handed to each new AgentPane
+    //    via `AgentPane::set_mcp_registry` so dispatch can route unknown tool
+    //    names to connected MCP servers.
+    pub(crate) mcp_registry:
+        std::sync::Arc<tokio::sync::RwLock<phantom_mcp::McpToolRegistry>>,
+
+    // -- Background MCP discovery task (kept alive for the App lifetime).
+    //    `None` when `config.mcp_servers` is empty (no work to do).
+    #[allow(dead_code)]
+    pub(crate) _mcp_discovery_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// An active suggestion from the AI brain.
@@ -560,7 +649,7 @@ impl App {
             "Font: {:.0}pt logical × {:.1}x scale = {:.0}pt physical",
             config.font_size, scale_factor, scaled_font_size
         );
-        let mut text_renderer = TextRenderer::new(scaled_font_size);
+        let mut text_renderer = TextRenderer::with_font_family(scaled_font_size, config.font_family.clone());
         let cell_size = text_renderer.measure_cell();
         info!(
             "Cell size: {:.1}x{:.1} at {:.0}pt",
@@ -617,7 +706,12 @@ impl App {
         let project_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".into());
-        let context = ProjectContext::detect(Path::new(&project_dir));
+        // Use ContextAssembler so subsequent agent invocations benefit from
+        // DAG caching rather than calling ProjectContext::detect() on every spawn.
+        let mut context_assembler = ContextAssembler::new();
+        let context = context_assembler.assemble(Path::new(&project_dir));
+        let context_assembler =
+            std::sync::Arc::new(std::sync::Mutex::new(context_assembler));
         info!(
             "Project detected: {} [{:?}]",
             context.name, context.project_type
@@ -705,7 +799,21 @@ impl App {
             }
         }
 
+        // -- Federation relay task --
+        // When PHANTOM_RELAY_URL (or PHANTOM_HUB_URL as a convenience alias)
+        // is set, create an inbound channel and spawn a background OS thread
+        // that connects to the relay WebSocket and forwards inbound frames to
+        // the brain.  relay_inbound_rx is `None` when no relay URL is
+        // configured, keeping the federation path fully disabled in standalone
+        // mode.
+        let (relay_inbound_rx, relay_connected_rx, relay_task) = build_relay_channels();
+
         // -- AI Brain thread --
+        // Seed the brain's initial history snapshot (up to 20 most recent commands).
+        let initial_history_context: Vec<phantom_history::HistoryEntry> = history
+            .as_ref()
+            .and_then(|s| s.recent(20).ok())
+            .unwrap_or_default();
         let brain = spawn_brain(BrainConfig {
             project_dir: project_dir.clone(),
             enable_suggestions: true,
@@ -714,9 +822,17 @@ impl App {
             router: None,
             catalog: None,
             privacy_mode: config.privacy_mode,
-            // relay_inbound_rx: wired by the relay task on handshake completion
-            // via AiEvent::RelayConnected. None in standalone (non-relay) mode.
-            relay_inbound_rx: None,
+            // relay_inbound_rx is Some when PHANTOM_RELAY_URL is configured
+            // (wired by build_relay_channels above), None in standalone mode.
+            relay_inbound_rx,
+            recall_context: None,
+            history_context: initial_history_context,
+            // Self-improvement defaults to OFF per design doc §5.1; the
+            // operator opts in by setting `BrainConfig::self_improvement` and
+            // `BrainConfig::goal_sources` (typically via a future PR that
+            // adds the `ghost self-improve on` command).
+            self_improvement: None,
+            goal_sources: Vec::new(),
         });
         if config.privacy_mode {
             info!("Privacy mode enabled — cloud API calls blocked");
@@ -789,6 +905,28 @@ impl App {
         } else {
             info!("Bundle store unavailable — per-pane capture disabled");
         }
+
+        // -- Embedding backend (optional). Constructed from OPENAI_API_KEY when
+        //    present so the capture pipeline can vector-index sealed bundles.
+        //    When the key is absent we store None and log at debug level — bundles
+        //    still persist with metadata; only vector search is unavailable.
+        //    The client is cached inside the backend (not per-request) so the
+        //    Arc<dyn EmbeddingBackend> can be shared cheaply with job workers.
+        let embedding_backend: Option<std::sync::Arc<dyn phantom_embeddings::EmbeddingBackend>> =
+            match phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env() {
+                Ok(backend) => {
+                    info!("Embedding backend ready (OpenAI text-embedding-3-large)");
+                    Some(std::sync::Arc::new(backend))
+                }
+                Err(phantom_embeddings::EmbedError::NotConfigured { .. }) => {
+                    debug!("OPENAI_API_KEY not set — embedding backend disabled");
+                    None
+                }
+                Err(e) => {
+                    warn!("Embedding backend init failed: {e} — vector indexing disabled");
+                    None
+                }
+            };
 
         // -- Scene graph --
         let mut scene = SceneTree::new();
@@ -923,6 +1061,30 @@ impl App {
                 }
             }
         }
+
+        // -- Session restore: load agent + goal snapshots from sidecar files --
+        // Called after both persisters are initialised so the sidecar paths are
+        // known.  Partial failure (corrupt sidecar on one side) is handled
+        // gracefully inside `SessionRestorer::restore`.  The result is stored on
+        // `App` and consumed on the first Terminal-state OODA tick in `update.rs`.
+        let restored_session: Option<RestoredSession> = {
+            let agent_path = agent_persister.as_ref().map(|p| p.path().to_path_buf());
+            let goal_path = goal_persister.as_ref().map(|p| p.path().to_path_buf());
+            let session = SessionRestorer::restore(
+                agent_path.as_deref(),
+                goal_path.as_deref(),
+            );
+            if session.is_empty() {
+                None
+            } else {
+                info!(
+                    "RestoredSession ready: {} agent(s), {} goal(s)",
+                    session.agent_count(),
+                    session.goal_count(),
+                );
+                Some(session)
+            }
+        };
 
         // -- Event bus (single instance, will be handed to AppCoordinator) --
         let mut event_bus = EventBus::new();
@@ -1128,6 +1290,104 @@ impl App {
         // can self-correct.
         let ticket_dispatcher = build_ticket_dispatcher();
 
+        // -- MCP external-server discovery (Bug 3 fix, env-var path).
+        //
+        // Spawn an async task that connects to each URL listed in
+        // `$PHANTOM_MCP_SERVERS` (comma-separated), calls `tools/list` on each,
+        // and sets `mcp_discovery_complete` to `true` when done.
+        //
+        // Agent spawn checks this flag and waits up to 500 ms so that agents
+        // started immediately after boot have access to the full external tool
+        // list. If discovery is still running after 500 ms, the agent proceeds
+        // with whatever tools are available (empty external list is acceptable).
+        let mcp_discovery_complete =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let flag = std::sync::Arc::clone(&mcp_discovery_complete);
+            let server_urls: Vec<String> = std::env::var("PHANTOM_MCP_SERVERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+
+            if server_urls.is_empty() {
+                // No external servers configured — mark discovery done immediately.
+                flag.store(true, std::sync::atomic::Ordering::Release);
+                debug!("MCP discovery: no PHANTOM_MCP_SERVERS configured, skipping");
+            } else {
+                // Spin up a one-shot tokio runtime on a background thread so we
+                // don't block the winit event loop.
+                std::thread::Builder::new()
+                    .name("mcp-discovery".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("mcp-discovery: tokio runtime");
+                        rt.block_on(async move {
+                            let mut registry = phantom_mcp::McpToolRegistry::new();
+                            for url in &server_urls {
+                                match phantom_mcp::McpClient::connect(url).await {
+                                    Ok(mut client) => {
+                                        if let Err(e) = client.list_tools().await {
+                                            warn!("MCP discovery: list_tools failed for {url}: {e}");
+                                        }
+                                        let server_name = url
+                                            .trim_start_matches("ws://")
+                                            .trim_start_matches("wss://")
+                                            .to_owned();
+                                        registry.register_server(&server_name, client);
+                                        info!("MCP discovery: registered server {url} ({} tools)",
+                                            registry.tool_count());
+                                    }
+                                    Err(e) => {
+                                        warn!("MCP discovery: connect failed for {url}: {e}");
+                                    }
+                                }
+                            }
+                            // Mark discovery done so agents can proceed.
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                            info!("MCP discovery complete ({} tools indexed)", registry.tool_count());
+                        });
+                    })
+                    .expect("mcp-discovery thread spawn");
+            }
+        }
+
+        // -- TTS pipeline (best-effort; no-op when OPENAI_API_KEY is absent) --
+        // Privacy mode blocks cloud API calls, so we skip TTS init to avoid
+        // a live network call on first synthesis.
+        let (tts, _tts_handles) = if config.privacy_mode {
+            debug!("TTS pipeline disabled (privacy mode)");
+            (None, None)
+        } else {
+            match crate::tts::build_tts_pipeline_from_env() {
+                Some((p, h)) => (Some(p), Some(h)),
+                None => (None, None),
+            }
+        };
+
+        // -- MCP config-driven tool registry (shared across agent panes).
+        // `discover_and_connect` is spawned as a background task so it does
+        // not block the GPU / render thread during startup. This complements
+        // the env-var discovery above; both populate registries used by agents.
+        let mcp_registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+            phantom_mcp::McpToolRegistry::new(),
+        ));
+        let mcp_discovery_task: Option<tokio::task::JoinHandle<()>> =
+            if config.mcp_servers.is_empty() {
+                None
+            } else {
+                let servers = config.mcp_servers.clone();
+                let registry = std::sync::Arc::clone(&mcp_registry);
+                let handle = tokio::spawn(async move {
+                    crate::mcp_discovery::discover_and_connect(&servers, registry).await;
+                });
+                Some(handle)
+            };
+
         let now = Instant::now();
 
         Ok(Self {
@@ -1144,12 +1404,16 @@ impl App {
             theme,
             status_bar,
             tab_bar,
+            keybind_help: KeybindHelp::new(),
+            search_bar: SearchBar::new(),
             boot,
             state: initial_state,
             demo_mode: config.demo_mode,
             demo_post_boot_done: false,
             start_time: now,
             last_frame: now,
+            dt_clamp: phantom_scene::DtClamp::default_60fps(),
+            scene_clock: phantom_scene::Clock::new(),
             cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
@@ -1162,11 +1426,13 @@ impl App {
             ooda_loop: OodaLoop::new(OodaConfig::default()),
             runtime,
             context: Some(context),
+            context_assembler,
             memory,
             notification_store,
             session_manager,
             agent_persister,
             goal_persister,
+            restored_session,
             agent_snapshot_queue: crate::agent_pane::new_agent_snapshot_queue(),
             last_input_time: now,
             suggestion: None,
@@ -1184,6 +1450,9 @@ impl App {
             mcp_cmd_rx,
             _mcp_listener: mcp_listener,
             _hub_listener: hub_listener,
+            _relay_task: relay_task,
+            relay_connected_rx,
+            mcp_discovery_complete,
             pool_quads: Vec::with_capacity(256),
             pool_glyphs: Vec::with_capacity(4096),
             pool_color_glyphs: Vec::with_capacity(64),
@@ -1231,6 +1500,10 @@ impl App {
             settings_panel: crate::settings_ui::SettingsPanel::new(),
             bundle_store,
             capture_state: crate::capture::CaptureState::new(),
+            vision_analyzer: phantom_vision::VisionAnalyzer::from_env()
+                .ok()
+                .map(std::sync::Arc::new),
+            embedding_backend,
             ticket_dispatcher,
             pane_last_command: std::collections::HashMap::new(),
             shader_reloader: phantom_renderer::shader_loader::ShaderReloader::new(),
@@ -1244,16 +1517,29 @@ impl App {
             alt_screen_pending_collapses: Vec::new(),
             privacy_mode: config.privacy_mode,
             peer_grant_registry: crate::peer_grants::load_peer_grant_registry(),
+            tts,
+            _tts_handles,
             // OODA signal cache — all start zeroed; populated by drain_bus_to_brain.
             ooda_last_parsed: None,
             ooda_agent_just_completed: false,
             ooda_git_changed: false,
+            mcp_registry,
+            _mcp_discovery_task: mcp_discovery_task,
         })
     }
 
     /// Returns `true` if the app has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.quit_requested
+    }
+
+    /// Drain the latest OSC 2 window title from the focused terminal adapter.
+    ///
+    /// Returns the title string when the running program has emitted a new
+    /// title since the last call.  The caller should forward this to
+    /// `winit_window.set_title()`.  Returns `None` when no change arrived.
+    pub fn take_pending_window_title(&mut self) -> Option<String> {
+        self.coordinator.take_focused_window_title()
     }
 
     /// Watchdog trace: returns a log line every `interval` frames.
@@ -1648,16 +1934,14 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
         return None;
     }
 
-    // Resolve master key from the OS keychain. If the keyring isn't
-    // available (CI, sandboxed test runs), we fall back to a deterministic
-    // key derived from `$HOME`. The fallback isn't secure — bundles
-    // written under it are encrypted but with a key any process on the
-    // box can rederive — and we surface a clear log line so the user
-    // notices.
-    let master_key = match MasterKey::from_keyring() {
+    // Resolve master key from the on-disk store under `dirs::config_dir()`.
+    // First run generates a fresh key and persists it at mode 0600; later
+    // runs read it back. See `phantom-bundle-store::crypto` for the file
+    // layout and the `PHANTOM_BUNDLE_STORE_MASTER_KEY_FILE` test override.
+    let master_key = match MasterKey::load_or_generate() {
         Ok(k) => k,
         Err(e) => {
-            warn!("Bundle store keychain unavailable ({e}); skipping capture init");
+            warn!("Bundle store master-key load failed ({e}); skipping capture init");
             return None;
         }
     };
@@ -1688,9 +1972,272 @@ fn open_bundle_store() -> Option<std::sync::Arc<phantom_bundle_store::BundleStor
     }
 }
 
+// ---------------------------------------------------------------------------
+// build_relay_channels — federation relay wiring
+// ---------------------------------------------------------------------------
+
+/// Handshake notification payload: sent by the relay task to the update loop
+/// once the WebSocket handshake is complete.  The update loop uses this to
+/// emit [`phantom_brain::events::AiEvent::RelayConnected`] to the brain.
+pub(crate) struct RelayHandshakeInfo {
+    /// Outbound channel: the brain's `AgentRouter` sends `(peer_id, json)`
+    /// tuples here; the relay task's outbound leg forwards them to the relay
+    /// WebSocket.
+    ///
+    /// # TODO — outbound forwarding leg
+    /// The relay task currently only wires the inbound leg.  The outbound leg
+    /// (brain → relay) requires phantom-net to expose a `select!`-friendly
+    /// recv so the relay loop can simultaneously poll `outbound_rx` and
+    /// `client.recv()` without blocking.  Track in phantom-net:
+    /// "expose select-friendly recv on RelayClient so relay_task can drive
+    /// inbound and outbound concurrently without blocking".
+    pub outbound_tx: tokio::sync::mpsc::Sender<(String, String)>,
+    /// This Phantom instance's peer id string (base58, derived from Ed25519 key).
+    pub local_peer_id: String,
+}
+
+/// Set up the inbound relay channel and (optionally) spawn the relay task.
+///
+/// Returns `(relay_inbound_rx, relay_connected_rx, relay_task_handle)`:
+/// - `relay_inbound_rx` goes to [`BrainConfig::relay_inbound_rx`] so the
+///   brain drains inbound relay frames on its proactive tick.
+/// - `relay_connected_rx` is a one-shot receiver.  The relay task sends a
+///   [`RelayHandshakeInfo`] on it after the WebSocket handshake completes.
+///   The update loop drains this and emits `AiEvent::RelayConnected` to the
+///   brain to wire the `AgentRouter`.
+/// - `relay_task_handle` keeps the OS thread alive.  All three are `None`
+///   when neither `PHANTOM_RELAY_URL` nor `PHANTOM_HUB_URL` is set.
+pub(crate) fn build_relay_channels() -> (
+    Option<tokio::sync::mpsc::Receiver<String>>,
+    Option<std::sync::mpsc::Receiver<RelayHandshakeInfo>>,
+    Option<std::thread::JoinHandle<()>>,
+) {
+    // Accept PHANTOM_RELAY_URL as the canonical var; fall back to
+    // PHANTOM_HUB_URL as a convenience alias so the same env var that
+    // controls hub registration also enables the relay path.
+    let relay_url = std::env::var("PHANTOM_RELAY_URL")
+        .or_else(|_| std::env::var("PHANTOM_HUB_URL"))
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let Some(relay_url) = relay_url else {
+        debug!("PHANTOM_RELAY_URL not set — federation relay disabled");
+        return (None, None, None);
+    };
+
+    info!("Federation relay URL configured: {relay_url}");
+
+    // Inbound channel: relay task pushes raw JSON frames; brain drains them.
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<String>(256);
+
+    // One-shot handshake notification: relay task → update loop.
+    let (connected_tx, connected_rx) = std::sync::mpsc::sync_channel::<RelayHandshakeInfo>(1);
+
+    let handle = std::thread::Builder::new()
+        .name("phantom-relay-task".into())
+        .spawn(move || {
+            relay_task_body(&relay_url, inbound_tx, connected_tx);
+        })
+        .unwrap_or_else(|e| {
+            warn!("Failed to spawn relay task: {e}; federation disabled");
+            std::thread::Builder::new()
+                .name("phantom-relay-noop".into())
+                .spawn(|| {})
+                .expect("noop thread")
+        });
+
+    (Some(inbound_rx), Some(connected_rx), Some(handle))
+}
+
+/// Body of the relay task OS thread.
+///
+/// Runs a single-threaded tokio runtime that:
+/// 1. Loads the on-disk identity and (optional) device JWT.
+/// 2. Connects to the relay WebSocket and completes the handshake.
+/// 3. Notifies the update loop via `connected_tx` so it can emit
+///    `AiEvent::RelayConnected` to the brain.
+/// 4. Forwards inbound frames to `inbound_tx`.
+///
+/// Logs on error and returns without panicking so the App continues
+/// without federation.
+fn relay_task_body(
+    relay_url: &str,
+    inbound_tx: tokio::sync::mpsc::Sender<String>,
+    connected_tx: std::sync::mpsc::SyncSender<RelayHandshakeInfo>,
+) {
+    use phantom_net::{DeviceCredentials, Identity};
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            warn!("relay task: failed to build tokio runtime: {e}");
+            return;
+        }
+    };
+
+    rt.block_on(async move {
+        // Load or generate the on-disk Ed25519 identity.
+        let identity = match Identity::load_or_generate("phantom") {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("relay task: failed to load identity: {e}; federation disabled");
+                return;
+            }
+        };
+
+        let local_peer_id = identity.peer_id.to_string();
+        info!("relay task: local peer id = {local_peer_id}");
+
+        // Optionally load a device JWT for authenticated relay connections.
+        let device_token: Option<String> = match DeviceCredentials::load("phantom") {
+            Ok(Some(creds)) => {
+                info!(
+                    "relay task: device credentials loaded (hub={})",
+                    creds.hub_url
+                );
+                Some(creds.jwt)
+            }
+            Ok(None) => {
+                debug!(
+                    "relay task: no device credentials — connecting without Authorization header; \
+                     run `phantom auth register --hub <url>` to populate credentials"
+                );
+                None
+            }
+            Err(e) => {
+                warn!(
+                    "relay task: failed to load device credentials: {e}; connecting unauthenticated"
+                );
+                None
+            }
+        };
+
+        // Connect to the relay.
+        let token_ref = device_token.as_deref();
+        let mut client = match phantom_net::client::RelayClient::connect_with_token(
+            relay_url,
+            identity,
+            token_ref,
+        )
+        .await
+        {
+            Ok(c) => {
+                info!("relay task: connected and handshake complete");
+                c
+            }
+            Err(e) => {
+                warn!(
+                    "relay task: connection failed: {e}; federation disabled for this session"
+                );
+                return;
+            }
+        };
+
+        // Notify the update loop that the handshake is done.  Create the
+        // outbound channel now so the brain's AgentRouter can send messages
+        // to the relay.  The outbound_rx end is held here; the sender is
+        // handed to the brain via AiEvent::RelayConnected.
+        //
+        // TODO: drive the outbound_rx in the loop below once phantom-net
+        // exposes a select!-friendly recv — see RelayHandshakeInfo TODO.
+        let (outbound_tx, _outbound_rx) =
+            tokio::sync::mpsc::channel::<(String, String)>(64);
+        let _ = connected_tx.try_send(RelayHandshakeInfo {
+            outbound_tx,
+            local_peer_id,
+        });
+
+        // Forward inbound frames to the brain's relay_inbound_rx.
+        loop {
+            match client.recv().await {
+                Ok(envelope) => match String::from_utf8(envelope.payload) {
+                    Ok(json) => {
+                        if inbound_tx.send(json).await.is_err() {
+                            debug!("relay task: brain inbound channel closed; shutting down");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("relay task: non-UTF-8 envelope payload ignored: {e}");
+                    }
+                },
+                Err(e) => {
+                    warn!("relay task: recv error: {e}; closing relay connection");
+                    break;
+                }
+            }
+        }
+
+        info!("relay task: exiting");
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::open_bundle_store;
+
+    // -- Helpers for env-var mutation in tests --------------------------------
+
+    /// Serialize env-var mutations so parallel tests in the same binary
+    /// don't stomp on each other.
+    fn with_env_var<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var(key).ok();
+        // SAFETY: serialized by LOCK.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    // -- Embedding backend construction tests --------------------------------
+
+    /// `embedding_backend_created_when_key_present`
+    ///
+    /// When `OPENAI_API_KEY` is set to a non-empty value,
+    /// `OpenAiEmbeddingBackend::from_env()` must succeed and produce a
+    /// backend whose `name()` is `"openai-embedding"`.
+    #[test]
+    fn embedding_backend_created_when_key_present() {
+        use phantom_embeddings::EmbeddingBackend;
+        with_env_var("OPENAI_API_KEY", Some("sk-test-fixture"), || {
+            let backend = phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env()
+                .expect("from_env should succeed when key is set");
+            assert_eq!(backend.name(), "openai-embedding");
+        });
+    }
+
+    /// `embedding_backend_none_when_no_key`
+    ///
+    /// When `OPENAI_API_KEY` is absent, `OpenAiEmbeddingBackend::from_env()`
+    /// must return `Err(EmbedError::NotConfigured(_))` — the App then stores
+    /// `None` for `embedding_backend`.
+    #[test]
+    fn embedding_backend_none_when_no_key() {
+        with_env_var("OPENAI_API_KEY", None, || {
+            let result = phantom_embeddings::openai::OpenAiEmbeddingBackend::from_env();
+            assert!(
+                matches!(result, Err(phantom_embeddings::EmbedError::NotConfigured(_))),
+                "expected NotConfigured, got {result:?}"
+            );
+        });
+    }
+
+    // -- Bundle store env guard test -----------------------------------------
 
     /// Setting `PHANTOM_DISABLE_BUNDLE_STORE=1` must short-circuit
     /// `open_bundle_store()` and return `None` WITHOUT touching the
@@ -1720,6 +2267,104 @@ mod tests {
         assert!(
             result.is_none(),
             "open_bundle_store must return None when PHANTOM_DISABLE_BUNDLE_STORE=1"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Federation relay channel tests
+    // -----------------------------------------------------------------------
+
+    /// When `PHANTOM_HUB_URL` and `PHANTOM_RELAY_URL` are both absent,
+    /// `build_relay_channels` must return `None` for the inbound receiver so
+    /// `BrainConfig::relay_inbound_rx` stays `None` in standalone mode.
+    #[test]
+    fn relay_inbound_rx_is_none_without_env_var() {
+        use super::build_relay_channels;
+        use std::sync::Mutex;
+
+        // Coarse serial lock so parallel test threads do not race on env vars.
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Snapshot and clear both relay env vars.
+        let prior_relay = std::env::var("PHANTOM_RELAY_URL").ok();
+        let prior_hub = std::env::var("PHANTOM_HUB_URL").ok();
+        unsafe {
+            std::env::remove_var("PHANTOM_RELAY_URL");
+            std::env::remove_var("PHANTOM_HUB_URL");
+        }
+
+        let (rx, connected_rx, handle) = build_relay_channels();
+
+        // Restore env vars before asserting.
+        unsafe {
+            match prior_relay {
+                Some(v) => std::env::set_var("PHANTOM_RELAY_URL", v),
+                None => std::env::remove_var("PHANTOM_RELAY_URL"),
+            }
+            match prior_hub {
+                Some(v) => std::env::set_var("PHANTOM_HUB_URL", v),
+                None => std::env::remove_var("PHANTOM_HUB_URL"),
+            }
+        }
+
+        assert!(
+            rx.is_none(),
+            "relay_inbound_rx must be None when no relay URL is configured"
+        );
+        assert!(
+            connected_rx.is_none(),
+            "relay_connected_rx must be None when no relay URL is configured"
+        );
+        assert!(
+            handle.is_none(),
+            "relay task handle must be None when no relay URL is configured"
+        );
+    }
+
+    /// When `PHANTOM_HUB_URL` is set to a non-empty value,
+    /// `build_relay_channels` must return `Some` for the inbound receiver so
+    /// `BrainConfig::relay_inbound_rx` is wired.  The relay task will attempt
+    /// to connect and log an error if the URL is unreachable — that is
+    /// acceptable; this test only validates channel creation, not network
+    /// connectivity.
+    #[test]
+    fn relay_inbound_rx_is_some_with_env_var() {
+        use super::build_relay_channels;
+        use std::sync::Mutex;
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let prior_relay = std::env::var("PHANTOM_RELAY_URL").ok();
+        let prior_hub = std::env::var("PHANTOM_HUB_URL").ok();
+        unsafe {
+            std::env::remove_var("PHANTOM_RELAY_URL");
+            std::env::set_var("PHANTOM_HUB_URL", "wss://relay.phantom.test");
+        }
+
+        let (rx, connected_rx, handle) = build_relay_channels();
+
+        // Restore env vars before asserting.
+        unsafe {
+            match prior_relay {
+                Some(v) => std::env::set_var("PHANTOM_RELAY_URL", v),
+                None => std::env::remove_var("PHANTOM_RELAY_URL"),
+            }
+            match prior_hub {
+                Some(v) => std::env::set_var("PHANTOM_HUB_URL", v),
+                None => std::env::remove_var("PHANTOM_HUB_URL"),
+            }
+        }
+
+        // Drop handle before asserting so the relay thread is not left
+        // dangling across tests (it will fail to connect and exit cleanly).
+        drop(handle);
+        drop(connected_rx);
+
+        assert!(
+            rx.is_some(),
+            "relay_inbound_rx must be Some when PHANTOM_HUB_URL is set"
         );
     }
 }

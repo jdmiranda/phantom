@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · self-improvement</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 09 · SELF-IMPROVEMENT · PHANTOM-ON-PHANTOM</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html" class="active">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 09 · PHANTOM-ON-PHANTOM</span>
+    <span class="sysid">SYS://self_improve.0</span>
+  </div>
+  <h1 class="page-title">Self-Improvement</h1>
+  <p class="page-lede">
+    Phantom <strong>wants to and can safely modify its own codebase</strong>. The brain auto-discovers work in
+    <code>jdmiranda/phantom</code> through pluggable goal sources, scores each candidate with a weighted-sum
+    utility function, applies hard exclusions and trust-band thresholds, throttles through a sliding-window
+    rate limiter, and emits <code>AiAction::EnqueueLoopMessage</code> for the highest-scoring survivors. The
+    implementer loop picks them up and ships PRs. The full pipeline is governed and auditable.
+  </p>
+
+  <div class="callout callout-danger">
+    <div class="callout-title">Opt-in by default</div>
+    <code>SelfImprovementConfig::enabled = false</code> ships off. The operator must explicitly turn it on.
+    Trust band starts at <code>Conservative</code> and ramps only on observed success.
+  </div>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Goal sources</div><div class="value">2 + pluggable</div></div>
+    <div class="status-cell"><div class="label">Score range</div><div class="value">0.0 – 1.0</div></div>
+    <div class="status-cell"><div class="label">Trust bands</div><div class="value">4</div></div>
+    <div class="status-cell"><div class="label">Critical floor</div><div class="value">0.85</div></div>
+    <div class="status-cell"><div class="label">Default rate</div><div class="value">4 / hour</div></div>
+  </div>
+
+  <h2>The end-to-end flow</h2>
+
+<pre class="ascii bright">
+  phantom-brain GoalSource polls jdmiranda/phantom
+   (GhIssueGoalSource + GhCiFailureGoalSource)
+      │
+      ▼
+  score_candidate weighted-sum scorer  ──→  [score, breakdown]
+      │
+      ▼
+  HardExclusions keyword filter
+   (security label · draft · brain-authored · in-progress · …)
+      │
+      ▼
+  TrustBand threshold check
+   (Conservative=0.85 · Standard=0.75 · Aggressive=0.65)
+      │
+      ▼
+  RateLimiter sliding window
+   (per_hour · per_day · cooldown)
+      │
+      ▼
+  AppendOnly AuditEntry JSONL  ←──── EVERY decision (enqueue OR skip)
+      │
+      ▼
+  AiAction::EnqueueLoopMessage { queue, message }
+      │
+      ▼
+  LoopQueueActionHandler → LoopQueueRegistry → LoopRunner
+      │
+      ▼
+  SubstrateAgentDispatcher → SubstrateDriver → Claude API
+      │
+      ▼
+  agent reads issue, writes code, opens PR, complete_task{…}
+      │
+      ▼
+  Event::AgentTaskComplete → review-queue → reviewer loop
+</pre>
+
+  <h2>GoalSource trait</h2>
+  <p>
+    Every "where does the brain look for things to do" surface is a <code>GoalSource</code>. The trait is
+    deliberately tiny — a name and a pull. Implementations dedup on <code>external_id</code> so the same
+    issue doesn't fire twice in one window.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub trait</span> <span class="t">GoalSource</span> {
+    <span class="k">fn</span> <span class="fn">name</span>(&amp;<span class="k">self</span>) -&gt; &amp;<span class="t">str</span>;
+    <span class="k">fn</span> <span class="fn">poll</span>(&amp;<span class="k">mut self</span>)
+        -&gt; <span class="t">Result</span>&lt;<span class="t">Vec</span>&lt;<span class="t">GoalCandidate</span>&gt;, <span class="t">GoalSourceError</span>&gt;;
+}
+
+<span class="k">pub struct</span> <span class="t">GoalCandidate</span> {
+    <span class="k">pub</span> <span class="n">source</span>:      <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">external_id</span>: <span class="t">String</span>,                <span class="c">// "gh-issue:649"</span>
+    <span class="k">pub</span> <span class="n">title</span>:       <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">body</span>:        <span class="t">Option</span>&lt;<span class="t">String</span>&gt;,
+    <span class="k">pub</span> <span class="n">labels</span>:      <span class="t">Vec</span>&lt;<span class="t">String</span>&gt;,
+    <span class="k">pub</span> <span class="n">created_at</span>:  <span class="t">SystemTime</span>,
+    <span class="k">pub</span> <span class="n">signals</span>:     <span class="t">HashMap</span>&lt;<span class="t">String</span>, <span class="t">f32</span>&gt;,  <span class="c">// priority, age, activity, …</span>
+}</code></pre>
+
+  <h2>Two concrete sources</h2>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-h"><span class="card-title">GhIssueGoalSource</span><span class="card-sub">goal_source/gh_issues.rs</span></div>
+      <div class="card-body">Shells out to <code>gh issue list --json …</code>. Filters by repo + open status. Emits one candidate per matching issue with <code>external_id = "gh-issue:{number}"</code>.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">GhCiFailureGoalSource</span><span class="card-sub">goal_source/gh_ci.rs</span></div>
+      <div class="card-body">Shells out to <code>gh run list --json …</code>. Filters by failed status. Emits one candidate per failed CI run with synthesized title/body.</div>
+    </div>
+  </div>
+
+  <h2>The weighted-sum scorer</h2>
+  <p>
+    <code>score_candidate(&amp;GoalCandidate) → (f32, HashMap&lt;String, f32&gt;)</code> at
+    <code>self_improvement.rs:~350</code>. Each signal contributes a weighted score; the sum is clamped to
+    <code>[0.0, 1.0]</code>. The breakdown is returned alongside the score so the audit log can show <em>why</em>
+    a decision was made.
+  </p>
+
+  <table class="table">
+    <thead><tr><th>Signal</th><th>Weight</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr><td><code>priority</code></td><td class="bright">0.30</td><td>label parser — <code>priority:high → 1.0</code></td></tr>
+      <tr><td><code>recent_ci_failures</code></td><td class="bright">0.20</td><td>CI signal: how many recent CI runs touched this file</td></tr>
+      <tr><td><code>age_hours</code></td><td>0.15</td><td>time-since-opened, logistic curve</td></tr>
+      <tr><td><code>label_bonus</code></td><td>±0.15</td><td>well-defined labels add; ambiguous labels subtract</td></tr>
+      <tr><td><code>activity</code></td><td>0.10</td><td>comments/reactions in last 72h</td></tr>
+      <tr><td><code>blocked_by_count</code></td><td>-0.10</td><td>open dependencies subtract — pick unblocked work first</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <strong>Critical label floor.</strong> Any candidate with a <code>critical</code>, <code>regression</code>,
+    or <code>blocker</code> label has its score floored at <code>CRITICAL_LABEL_FLOOR = 0.85</code> regardless
+    of other signals. Per design doc §7.1: <em>critical things take precedence over the scorer's opinion</em>.
+  </p>
+
+  <h2>HardExclusions — categorical refusals</h2>
+  <p>
+    Some candidates are <em>never</em> eligible, regardless of score. A single predicate matches a
+    <code>Some(reason)</code> on any such candidate. Examples:
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub struct</span> <span class="t">HardExclusions</span> { … }
+
+<span class="k">impl</span> <span class="t">HardExclusions</span> {
+    <span class="k">pub fn</span> <span class="fn">matches</span>(&amp;<span class="k">self</span>, c: &amp;<span class="t">GoalCandidate</span>) -&gt; <span class="t">Option</span>&lt;<span class="t">String</span>&gt; {
+        <span class="k">if</span> c.labels.<span class="fn">contains</span>(&amp;<span class="s">"security"</span>) { <span class="k">return</span> <span class="t">Some</span>(<span class="s">"security label"</span>.<span class="fn">into</span>()); }
+        <span class="k">if</span> c.labels.<span class="fn">contains</span>(&amp;<span class="s">"draft"</span>)    { <span class="k">return</span> <span class="t">Some</span>(<span class="s">"draft"</span>.<span class="fn">into</span>()); }
+        <span class="k">if</span> c.signals.<span class="fn">get</span>(<span class="s">"brain_authored"</span>) == <span class="t">Some</span>(&amp;<span class="lit">1.0</span>) {
+            <span class="k">return</span> <span class="t">Some</span>(<span class="s">"brain authored — refuse self-loops"</span>.<span class="fn">into</span>());
+        }
+        <span class="k">if</span> c.signals.<span class="fn">get</span>(<span class="s">"in_progress"</span>) == <span class="t">Some</span>(&amp;<span class="lit">1.0</span>) {
+            <span class="k">return</span> <span class="t">Some</span>(<span class="s">"in-progress — another agent owns this"</span>.<span class="fn">into</span>());
+        }
+        <span class="t">None</span>
+    }
+}</code></pre>
+
+  <h2>TrustBudget &amp; the four bands</h2>
+  <p>
+    Trust is an integer in <code>[0, 20]</code>. It starts at the operator's chosen band and ramps on enqueue
+    success / failure. The threshold and rate limits change with the band.
+  </p>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-h"><span class="card-title">SuggestionOnly</span><span class="card-sub">budget = 0</span></div>
+      <div class="card-body">No auto-enqueue. The brain still scores candidates and writes audit entries, but never enqueues. Suggestions appear in the UI for human approval.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">Conservative</span><span class="card-sub">budget 1–3</span></div>
+      <div class="card-body"><strong>Threshold 0.85.</strong> Half the per-hour cap. Default first-week setting. Builds trust through wins.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">Standard</span><span class="card-sub">budget 4–9</span></div>
+      <div class="card-body"><strong>Threshold 0.75.</strong> Design-doc defaults. 4 enqueues per hour. Most ongoing operation lives here.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">Aggressive</span><span class="card-sub">budget 10–20</span></div>
+      <div class="card-body"><strong>Threshold 0.65.</strong> Double the per-hour cap. Reserved for proven operators. Picks up borderline work.</div>
+    </div>
+  </div>
+
+  <h2>RateLimiter — three windows</h2>
+  <p>
+    Every enqueue is subject to three throttles simultaneously. Failure on any one short-circuits the decision
+    to <em>skip with reason</em>.
+  </p>
+
+  <div class="grid grid-3">
+    <div class="card"><div class="card-h"><span class="card-title">per_hour</span></div>
+      <div class="card-body">Sliding-window counter. Conservative = 2/h, Standard = 4/h, Aggressive = 8/h.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">per_day</span></div>
+      <div class="card-body">Daily ceiling. Stops runaway PR storms after off-hours drift.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">cooldown</span></div>
+      <div class="card-body"><code>DEFAULT_COOLDOWN = 600s</code>. Minimum time between any two enqueues.</div></div>
+  </div>
+
+  <h2>AuditEntry — every decision logged</h2>
+  <p>
+    Every brain tick that touches a candidate writes one JSONL envelope to the configured audit log. Decisions
+    <em>and</em> skips. The tail of the audit log is the brain's running mind.
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub struct</span> <span class="t">AuditEntry</span> {
+    <span class="k">pub</span> <span class="n">timestamp</span>:        <span class="t">SystemTime</span>,
+    <span class="k">pub</span> <span class="n">external_id</span>:      <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">source</span>:           <span class="t">String</span>,
+    <span class="k">pub</span> <span class="n">score</span>:            <span class="t">f32</span>,
+    <span class="k">pub</span> <span class="n">score_breakdown</span>:  <span class="t">HashMap</span>&lt;<span class="t">String</span>, <span class="t">f32</span>&gt;,
+    <span class="k">pub</span> <span class="n">decision</span>:         <span class="t">Decision</span>,        <span class="c">// Enqueued · Skipped</span>
+    <span class="k">pub</span> <span class="n">reason</span>:           <span class="t">String</span>,          <span class="c">// "below threshold 0.85" etc.</span>
+    <span class="k">pub</span> <span class="n">trust_band</span>:       <span class="t">TrustBand</span>,
+}</code></pre>
+
+<pre class="code-bash"><code><span class="c"># tail the audit log</span>
+tail -f .phantom/brain/audit.jsonl | jq <span class="s">'.'</span>
+
+<span class="c"># count enqueues today</span>
+grep <span class="s">'"decision":"Enqueued"'</span> .phantom/brain/audit.jsonl | wc -l
+
+<span class="c"># last skip with reason</span>
+grep <span class="s">'"decision":"Skipped"'</span> .phantom/brain/audit.jsonl | tail -1 | jq <span class="s">'.reason, .score_breakdown'</span></code></pre>
+
+  <h2>Configuration</h2>
+
+<pre class="code-rust"><code><span class="k">pub struct</span> <span class="t">SelfImprovementConfig</span> {
+    <span class="k">pub</span> <span class="n">enabled</span>:         <span class="t">bool</span>,                <span class="c">// default false; opt-in only</span>
+    <span class="k">pub</span> <span class="n">queue_name</span>:      <span class="t">String</span>,              <span class="c">// "implementer-queue"</span>
+    <span class="k">pub</span> <span class="n">audit_log_path</span>:  <span class="t">Option</span>&lt;<span class="t">PathBuf</span>&gt;,
+    <span class="k">pub</span> <span class="n">per_hour</span>:        <span class="t">u32</span>,
+    <span class="k">pub</span> <span class="n">per_day</span>:         <span class="t">u32</span>,
+    <span class="k">pub</span> <span class="n">cooldown</span>:        <span class="t">Duration</span>,
+    <span class="k">pub</span> <span class="n">max_in_flight</span>:   <span class="t">u32</span>,
+    <span class="k">pub</span> <span class="n">trust_band</span>:      <span class="t">TrustBand</span>,
+    <span class="k">pub</span> <span class="n">hard_exclusions</span>: <span class="t">HardExclusions</span>,
+}</code></pre>
+
+  <h2>Why this is safe</h2>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-h"><span class="card-title">No self-loop</span></div>
+      <div class="card-body">HardExclusions matches <code>brain_authored=1</code> — the brain refuses to score work it itself opened.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">No security work</span></div>
+      <div class="card-body">Anything labeled <code>security</code> is excluded categorically. Humans only.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">Hard cap</span></div>
+      <div class="card-body">Three rate-limiter windows (hour, day, cooldown) all enforce simultaneously.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">Reviewer is downstream</span></div>
+      <div class="card-body">Implementer's <code>on_complete</code> always enqueues to <code>review-queue</code>. Every brain-authored PR sees a second pair of eyes (agent or human).</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">Full audit</span></div>
+      <div class="card-body">Every decision (enqueue <em>or</em> skip) is one JSONL line. Tail it. Diff it. Replay it.</div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="card-title">Trust ramps slowly</span></div>
+      <div class="card-body">Starts Conservative. One failure drops the budget. Has to <em>earn</em> Standard then Aggressive.</div>
+    </div>
+  </div>
+
+  <h2>Operating it</h2>
+<pre class="code-bash"><code>phantom loop run \
+    <span class="k">--repo</span>  ~/code/phantom \
+    <span class="k">--loops</span> pr_finder_review,pr_finder_impl,reviewer,implementer
+<span class="c"># brain self-improvement defaults ON when this command boots a headless brain.</span>
+<span class="c"># --no-self-improve disables.</span></code></pre>
+
+  <div class="callout callout-ok">
+    <div class="callout-title">The thesis</div>
+    Phantom is not a chatbot you query. It is a substrate that <em>has goals</em>. Right now its only goal is
+    self-improvement — eat its own issue queue. Tomorrow its goals are yours. The same machinery — goal sources,
+    scorer, trust bands, audit — will be pointed at your codebase, your roadmap, your bugs.
+  </div>
+
+  <footer class="footer">
+    <span>SEC 09 · SELF-IMPROVEMENT</span>
+    <span><a href="loop.html">↩ SEC 08 · LOOP</a> · <a href="fleet.html">next → SEC 10 · FLEET</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

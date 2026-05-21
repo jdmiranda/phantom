@@ -1,5 +1,6 @@
 pub mod alt_screen;
 pub mod process;
+pub mod search;
 pub mod takeover;
 pub mod terminal;
 pub mod input;
