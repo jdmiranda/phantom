@@ -1,0 +1,452 @@
+/* =========================================================================
+   PHANTOM DESIGN SYSTEM · shared stylesheet
+   --------------------------------------------------------------------------
+   Every surface in Phantom renders through the same tokens.  This file
+   defines:
+     1. The token vocabulary (CSS custom properties).
+     2. Six concrete themes (phosphor, amber, ice, blood, vapor, cyberpunk).
+     3. Reusable component classes that match the in-app widget API.
+   The Rust side mirrors this shape: `phantom_ui::Tokens` carries the same
+   semantic roles; `phantom_ui::themes::Theme` ships the same palettes.
+   ========================================================================= */
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Token vocabulary (defaults = phosphor)
+   ────────────────────────────────────────────────────────────────────────── */
+:root,
+[data-theme="phosphor"] {
+  /* surfaces — z-order from sunken to raised */
+  --surface-recessed:  #060a10;
+  --surface-base:      #0a0e14;
+  --surface-raised:    #0d1219;
+  --surface-floating:  #11171f;
+
+  /* frames + dividers */
+  --frame-dim:         #1a2a18;
+  --frame-active:      #33ff00;
+  --divider:           #15281a;
+
+  /* text */
+  --text-dim:          #4a8048;
+  --text-secondary:    #6f9f6a;
+  --text-primary:      #b8ffb8;
+  --text-bright:       #33ff00;
+  --text-accent:       #5fff20;
+
+  /* status */
+  --status-ok:         #33ff00;
+  --status-warn:       #ffb000;
+  --status-danger:     #ff3344;
+  --status-info:       #66ddff;
+  --status-mute:       #4a8048;
+
+  /* role colors (events, agents, tools) */
+  --role-user:         #c4ff66;
+  --role-agent:        #33ff00;
+  --role-tool:         #66ddff;
+  --role-system:       #ffb000;
+
+  /* shaders */
+  --glow:              0 0 12px rgba(51, 255, 0, 0.32);
+  --scanline:          rgba(51, 255, 0, 0.04);
+  --selection:         rgba(51, 255, 0, 0.22);
+
+  /* typography */
+  --font-mono:         'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  --font-display:      'JetBrains Mono', ui-monospace, monospace;
+  --font-ui:           'Inter', system-ui, -apple-system, sans-serif;
+}
+
+[data-theme="amber"] {
+  --surface-recessed:  #0a0500;
+  --surface-base:      #110800;
+  --surface-raised:    #170c01;
+  --surface-floating:  #1e1004;
+
+  --frame-dim:         #3a2304;
+  --frame-active:      #ffb000;
+  --divider:           #2a1903;
+
+  --text-dim:          #806430;
+  --text-secondary:    #b88f4e;
+  --text-primary:      #ffd9a3;
+  --text-bright:       #ffb000;
+  --text-accent:       #ffc94d;
+
+  --status-ok:         #c4ff66;
+  --status-warn:       #ffb000;
+  --status-danger:     #ff5544;
+  --status-info:       #ffce5f;
+  --status-mute:       #806430;
+
+  --role-user:         #ffd9a3;
+  --role-agent:        #ffb000;
+  --role-tool:         #ffce5f;
+  --role-system:       #ff5544;
+
+  --glow:              0 0 14px rgba(255, 176, 0, 0.32);
+  --scanline:          rgba(255, 176, 0, 0.04);
+  --selection:         rgba(255, 176, 0, 0.22);
+}
+
+[data-theme="ice"] {
+  --surface-recessed:  #04080d;
+  --surface-base:      #060c14;
+  --surface-raised:    #08111b;
+  --surface-floating:  #0c1924;
+
+  --frame-dim:         #18324a;
+  --frame-active:      #66ddff;
+  --divider:           #14283c;
+
+  --text-dim:          #4a7d99;
+  --text-secondary:    #6fa3c4;
+  --text-primary:      #b8e0ff;
+  --text-bright:       #66ddff;
+  --text-accent:       #5fc4ff;
+
+  --status-ok:         #5fffb8;
+  --status-warn:       #ffce5f;
+  --status-danger:     #ff5fa3;
+  --status-info:       #66ddff;
+  --status-mute:       #4a7d99;
+
+  --role-user:         #b8e0ff;
+  --role-agent:        #66ddff;
+  --role-tool:         #5fffb8;
+  --role-system:       #ffce5f;
+
+  --glow:              0 0 14px rgba(102, 221, 255, 0.32);
+  --scanline:          rgba(102, 221, 255, 0.04);
+  --selection:         rgba(102, 221, 255, 0.22);
+}
+
+[data-theme="blood"] {
+  --surface-recessed:  #0c0405;
+  --surface-base:      #110608;
+  --surface-raised:    #18090c;
+  --surface-floating:  #1f0c10;
+
+  --frame-dim:         #3c1820;
+  --frame-active:      #ff3344;
+  --divider:           #2a1218;
+
+  --text-dim:          #8a4048;
+  --text-secondary:    #b8666d;
+  --text-primary:      #ffd0d4;
+  --text-bright:       #ff3344;
+  --text-accent:       #ff6680;
+
+  --status-ok:         #66ff80;
+  --status-warn:       #ffaa44;
+  --status-danger:     #ff3344;
+  --status-info:       #ff80c4;
+  --status-mute:       #8a4048;
+
+  --role-user:         #ffd0d4;
+  --role-agent:        #ff3344;
+  --role-tool:         #ff80c4;
+  --role-system:       #ffaa44;
+
+  --glow:              0 0 14px rgba(255, 51, 68, 0.36);
+  --scanline:          rgba(255, 51, 68, 0.04);
+  --selection:         rgba(255, 51, 68, 0.22);
+}
+
+/* Miami Vice neon — pink + cyan + purple */
+[data-theme="vapor"] {
+  --surface-recessed:  #0a0418;
+  --surface-base:      #0e0626;
+  --surface-raised:    #150a36;
+  --surface-floating:  #1c1048;
+
+  --frame-dim:         #3a1c5e;
+  --frame-active:      #ff44dd;
+  --divider:           #2a1444;
+
+  --text-dim:          #8a4ec4;
+  --text-secondary:    #c08eff;
+  --text-primary:      #f0e2ff;
+  --text-bright:       #ff44dd;
+  --text-accent:       #5fc4ff;
+
+  --status-ok:         #5fffd0;
+  --status-warn:       #ffc94d;
+  --status-danger:     #ff5fa3;
+  --status-info:       #5fc4ff;
+  --status-mute:       #8a4ec4;
+
+  --role-user:         #ff44dd;
+  --role-agent:        #5fc4ff;
+  --role-tool:         #5fffd0;
+  --role-system:       #ffc94d;
+
+  --glow:              0 0 18px rgba(255, 68, 221, 0.42);
+  --scanline:          rgba(255, 68, 221, 0.04);
+  --selection:         rgba(95, 196, 255, 0.24);
+}
+
+/* Cyberpunk — magenta + electric green + danger orange */
+[data-theme="cyber"] {
+  --surface-recessed:  #050208;
+  --surface-base:      #0a0410;
+  --surface-raised:    #130820;
+  --surface-floating:  #1c0e30;
+
+  --frame-dim:         #3a1850;
+  --frame-active:      #ff007a;
+  --divider:           #221038;
+
+  --text-dim:          #7a3c8a;
+  --text-secondary:    #c44ed8;
+  --text-primary:      #f0d4ff;
+  --text-bright:       #ff007a;
+  --text-accent:       #00ffd0;
+
+  --status-ok:         #00ffd0;
+  --status-warn:       #ffe44d;
+  --status-danger:     #ff4444;
+  --status-info:       #00b4ff;
+  --status-mute:       #7a3c8a;
+
+  --role-user:         #00ffd0;
+  --role-agent:        #ff007a;
+  --role-tool:         #ffe44d;
+  --role-system:       #ff4444;
+
+  --glow:              0 0 18px rgba(255, 0, 122, 0.5);
+  --scanline:          rgba(255, 0, 122, 0.04);
+  --selection:         rgba(0, 255, 208, 0.24);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Reset + base
+   ────────────────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.25s ease, color 0.25s ease;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Mono / display helpers
+   ────────────────────────────────────────────────────────────────────────── */
+.mono   { font-family: var(--font-mono); }
+.label  { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); }
+.eyebrow { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-bright); }
+.caption { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Component primitives — match the in-app widget API
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* status dot */
+.dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--status-ok);
+  box-shadow: 0 0 8px currentColor;
+  vertical-align: middle;
+}
+.dot.warn   { background: var(--status-warn);   color: var(--status-warn); }
+.dot.danger { background: var(--status-danger); color: var(--status-danger); }
+.dot.info   { background: var(--status-info);   color: var(--status-info); }
+.dot.mute   { background: var(--status-mute);   color: transparent; box-shadow: none; }
+
+/* chip (status pill) */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--frame-dim);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.chip.active { color: var(--text-bright); border-color: var(--frame-active); box-shadow: var(--glow); }
+
+/* kbd */
+.kbd {
+  border: 1px solid var(--frame-dim);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  background: var(--surface-raised);
+}
+
+/* app frame — the canvas slot an adapter renders into */
+.app {
+  background: var(--surface-raised);
+  border: 1px solid var(--frame-dim);
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  position: relative;
+}
+.app.focused { border-color: var(--frame-active); box-shadow: var(--glow); }
+
+/* app header — every app gets a typed header (app_type · title · meta) */
+.app-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--surface-floating);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.app-head .ico {
+  width: 16px; height: 16px;
+  display: grid; place-items: center;
+  color: var(--text-bright);
+  font-size: 13px;
+}
+.app-head .name { color: var(--text-bright); font-weight: 600; letter-spacing: 0.06em; }
+.app-head .sep  { color: var(--text-dim); }
+.app-head .title { color: var(--text-primary); flex: 1; }
+.app-head .meta { color: var(--text-dim); }
+
+/* app body — the renderable region the adapter owns */
+.app-body {
+  padding: 14px 16px;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+/* role-tinted message row */
+.msg-row { display: grid; grid-template-columns: 32px 1fr; gap: 10px; margin-bottom: 14px; }
+.msg-row:last-child { margin-bottom: 0; }
+.msg-row .av {
+  width: 22px; height: 22px;
+  border-radius: 5px;
+  display: grid; place-items: center;
+  font-family: var(--font-mono);
+  font-size: 9.5px; font-weight: 700;
+  color: var(--surface-base);
+  background: var(--text-dim);
+}
+.msg-row.user .av    { background: var(--role-user); }
+.msg-row.agent .av   { background: var(--role-agent); }
+.msg-row.tool .av    { background: var(--role-tool); }
+.msg-row.system .av  { background: var(--role-system); }
+.msg-row .who {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+.msg-row.user .who    { color: var(--role-user); }
+.msg-row.agent .who   { color: var(--role-agent); }
+.msg-row.tool .who    { color: var(--role-tool); }
+.msg-row.system .who  { color: var(--role-system); }
+.msg-row .body { color: var(--text-primary); font-size: 13px; line-height: 1.55; }
+
+/* code block — inline & fenced */
+code, .code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-recessed);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--text-accent);
+}
+pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-recessed);
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 10px 0;
+  overflow-x: auto;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* chrome bars (tab bar / status bar) */
+.chrome-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 16px;
+  background: var(--surface-floating);
+  border-bottom: 1px solid var(--divider);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.chrome-bar.bottom { border-bottom: 0; border-top: 1px solid var(--divider); }
+
+/* input bar */
+.input-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  background: var(--surface-floating);
+  border-top: 1px solid var(--divider);
+  font-family: var(--font-mono);
+}
+.input-bar .prompt { color: var(--text-bright); }
+.input-bar input {
+  flex: 1; background: transparent; border: 0; outline: 0;
+  color: var(--text-primary); font: inherit;
+}
+.input-bar input::placeholder { color: var(--text-dim); }
+
+/* button */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--frame-dim);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn:hover { border-color: var(--frame-active); color: var(--text-bright); }
+.btn.primary { border-color: var(--frame-active); color: var(--text-bright); box-shadow: var(--glow); }
+
+/* scrollbar */
+.app-body::-webkit-scrollbar,
+body::-webkit-scrollbar { width: 8px; height: 8px; }
+.app-body::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb {
+  background: var(--frame-dim);
+  border-radius: 4px;
+}
+.app-body::-webkit-scrollbar-thumb:hover,
+body::-webkit-scrollbar-thumb:hover { background: var(--frame-active); }
+
+/* scanline overlay (opt-in via .crt) */
+.crt::before {
+  content: "";
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    180deg,
+    transparent 0,
+    transparent 2px,
+    var(--scanline) 2px,
+    var(--scanline) 3px
+  );
+  pointer-events: none;
+  mix-blend-mode: overlay;
+}
+
+/* progress bar */
+.bar { height: 4px; background: var(--surface-recessed); border-radius: 2px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--frame-active); box-shadow: var(--glow); }

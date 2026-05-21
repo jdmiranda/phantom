@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phantom · Concept A · Hearth</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:           #0e0f12;
+    --bg-card:      #14161a;
+    --bg-card-soft: #181b20;
+    --line:         rgba(255,255,255,0.06);
+    --line-strong:  rgba(255,255,255,0.10);
+    --text:         #e8e6e1;
+    --text-soft:    #b3b0a7;
+    --text-mute:    #6f6c64;
+    --accent:       #d99a4e;  /* warm amber — the "hearth" */
+    --accent-soft:  rgba(217,154,78,0.18);
+    --ok:           #7fc77e;
+    --warn:         #e0b96a;
+    --danger:       #e07b6a;
+    --user:         #8ab4ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; height:100%; }
+  body {
+    background: radial-gradient(80% 60% at 50% -10%, #1c1814 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .shell { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ───── top strip ───── */
+  .strip {
+    display: flex; align-items: center; gap: 18px;
+    padding: 10px 24px;
+    border-bottom: 1px solid var(--line);
+    color: var(--text-mute);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .strip .brand { color: var(--text); font-weight: 600; letter-spacing: 0.08em; }
+  .strip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .strip .spacer { flex: 1; }
+  .strip .meta { color: var(--text-mute); }
+  .strip .kbd {
+    border: 1px solid var(--line-strong); border-radius: 4px;
+    padding: 2px 6px; color: var(--text-soft);
+    font-size: 10.5px;
+  }
+
+  /* ───── conversation canvas ───── */
+  .canvas {
+    flex: 1;
+    overflow-y: auto;
+    padding: 64px 32px 220px;
+  }
+  .thread { max-width: 760px; margin: 0 auto; }
+
+  .msg { margin-bottom: 36px; }
+  .msg .role {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    margin-bottom: 6px;
+  }
+  .msg.user .role { color: var(--user); }
+  .msg.agent .role { color: var(--accent); }
+  .msg.tool .role { color: var(--text-soft); }
+
+  .msg .body {
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  .msg .body em { font-family: 'Newsreader', serif; font-style: italic; font-weight: 500; }
+  .msg .body code,
+  .msg .body pre {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px;
+  }
+  .msg .body pre {
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    color: var(--text-soft);
+    margin: 14px 0;
+  }
+  .msg .body code:not(pre code) {
+    background: var(--bg-card-soft);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--accent);
+    font-size: 12.5px;
+  }
+
+  /* tool call card */
+  .tool-card {
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 10px 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    color: var(--text-soft);
+  }
+  .tool-card .tool-head {
+    display: flex; align-items: center; gap: 10px;
+    color: var(--text-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 11px;
+    margin-bottom: 8px;
+  }
+  .tool-card .tool-head .arrow { color: var(--accent); }
+  .tool-card .tool-body { color: var(--text); }
+
+  /* status pulse on agent's "thinking" */
+  .thinking {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--text-mute);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    margin-top: 6px;
+  }
+  .thinking .pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+  /* ───── input dock ───── */
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 24px 32px 32px;
+    background: linear-gradient(180deg, rgba(14,15,18,0) 0%, var(--bg) 40%);
+    pointer-events: none;
+  }
+  .dock-inner {
+    max-width: 760px;
+    margin: 0 auto;
+    pointer-events: auto;
+  }
+  .input {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    padding: 14px 18px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.35), 0 0 0 1px rgba(217,154,78,0.06);
+  }
+  .input:focus-within { border-color: rgba(217,154,78,0.4); }
+  .input .prompt { color: var(--accent); font-family: 'JetBrains Mono', monospace; font-size: 14px; }
+  .input input {
+    flex: 1; background: transparent; border: 0; outline: 0;
+    color: var(--text); font-family: 'Inter', sans-serif; font-size: 14.5px;
+  }
+  .input input::placeholder { color: var(--text-mute); }
+  .input .hint {
+    color: var(--text-mute);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    display: flex; gap: 8px;
+  }
+  .input .hint .kbd {
+    border: 1px solid var(--line-strong); border-radius: 4px;
+    padding: 2px 6px; font-size: 10.5px;
+  }
+
+  /* ───── scrollbar polish ───── */
+  .canvas::-webkit-scrollbar { width: 8px; }
+  .canvas::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+  .canvas::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.16); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ─── top status strip ─── -->
+  <div class="strip">
+    <span class="brand">phantom</span>
+    <span>·</span>
+    <span class="dot"></span>
+    <span>agent · ready</span>
+    <span>·</span>
+    <span class="meta">claude-opus-4-7</span>
+    <span class="spacer"></span>
+    <span class="meta">badass-cli · feat/fleet-builder</span>
+    <span class="kbd">⌘K</span>
+    <span class="kbd">⌘T</span>
+  </div>
+
+  <!-- ─── conversation canvas ─── -->
+  <div class="canvas">
+    <div class="thread">
+
+      <div class="msg user">
+        <div class="role">you</div>
+        <div class="body">
+          The agent pane keeps rendering with a giant black void below the content.
+          Window <em>is</em> fullscreen but only the top third has anything in it.
+          Fix it so the conversation fills the space the way you'd expect a real
+          chat surface to fill it.
+        </div>
+      </div>
+
+      <div class="msg agent">
+        <div class="role">phantom · agent</div>
+        <div class="body">
+          Tracing the layout chain. The arbiter clamps the agent pane to
+          <code>preferred_size: (80, 20)</code> — 20 cell rows × 34 px = 680 px on
+          your Retina display. That's the void you're seeing.
+          <div class="tool-card">
+            <div class="tool-head"><span class="arrow">▸</span> read_file <span style="color:var(--text-mute)">·</span> crates/phantom-app/src/adapters/agent.rs</div>
+            <div class="tool-body">
+              <pre>fn spatial_preference(&amp;self) -&gt; Option&lt;SpatialPreference&gt; {
+    Some(SpatialPreference {
+        min_size: (30, 8),
+        preferred_size: (80, 20),       // ← clamps to 680 px
+        max_size: Some((120, 40)),      // ← caps at 1360 px
+        priority: 5.0,
+    })
+}</pre>
+            </div>
+          </div>
+          Removing the cap and bumping <code>preferred_size</code> to a "larger
+          than any monitor" sentinel so the single-adapter case eats all available
+          height.
+          <div class="thinking">
+            <span class="pulse"></span>
+            applying patch · cargo build · cold-launching to verify
+          </div>
+        </div>
+      </div>
+
+      <div class="msg tool">
+        <div class="role">tool · run_command</div>
+        <div class="body">
+          <div class="tool-card">
+            <div class="tool-head"><span class="arrow">▸</span> cargo build --release --bin phantom</div>
+            <div class="tool-body" style="color: var(--ok)">finished `release` profile [optimized] target(s) in 13.34s</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ─── input dock ─── -->
+  <div class="dock">
+    <div class="dock-inner">
+      <div class="input">
+        <span class="prompt">▸</span>
+        <input placeholder="ask the agent — or press ⌘K for commands" />
+        <span class="hint">
+          <span class="kbd">↵</span>
+          <span>send</span>
+          <span class="kbd">⌘↵</span>
+          <span>run</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en" data-theme="phosphor">
+<head>
+<meta charset="utf-8">
+<title>Phantom · UX mockups</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="system.css">
+<style>
+  .page { max-width: 1100px; margin: 0 auto; padding: 56px 32px 80px; }
+
+  header { margin-bottom: 48px; }
+  h1 {
+    font-size: 36px;
+    margin: 12px 0 8px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-bright);
+  }
+  .lead { color: var(--text-secondary); max-width: 720px; font-size: 15px; }
+  .lead em { color: var(--text-primary); font-style: normal; font-weight: 500; }
+  .lead code { font-size: 12.5px; }
+
+  .theme-bar {
+    margin: 24px 0 0;
+    padding: 14px 18px;
+    background: var(--surface-floating);
+    border: 1px solid var(--frame-dim);
+    border-radius: 10px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .theme-bar .label { margin-right: 4px; }
+  .theme-bar .sw {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: 1.5px solid var(--frame-dim);
+    cursor: pointer;
+  }
+  .theme-bar .sw.active {
+    border-color: var(--frame-active);
+    box-shadow: var(--glow);
+    transform: scale(1.1);
+  }
+  .theme-bar .sw[data-set="phosphor"] { background: #33ff00; }
+  .theme-bar .sw[data-set="amber"]    { background: #ffb000; }
+  .theme-bar .sw[data-set="ice"]      { background: #66ddff; }
+  .theme-bar .sw[data-set="blood"]    { background: #ff3344; }
+  .theme-bar .sw[data-set="vapor"]    { background: linear-gradient(135deg, #ff44dd, #5fc4ff); }
+  .theme-bar .sw[data-set="cyber"]    { background: linear-gradient(135deg, #ff007a, #00ffd0); }
+  .theme-bar .desc { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11.5px; margin-left: auto; }
+
+  h2 {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 56px 0 18px;
+  }
+
+  .principles {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    margin-top: 28px;
+  }
+  .principle {
+    border: 1px solid var(--frame-dim);
+    border-radius: 10px;
+    padding: 16px 18px;
+    background: var(--surface-raised);
+  }
+  .principle .num {
+    font-family: var(--font-mono);
+    color: var(--text-bright);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+  }
+  .principle .lbl { color: var(--text-primary); font-weight: 600; margin: 6px 0 4px; font-size: 14px; }
+  .principle .why { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+  .principle code { font-size: 11.5px; }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px;
+  }
+  .grid.tight { grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .card {
+    border: 1px solid var(--frame-dim);
+    border-radius: 14px;
+    background: var(--surface-raised);
+    overflow: hidden;
+    transition: border-color 0.18s, transform 0.18s, box-shadow 0.18s;
+  }
+  .card:hover {
+    border-color: var(--frame-active);
+    transform: translateY(-2px);
+    box-shadow: var(--glow);
+  }
+  .card a { color: inherit; text-decoration: none; display: block; }
+
+  .swatch {
+    height: 180px;
+    background: var(--surface-recessed);
+    border-bottom: 1px solid var(--divider);
+    position: relative;
+    overflow: hidden;
+  }
+  .swatch.canvas {
+    background:
+      linear-gradient(180deg, var(--surface-base), var(--surface-recessed));
+    padding: 10px;
+  }
+  .swatch.canvas::before {
+    content: "";
+    position: absolute; left: 10px; top: 10px; width: 56%; bottom: 10px;
+    border: 1px solid var(--frame-active);
+    border-radius: 6px;
+    background: var(--surface-raised);
+    box-shadow: var(--glow);
+  }
+  .swatch.canvas::after {
+    content: "";
+    position: absolute; right: 10px; top: 10px; width: 36%; height: 48%;
+    border: 1px solid var(--frame-dim);
+    border-radius: 6px;
+    background: var(--surface-floating);
+    box-shadow:
+      0 56% 0 0 var(--surface-floating),
+      0 -56% 0 0 transparent;
+  }
+  .swatch.apps {
+    background: var(--surface-recessed);
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 6px;
+    padding: 10px;
+  }
+  .swatch.apps span {
+    background: var(--surface-floating);
+    border: 1px solid var(--frame-dim);
+    border-radius: 4px;
+  }
+  .swatch.apps span:first-child {
+    border-color: var(--frame-active);
+    box-shadow: var(--glow);
+  }
+  .swatch.themes {
+    background:
+      conic-gradient(from 0deg,
+        #33ff00 0deg 60deg,
+        #ffb000 60deg 120deg,
+        #66ddff 120deg 180deg,
+        #ff3344 180deg 240deg,
+        #ff44dd 240deg 300deg,
+        #00ffd0 300deg 360deg);
+  }
+  .swatch.themes::after {
+    content: "";
+    position: absolute; inset: 30%;
+    border-radius: 50%;
+    background: var(--surface-base);
+    border: 2px solid var(--surface-raised);
+  }
+  .swatch.audit {
+    background:
+      repeating-linear-gradient(
+        135deg,
+        var(--surface-recessed) 0,
+        var(--surface-recessed) 8px,
+        var(--surface-floating) 8px,
+        var(--surface-floating) 9px);
+  }
+  .swatch.audit::after {
+    content: "20 / 30+";
+    position: absolute; inset: 0;
+    display: grid; place-items: center;
+    font-family: var(--font-mono);
+    font-size: 28px;
+    color: var(--text-bright);
+    text-shadow: var(--glow);
+    letter-spacing: 0.12em;
+  }
+
+  .body { padding: 20px 22px 22px; }
+  .tag {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .name {
+    font-size: 19px;
+    font-weight: 600;
+    margin: 4px 0 8px;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+  }
+  .desc { color: var(--text-secondary); font-size: 13.5px; line-height: 1.55; min-height: 70px; }
+  .desc code { font-size: 11.5px; }
+
+  .traits {
+    margin-top: 12px;
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .open {
+    margin-top: 18px;
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--text-bright);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .open::after { content: "→"; transition: transform 0.18s; }
+  .card:hover .open::after { transform: translateX(4px); }
+
+  /* repo audit summary */
+  .audit-summary {
+    margin-top: 18px;
+    padding: 16px 18px;
+    background: var(--surface-raised);
+    border: 1px solid var(--frame-dim);
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .audit-summary table { width: 100%; border-collapse: collapse; }
+  .audit-summary td { padding: 4px 0; }
+  .audit-summary td.k { color: var(--text-dim); width: 40%; font-family: var(--font-mono); font-size: 11.5px; }
+  .audit-summary td.v { color: var(--text-primary); }
+  .audit-summary td.v strong { color: var(--text-bright); font-weight: 600; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 28px;
+    border-top: 1px solid var(--divider);
+    color: var(--text-dim);
+    font-size: 12.5px;
+  }
+  footer a { color: var(--text-bright); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">PHANTOM · UX RESET · 2026-05-20</div>
+    <h1>A canvas of apps, one design system.</h1>
+    <p class="lead">
+      Phantom isn't a chat window — it's a <em>container for spatial citizens</em>.
+      Every app (Terminal, Agent, Inspector, Monitor, Video, …) implements
+      <code>AppAdapter</code>, declares a <code>SpatialPreference</code>,
+      and renders inside the rect the arbiter grants it using the shared
+      <code>Tokens</code>. Themes swap the tokens; every surface redraws live.
+      Pub/sub on the event bus wires apps to each other.
+    </p>
+
+    <div class="theme-bar">
+      <span class="label">Switch theme (live)</span>
+      <span class="sw active" data-set="phosphor" title="phosphor — green CRT"></span>
+      <span class="sw" data-set="amber" title="amber — Apple ][ / VT220"></span>
+      <span class="sw" data-set="ice" title="ice — arctic blue"></span>
+      <span class="sw" data-set="blood" title="blood — danger red"></span>
+      <span class="sw" data-set="vapor" title="vapor — Miami Vice neon"></span>
+      <span class="sw" data-set="cyber" title="cyber — cyberpunk"></span>
+      <span class="desc" id="theme-desc">phosphor · the default green CRT — generic, no franchise IP</span>
+    </div>
+
+    <div class="principles">
+      <div class="principle">
+        <div class="num">01</div>
+        <div class="lbl">Every app is a spatial citizen</div>
+        <div class="why">
+          Each adapter declares <code>SpatialPreference { min, preferred, max, priority }</code>.
+          The arbiter resolves competing claims; the adapter renders inside whatever rect it gets.
+        </div>
+      </div>
+      <div class="principle">
+        <div class="num">02</div>
+        <div class="lbl">Apps compose via pub/sub</div>
+        <div class="why">
+          Terminal publishes <code>terminal.output</code>; Agent subscribes.
+          Agent publishes <code>agent.event</code>; Inspector subscribes.
+          Like Unix pipes for structured data between GUI apps.
+        </div>
+      </div>
+      <div class="principle">
+        <div class="num">03</div>
+        <div class="lbl">Themes are token swaps</div>
+        <div class="why">
+          One <code>Tokens</code> shape; six palettes. Phosphor, amber, ice, blood,
+          vapor (Miami Vice), cyber (cyberpunk). Aesthetic style, not franchise IP.
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <h2>Open the mockups</h2>
+
+  <div class="grid">
+
+    <div class="card">
+      <a href="canvas.html">
+        <div class="swatch canvas"></div>
+        <div class="body">
+          <div class="tag">01 · LIVE CANVAS</div>
+          <div class="name">Canvas — apps wired by pub/sub</div>
+          <div class="desc">
+            A full cold-launch window: Agent (king) on the left, Inspector
+            (event log) top-right, Monitor (sysmon) bottom-right.
+            Animated dashed lines visualize the pub/sub topology between them.
+            Theme switcher top-right; CRT scanlines optional.
+          </div>
+          <div class="traits">
+            <span class="chip">3 apps live</span>
+            <span class="chip">pub/sub overlay</span>
+            <span class="chip">theme-switchable</span>
+          </div>
+          <div class="open">open canvas</div>
+        </div>
+      </a>
+    </div>
+
+    <div class="card">
+      <a href="apps.html">
+        <div class="swatch apps">
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+        </div>
+        <div class="body">
+          <div class="tag">02 · APP GALLERY</div>
+          <div class="name">Every app, one system</div>
+          <div class="desc">
+            All 7 shipping adapters (Agent, Terminal, Inspector, Monitor,
+            Video, AltScreen, Setup) plus chrome (Boot, Keybinds, Console,
+            Settings, Notifications) plus 6 future apps (Diff, Database,
+            Logs, Voice, Memory, Fleet, Plugins, FileWatch, DAG).
+          </div>
+          <div class="traits">
+            <span class="chip">20+ surfaces</span>
+            <span class="chip">all themed</span>
+            <span class="chip">CRT toggle</span>
+          </div>
+          <div class="open">open gallery</div>
+        </div>
+      </a>
+    </div>
+
+  </div>
+
+  <h2>The earlier concepts (kept for reference)</h2>
+
+  <div class="grid tight">
+
+    <div class="card">
+      <a href="a-hearth.html">
+        <div class="swatch" style="background: radial-gradient(80% 60% at 50% -10%, #1c1814 0%, #0e0f12 60%);">
+          <div style="position:absolute; inset:30% 20% 28% 20%; background: linear-gradient(180deg, rgba(217,154,78,0.18), transparent); border: 1px solid rgba(217,154,78,0.3); border-radius: 8px;"></div>
+        </div>
+        <div class="body">
+          <div class="tag">A · CONVERSATION</div>
+          <div class="name">Hearth</div>
+          <div class="desc">Single column. Warm amber accent. Agent = the screen.</div>
+        </div>
+      </a>
+    </div>
+
+    <div class="card">
+      <a href="b-operator.html">
+        <div class="swatch" style="background: #07090b; background-image: linear-gradient(rgba(95,255,122,0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(95,255,122,0.08) 1px, transparent 1px); background-size: 18px 18px;"></div>
+        <div class="body">
+          <div class="tag">B · WORKSPACE</div>
+          <div class="name">Operator</div>
+          <div class="desc">3-pane grid. Phosphor green. Everything visible.</div>
+        </div>
+      </a>
+    </div>
+
+    <div class="card">
+      <a href="c-canvas.html">
+        <div class="swatch" style="background: #f4f1ec; background-image: radial-gradient(2px 2px at 20px 20px, rgba(15,17,21,0.06) 1px, transparent 1px); background-size: 24px 24px;">
+          <div style="position:absolute; inset: 22% 18% 22% 18%; background: white; border-radius: 12px; border: 1px solid rgba(15,17,21,0.08); box-shadow: 0 1px 2px rgba(15,17,21,0.05), 0 8px 24px rgba(15,17,21,0.08);"></div>
+        </div>
+        <div class="body">
+          <div class="tag">C · SPATIAL</div>
+          <div class="name">Canvas</div>
+          <div class="desc">Light paper, electric blue. Multi-thread future.</div>
+        </div>
+      </a>
+    </div>
+
+  </div>
+
+  <h2>Repo audit — what exists today</h2>
+
+  <div class="audit-summary">
+    <table>
+      <tr><td class="k">Shipping AppAdapter</td><td class="v"><strong>7</strong> · Terminal, Agent, Inspector, Monitor, Video, AltScreenView, Setup</td></tr>
+      <tr><td class="k">Chrome surfaces</td><td class="v"><strong>10</strong> · TabBar, StatusBar, KeybindHelp, Console, SearchBar, ContextMenu, NotificationBanner, KeystrokeFx, SettingsPanel, AppMon</td></tr>
+      <tr><td class="k">Boot screens</td><td class="v"><strong>1</strong> · BootSequence (7 phases)</td></tr>
+      <tr><td class="k">Spatial citizens</td><td class="v"><strong>7 / 7</strong> adapters request space via <code>SpatialPreference</code></td></tr>
+      <tr><td class="k">Themed via <code>Tokens</code></td><td class="v"><strong>5</strong> surfaces · most still hardcoded</td></tr>
+      <tr><td class="k">Hardcoded colors</td><td class="v"><strong>13</strong> surfaces · prime targets for the token migration</td></tr>
+      <tr><td class="k">Event bus topics</td><td class="v"><strong>8</strong> · Terminal, Agents, Sessions, Brain, Video, Fx, System, Custom</td></tr>
+      <tr><td class="k">Apps planned (VISION.md)</td><td class="v"><strong>10+</strong> · Database, Logs, Voice, FileWatch, Migration, Diff, Fleet, Plugins, Memory, Supervisor</td></tr>
+    </table>
+  </div>
+
+  <h2>What's NOT in these</h2>
+  <p class="lead">
+    No Fallout (no RobCo, no MU/TH/UR, no Vault-Tec, no Pip-Boy). No Alien IP
+    (no Weyland-Yutani). The <em>aesthetic styles</em> (phosphor CRT, neon Miami
+    Vice, cyberpunk magenta) stay — just stripped of franchise marks. CRT
+    scanlines are an opt-in shader, not a default.
+  </p>
+
+  <footer>
+    Mockups in <code>docs/mockups/</code>. Shared stylesheet:
+    <code>system.css</code> — single source of truth for tokens and components.
+    The Rust side mirrors the same shape in
+    <code>phantom_ui::tokens</code> + <code>phantom_ui::themes</code>.<br><br>
+    Tell me which direction, which themes, which apps to prioritise — I'll
+    wire the tokens into the live Rust adapters next.
+  </footer>
+
+</div>
+
+<script>
+  const root = document.documentElement;
+  const buttons = document.querySelectorAll('.theme-bar .sw');
+  const desc = document.getElementById('theme-desc');
+  const descs = {
+    phosphor: 'phosphor · the default green CRT — generic, no franchise IP',
+    amber:    'amber · classic vt220 / apple ][ — warm orange CRT',
+    ice:      'ice · arctic / data-center cool · cyan accent',
+    blood:    'blood · danger / urgent · red accent',
+    vapor:    'vapor · miami vice neon · magenta + cyan + purple',
+    cyber:    'cyber · cyberpunk · magenta + electric green + danger',
+  };
+  buttons.forEach(b => {
+    b.addEventListener('click', () => {
+      buttons.forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      root.setAttribute('data-theme', b.dataset.set);
+      desc.textContent = descs[b.dataset.set];
+    });
+  });
+</script>
+
+</body>
+</html>
