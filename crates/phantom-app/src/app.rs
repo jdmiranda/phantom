@@ -918,7 +918,7 @@ impl App {
                     info!("Embedding backend ready (OpenAI text-embedding-3-large)");
                     Some(std::sync::Arc::new(backend))
                 }
-                Err(phantom_embeddings::EmbedError::NotConfigured(_)) => {
+                Err(phantom_embeddings::EmbedError::NotConfigured { .. }) => {
                     debug!("OPENAI_API_KEY not set — embedding backend disabled");
                     None
                 }
