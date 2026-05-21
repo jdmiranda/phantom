@@ -73,10 +73,10 @@ pub struct GlyphAtlas {
     height: u32,
     /// Set to `true` when the atlas ran out of space and was fully cleared.
     ///
-    /// Callers should check this flag at frame start and re-upload any glyphs
-    /// they need for the current frame. The flag is cleared after being read
-    /// via [`GlyphAtlas::take_needs_reset`].
-    pub needs_reset: bool,
+    /// Read and clear via [`GlyphAtlas::take_needs_reset`] or peek without
+    /// clearing via [`GlyphAtlas::needs_reset`]. The field is kept private so
+    /// the read-and-clear contract is enforced by the accessor.
+    needs_reset: bool,
 }
 
 impl GlyphAtlas {
@@ -187,6 +187,11 @@ impl GlyphAtlas {
 
     /// Returns `true` when the atlas still has room for at least one more
     /// glyph of the given size without triggering a reset.
+    ///
+    /// **Diagnostic / pre-flight only.** This call clones the underlying
+    /// `etagere` free-list, so it is O(n) in the number of live allocations and
+    /// allocates on the heap each invocation. Do not call it in a per-glyph
+    /// hot path; use it sparingly to check a batch up front.
     #[must_use]
     pub fn has_capacity(&self, width: u32, height: u32) -> bool {
         if width == 0 || height == 0 {
@@ -197,9 +202,21 @@ impl GlyphAtlas {
         probe.allocate(size2(width as i32, height as i32)).is_some()
     }
 
+    /// Peek at the `needs_reset` flag without clearing it.
+    ///
+    /// Use this in the middle of a glyph batch to detect that a mid-batch
+    /// eviction has invalidated previously-allocated UV coordinates. Call
+    /// [`GlyphAtlas::take_needs_reset`] once the caller has handled the reset.
+    #[must_use]
+    pub fn needs_reset(&self) -> bool {
+        self.needs_reset
+    }
+
     /// Consume and return the `needs_reset` flag, clearing it.
     ///
-    /// Call once per frame after checking whether a full re-upload is needed.
+    /// Call once per frame after handling any pending atlas reset (typically
+    /// by restarting the in-progress glyph batch so all UVs reference the
+    /// post-eviction state).
     pub fn take_needs_reset(&mut self) -> bool {
         let flag = self.needs_reset;
         self.needs_reset = false;
@@ -365,9 +382,13 @@ impl GlyphAtlas {
 
     /// Evict all cached glyphs and reset the allocator.
     ///
-    /// The GPU texture is not cleared — old data is simply overwritten as new
-    /// glyphs are allocated. This is safe because we always upload before
-    /// sampling a region.
+    /// The GPU texture is intentionally not zero-filled. Stale pixel data
+    /// remains in the texture until a new allocation overwrites it via
+    /// [`GlyphAtlas::upload`]. Correctness depends on the invariant that
+    /// **every freshly allocated region is uploaded before it is sampled**;
+    /// `get_or_insert` enforces this by uploading immediately after
+    /// `self.allocate(...)`. Direct callers of `allocate` must uphold the same
+    /// contract or risk sampling evicted-glyph pixels.
     pub fn clear(&mut self) {
         self.cache.clear();
         self.allocator.clear();
@@ -398,8 +419,10 @@ pub struct ColorGlyphAtlas {
     /// Set to `true` when the color atlas ran out of space and was fully cleared.
     ///
     /// Mirrors the same flag on [`GlyphAtlas`]. Read and clear via
-    /// [`ColorGlyphAtlas::take_needs_reset`].
-    pub needs_reset: bool,
+    /// [`ColorGlyphAtlas::take_needs_reset`], or peek without clearing via
+    /// [`ColorGlyphAtlas::needs_reset`]. Kept private so the read-and-clear
+    /// contract is enforced by the accessor.
+    needs_reset: bool,
 }
 
 impl ColorGlyphAtlas {
@@ -508,6 +531,9 @@ impl ColorGlyphAtlas {
 
     /// Returns `true` when the color atlas still has room for a glyph of the
     /// given size without triggering a reset.
+    ///
+    /// **Diagnostic / pre-flight only.** Clones the allocator's free-list; see
+    /// the matching note on [`GlyphAtlas::has_capacity`].
     #[must_use]
     pub fn has_capacity(&self, width: u32, height: u32) -> bool {
         if width == 0 || height == 0 {
@@ -515,6 +541,15 @@ impl ColorGlyphAtlas {
         }
         let mut probe = self.allocator.clone();
         probe.allocate(size2(width as i32, height as i32)).is_some()
+    }
+
+    /// Peek at the `needs_reset` flag without clearing it.
+    ///
+    /// Mirrors [`GlyphAtlas::needs_reset`]; use mid-batch to detect that an
+    /// eviction has invalidated previously-allocated UV coordinates.
+    #[must_use]
+    pub fn needs_reset(&self) -> bool {
+        self.needs_reset
     }
 
     /// Consume and return the `needs_reset` flag, clearing it.
@@ -659,6 +694,10 @@ impl ColorGlyphAtlas {
     }
 
     /// Evict all cached color glyphs and reset the allocator.
+    ///
+    /// As with [`GlyphAtlas::clear`], the GPU texture is not zero-filled;
+    /// callers must rely on the upload-before-sample invariant enforced by
+    /// `get_or_insert`.
     pub fn clear(&mut self) {
         self.cache.clear();
         self.allocator.clear();
@@ -673,44 +712,92 @@ impl ColorGlyphAtlas {
 mod tests {
     use etagere::{size2, AtlasAllocator};
 
-    /// Verify the atlas-reset strategy: when the allocator fills, clearing it
-    /// and retrying must succeed and set `needs_reset`.
+    /// State-machine fixture mirroring `GlyphAtlas::allocate`.
     ///
-    /// This test exercises the pure CPU allocator path (no GPU device needed).
+    /// `GlyphAtlas::allocate` cannot be unit-tested directly because building
+    /// a `GlyphAtlas` requires a real wgpu `Device` (no headless test harness
+    /// exists). This fixture is a faithful CPU-only restatement of the same
+    /// allocate-or-evict-and-retry logic, so behavioural changes to the
+    /// production code must be mirrored here to keep the test honest.
+    struct AtlasFixture {
+        allocator: AtlasAllocator,
+        needs_reset: bool,
+    }
+
+    impl AtlasFixture {
+        fn new(side: i32) -> Self {
+            Self {
+                allocator: AtlasAllocator::new(size2(side, side)),
+                needs_reset: false,
+            }
+        }
+
+        fn allocate(&mut self, width: i32, height: i32) -> Option<etagere::Allocation> {
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            if let Some(alloc) = self.allocator.allocate(size2(width, height)) {
+                return Some(alloc);
+            }
+            self.allocator.clear();
+            self.needs_reset = true;
+            self.allocator.allocate(size2(width, height))
+        }
+
+        fn take_needs_reset(&mut self) -> bool {
+            let flag = self.needs_reset;
+            self.needs_reset = false;
+            flag
+        }
+    }
+
+    /// When the atlas runs out of space, `allocate` must evict, set
+    /// `needs_reset`, and return a fresh region; `take_needs_reset` must
+    /// return `true` once and then `false` on the next call.
     #[test]
     fn atlas_reset_when_full_allows_new_glyphs() {
-        // Build a tiny 64x64 allocator so we can fill it quickly.
-        let atlas_size = 64i32;
-        let mut allocator = AtlasAllocator::new(size2(atlas_size, atlas_size));
-
-        // Fill the atlas with 16x16 tiles (16 tiles fit in 64x64).
+        let mut atlas = AtlasFixture::new(64);
         let tile = 16i32;
+
+        // Fill the atlas.
         let mut allocated = 0usize;
-        loop {
-            if allocator.allocate(size2(tile, tile)).is_none() {
-                break;
-            }
+        while atlas.allocator.allocate(size2(tile, tile)).is_some() {
             allocated += 1;
         }
         assert!(allocated > 0, "should have allocated at least one tile");
+        assert!(
+            !atlas.needs_reset,
+            "needs_reset must stay false while raw allocator calls succeed"
+        );
 
-        // Simulate the atlas-reset path: clear the allocator and set the flag.
-        allocator.clear();
-        let needs_reset = true;
-
-        // After reset, a fresh allocation must succeed.
-        let post_reset = allocator.allocate(size2(tile, tile));
+        // The next allocate-through-the-fixture must trigger eviction.
+        let post_reset = atlas.allocate(tile, tile);
         assert!(
             post_reset.is_some(),
-            "allocation after reset must succeed"
+            "allocation after eviction must succeed"
         );
-        assert!(needs_reset, "needs_reset flag must be set after eviction");
-
-        // has_capacity equivalent: a probe clone should succeed.
-        let mut probe = allocator.clone();
         assert!(
-            probe.allocate(size2(tile, tile)).is_some(),
-            "probe allocator should still have capacity"
+            atlas.needs_reset,
+            "needs_reset flag must be set after an eviction"
         );
+
+        // take_needs_reset returns true once, then false.
+        assert!(atlas.take_needs_reset(), "first take must observe the flag");
+        assert!(
+            !atlas.take_needs_reset(),
+            "second take must observe a cleared flag"
+        );
+    }
+
+    /// A glyph larger than the entire atlas must return `None` without
+    /// trapping the atlas in an inconsistent state. `needs_reset` is set
+    /// (because the eviction path ran) but the allocation still fails.
+    #[test]
+    fn atlas_returns_none_when_glyph_exceeds_capacity() {
+        let mut atlas = AtlasFixture::new(64);
+        let too_big = 128i32;
+
+        let alloc = atlas.allocate(too_big, too_big);
+        assert!(alloc.is_none(), "oversize glyphs must return None");
     }
 }

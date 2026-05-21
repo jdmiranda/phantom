@@ -12,6 +12,10 @@ use winit::window::Window;
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during GPU initialization.
+///
+/// The "no adapter" failure mode is surfaced by `wgpu` itself via
+/// `RequestAdapterError`, so this enum only owns the surface-format
+/// negotiation error that the renderer itself constructs.
 #[derive(Debug)]
 pub enum GpuError {
     /// The surface reported an empty list of supported texture formats.
@@ -20,9 +24,6 @@ pub enum GpuError {
     /// occur on headless machines, CI environments, or with broken wgpu
     /// backends. Returning an error here is safer than an index panic.
     NoSupportedFormat,
-    /// No adapter was found that satisfies the requested power preference and
-    /// surface compatibility.
-    NoAdapter,
 }
 
 impl std::fmt::Display for GpuError {
@@ -32,11 +33,6 @@ impl std::fmt::Display for GpuError {
                 f,
                 "GPU surface reported no supported texture formats; \
                  check GPU drivers or wgpu backend"
-            ),
-            Self::NoAdapter => write!(
-                f,
-                "no suitable GPU adapter found; \
-                 ensure a compatible GPU and up-to-date drivers are present"
             ),
         }
     }
@@ -245,8 +241,5 @@ mod tests {
     fn gpu_error_display_is_non_empty() {
         let no_fmt = GpuError::NoSupportedFormat;
         assert!(!no_fmt.to_string().is_empty());
-
-        let no_adapter = GpuError::NoAdapter;
-        assert!(!no_adapter.to_string().is_empty());
     }
 }
