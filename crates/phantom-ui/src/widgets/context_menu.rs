@@ -47,8 +47,12 @@ use phantom_renderer::quads::QuadInstance;
 // Geometry constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Height of each item row in pixels.
-pub const ITEM_ROW_HEIGHT: f32 = 22.0;
+/// Vertical padding added on top and bottom of each item row.
+///
+/// Row height is computed as `ctx.cell_h() + ROW_V_PAD * 2.0`, so the menu
+/// scales with font size. At the fallback metrics `(cell_h = 16, pad = 3)` this
+/// yields the historical 22-pixel row height.
+const ROW_V_PAD: f32 = 3.0;
 
 /// Height of a separator line in pixels.
 const SEPARATOR_HEIGHT: f32 = 1.0;
@@ -59,19 +63,12 @@ const H_PAD: f32 = 12.0;
 /// Minimum menu width so narrow labels still look presentable.
 const MIN_MENU_WIDTH: f32 = 160.0;
 
-/// Border thickness (matches `Tokens::frame()`).
-const BORDER: f32 = 2.0;
-
-/// Approximate monospace char width used for label measurement.
-/// Menus don't usually carry a live `RenderCtx`, so we fall back to this.
-const CHAR_W: f32 = 8.0;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // ContextMenuItem
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A single entry in a [`ContextMenu`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextMenuItem {
     /// Display label shown to the user.
     pub label: String,
@@ -192,75 +189,80 @@ impl ContextMenu {
     /// Move focus by `delta` (+1 or -1), skipping disabled items.
     ///
     /// Wraps around. If there are no selectable items the focus does not change.
+    /// Allocation-free: walks the item ring directly instead of materialising
+    /// the selectable-index list.
     fn advance_focus(&mut self, delta: i32) {
         let n = self.items.len();
         if n == 0 {
             return;
         }
-        let selectables: Vec<usize> = (0..n)
-            .filter(|&i| !self.items[i].disabled)
-            .collect();
-        if selectables.is_empty() {
-            return;
-        }
-
-        // Find the position of current focus in the selectable list.
-        let pos = selectables
-            .iter()
-            .position(|&i| i == self.focused)
-            .unwrap_or(0);
-
-        let new_pos = if delta > 0 {
-            (pos + 1) % selectables.len()
+        let start = self.focused.min(n - 1);
+        let next = if delta > 0 {
+            (1..=n).map(|i| (start + i) % n).find(|&i| !self.items[i].disabled)
         } else {
-            (pos + selectables.len() - 1) % selectables.len()
+            (1..=n).map(|i| (start + n - i) % n).find(|&i| !self.items[i].disabled)
         };
-        self.focused = selectables[new_pos];
+        if let Some(idx) = next {
+            self.focused = idx;
+        }
+    }
+
+    /// Height of a single item row, derived from the live `RenderCtx`.
+    ///
+    /// At the fallback metrics this matches the historical 22-pixel constant.
+    fn row_height(&self) -> f32 {
+        self.ctx.cell_h() + ROW_V_PAD * 2.0
+    }
+
+    /// Border thickness, sourced from the canonical `Tokens::frame()`.
+    fn border(&self) -> f32 {
+        Tokens::phosphor(self.ctx).frame()
     }
 
     /// Compute the total pixel height of the menu including borders.
     fn menu_height(&self) -> f32 {
+        let row_h = self.row_height();
         let rows_h: f32 = self
             .items
             .iter()
-            .map(|it| {
-                ITEM_ROW_HEIGHT + if it.separator_after { SEPARATOR_HEIGHT } else { 0.0 }
-            })
+            .map(|it| row_h + if it.separator_after { SEPARATOR_HEIGHT } else { 0.0 })
             .sum();
-        rows_h + BORDER * 2.0
+        rows_h + self.border() * 2.0
     }
 
     /// Compute the total pixel width of the menu including borders and padding.
+    ///
+    /// Label widths flow through `RenderCtx::measure_mono`, so the menu scales
+    /// correctly when the font size or DPI changes.
     fn menu_width(&self) -> f32 {
         let max_label_px = self
             .items
             .iter()
-            .map(|it| it.label.chars().count() as f32 * CHAR_W + H_PAD * 2.0)
+            .map(|it| self.ctx.measure_mono(&it.label) + H_PAD * 2.0)
             .fold(0.0_f32, f32::max);
-        max_label_px.max(MIN_MENU_WIDTH) + BORDER * 2.0
+        max_label_px.max(MIN_MENU_WIDTH) + self.border() * 2.0
     }
 
     /// Compute the clamped top-left corner of the menu so it stays inside
     /// `bounds`. The menu prefers to open below-right of the anchor; if that
-    /// would overflow it shifts up and/or left.
-    fn clamped_origin(&self, bounds: &Rect) -> (f32, f32) {
-        let w = self.menu_width();
-        let h = self.menu_height();
-
-        let x = if self.anchor.0 + w > bounds.x + bounds.width {
-            (bounds.x + bounds.width - w).max(bounds.x)
+    /// would overflow it shifts up and/or left, and the result is always
+    /// clamped against the top and left edges of `bounds` as well.
+    fn clamped_origin_from(&self, w: f32, h: f32, bounds: &Rect) -> (f32, f32) {
+        let x_raw = if self.anchor.0 + w > bounds.x + bounds.width {
+            bounds.x + bounds.width - w
         } else {
             self.anchor.0
         };
-
-        let y = if self.anchor.1 + h > bounds.y + bounds.height {
-            (bounds.y + bounds.height - h).max(bounds.y)
+        let y_raw = if self.anchor.1 + h > bounds.y + bounds.height {
+            bounds.y + bounds.height - h
         } else {
             self.anchor.1
         };
-
-        (x, y)
+        // Clamp against all four edges so anchors outside `bounds` don't render
+        // the menu off-screen.
+        (x_raw.max(bounds.x), y_raw.max(bounds.y))
     }
+
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -285,9 +287,11 @@ impl Widget for ContextMenu {
         }
 
         let t = Tokens::phosphor(self.ctx);
-        let (mx, my) = self.clamped_origin(rect);
+        let border = t.frame();
+        let row_h = self.row_height();
         let mw = self.menu_width();
         let mh = self.menu_height();
+        let (mx, my) = self.clamped_origin_from(mw, mh, rect);
 
         let mut quads = Vec::new();
 
@@ -303,52 +307,52 @@ impl Widget for ContextMenu {
         // Top
         quads.push(QuadInstance {
             pos: [mx, my],
-            size: [mw, BORDER],
+            size: [mw, border],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
         });
         // Bottom
         quads.push(QuadInstance {
-            pos: [mx, my + mh - BORDER],
-            size: [mw, BORDER],
+            pos: [mx, my + mh - border],
+            size: [mw, border],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
         });
         // Left
         quads.push(QuadInstance {
             pos: [mx, my],
-            size: [BORDER, mh],
+            size: [border, mh],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
         });
         // Right
         quads.push(QuadInstance {
-            pos: [mx + mw - BORDER, my],
-            size: [BORDER, mh],
+            pos: [mx + mw - border, my],
+            size: [border, mh],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
         });
 
         // 3 & 4. Per-item quads.
-        let mut cursor_y = my + BORDER;
+        let mut cursor_y = my + border;
         for (idx, item) in self.items.iter().enumerate() {
             // Focus highlight.
             if idx == self.focused && !item.disabled {
                 quads.push(QuadInstance {
-                    pos: [mx + BORDER, cursor_y],
-                    size: [mw - BORDER * 2.0, ITEM_ROW_HEIGHT],
+                    pos: [mx + border, cursor_y],
+                    size: [mw - border * 2.0, row_h],
                     color: t.colors.accent_focus,
                     border_radius: 0.0,
                 });
             }
 
-            cursor_y += ITEM_ROW_HEIGHT;
+            cursor_y += row_h;
 
             // Separator line.
             if item.separator_after {
                 quads.push(QuadInstance {
-                    pos: [mx + BORDER, cursor_y],
-                    size: [mw - BORDER * 2.0, SEPARATOR_HEIGHT],
+                    pos: [mx + border, cursor_y],
+                    size: [mw - border * 2.0, SEPARATOR_HEIGHT],
                     color: t.colors.chrome_frame,
                     border_radius: 0.0,
                 });
@@ -369,36 +373,41 @@ impl Widget for ContextMenu {
         }
 
         let t = Tokens::phosphor(self.ctx);
-        let (mx, my) = self.clamped_origin(rect);
+        let border = t.frame();
+        let row_h = self.row_height();
+        let mw = self.menu_width();
+        let mh = self.menu_height();
+        let (mx, my) = self.clamped_origin_from(mw, mh, rect);
 
-        // text_disabled = text_dim at 50% alpha.
-        let text_disabled = {
-            let mut c = t.colors.text_dim;
-            c[3] *= 0.5;
-            c
-        };
+        // text_disabled = text_dim at 50% alpha. Computed lazily; only paid for
+        // when the menu actually contains a disabled item.
+        let mut text_disabled: Option<[f32; 4]> = None;
 
         let mut segments = Vec::with_capacity(self.items.len());
-        let mut cursor_y = my + BORDER;
+        let mut cursor_y = my + border;
 
         for item in &self.items {
             let color = if item.disabled {
-                text_disabled
+                *text_disabled.get_or_insert_with(|| {
+                    let mut c = t.colors.text_dim;
+                    c[3] *= 0.5;
+                    c
+                })
             } else {
                 t.colors.text_primary
             };
 
             // Vertically center the text in the row.
-            let text_y = cursor_y + (ITEM_ROW_HEIGHT - self.ctx.cell_h()) * 0.5;
+            let text_y = cursor_y + (row_h - self.ctx.cell_h()) * 0.5;
 
             segments.push(TextSegment {
                 text: item.label.clone(),
-                x: mx + BORDER + H_PAD,
+                x: mx + border + H_PAD,
                 y: text_y,
                 color,
             });
 
-            cursor_y += ITEM_ROW_HEIGHT;
+            cursor_y += row_h;
             if item.separator_after {
                 cursor_y += SEPARATOR_HEIGHT;
             }
@@ -838,5 +847,95 @@ mod tests {
         menu.show_at(0.0, 0.0);
         assert!(menu.render_quads(&screen_rect()).is_empty());
         assert!(menu.render_text(&screen_rect()).is_empty());
+    }
+
+    // ── RenderCtx-driven sizing ───────────────────────────────────────────────
+
+    /// Long-label menu width must scale with `RenderCtx::cell_w`, not a baked
+    /// constant. This guards against the historical `CHAR_W = 8.0` hardcode.
+    #[test]
+    fn menu_width_scales_with_cell_w() {
+        // Use a label longer than `MIN_MENU_WIDTH / cell_w` so the label-width
+        // term dominates the `max` against the minimum.
+        let long = "0123456789ABCDEF0123456789".to_string();
+        let make = |cw: f32| {
+            let mut m = ContextMenu::new(vec![ContextMenuItem {
+                label: long.clone(),
+                action: "x".into(),
+                disabled: false,
+                separator_after: false,
+            }]);
+            m.set_render_ctx(RenderCtx::new((cw, 16.0), 1.0));
+            m.menu_width()
+        };
+        let small = make(8.0);
+        let big = make(16.0);
+        assert!(
+            big > small,
+            "menu_width must scale with cell_w; got {big} vs {small}"
+        );
+    }
+
+    /// Row height must derive from `RenderCtx::cell_h`, so larger fonts get
+    /// taller rows.
+    #[test]
+    fn menu_height_scales_with_cell_h() {
+        let make = |ch: f32| {
+            let mut m = ContextMenu::new(three_items());
+            m.set_render_ctx(RenderCtx::new((8.0, ch), 1.0));
+            m.menu_height()
+        };
+        let small = make(16.0);
+        let big = make(32.0);
+        assert!(
+            big > small,
+            "menu_height must scale with cell_h; got {big} vs {small}"
+        );
+    }
+
+    // ── Overflow clamping: top/left edges ─────────────────────────────────────
+
+    /// Anchor to the left of `bounds` must clamp to `bounds.x`, not render
+    /// off-screen.
+    #[test]
+    fn render_clamps_against_left_edge() {
+        let bounds = Rect {
+            x: 100.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let mut menu = ContextMenu::new(three_items());
+        // Anchor well to the left of `bounds.x`.
+        menu.show_at(-50.0, 10.0);
+        let quads = menu.render_quads(&bounds);
+        let bg = &quads[0];
+        assert!(
+            bg.pos[0] >= bounds.x - 0.01,
+            "menu left must clamp to bounds.x={}; got {}",
+            bounds.x,
+            bg.pos[0]
+        );
+    }
+
+    /// Anchor above `bounds` must clamp to `bounds.y`, not render off-screen.
+    #[test]
+    fn render_clamps_against_top_edge() {
+        let bounds = Rect {
+            x: 0.0,
+            y: 100.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let mut menu = ContextMenu::new(three_items());
+        menu.show_at(10.0, -50.0);
+        let quads = menu.render_quads(&bounds);
+        let bg = &quads[0];
+        assert!(
+            bg.pos[1] >= bounds.y - 0.01,
+            "menu top must clamp to bounds.y={}; got {}",
+            bounds.y,
+            bg.pos[1]
+        );
     }
 }
