@@ -42,6 +42,7 @@ winit.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid.workspace = true
 dotenvy = "0.15"
 serde = { version = "1", features = ["derive"] }

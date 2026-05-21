@@ -42,6 +42,36 @@ const WINDOW_DURATION: Duration = Duration::from_secs(10);
 /// behavior so existing peers continue to work during rollout.
 pub const ENV_REQUIRE_SIGNATURES: &str = "PHANTOM_RELAY_REQUIRE_SIGNATURES";
 
+/// A `std::io::Write` that discards bytes and counts them.
+///
+/// Used to measure the JSON-serialized size of an envelope payload without
+/// allocating an intermediate `String`. Cheap enough to call on the hot path.
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Measure the serialized JSON size of a payload in bytes without allocating
+/// a `String`. Returns `usize::MAX` on serialization failure so the caller's
+/// size-cap check treats the payload as oversized.
+fn measure_payload_bytes(payload: &serde_json::Value) -> usize {
+    let mut counter = CountingWriter { bytes: 0 };
+    match serde_json::to_writer(&mut counter, payload) {
+        Ok(()) => counter.bytes,
+        Err(_) => usize::MAX,
+    }
+}
+
 /// Returns `true` when [`ENV_REQUIRE_SIGNATURES`] is set to a truthy value.
 fn deny_unsigned_from_env() -> bool {
     match std::env::var(ENV_REQUIRE_SIGNATURES) {
@@ -185,16 +215,43 @@ impl Router {
         }
     }
 
-    fn forward(&mut self, sender: &PeerId, envelope: Envelope) -> RelayMessage {
+    fn forward(&mut self, sender: &PeerId, mut envelope: Envelope) -> RelayMessage {
+        // --- from-field identity validation (security: envelope forgery) ---
+        //
+        // The `envelope.from` field is user-controlled wire data. A malicious
+        // or buggy client can set `from` to any arbitrary PeerId, causing the
+        // recipient to believe the message originated from a different peer.
+        //
+        // Defense strategy: overwrite `envelope.from` with the server-side
+        // authenticated `sender` identity before any further processing or
+        // forwarding. This ensures correctness regardless of what the client
+        // sent. When a mismatch is detected we also emit a `FromMismatch`
+        // notification so that well-behaved clients can detect a bug in their
+        // envelope construction — the message is still delivered with the real
+        // sender identity stamped in.
+        let from_mismatch = if envelope.from != *sender {
+            warn!(
+                "router: envelope.from mismatch — authenticated sender={}, claimed={}; \
+                 overwriting with authenticated identity",
+                sender, envelope.from
+            );
+            let claimed = std::mem::replace(&mut envelope.from, sender.clone());
+            Some(claimed)
+        } else {
+            None
+        };
+
         // --- message size cap ---
         //
-        // Serialize the payload to measure its wire size. If it exceeds
+        // Measure the serialized wire size of the payload. If it exceeds
         // MAX_MESSAGE_BYTES we reject with MessageTooLarge (WS 1009). This
         // check runs before signature validation and rate-limit accounting so
         // no tokens are burned on oversized frames.
-        let payload_bytes = serde_json::to_string(&envelope.payload)
-            .map(|s| s.len())
-            .unwrap_or(usize::MAX);
+        //
+        // We stream into a `CountingWriter` rather than `serde_json::to_string`
+        // so that large (~1 MiB) payloads do not allocate a transient String
+        // just to read its length.
+        let payload_bytes = measure_payload_bytes(&envelope.payload);
         if payload_bytes > MAX_MESSAGE_BYTES {
             warn!(
                 "router: oversized envelope from peer {} ({} bytes > {} limit); closing 1009",
@@ -329,6 +386,19 @@ impl Router {
             "router: delivered envelope {} from {} to {}",
             nonce, sender, to
         );
+
+        // When a from-field mismatch was detected we notify the sender with
+        // `FromMismatch` rather than `Delivered`. The envelope has already been
+        // forwarded with the corrected `from` field, so this is purely advisory.
+        // Well-behaved clients should treat this as a bug signal; malicious
+        // clients learn only that the relay corrected their forgery attempt.
+        if let Some(claimed) = from_mismatch {
+            return RelayMessage::FromMismatch {
+                claimed,
+                actual: sender.clone(),
+            };
+        }
+
         RelayMessage::Delivered { nonce }
     }
 
@@ -815,6 +885,143 @@ mod tests {
             .try_recv()
             .expect("unsigned envelope must reach destination under default policy");
         assert!(raw.contains("hello"));
+    }
+
+    // ── From-field identity validation tests ──────────────────────────────────
+
+    /// A peer authenticated as "alice" that sends an envelope with `from` set
+    /// to "mallory" (a forged sender identity) must receive `FromMismatch`.
+    /// The envelope is still forwarded to the destination, but with the real
+    /// authenticated sender identity stamped in.
+    #[tokio::test]
+    async fn envelope_from_mismatch_is_rejected() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("fm-bob");
+        let (_, ha) = make_session("fm-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "fm-alice");
+        grant_relay(&mut router, "fm-bob");
+
+        // Alice is authenticated as "fm-alice" but claims to be "mallory".
+        let envelope = Envelope {
+            from: PeerId("mallory".into()), // forged sender identity
+            to: PeerId("fm-bob".into()),
+            payload: serde_json::json!("forged-message"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        let reply = router.route(&PeerId("fm-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(
+                reply,
+                RelayMessage::FromMismatch {
+                    ref claimed,
+                    ref actual
+                } if claimed == &PeerId("mallory".into()) && actual == &PeerId("fm-alice".into())
+            ),
+            "expected FromMismatch when from field is forged, got {reply:?}"
+        );
+
+        // The envelope must still have been forwarded to bob.
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("forged envelope must still be delivered to destination");
+        assert!(raw.contains("forged-message"), "payload must reach destination");
+    }
+
+    /// Normal case: a peer sends an envelope with `from` correctly set to its
+    /// own authenticated identity. The router must return `Delivered` (no
+    /// `FromMismatch`) and the message must reach the destination.
+    #[tokio::test]
+    async fn envelope_from_matching_is_forwarded() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("fm2-bob");
+        let (_, ha) = make_session("fm2-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "fm2-alice");
+        grant_relay(&mut router, "fm2-bob");
+
+        let envelope = Envelope {
+            from: PeerId("fm2-alice".into()), // correct sender identity
+            to: PeerId("fm2-bob".into()),
+            payload: serde_json::json!("legitimate-message"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("fm2-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "expected Delivered when from field matches authenticated sender, got {reply:?}"
+        );
+
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("legitimate envelope must be delivered to destination");
+        assert!(raw.contains("legitimate-message"), "payload must reach destination");
+    }
+
+    /// When a client forges `envelope.from`, the relay must stamp the real
+    /// authenticated `PeerId` into the forwarded envelope before it reaches
+    /// the destination. The destination must see the real sender, never the
+    /// claimed one.
+    #[tokio::test]
+    async fn server_overwrites_forged_from() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("ow-bob");
+        let (_, ha) = make_session("ow-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "ow-alice");
+        grant_relay(&mut router, "ow-bob");
+
+        // Authenticated as "ow-alice" but forging `from` as "evil-peer".
+        let envelope = Envelope {
+            from: PeerId("evil-peer".into()),
+            to: PeerId("ow-bob".into()),
+            payload: serde_json::json!("overwrite-test"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        let reply = router.route(&PeerId("ow-alice".into()), ClientMessage::Send(envelope));
+        // The reply must be FromMismatch (not Delivered), confirming the
+        // mismatch was detected.
+        assert!(
+            matches!(reply, RelayMessage::FromMismatch { .. }),
+            "expected FromMismatch for a forged from field, got {reply:?}"
+        );
+
+        // Deserialize the wire envelope that arrived in Bob's channel.
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("overwritten envelope must still be delivered to bob");
+
+        let client_msg: ClientMessage =
+            serde_json::from_str(&raw).expect("invalid JSON in bob's channel");
+        let ClientMessage::Send(wire_env) = client_msg else {
+            panic!("expected Send variant in bob's channel");
+        };
+
+        // The delivered envelope must carry the real authenticated sender
+        // identity, never the forged "evil-peer" claim.
+        assert_eq!(
+            wire_env.from,
+            PeerId("ow-alice".into()),
+            "delivered envelope.from must be the authenticated sender, not the forged claim"
+        );
+        assert_ne!(
+            wire_env.from,
+            PeerId("evil-peer".into()),
+            "delivered envelope must NOT contain the forged from identity"
+        );
     }
 
     // ── Message-size cap tests ────────────────────────────────────────────────

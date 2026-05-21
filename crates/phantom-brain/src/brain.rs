@@ -388,10 +388,38 @@ fn brain_supervised(
             goal_sources: std::mem::take(&mut goal_sources),
         };
 
+        // Forwarder thread: drains `iter_action_rx` and pushes to the
+        // external `action_tx` for the lifetime of this iteration. Without
+        // this, actions emitted by `brain_loop` sit unread until the loop
+        // exits — which never happens during normal operation, so every
+        // emitted action (including self-improvement `EnqueueLoopMessage`s)
+        // evaporates. The forwarder exits naturally when `iter_action_tx`
+        // is dropped at the end of `brain_loop`.
+        let action_tx_for_fwd = action_tx.clone();
+        let forwarder = std::thread::Builder::new()
+            .name("phantom-brain-action-fwd".into())
+            .spawn(move || {
+                while let Ok(action) = iter_action_rx.recv() {
+                    if action_tx_for_fwd.send(action).is_err() {
+                        break;
+                    }
+                }
+                iter_action_rx
+            })
+            .expect("failed to spawn brain action forwarder thread");
+
         // Run brain_loop under catch_unwind.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             brain_loop(iter_config, iter_rx, iter_action_tx);
         }));
+
+        // brain_loop dropped its `iter_action_tx`; the forwarder's recv()
+        // now returns Err, the thread exits, and we recover the receiver
+        // so the post-exit drain below has something to read. Joining is
+        // safe — the thread is bounded by the channel closing.
+        let iter_action_rx = forwarder
+            .join()
+            .expect("brain action forwarder thread panicked");
 
         // Drain any actions the iteration emitted before it exited / panicked.
         while let Ok(action) = iter_action_rx.try_recv() {

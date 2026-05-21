@@ -176,6 +176,23 @@ impl App {
             return;
         };
 
+        // Cmd+T story when the user is sitting on a SetupAdapter:
+        // splitting would leave a half-screen Setup beside a half-screen
+        // terminal, which contradicts the agent-is-king UX.  Instead, swap
+        // the SetupAdapter out in-place for a fresh TerminalAdapter using
+        // the same `kill_keeping_pane` path the agent spawn uses on cold
+        // launch.
+        let focused_is_setup = self
+            .coordinator
+            .registry()
+            .get_adapter(focused_app_id)
+            .map(|a| a.app_type() == "setup")
+            .unwrap_or(false);
+        if focused_is_setup {
+            self.replace_setup_with_terminal(focused_app_id, current_pane_id);
+            return;
+        }
+
         // Ask the layout engine to split.
         let split_result = if horizontal {
             self.layout.split_horizontal(current_pane_id)
@@ -256,6 +273,77 @@ impl App {
                 let _ = self.layout.remove_pane(new_child);
             }
         }
+    }
+
+    /// Cmd+T from the cold-launch SetupAdapter: swap the SetupAdapter out for
+    /// a fresh full-window TerminalAdapter at the same pane slot.  Uses the
+    /// `kill_keeping_pane` → `register_adapter_at_pane` swap that
+    /// `agent_pane::spawn` already relies on, so the new terminal owns the
+    /// full pane (no split, no half-window artefact).
+    fn replace_setup_with_terminal(
+        &mut self,
+        setup_app_id: phantom_adapter::AppId,
+        _setup_pane_id: phantom_ui::layout::PaneId,
+    ) {
+        use crate::adapters::terminal::TerminalAdapter;
+        use phantom_scene::clock::Cadence;
+        use phantom_terminal::output::TerminalThemeColors;
+
+        // Snapshot the pane slot before killing the SetupAdapter.
+        let Some((target_pane_id, target_scene_node)) =
+            self.coordinator.kill_keeping_pane(setup_app_id)
+        else {
+            warn!("Cmd+T: kill_keeping_pane returned None for SetupAdapter {setup_app_id}");
+            return;
+        };
+
+        // Resize layout (in case it was waiting on something) and compute
+        // cols/rows from the current pane rect.
+        let width = self.gpu.surface_config.width;
+        let height = self.gpu.surface_config.height;
+        let _ = self.layout.resize(width as f32, height as f32);
+
+        let rect = match self.layout.get_pane_rect(target_pane_id) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Cmd+T: layout missing rect for replacement pane: {e}");
+                phantom_ui::layout::Rect {
+                    x: 0.0,
+                    y: 30.0,
+                    width: width as f32,
+                    height: height as f32 - 54.0,
+                }
+            }
+        };
+        let (cols, rows) = pane_cols_rows(self.cell_size, rect);
+
+        let terminal = match PhantomTerminal::new(cols, rows) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("Cmd+T: failed to spawn replacement terminal: {e}");
+                return;
+            }
+        };
+
+        let theme_colors = TerminalThemeColors {
+            foreground: self.theme.colors.foreground,
+            background: self.theme.colors.background,
+            cursor: self.theme.colors.cursor,
+            ansi: Some(self.theme.colors.ansi),
+        };
+        let adapter = TerminalAdapter::with_theme(terminal, theme_colors);
+
+        let new_app_id = self.coordinator.register_adapter_at_pane(
+            Box::new(adapter),
+            target_pane_id,
+            target_scene_node,
+            Cadence::unlimited(),
+            &mut self.layout,
+        );
+        self.coordinator.set_focus(new_app_id);
+        info!(
+            "Cmd+T: replaced SetupAdapter with full-window terminal {new_app_id} ({cols}x{rows})"
+        );
     }
 
     /// Split a terminal pane in two for alt-screen mode (issue #323).

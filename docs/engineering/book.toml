@@ -1,0 +1,48 @@
+[book]
+title = "Phantom · Engineering Reference"
+authors = ["Phantom contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+additional-css = ["theme/custom.css"]
+additional-js  = ["theme/theme-switch.js", "mermaid.min.js", "mermaid-init.js"]
+git-repository-url = "https://github.com/jdmiranda/phantom"
+edit-url-template  = "https://github.com/jdmiranda/phantom/edit/main/docs/engineering/{path}"
+preferred-dark-theme = "navy"
+default-theme = "navy"
+
+[output.html.fold]
+enable = true
+level  = 2
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.linkcheck]
+command = "mdbook-linkcheck2"
+warning-policy = "warn"
+follow-web-links = false
+optional = true
+traverse-parent-directories = true
+# Included ARD content uses paths relative to docs/ARD-*.md's original location.
+# Those relative links don't re-base when {{#include}}'d into src/decisions/.
+# The links resolve fine for readers (mdbook renders the link as-is); only
+# linkcheck's filesystem probe sees them as broken.  Excluding the
+# `research/` and `design/` prefixes is the cleanest fix.
+exclude = [
+    "^research/",
+    "^design/",
+    # In-flight files documented forward-looking — they exist on the feature
+    # branch where the docs were authored but not yet on `origin/main`.
+    # Links will auto-resolve once the corresponding feature PRs land.
+    ".*adapters/setup\\.rs$",
+    ".*\\.phantom/loops/triager\\.toml$",
+    # Operator manual lands in a parallel PR — see docs/README.md row 2.
+    ".*html/index\\.html$",
+]

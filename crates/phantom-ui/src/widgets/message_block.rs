@@ -36,6 +36,33 @@ pub const AVATAR_W: f32 = 16.0;
 pub const AVATAR_GAP: f32 = 8.0;
 
 // -----------------------------------------------------------------------
+// Spinner frames
+// -----------------------------------------------------------------------
+
+/// Braille spinner frames cycling through 10 positions.
+const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+// -----------------------------------------------------------------------
+// LineKind
+// -----------------------------------------------------------------------
+
+/// Classifies each wrapped line so the renderer can apply distinct styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    /// Ordinary prose text.
+    Text,
+    /// A line inside a fenced ``` code block.
+    CodeLine,
+    /// A line that is part of a tool call / tool result.
+    ///
+    /// Reserved for a future phase that classifies tool-call fences (e.g.
+    /// `<tool_use>` blocks) so the renderer can style them distinctly from
+    /// regular code. Currently `wrapped_lines` does not emit this variant.
+    #[allow(dead_code)]
+    ToolCall,
+}
+
+// -----------------------------------------------------------------------
 // MessageRole
 // -----------------------------------------------------------------------
 
@@ -59,7 +86,7 @@ pub enum MessageRole {
 
 impl MessageRole {
     /// Single uppercase ASCII initial for the avatar glyph column.
-    #[must_use] 
+    #[must_use]
     pub fn initial(self) -> char {
         match self {
             Self::User => 'U',
@@ -71,7 +98,7 @@ impl MessageRole {
     }
 
     /// Short display label rendered on the first body line.
-    #[must_use] 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::User => "User",
@@ -90,7 +117,7 @@ impl MessageRole {
     /// - `System`     → `text_secondary`  (muted)
     /// - `ToolUse`    → `status_info`     (cyan)
     /// - `ToolResult` → `status_ok`       (green OK)
-    #[must_use] 
+    #[must_use]
     pub fn color(self, tokens: &Tokens) -> [f32; 4] {
         let c = &tokens.colors;
         match self {
@@ -101,6 +128,70 @@ impl MessageRole {
             Self::ToolResult => c.status_ok,
         }
     }
+}
+
+// -----------------------------------------------------------------------
+// ANSI stripping
+// -----------------------------------------------------------------------
+
+/// Strip ANSI escape sequences from `s`, returning clean text.
+///
+/// Handles:
+/// - `ESC [ ... final_byte` — CSI sequences (including SGR color codes), drained
+///   until the first ASCII alphabetic final byte.
+/// - `ESC ]` (OSC), `ESC P` (DCS), `ESC ^` (PM), `ESC _` (APC), `ESC X` (SOS) —
+///   string-terminator sequences drained until BEL (`\x07`) or ST (`ESC \`).
+///   Without this, hyperlinks (`ESC]8;;URL BEL text ESC]8;; BEL`) and
+///   tmux/iTerm2 passthrough would bleed through verbatim.
+/// - Other two-character `ESC <byte>` sequences (e.g. `ESC (B`, `ESC =`,
+///   `ESC >`, `ESC M`) — consume the single following byte.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next(); // consume '['
+                    // Skip until we hit an ASCII letter (the final byte).
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                // OSC / DCS / PM / APC / SOS: drain until BEL or ST (ESC \).
+                Some(']' | 'P' | '^' | '_' | 'X') => {
+                    chars.next(); // consume introducer
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '\x07' {
+                            // BEL terminator.
+                            break;
+                        }
+                        if next == '\x1b' {
+                            // ST = ESC \ — consume the trailing '\' if present.
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Two-character ESC sequence: consume one more byte.
+                    let _ = chars.next();
+                }
+                None => {
+                    // Lone ESC at end of input — drop it.
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 // -----------------------------------------------------------------------
@@ -117,7 +208,7 @@ impl MessageRole {
 ///   [I]   Role label
 ///         Body line 1
 ///         Body line 2 (wrapped)
-///         …
+///         ...
 /// ```
 ///
 /// The widget's rendered height is:
@@ -138,6 +229,10 @@ pub struct MessageBlock {
     pub(crate) timestamp_ms: u64,
     /// Render context for cell metrics. Defaults to `RenderCtx::fallback()`.
     ctx: RenderCtx,
+    /// Optional spinner state. When `Some(frame)`, a braille spinner character
+    /// is appended to the last rendered line (frame is an index into
+    /// [`SPINNER_FRAMES`]).
+    pub spinner_frame: Option<u8>,
 }
 
 impl MessageBlock {
@@ -148,6 +243,7 @@ impl MessageBlock {
             body: body.into(),
             timestamp_ms,
             ctx: RenderCtx::fallback(),
+            spinner_frame: None,
         }
     }
 
@@ -157,19 +253,47 @@ impl MessageBlock {
         self.ctx = ctx;
     }
 
-    /// Compute the pixel height this block occupies for a given `rect_width`.
+    /// Advance the spinner to the next frame.
     ///
-    /// Height = `(1 + wrapped_line_count) * cell_h`, where the leading `1`
-    /// accounts for the role-label row.
-    #[must_use] 
-    pub fn compute_height(&self, rect_width: f32) -> f32 {
-        let line_count = self.wrapped_lines(rect_width).len();
-        // role-label row (1) + body rows
-        (1 + line_count) as f32 * self.ctx.cell_h()
+    /// If no spinner is active (`spinner_frame` is `None`), this starts the
+    /// spinner at frame 0. Call this from the app update loop when the agent
+    /// status is `Working`.
+    pub fn advance_spinner(&mut self) {
+        let next = match self.spinner_frame {
+            None => 0,
+            // Compute the modulo in `usize` so a future `SPINNER_FRAMES.len()`
+            // beyond 255 cannot silently truncate via `as u8`. The current
+            // 10-element table can never exceed `u8::MAX`, so the cast back
+            // is always lossless.
+            Some(f) => {
+                let next_idx = (f as usize + 1) % SPINNER_FRAMES.len();
+                next_idx as u8
+            }
+        };
+        self.spinner_frame = Some(next);
     }
 
-    /// Wrap `body` into lines that fit within `rect_width`, honouring the
-    /// avatar column offset.
+    /// Compute the pixel height this block occupies for a given `rect_width`.
+    ///
+    /// Height = `(1 + body_rows) * cell_h`, where the leading `1` accounts
+    /// for the role-label row and `body_rows` is the wrapped line count.
+    /// When the body is empty but a spinner is active, one extra row is
+    /// reserved for the standalone spinner segment so the next widget in a
+    /// vertical list does not overlap it.
+    #[must_use]
+    pub fn compute_height(&self, rect_width: f32) -> f32 {
+        let line_count = self.wrapped_lines(rect_width).len();
+        let spinner_row = usize::from(line_count == 0 && self.spinner_frame.is_some());
+        // role-label row (1) + body rows (+ optional spinner row)
+        (1 + line_count + spinner_row) as f32 * self.ctx.cell_h()
+    }
+
+    /// Wrap `body` into classified lines that fit within `rect_width`,
+    /// honouring the avatar column offset.
+    ///
+    /// ANSI escape codes are stripped before wrapping.  Lines inside fenced
+    /// ` ``` ` code blocks are tagged [`LineKind::CodeLine`]; all other lines
+    /// are tagged [`LineKind::Text`].
     ///
     /// The available body-column width (in characters) is:
     /// ```text
@@ -177,45 +301,69 @@ impl MessageBlock {
     /// ```
     /// An empty body returns an empty `Vec`.  A `cell_w` of `0.0` (degenerate
     /// context) is treated as `1.0` to avoid division by zero.
-    #[must_use] 
-    pub fn wrapped_lines(&self, rect_width: f32) -> Vec<String> {
+    #[must_use]
+    pub fn wrapped_lines(&self, rect_width: f32) -> Vec<(LineKind, String)> {
         let cell_w = self.ctx.cell_w().max(1.0);
         let body_px = (rect_width - AVATAR_W - AVATAR_GAP).max(0.0);
         let cols = (body_px / cell_w).floor() as usize;
 
-        if cols == 0 || self.body.is_empty() {
+        // Strip ANSI escape codes before any further processing.
+        let clean_body = strip_ansi(&self.body);
+
+        if cols == 0 || clean_body.is_empty() {
             return Vec::new();
         }
 
-        let mut lines = Vec::new();
-        let mut remaining = self.body.as_str();
+        let mut lines: Vec<(LineKind, String)> = Vec::new();
+        let mut in_code_block = false;
 
-        while !remaining.is_empty() {
-            let chars: Vec<char> = remaining.chars().collect();
-            if chars.len() <= cols {
-                lines.push(remaining.to_owned());
-                break;
+        for raw_line in clean_body.lines() {
+            // Detect fenced code block boundaries.
+            let trimmed = raw_line.trim();
+            if trimmed.starts_with("```") {
+                in_code_block = !in_code_block;
+                // Emit the fence line itself as a CodeLine.
+                lines.push((LineKind::CodeLine, raw_line.to_owned()));
+                continue;
             }
-            // Find the last space within `cols` chars to word-wrap cleanly.
-            // Use char-index arithmetic throughout — `rfind` on a `&str`
-            // returns a *byte* offset, which is wrong for multibyte text.
-            let break_at = chars[..cols]
-                .iter()
-                .enumerate()
-                .rfind(|&(_, c)| *c == ' ')
-                .map(|(i, _)| i)
-                .filter(|&i| i > 0)
-                .unwrap_or(cols); // hard-break if no space found
 
-            lines.push(chars[..break_at].iter().collect());
-            // Advance past the space (if any) so it doesn't start the next line.
-            let skip = if break_at < chars.len() && chars[break_at] == ' ' {
-                break_at + 1
+            let kind = if in_code_block {
+                LineKind::CodeLine
             } else {
-                break_at
+                LineKind::Text
             };
-            // Build remaining from the unconsumed chars.
-            remaining = &remaining[chars[..skip].iter().map(|c| c.len_utf8()).sum::<usize>()..];
+
+            // Word-wrap the raw_line into cols-wide chunks.
+            let mut remaining: &str = raw_line;
+            loop {
+                if remaining.is_empty() {
+                    break;
+                }
+                let chars: Vec<char> = remaining.chars().collect();
+                if chars.len() <= cols {
+                    lines.push((kind, remaining.to_owned()));
+                    break;
+                }
+                // Find the last space within `cols` chars for a soft word-break.
+                // Use char-index arithmetic — byte offsets are wrong for multibyte text.
+                let break_at = chars[..cols]
+                    .iter()
+                    .enumerate()
+                    .rfind(|&(_, c)| *c == ' ')
+                    .map(|(i, _)| i)
+                    .filter(|&i| i > 0)
+                    .unwrap_or(cols); // hard-break if no space found
+
+                lines.push((kind, chars[..break_at].iter().collect()));
+
+                let skip = if break_at < chars.len() && chars[break_at] == ' ' {
+                    break_at + 1
+                } else {
+                    break_at
+                };
+                remaining =
+                    &remaining[chars[..skip].iter().map(|c| c.len_utf8()).sum::<usize>()..];
+            }
         }
 
         lines
@@ -223,40 +371,68 @@ impl MessageBlock {
 }
 
 impl Widget for MessageBlock {
-    /// Emits a single full-width background quad in `surface_recessed` so
-    /// each block is visually distinct from the raw terminal surface.
+    /// Emits quads: one full-width background in `surface_recessed`, plus
+    /// an additional background quad behind each [`LineKind::CodeLine`] to
+    /// distinguish code blocks from prose.
     fn render_quads(&self, rect: &Rect) -> Vec<QuadInstance> {
         let t = Tokens::phosphor(self.ctx);
-        vec![QuadInstance {
+        let cell_h = self.ctx.cell_h();
+        let body_x = rect.x + AVATAR_W + AVATAR_GAP;
+        let body_width = (rect.width - AVATAR_W - AVATAR_GAP).max(0.0);
+
+        // Compute wrapped lines once. `compute_height` would otherwise wrap
+        // a second time on the very next line — wasteful for long streaming
+        // messages where the spinner forces a redraw every tick.
+        let body_lines = self.wrapped_lines(rect.width);
+        let spinner_row = usize::from(body_lines.is_empty() && self.spinner_frame.is_some());
+        let total_height = (1 + body_lines.len() + spinner_row) as f32 * cell_h;
+
+        // Full-block background.
+        let mut quads = vec![QuadInstance {
             pos: [rect.x, rect.y],
-            size: [rect.width, self.compute_height(rect.width)],
+            size: [rect.width, total_height],
             color: t.colors.surface_recessed,
             border_radius: 0.0,
-        }]
+        }];
+
+        // Code-line highlight quads: dark charcoal overlay on top of
+        // surface_recessed to give code blocks a subtle inset appearance.
+        let code_bg: [f32; 4] = [0.05, 0.08, 0.05, 0.6];
+
+        for (i, (kind, _)) in body_lines.iter().enumerate() {
+            if *kind == LineKind::CodeLine {
+                let line_y = rect.y + (i + 1) as f32 * cell_h;
+                quads.push(QuadInstance {
+                    pos: [body_x, line_y],
+                    size: [body_width, cell_h],
+                    color: code_bg,
+                    border_radius: 0.0,
+                });
+            }
+        }
+
+        quads
     }
 
     /// Emits text segments:
-    /// 1. Avatar initial in the glyph column (role color, dim background implied
-    ///    by `surface_recessed` quad).
+    /// 1. Avatar initial in the glyph column (role color).
     /// 2. Role label on row 0 of the body column (role color).
-    /// 3. One `TextSegment` per wrapped body line (text_primary color, slightly
-    ///    dimmer than the label so the label stands out as a header).
+    /// 3. One `TextSegment` per wrapped body line (text_primary for prose,
+    ///    slightly dimmer for code lines).
+    /// 4. If `spinner_frame` is `Some`, appends the spinner glyph to the last
+    ///    line (or adds a standalone spinner segment when the body is empty).
     fn render_text(&self, rect: &Rect) -> Vec<TextSegment> {
         let t = Tokens::phosphor(self.ctx);
         let role_color = self.role.color(&t);
         let cell_h = self.ctx.cell_h();
 
-        // Column positions.
         let avatar_x = rect.x;
         let body_x = rect.x + AVATAR_W + AVATAR_GAP;
-
-        // Row 0 — avatar initial + role label.
-        let row0_y = rect.y + cell_h * 0.5 - cell_h * 0.5; // == rect.y (top of row)
-        let label_y = row0_y;
+        let label_y = rect.y;
 
         let mut segments = Vec::new();
 
-        // Avatar glyph (initial letter).
+        // Avatar glyph.
         segments.push(TextSegment {
             text: self.role.initial().to_string(),
             x: avatar_x,
@@ -272,16 +448,57 @@ impl Widget for MessageBlock {
             color: role_color,
         });
 
-        // Body lines — each on its own row after the label row.
+        // Code line color: 85% of text_primary brightness.
+        let code_color: [f32; 4] = [
+            t.colors.text_primary[0] * 0.85,
+            t.colors.text_primary[1] * 0.85,
+            t.colors.text_primary[2] * 0.85,
+            t.colors.text_primary[3],
+        ];
+
         let body_lines = self.wrapped_lines(rect.width);
-        for (i, line) in body_lines.iter().enumerate() {
+        let line_count = body_lines.len();
+
+        for (i, (kind, line)) in body_lines.into_iter().enumerate() {
             let line_y = rect.y + (i + 1) as f32 * cell_h;
+            let is_last = i + 1 == line_count;
+
+            // Append spinner glyph to the last line when active.
+            let text = if is_last {
+                if let Some(frame) = self.spinner_frame {
+                    let spinner = SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()];
+                    format!("{line} {spinner}")
+                } else {
+                    line
+                }
+            } else {
+                line
+            };
+
+            let color = match kind {
+                LineKind::CodeLine => code_color,
+                _ => t.colors.text_primary,
+            };
+
             segments.push(TextSegment {
-                text: line.clone(),
+                text,
                 x: body_x,
                 y: line_y,
-                color: t.colors.text_primary,
+                color,
             });
+        }
+
+        // Standalone spinner row when body is empty.
+        if line_count == 0 {
+            if let Some(frame) = self.spinner_frame {
+                let spinner = SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()];
+                segments.push(TextSegment {
+                    text: spinner.to_string(),
+                    x: body_x,
+                    y: rect.y + cell_h,
+                    color: t.colors.text_primary,
+                });
+            }
         }
 
         segments
@@ -313,7 +530,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Role → color mapping
+    // Role -> color mapping
     // ----------------------------------------------------------------
 
     #[test]
@@ -397,13 +614,13 @@ mod tests {
     // Height auto-computation
     // ----------------------------------------------------------------
 
-    /// Single-line body → height = 2 rows (label + 1 body line).
+    /// Single-line body -> height = 2 rows (label + 1 body line).
     #[test]
     fn single_line_body_height_is_two_rows() {
         let mut block = MessageBlock::new(MessageRole::User, "hello", 0);
         block.set_render_ctx(fallback_ctx());
         // Width wide enough that "hello" (5 chars) fits in one line.
-        // Body column width = 800 - 16 - 8 = 776 px → 97 chars at cell_w=8
+        // Body column width = 800 - 16 - 8 = 776 px -> 97 chars at cell_w=8
         let h = block.compute_height(800.0);
         let cell_h = fallback_ctx().cell_h();
         assert_eq!(
@@ -416,8 +633,8 @@ mod tests {
     /// Multiline body grows height proportionally.
     #[test]
     fn multiline_body_height_grows_with_lines() {
-        // cell_w = 8, body col = 800 - 16 - 8 = 776 px → 97 cols
-        // body = 200 'a' chars → ceil(200/97) = 3 lines
+        // cell_w = 8, body col = 800 - 16 - 8 = 776 px -> 97 cols
+        // body = 200 'a' chars -> ceil(200/97) = 3 lines
         let body: String = "a".repeat(200);
         let mut block = MessageBlock::new(MessageRole::Agent, body, 0);
         block.set_render_ctx(fallback_ctx());
@@ -434,7 +651,7 @@ mod tests {
         );
     }
 
-    /// Empty body → only the label row → height = 1 row.
+    /// Empty body -> only the label row -> height = 1 row.
     #[test]
     fn empty_body_height_is_one_row() {
         let mut block = MessageBlock::new(MessageRole::System, "", 0);
@@ -460,13 +677,13 @@ mod tests {
         block.set_render_ctx(fallback_ctx());
         let lines = block.wrapped_lines(800.0);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], body);
+        assert_eq!(lines[0].1, body);
     }
 
     /// A body of exactly `cols` chars must fit in a single line.
     #[test]
     fn body_exactly_cols_wide_fits_one_line() {
-        // cell_w=8, rect=800 → body_col=776px → 97 cols
+        // cell_w=8, rect=800 -> body_col=776px -> 97 cols
         let body: String = "x".repeat(97);
         let mut block = MessageBlock::new(MessageRole::User, body.clone(), 0);
         block.set_render_ctx(fallback_ctx());
@@ -476,13 +693,13 @@ mod tests {
             1,
             "body of exactly `cols` chars should be one line"
         );
-        assert_eq!(lines[0], body);
+        assert_eq!(lines[0].1, body);
     }
 
     /// A body of `cols+1` chars must split into two lines.
     #[test]
     fn body_one_over_cols_wraps_to_two_lines() {
-        // 97 + 1 = 98 'x' chars, no spaces → hard break at 97
+        // 97 + 1 = 98 'x' chars, no spaces -> hard break at 97
         let body: String = "x".repeat(98);
         let mut block = MessageBlock::new(MessageRole::User, body, 0);
         block.set_render_ctx(fallback_ctx());
@@ -497,35 +714,28 @@ mod tests {
     /// Word-wrap: prefer breaking at a space rather than mid-word.
     #[test]
     fn wrap_prefers_word_boundary() {
-        // Build a line just over 97 chars with a space somewhere inside.
-        // "word " * 10 = 50 chars, then another long word to force wrap.
-        // Use a simple scenario: 96 chars before a space, then more text.
         let word_a: String = "a".repeat(48);
         let word_b: String = "b".repeat(48);
         let body = format!("{word_a} {word_b}cccc");
-        // word_a + " " + word_b = 97 chars; adding "cccc" forces a second line.
         let mut block = MessageBlock::new(MessageRole::User, body, 0);
         block.set_render_ctx(fallback_ctx());
         let lines = block.wrapped_lines(800.0);
-        // First line should end at the space boundary (48 a's + space is ≤97 cols).
         assert!(
             lines.len() >= 2,
             "should have wrapped at space boundary: {lines:?}"
         );
-        // First line must not start with 'b'.
         assert!(
-            !lines[0].starts_with('b'),
+            !lines[0].1.starts_with('b'),
             "first line should not start with 'b': {:?}",
-            lines[0]
+            lines[0].1
         );
     }
 
-    /// Very narrow rect (body col ≤ 0 px) → no lines (degenerate).
+    /// Very narrow rect (body col <= 0 px) -> no lines (degenerate).
     #[test]
     fn zero_width_rect_produces_no_lines() {
         let mut block = MessageBlock::new(MessageRole::User, "hello", 0);
         block.set_render_ctx(fallback_ctx());
-        // rect_width ≤ AVATAR_W + AVATAR_GAP → body_px = 0 → cols = 0
         let lines = block.wrapped_lines(AVATAR_W + AVATAR_GAP);
         assert!(
             lines.is_empty(),
@@ -534,7 +744,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Widget trait — render_quads
+    // Widget trait -- render_quads
     // ----------------------------------------------------------------
 
     #[test]
@@ -543,6 +753,7 @@ mod tests {
         block.set_render_ctx(fallback_ctx());
         let rect = make_rect(800.0);
         let quads = block.render_quads(&rect);
+        // 1 background quad only (no code lines)
         assert_eq!(quads.len(), 1, "should emit exactly one background quad");
         let t = Tokens::phosphor(fallback_ctx());
         assert_eq!(
@@ -562,7 +773,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Widget trait — render_text
+    // Widget trait -- render_text
     // ----------------------------------------------------------------
 
     /// render_text must always emit at least: avatar + label (2 segments).
@@ -623,7 +834,7 @@ mod tests {
         );
     }
 
-    /// Body text segments use text_primary color.
+    /// Body text segments use text_primary color (for prose lines).
     #[test]
     fn body_segments_use_text_primary_color() {
         let ctx = fallback_ctx();
@@ -650,7 +861,6 @@ mod tests {
         block.set_render_ctx(ctx);
         let rect = make_rect(800.0);
         let texts = block.render_text(&rect);
-        // Label (index 1) and body lines (index 2+) all start at body_x.
         let expected_body_x = rect.x + AVATAR_W + AVATAR_GAP;
         for seg in texts.iter().skip(1) {
             assert_eq!(
@@ -723,43 +933,30 @@ mod tests {
 
     /// Wrapping a body that contains multibyte characters (emoji, accented
     /// letters, CJK) must not panic and must produce correct line boundaries.
-    ///
-    /// With cell_w=8, rect=800 → body col = (800 - 16 - 8) / 8 = 97 cols.
-    /// Each emoji is one *char* but 4 UTF-8 bytes.  Using a byte offset from
-    /// `rfind` as a char index would either panic (out-of-bounds) or slice at
-    /// a non-char boundary — this test catches both failure modes.
     #[test]
     fn wrap_is_correct_for_multibyte_body() {
-        // 50 emoji chars + space + 50 more emoji → 101 chars total.
-        // The space is at char index 50, well inside the 97-col limit,
-        // so the wrap should break there and NOT at a mid-emoji byte offset.
-        let left: String = "🦀".repeat(50); // 50 chars, 200 bytes
-        let right: String = "🦀".repeat(50); // 50 chars, 200 bytes
-        let body = format!("{left} {right}"); // 101 chars, 401 bytes
+        let left: String = "🦀".repeat(50);
+        let right: String = "🦀".repeat(50);
+        let body = format!("{left} {right}");
 
         let mut block = MessageBlock::new(MessageRole::Agent, body.clone(), 0);
         block.set_render_ctx(fallback_ctx());
 
-        // Must not panic:
         let lines = block.wrapped_lines(800.0);
 
-        // The space lives at char index 50 (≤ 97), so we expect a soft wrap
-        // there, giving us exactly 2 lines.
         assert_eq!(
             lines.len(),
             2,
             "emoji body should wrap into 2 lines: {lines:?}"
         );
+        assert_eq!(lines[0].1, left, "first line should be the 50-emoji prefix");
+        assert_eq!(lines[1].1, right, "second line should be the 50-emoji suffix");
 
-        // First line must be exactly the 50 crab emoji.
-        assert_eq!(lines[0], left, "first line should be the 50-emoji prefix");
-
-        // Second line must be the remaining 50 emoji (space consumed by wrap).
-        assert_eq!(lines[1], right, "second line should be the 50-emoji suffix");
-
-        // Sanity-check that the output round-trips back to the original body
-        // (minus the joining space which is consumed).
-        let reconstructed = lines.join(" ");
+        let reconstructed = lines
+            .iter()
+            .map(|(_, s)| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(
             reconstructed, body,
             "reconstructed body must match original"
@@ -769,19 +966,274 @@ mod tests {
     /// Accented / Latin-extended characters (2-byte UTF-8) wrap correctly.
     #[test]
     fn wrap_is_correct_for_accented_chars() {
-        // 'é' is U+00E9, 2 bytes in UTF-8 but 1 char.
-        // 48 × 'é' + space + 48 × 'é' = 97 chars exactly at the break point.
         let left: String = "é".repeat(48);
         let right: String = "é".repeat(48);
-        let body = format!("{left} {right}extra"); // space at index 48 → within 97 cols
+        let body = format!("{left} {right}extra");
 
         let mut block = MessageBlock::new(MessageRole::User, body, 0);
         block.set_render_ctx(fallback_ctx());
 
-        // Must not panic:
         let lines = block.wrapped_lines(800.0);
 
         assert!(lines.len() >= 2, "accented body should wrap: {lines:?}");
-        assert_eq!(lines[0], left, "first line should be 48 accented chars");
+        assert_eq!(lines[0].1, left, "first line should be 48 accented chars");
+    }
+
+    // ----------------------------------------------------------------
+    // Fix 1 -- ANSI stripping
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        assert_eq!(
+            strip_ansi("\x1b[32mhello\x1b[0m"),
+            "hello",
+            "SGR color sequences must be stripped"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_preserves_normal_text() {
+        assert_eq!(
+            strip_ansi("hello world"),
+            "hello world",
+            "plain text must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_removes_bold_and_compound_sequences() {
+        let input = "\x1b[1m\x1b[33mwarning\x1b[0m";
+        assert_eq!(strip_ansi(input), "warning");
+    }
+
+    #[test]
+    fn wrapped_lines_strips_ansi_before_wrap() {
+        let ansi_body = "\x1b[32mhello\x1b[0m";
+        let mut block = MessageBlock::new(MessageRole::Agent, ansi_body, 0);
+        block.set_render_ctx(fallback_ctx());
+        let lines = block.wrapped_lines(800.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].1, "hello",
+            "ANSI codes must be stripped before wrapping"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Fix 2 -- Code block detection + classification
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn code_block_lines_classified_as_code() {
+        let body = "```\ncode line\n```";
+        let mut block = MessageBlock::new(MessageRole::Agent, body, 0);
+        block.set_render_ctx(fallback_ctx());
+        let lines = block.wrapped_lines(800.0);
+        // All three lines (opening fence, code, closing fence) are CodeLine.
+        for (kind, text) in &lines {
+            assert_eq!(
+                *kind,
+                LineKind::CodeLine,
+                "line '{text}' should be CodeLine"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_before_code_block_is_text() {
+        let body = "intro\n```\ncode\n```";
+        let mut block = MessageBlock::new(MessageRole::Agent, body, 0);
+        block.set_render_ctx(fallback_ctx());
+        let lines = block.wrapped_lines(800.0);
+        assert!(!lines.is_empty());
+        assert_eq!(lines[0].0, LineKind::Text, "first line before ``` must be Text");
+        assert_eq!(lines[1].0, LineKind::CodeLine, "fence line must be CodeLine");
+        assert_eq!(
+            lines[2].0,
+            LineKind::CodeLine,
+            "code content line must be CodeLine"
+        );
+    }
+
+    #[test]
+    fn render_quads_emits_code_bg_for_code_lines() {
+        let body = "```\ncode here\n```";
+        let mut block = MessageBlock::new(MessageRole::Agent, body, 0);
+        block.set_render_ctx(fallback_ctx());
+        let rect = make_rect(800.0);
+        let quads = block.render_quads(&rect);
+        // 1 background quad + 3 code-line quads (fence, code, fence)
+        assert!(
+            quads.len() > 1,
+            "code block should emit additional background quads, got {}",
+            quads.len()
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Fix 3 -- Spinner
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn spinner_advances_on_call() {
+        let mut block = MessageBlock::new(MessageRole::Agent, "working", 0);
+        block.set_render_ctx(fallback_ctx());
+
+        assert_eq!(block.spinner_frame, None, "spinner starts as None");
+
+        block.advance_spinner();
+        assert_eq!(block.spinner_frame, Some(0), "first advance -> frame 0");
+
+        block.advance_spinner();
+        assert_eq!(block.spinner_frame, Some(1), "second advance -> frame 1");
+    }
+
+    #[test]
+    fn spinner_cycles_through_all_frames() {
+        let mut block = MessageBlock::new(MessageRole::Agent, "working", 0);
+        block.set_render_ctx(fallback_ctx());
+        // First advance: None -> 0.
+        // Advance SPINNER_FRAMES.len() more times (10) to wrap back to 0.
+        // Total: 11 advances -> frame = 10 % 10 = 0
+        for _ in 0..=SPINNER_FRAMES.len() {
+            block.advance_spinner();
+        }
+        // After 11 advances (None->0, 0->1, ..., 9->0):
+        //   call 1:  None -> 0
+        //   calls 2..11: 0->1->2->...->9->0
+        // frame wraps back to 0
+        assert_eq!(block.spinner_frame, Some(0), "spinner must wrap around to 0 after 11 advances");
+    }
+
+    #[test]
+    fn spinner_glyph_appears_in_last_line() {
+        let mut block = MessageBlock::new(MessageRole::Agent, "thinking", 0);
+        block.set_render_ctx(fallback_ctx());
+        block.advance_spinner(); // frame 0 -> '⠋'
+
+        let rect = make_rect(800.0);
+        let texts = block.render_text(&rect);
+        let last_body = texts.iter().skip(2).last().expect("must have body segment");
+        assert!(
+            last_body.text.contains('⠋'),
+            "last body line must contain spinner glyph, got: {:?}",
+            last_body.text
+        );
+    }
+
+    #[test]
+    fn no_spinner_no_extra_chars() {
+        let mut block = MessageBlock::new(MessageRole::Agent, "done", 0);
+        block.set_render_ctx(fallback_ctx());
+
+        let rect = make_rect(800.0);
+        let texts = block.render_text(&rect);
+        let last_body = texts.iter().skip(2).last().expect("must have body segment");
+        assert_eq!(last_body.text, "done", "no spinner -> text must be unchanged");
+    }
+
+    #[test]
+    fn spinner_on_empty_body_emits_standalone_segment() {
+        let mut block = MessageBlock::new(MessageRole::Agent, "", 0);
+        block.set_render_ctx(fallback_ctx());
+        block.advance_spinner(); // frame 0
+
+        let rect = make_rect(800.0);
+        let texts = block.render_text(&rect);
+        // avatar + label + standalone spinner = 3 segments
+        assert_eq!(
+            texts.len(),
+            3,
+            "spinner on empty body must emit a standalone segment"
+        );
+        assert!(
+            texts[2].text.contains('⠋'),
+            "standalone spinner segment must contain the spinner char"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // PR #596 review fixes
+    // ----------------------------------------------------------------
+
+    /// OSC hyperlink sequences (`ESC ] 8 ; ; URL BEL text ESC ] 8 ; ; BEL`)
+    /// must be drained entirely; the visible text must remain.
+    #[test]
+    fn strip_ansi_drains_osc_hyperlink() {
+        let input = "\x1b]8;;https://example.com\x07link text\x1b]8;;\x07 tail";
+        assert_eq!(
+            strip_ansi(input),
+            "link text tail",
+            "OSC hyperlink sequences must be drained to their BEL terminator"
+        );
+    }
+
+    /// OSC sequences terminated by ST (`ESC \`) instead of BEL must also be
+    /// drained completely.
+    #[test]
+    fn strip_ansi_drains_osc_with_string_terminator() {
+        let input = "\x1b]0;window title\x1b\\hello";
+        assert_eq!(
+            strip_ansi(input),
+            "hello",
+            "OSC sequences terminated by ST (ESC \\) must be drained"
+        );
+    }
+
+    /// DCS (`ESC P ... ESC \`) sequences must be drained.
+    #[test]
+    fn strip_ansi_drains_dcs() {
+        let input = "before\x1b\x50tmux;\x1b\\after";
+        assert_eq!(strip_ansi(input), "beforeafter");
+    }
+
+    /// `MessageBlock` body containing an OSC hyperlink must wrap to clean
+    /// visible text only.
+    #[test]
+    fn wrapped_lines_strips_osc_hyperlink() {
+        let body = "\x1b]8;;https://example.com\x07click here\x1b]8;;\x07";
+        let mut block = MessageBlock::new(MessageRole::Agent, body, 0);
+        block.set_render_ctx(fallback_ctx());
+        let lines = block.wrapped_lines(800.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].1, "click here");
+    }
+
+    /// `compute_height` must reserve a row for the standalone spinner when
+    /// the body is empty so the next widget in a vertical list does not
+    /// overlap it.
+    #[test]
+    fn compute_height_reserves_row_for_standalone_spinner() {
+        let cell_h = fallback_ctx().cell_h();
+
+        let mut without = MessageBlock::new(MessageRole::Agent, "", 0);
+        without.set_render_ctx(fallback_ctx());
+        assert_eq!(without.compute_height(800.0), cell_h, "no spinner: 1 row");
+
+        let mut with = MessageBlock::new(MessageRole::Agent, "", 0);
+        with.set_render_ctx(fallback_ctx());
+        with.advance_spinner();
+        assert_eq!(
+            with.compute_height(800.0),
+            2.0 * cell_h,
+            "empty body + spinner: 2 rows (label + standalone spinner)"
+        );
+    }
+
+    /// `render_quads` must report the same height as `compute_height` even
+    /// when only a spinner is rendered (no body lines).
+    #[test]
+    fn render_quads_height_includes_standalone_spinner() {
+        let mut block = MessageBlock::new(MessageRole::Agent, "", 0);
+        block.set_render_ctx(fallback_ctx());
+        block.advance_spinner();
+        let rect = make_rect(800.0);
+        let quads = block.render_quads(&rect);
+        assert_eq!(
+            quads[0].size[1],
+            block.compute_height(rect.width),
+            "background quad height must match compute_height when spinner is active"
+        );
     }
 }

@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use log::{debug, info};
+use log::{debug, info, warn};
 use winit::keyboard::{Key, NamedKey};
 
 use phantom_terminal::input::{self, KeyEvent, KittyEventType, PhantomKey, PhantomModifiers};
@@ -14,6 +14,7 @@ use phantom_ui::keybinds::Key as UiKey;
 use phantom_ui::keybinds::{Action, KeyCombo};
 
 use crate::app::{App, AppState};
+use crate::settings::PhantomSettings;
 
 // ---------------------------------------------------------------------------
 // Key conversion (free functions)
@@ -702,7 +703,26 @@ impl App {
     /// Handle keys when the settings panel is open.
     pub(crate) fn handle_settings_key(&mut self, event: &winit::event::KeyEvent) {
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.settings_panel.open = false,
+            Key::Named(NamedKey::Escape) => {
+                self.settings_panel.open = false;
+                // Auto-save: convert the current panel state to PhantomSettings
+                // and write to disk atomically. The config watcher will pick up
+                // the change on the next poll; CRT changes are already applied
+                // live below so the user sees them immediately.
+                //
+                // The panel only edits theme, font size, and CRT params, so we
+                // load the on-disk state first and merge the snapshot over it.
+                // Otherwise any user-edited scroll settings (history_lines,
+                // scroll_lines) would silently revert to defaults on every
+                // Escape-save.
+                let base = PhantomSettings::load();
+                let snapshot = self.settings_panel.to_snapshot();
+                let settings = PhantomSettings::from_snapshot(&snapshot, &base);
+                match settings.save() {
+                    Ok(path) => info!("Settings saved to {}", path.display()),
+                    Err(e) => warn!("Failed to save settings on Escape: {e}"),
+                }
+            }
             Key::Named(NamedKey::ArrowUp) => self.settings_panel.prev_item(),
             Key::Named(NamedKey::ArrowDown) => self.settings_panel.next_item(),
             Key::Named(NamedKey::ArrowRight) => self.settings_panel.adjust(1.0),

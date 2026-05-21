@@ -200,6 +200,10 @@ pub enum AppMessage {
     Pong,
     /// App is exiting intentionally — supervisor should NOT restart.
     ExitClean,
+    /// Render loop accumulated too many consecutive panics and is forcing exit.
+    /// The supervisor uses this to distinguish a panic-escalation crash from
+    /// a silent heartbeat-timeout crash (GPU hang, SIGKILL, etc.).
+    ///
     /// The render thread panicked. `count` is the number of panics since last
     /// reset; `last_message` is the panic message (truncated if needed).
     RenderPanic { count: u32, last_message: String },
@@ -210,10 +214,12 @@ impl AppMessage {
     /// newline so callers control framing on the socket write.
     ///
     /// The encoding is intentionally allocation-light and panic-free: simple
-    /// variants resolve to interned literals, and only `Log` allocates because
-    /// its payload is dynamic. The `LOG:` prefix is the only variant that may
-    /// embed colons in its tail; `from_line` therefore matches it greedily so
-    /// log bodies survive round-trip without escaping.
+    /// variants resolve to interned literals, while `Log` and `RenderPanic`
+    /// allocate because their payloads are dynamic. Both `LOG:` and the
+    /// trailing `last_message` of `RENDER_PANIC:<count>:<message>` may embed
+    /// colons; `from_line` strips their fixed-shape prefixes and treats the
+    /// remainder as opaque so message bodies survive round-trip without
+    /// escaping.
     #[must_use]
     pub fn to_line(&self) -> String {
         match self {
@@ -479,6 +485,26 @@ mod tests {
     fn app_log_with_colons() {
         // Colons in the log body must survive the round-trip.
         let msg = AppMessage::Log("key:value:extra".into());
+        assert_eq!(AppMessage::from_line(&msg.to_line()), Some(msg));
+    }
+
+    #[test]
+    fn app_render_panic_round_trip() {
+        let msg = AppMessage::RenderPanic {
+            count: 11,
+            last_message: "index out of bounds".into(),
+        };
+        let line = msg.to_line();
+        assert_eq!(line, "RENDER_PANIC:11:index out of bounds");
+        assert_eq!(AppMessage::from_line(&line), Some(msg));
+    }
+
+    #[test]
+    fn app_render_panic_message_with_colons() {
+        let msg = AppMessage::RenderPanic {
+            count: 3,
+            last_message: "called `Option::unwrap()` on a `None` value".into(),
+        };
         assert_eq!(AppMessage::from_line(&msg.to_line()), Some(msg));
     }
 

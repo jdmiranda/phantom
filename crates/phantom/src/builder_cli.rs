@@ -107,6 +107,19 @@ struct RunArgs {
 
 fn run_command(args: &[String]) -> Result<()> {
     use clap::Parser;
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .try_init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
     let parsed = if args.first().map(String::as_str) == Some("run") {
         RunArgs::parse_from(
             std::iter::once("phantom builder run").chain(args[1..].iter().map(String::as_str)),

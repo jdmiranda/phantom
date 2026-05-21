@@ -995,7 +995,7 @@ mod tests {
             api_keys: Arc::new(ApiKeyStore::from_raw_keys(std::iter::once(key))),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
             register_limiter: make_test_limiter(),
-            registry: crate::registry::new_shared(),
+            registry: crate::registry::new_shared_for_tests(),
             registry_rate_limiter: Arc::new(
                 crate::auth::IpRateLimiter::registry_default(),
             ),
@@ -1015,7 +1015,7 @@ mod tests {
             )),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
             register_limiter: make_test_limiter(),
-            registry: crate::registry::new_shared(),
+            registry: crate::registry::new_shared_for_tests(),
             registry_rate_limiter: Arc::new(
                 crate::auth::IpRateLimiter::registry_default(),
             ),
@@ -1029,7 +1029,7 @@ mod tests {
             api_keys: Arc::new(ApiKeyStore::default()),
             nonce_cache: Arc::new(crate::auth::NonceCache::new()),
             register_limiter: make_test_limiter(),
-            registry: crate::registry::new_shared(),
+            registry: crate::registry::new_shared_for_tests(),
             registry_rate_limiter: Arc::new(
                 crate::auth::IpRateLimiter::registry_default(),
             ),

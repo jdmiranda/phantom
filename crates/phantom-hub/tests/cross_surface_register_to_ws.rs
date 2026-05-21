@@ -39,7 +39,7 @@ use phantom_hub::{
     AppState,
     auth::{ApiKeyStore, JwtAuthority, NonceCache},
     build_router,
-    registry::new_shared,
+    registry::new_shared_for_tests,
 };
 
 // ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ fn test_state() -> AppState {
         jwt: Arc::new(JwtAuthority::from_secret(TEST_SECRET)),
         api_keys: Arc::new(ApiKeyStore::default()),
         nonce_cache: Arc::new(NonceCache::new()),
-        registry: new_shared(),
+        registry: new_shared_for_tests(),
     }
 }
 

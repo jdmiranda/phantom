@@ -36,6 +36,7 @@
 pub mod auth;
 pub mod health;
 pub mod mcp_endpoint;
+pub mod peer_key_store;
 pub mod phantom_endpoint;
 pub mod rate_limit;
 pub mod registry;
@@ -124,7 +125,7 @@ impl AppState {
             api_keys: Arc::new(api_keys),
             nonce_cache: Arc::new(auth::NonceCache::new()),
             register_limiter,
-            registry: registry::new_shared(),
+            registry: registry::new_shared()?,
             registry_rate_limiter: Arc::new(auth::IpRateLimiter::registry_default()),
             admin_token: Arc::new(admin_token),
         })
@@ -292,6 +293,8 @@ mod tests {
     const TEST_ADMIN_TOKEN: &str = "admin-super-secret-token-for-tests";
 
     fn test_state_with_key(key: &str) -> AppState {
+        // Use `new_shared_for_tests` so each call gets its own peer-keys tmp
+        // file and tests do not race on the user's real config dir (issue #527).
         AppState {
             jwt: Arc::new(auth::JwtAuthority::from_secret(TEST_SECRET)),
             api_keys: Arc::new(auth::ApiKeyStore::from_raw_keys(std::iter::once(key))),
@@ -300,7 +303,7 @@ mod tests {
                 std::time::Duration::from_secs(60),
                 10,
             )),
-            registry: registry::new_shared(),
+            registry: registry::new_shared_for_tests(),
             registry_rate_limiter: Arc::new(auth::IpRateLimiter::registry_default()),
             admin_token: Arc::new(auth::AdminToken::from_token(TEST_ADMIN_TOKEN)),
         }
