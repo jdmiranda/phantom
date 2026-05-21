@@ -384,7 +384,7 @@ impl AgentPane {
             chat_backend: None,
             turn_count: 0,
             current_assistant_text: String::new(),
-            permissions: PermissionSet::all(),
+            permissions: PermissionSet::for_role(&DEFAULT_AGENT_PANE_ROLE),
             input_tokens: 0,
             output_tokens: 0,
             tool_call_count: 0,
@@ -587,7 +587,7 @@ impl AgentPane {
             chat_backend,
             turn_count: 0,
             current_assistant_text: String::new(),
-            permissions: PermissionSet::all(),
+            permissions: PermissionSet::for_role(&initial_role),
             input_tokens: 0,
             output_tokens: 0,
             tool_call_count: 0,
@@ -1090,11 +1090,51 @@ impl AgentPane {
         &self.cached_lines
     }
 
+    /// Returns `true` when this pane already has an in-flight API turn
+    /// (background thread streaming events into [`AgentPane::api_handle`],
+    /// or pending tool calls that the next `Done` event will execute).
+    ///
+    /// Used by [`AgentPane::send_followup`] to refuse a re-entrant dispatch
+    /// instead of stomping the live conversation state, and by callers like
+    /// the adapter's input handler to surface a friendly hint without
+    /// silently dropping the user's keystrokes.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.status == AgentPaneStatus::Working
+            || self.api_handle.is_some()
+            || !self.pending_tools.is_empty()
+    }
+
     /// Send a follow-up user message and re-invoke Claude.
     ///
     /// This is the interactive chat loop — the user types in the agent pane,
     /// the message gets appended to the conversation, and Claude responds.
-    pub(crate) fn send_followup(&mut self, message: String) {
+    ///
+    /// Returns `false` when the pane is still processing a previous turn
+    /// ([`AgentPane::is_busy`] returns `true`); in that case the caller's
+    /// message is **not** appended to the conversation and no new background
+    /// thread is started. This prevents the "already busy" crash where a
+    /// second dispatch was started before the first finished — the live
+    /// `tool_use_ids` from the abandoned turn would then desynchronize from
+    /// the agent's message history (no matching `ToolCall` was ever
+    /// recorded), producing a malformed `tool_use`/`tool_result` pair on the
+    /// next API request and a panic deep in `parse_response` when the
+    /// remote returned a 400.
+    pub(crate) fn send_followup(&mut self, message: String) -> bool {
+        if self.is_busy() {
+            log::warn!(
+                "AgentPane #{}: ignoring follow-up while previous turn is still running \
+                 (status={:?}, pending_tools={}, api_handle={})",
+                self.agent.id(),
+                self.status,
+                self.pending_tools.len(),
+                self.api_handle.is_some(),
+            );
+            self.output.push_str(
+                "\n[busy — wait for the current response to finish before sending another message]\n",
+            );
+            return false;
+        }
+
         // Display the user message.
         self.output
             .push_str(&format!("\n\n> {message}\n\n● Thinking...\n"));
@@ -1119,6 +1159,7 @@ impl AgentPane {
         self.api_handle = Some(handle);
         self.status = AgentPaneStatus::Working;
         self.current_assistant_text.clear();
+        true
     }
 
     /// Save the agent conversation to disk for debugging and replay.

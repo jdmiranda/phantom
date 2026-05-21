@@ -505,22 +505,18 @@ pub fn lifecycle_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "complete_task".into(),
-            description: "Signal that the task is complete. Call this once when you have finished \
-                          the work — the call ends the agent loop. `result` must be a JSON object \
-                          summarising the outcome (e.g. `{\"summary\": \"...\", \"artifacts\": [...]}`).".into(),
+            description: "Signal that the task is complete. Call this ONCE when you have \
+                          finished the work — the call ends the agent loop. The argument \
+                          object's required shape is defined by your loop's `exit_schema` \
+                          and is documented in your system prompt under \"You MUST call \
+                          complete_task with ...\". Do NOT default to `summary`/`artifacts` \
+                          fields unless your system prompt explicitly demands them — the \
+                          loop validator will reject mismatched shapes. Mismatched shapes \
+                          flatline the loop after three consecutive failures."
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "Short human-readable description of what was accomplished."
-                    },
-                    "artifacts": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional list of files, identifiers, or outputs produced."
-                    }
-                }
+                "additionalProperties": true,
             }),
         },
         ToolDefinition {
@@ -900,7 +896,18 @@ fn execute_edit_file(root: &Path, args: &serde_json::Value) -> ToolResult {
 }
 
 fn execute_run_command(root: &Path, args: &serde_json::Value) -> ToolResult {
-    execute_run_command_with_policy(root, args, SandboxPolicy::Strict)
+    // Permissive (rlimits + cwd-bound writes, network ALLOWED) is the right
+    // default for autonomous loops: every agent role that holds Act needs
+    // to call `gh` / `git` / `cargo` (network for both gh and crates.io).
+    // Strict blocked network and triggered cascading false diagnoses — the
+    // triager's 2026-05-20 audit captured "gh API unreachable from sandbox
+    // (api.github.com connection error)" after multiple rounds of retries.
+    //
+    // Rlimits and cwd-bound writes still cap blast radius. A future
+    // refinement: per-loop sandbox policy in the TOML spec so an operator
+    // can downgrade to Strict for non-gh loops or upgrade to None for
+    // local-only test rigs.
+    execute_run_command_with_policy(root, args, SandboxPolicy::Permissive)
 }
 
 /// Execute `run_command` under the given [`SandboxPolicy`].
@@ -1144,15 +1151,14 @@ fn execute_search_files(root: &Path, args: &serde_json::Value) -> ToolResult {
 
 fn execute_git_status(root: &Path) -> ToolResult {
     let tool = ToolType::GitStatus;
-
-    // Use the sandboxed executor so a hung credential helper or network-mount
-    // git repo cannot block the agent thread indefinitely. The Permissive
-    // policy keeps rlimits but allows network (git may need it for LFS etc.);
-    // the 30-second wall-clock timeout is the real guard.
+    // Route through the OS-level sandbox with Strict policy so that a crafted
+    // .git/config core.hooksPath cannot execute arbitrary code outside the
+    // agent's cwd, AND a hung credential helper cannot block the agent thread
+    // indefinitely (the COMMAND_TIMEOUT wall-clock is the guard).
     match sandbox::execute_sandboxed(
-        "git status --porcelain",
+        "git status --porcelain=v2 --branch",
         root,
-        SandboxPolicy::Permissive,
+        SandboxPolicy::Strict,
         COMMAND_TIMEOUT,
     ) {
         Ok(out) => {
@@ -1165,19 +1171,18 @@ fn execute_git_status(root: &Path) -> ToolResult {
         Err(sandbox::SandboxError::Timeout { limit }) => {
             tool_err(tool, format!("git status timed out after {limit:?}"))
         }
-        Err(e) => tool_err(tool, format!("cannot run git status: {e}")),
+        Err(e) => tool_err(tool, format!("sandbox error running git status: {e}")),
     }
 }
 
 fn execute_git_diff(root: &Path) -> ToolResult {
     let tool = ToolType::GitDiff;
-
-    // Same timeout guard as execute_git_status: a hung git (e.g. credential
-    // helper on a network mount) must not block the agent thread indefinitely.
+    // Route through the OS-level sandbox with Strict policy (same reasoning
+    // as execute_git_status). COMMAND_TIMEOUT guards against hung git.
     match sandbox::execute_sandboxed(
         "git diff",
         root,
-        SandboxPolicy::Permissive,
+        SandboxPolicy::Strict,
         COMMAND_TIMEOUT,
     ) {
         Ok(out) => {
@@ -1190,7 +1195,7 @@ fn execute_git_diff(root: &Path) -> ToolResult {
         Err(sandbox::SandboxError::Timeout { limit }) => {
             tool_err(tool, format!("git diff timed out after {limit:?}"))
         }
-        Err(e) => tool_err(tool, format!("cannot run git diff: {e}")),
+        Err(e) => tool_err(tool, format!("sandbox error running git diff: {e}")),
     }
 }
 
@@ -2394,6 +2399,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn git_status_runs_through_sandbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output();
+        let result = execute_git_status(dir.path());
+        // Verify we are on the sandboxed path: errors say "sandbox error" or
+        // "git status failed", never the old bare "cannot run git" message.
+        if !result.success {
+            assert!(
+                result.output.contains("sandbox error") || result.output.contains("git status failed"),
+                "unexpected error from non-sandboxed path: {}",
+                result.output,
+            );
+        }
+    }
+
     /// `execute_read_file` must refuse common private-key filenames.
     #[test]
     fn read_file_private_keys_are_denied() {
@@ -2409,6 +2433,23 @@ mod tests {
             assert!(
                 !result.success,
                 "ReadFile must refuse {name}; got success with output: {}",
+                result.output,
+            );
+        }
+    }
+
+    #[test]
+    fn git_diff_runs_through_sandbox() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output();
+        let result = execute_git_diff(dir.path());
+        if !result.success {
+            assert!(
+                result.output.contains("sandbox error") || result.output.contains("git diff failed"),
+                "unexpected error from non-sandboxed path: {}",
                 result.output,
             );
         }
@@ -2437,30 +2478,11 @@ mod tests {
     // -- Bug fix: git_status / git_diff timeout (Bug 1) ----------------------
     //
     // A hung git process (e.g. credential helper on a network mount) must not
-    // block the agent thread indefinitely.  We verify this by pointing the
-    // git tools at a fake "git" script that sleeps longer than COMMAND_TIMEOUT.
-    //
-    // To avoid actually sleeping 30 seconds in CI we patch PATH to intercept
-    // the `git` command with a tiny sleep that exceeds a short test-only
-    // timeout, then assert the tool returns a failure result (not a hang).
-    // Because the tool implementation always uses COMMAND_TIMEOUT (30 s) and
-    // we cannot override it from a test, we use a different strategy: we run
-    // a very fast sleep (1 s) and confirm the process actually finishes
-    // without hanging the test.  The real timeout guarantee is covered by
-    // the sandbox module's own `none_policy_timeout_fires` test.
-    //
-    // What we verify here:
-    //   1. When git is not available (non-repo dir), execute_git_status and
-    //      execute_git_diff return !success — not a hang.
-    //   2. The result output contains a meaningful error string, not an empty
-    //      output that could mask a silent timeout.
+    // block the agent thread indefinitely. The sandboxed path ensures a
+    // timeout is always set; we assert non-repo failures return promptly.
 
     #[test]
     fn git_status_timeout_returns_tool_error_not_hang() {
-        // Use a temp dir that is not a git repo so git status returns non-zero
-        // quickly (no actual git process hangs).  The important property being
-        // tested is that execute_git_status no longer calls Command::output()
-        // with no timeout; the sandboxed path ensures a timeout is always set.
         let tmp = TempDir::new().unwrap();
         let result = execute_tool(
             ToolType::GitStatus,
@@ -2468,8 +2490,6 @@ mod tests {
             tmp.path().to_str().unwrap(),
             &AgentRole::Actor,
         );
-        // Non-repo → git exits non-zero. The result must be !success with a
-        // non-empty error message.
         assert!(
             !result.success,
             "git status in non-repo must fail; got success with: {}",
@@ -2483,7 +2503,6 @@ mod tests {
 
     #[test]
     fn git_diff_timeout_returns_tool_error_not_hang() {
-        // Same as above for execute_git_diff.
         let tmp = TempDir::new().unwrap();
         let result = execute_tool(
             ToolType::GitDiff,

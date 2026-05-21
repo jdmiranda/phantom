@@ -137,10 +137,14 @@ pub struct OodaConfig {
     /// Minimum BDS score required to emit an action. Scores at or below this
     /// value produce `AiAction::DoNothing`. Default: 15.0 (Basic class ceiling).
     action_threshold: f32,
-    /// Per-behavior emission cooldown in seconds. Once a behavior emits, the
-    /// same `behavior_id` is suppressed for this many seconds. Default: 5.0.
-    /// Set to 0.0 to disable.
+    /// Default per-behavior emission cooldown in seconds. Default: 5.0.
     cooldown_secs: f32,
+    /// Per-behavior cooldown overrides. Keys are behavior IDs; values override
+    /// `cooldown_secs` for that specific behavior.
+    per_behavior_cooldowns: HashMap<String, f32>,
+    /// Seconds after loop creation during which no actions are emitted.
+    /// Prevents noisy suggestions before the user has done anything.
+    startup_grace_secs: f32,
 }
 
 impl OodaConfig {
@@ -154,13 +158,29 @@ impl OodaConfig {
             budget_ms,
             action_threshold,
             cooldown_secs: 5.0,
+            per_behavior_cooldowns: HashMap::new(),
+            startup_grace_secs: 60.0,
         }
     }
 
-    /// Builder: set the per-behavior emission cooldown in seconds.
+    /// Builder: set the default per-behavior emission cooldown in seconds.
     #[must_use]
     pub fn with_cooldown_secs(mut self, secs: f32) -> Self {
         self.cooldown_secs = secs;
+        self
+    }
+
+    /// Builder: override the cooldown for a specific behavior ID.
+    #[must_use]
+    pub fn with_behavior_cooldown(mut self, behavior_id: impl Into<String>, secs: f32) -> Self {
+        self.per_behavior_cooldowns.insert(behavior_id.into(), secs);
+        self
+    }
+
+    /// Builder: set the startup grace period in seconds.
+    #[must_use]
+    pub fn with_startup_grace_secs(mut self, secs: f32) -> Self {
+        self.startup_grace_secs = secs;
         self
     }
 
@@ -176,19 +196,37 @@ impl OodaConfig {
         self.action_threshold
     }
 
-    /// Per-behavior emission cooldown in seconds.
+    /// Default per-behavior emission cooldown in seconds.
     #[must_use]
     pub fn cooldown_secs(&self) -> f32 {
         self.cooldown_secs
+    }
+
+    /// Effective cooldown for a specific behavior ID.
+    #[must_use]
+    fn behavior_cooldown(&self, behavior_id: &str) -> f32 {
+        self.per_behavior_cooldowns
+            .get(behavior_id)
+            .copied()
+            .unwrap_or(self.cooldown_secs)
     }
 }
 
 impl Default for OodaConfig {
     fn default() -> Self {
+        let mut per_behavior_cooldowns = HashMap::new();
+        // "offer_help" fires at most once per 5 minutes — showing it every 5s
+        // was obnoxious noise before the user even typed a command.
+        per_behavior_cooldowns.insert("offer_help".into(), 300.0);
+        // "notify_change" is informational; once per minute is plenty.
+        per_behavior_cooldowns.insert("notify_change".into(), 60.0);
+
         Self {
             budget_ms: 2.0,
             action_threshold: 15.0,
             cooldown_secs: 5.0,
+            per_behavior_cooldowns,
+            startup_grace_secs: 60.0,
         }
     }
 }
@@ -269,6 +307,8 @@ pub struct OodaLoop {
     last_phases: Vec<&'static str>,
     /// Per-behavior emission timestamps for cooldown debounce.
     last_emitted: HashMap<String, Instant>,
+    /// When the loop was created — used to enforce the startup grace period.
+    init_time: Instant,
 }
 
 impl OodaLoop {
@@ -285,6 +325,7 @@ impl OodaLoop {
             metrics: TickMetrics::default(),
             last_phases: Vec::new(),
             last_emitted: HashMap::new(),
+            init_time: Instant::now(),
         }
     }
 
@@ -359,16 +400,26 @@ impl OodaLoop {
 
         if eval.winner_score > self.config.action_threshold {
             let now = Instant::now();
-            let cooldown = std::time::Duration::from_secs_f32(self.config.cooldown_secs);
-            let allowed = self
-                .last_emitted
-                .get(&eval.winner_id)
-                .is_none_or(|&last| now.duration_since(last) >= cooldown);
-            if allowed {
-                self.last_emitted.insert(eval.winner_id.clone(), now);
-                self.metrics.actions_emitted += 1;
-                let action = Self::behavior_to_action(&eval.winner_id, &snapshot);
-                return vec![action];
+
+            // Startup grace — no proactive suggestions until the user has had
+            // time to settle in.
+            let in_grace = self.config.startup_grace_secs > 0.0
+                && now.duration_since(self.init_time).as_secs_f32()
+                    < self.config.startup_grace_secs;
+
+            if !in_grace {
+                let cooldown_secs = self.config.behavior_cooldown(&eval.winner_id);
+                let cooldown = std::time::Duration::from_secs_f32(cooldown_secs);
+                let allowed = self
+                    .last_emitted
+                    .get(&eval.winner_id)
+                    .is_none_or(|&last| now.duration_since(last) >= cooldown);
+                if allowed {
+                    self.last_emitted.insert(eval.winner_id.clone(), now);
+                    self.metrics.actions_emitted += 1;
+                    let action = Self::behavior_to_action(&eval.winner_id, &snapshot);
+                    return vec![action];
+                }
             }
         }
         Vec::new()
@@ -456,7 +507,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn default_loop() -> OodaLoop {
-        OodaLoop::new(OodaConfig::default())
+        // Tests call tick() immediately, so disable the startup grace period.
+        OodaLoop::new(OodaConfig::default().with_startup_grace_secs(0.0))
     }
 
     /// A world state that should reliably trigger the `fix_error` Reaction
@@ -656,7 +708,7 @@ mod tests {
 
     #[test]
     fn cooldown_suppresses_repeated_emission() {
-        let mut ooda = OodaLoop::new(OodaConfig::default());
+        let mut ooda = OodaLoop::new(OodaConfig::default().with_startup_grace_secs(0.0));
         let world = error_world();
         let first = ooda.tick(&world, 16);
         assert!(!first.is_empty(), "first tick must emit");
@@ -670,7 +722,7 @@ mod tests {
 
     #[test]
     fn cooldown_zero_allows_repeated_emission() {
-        let mut ooda = OodaLoop::new(OodaConfig::default().with_cooldown_secs(0.0));
+        let mut ooda = OodaLoop::new(OodaConfig::default().with_cooldown_secs(0.0).with_startup_grace_secs(0.0));
         let world = error_world();
         assert!(!ooda.tick(&world, 16).is_empty());
         assert!(!ooda.tick(&world, 16).is_empty(), "cooldown_secs=0 should allow repeats");

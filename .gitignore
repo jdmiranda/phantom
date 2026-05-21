@@ -19,5 +19,20 @@
 # Claude Code worktrees and local state
 .claude/
 
+# Phantom runtime artefacts (loop specs in .phantom/loops/ ARE checked in;
+# everything else under .phantom/ is per-run state and must not pollute git)
+.phantom/brain-audit.jsonl
+.phantom/forever-logs/
+.phantom/loops/.runlock
+.phantom/proposed-skills/
+.phantom/tmp/
+docs/html/
+
 # Reference material (copyrighted / bulky)
 docs/references/*.pdf
+
+# Engineering docs site — source is committed under docs/engineering/{src,theme}/;
+# vendored mermaid.min.js / mermaid-init.js are ALSO committed (output of
+# `mdbook-mermaid install .`, needed by every build).  Only the rendered
+# book/ output is gitignored — it's regenerable via `mdbook build`.
+docs/engineering/book/

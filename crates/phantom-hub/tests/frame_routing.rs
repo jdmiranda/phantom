@@ -6,7 +6,7 @@
 //! tokio mpsc channel acting as a mock Phantom client.
 
 use phantom_hub::{
-    registry::{new_shared, PhantomId, OUTBOUND_CHANNEL_CAPACITY},
+    registry::{new_shared_for_tests, PhantomId, OUTBOUND_CHANNEL_CAPACITY},
     router::{
         deliver_response, forward, new_idempotency_map, JsonRpcRequest, JsonRpcResponse,
         RouteError,
@@ -57,7 +57,7 @@ async fn register_mock(
 
 #[tokio::test]
 async fn forward_round_trip_succeeds() {
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let idem_map = new_idempotency_map();
     let mut rx = register_mock(&registry, "phantom-rt").await;
 
@@ -89,7 +89,7 @@ async fn forward_round_trip_succeeds() {
 
 #[tokio::test]
 async fn forward_returns_disconnected_after_unregister() {
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let idem_map = new_idempotency_map();
     let _rx = register_mock(&registry, "disc-test").await;
 
@@ -128,7 +128,7 @@ async fn forward_returns_disconnected_after_unregister() {
 
 #[tokio::test]
 async fn forward_not_found_for_unknown_phantom() {
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let idem_map = new_idempotency_map();
 
     let result = forward(
@@ -158,7 +158,7 @@ async fn forward_timeout_when_phantom_silent() {
         std::env::set_var("HUB_FORWARD_TIMEOUT_SECS", "0");
     }
 
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let idem_map = new_idempotency_map();
     let _rx = register_mock(&registry, "slow-phantom").await;
 
@@ -182,7 +182,7 @@ async fn forward_timeout_when_phantom_silent() {
 
 #[tokio::test]
 async fn forward_delivers_to_correct_phantom_only() {
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let idem_map = new_idempotency_map();
     let mut rx_a = register_mock(&registry, "pa").await;
     let mut rx_b = register_mock(&registry, "pb").await;
@@ -221,7 +221,7 @@ async fn forward_delivers_to_correct_phantom_only() {
 
 #[tokio::test]
 async fn hub_rewrites_id_on_wire_and_restores_original_on_response() {
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let idem_map = new_idempotency_map();
     let mut rx = register_mock(&registry, "id-phantom").await;
 
@@ -249,7 +249,7 @@ async fn hub_rewrites_id_on_wire_and_restores_original_on_response() {
 
 #[tokio::test]
 async fn registry_rejects_empty_phantom_id_string() {
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let (tx, _rx) = mpsc::channel::<JsonRpcRequest>(8);
     // An empty string PhantomId is technically allowed by the registry type
     // but the WSS handler rejects empty device_token before inserting.
@@ -275,7 +275,7 @@ async fn registry_rejects_empty_phantom_id_string() {
 
 #[tokio::test]
 async fn concurrent_requests_to_same_phantom_are_correlated() {
-    let registry = new_shared();
+    let registry = new_shared_for_tests();
     let idem_map = new_idempotency_map();
     let mut rx = register_mock(&registry, "multi-req").await;
 

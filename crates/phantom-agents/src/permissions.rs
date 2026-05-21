@@ -9,6 +9,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::role::AgentRole;
 use crate::ToolType;
 
 // ---------------------------------------------------------------------------
@@ -64,9 +65,24 @@ impl PermissionSet {
     }
 
     /// Read-only: `ReadFiles` + `GitAccess` only.
-    #[must_use] 
+    #[must_use]
     pub fn read_only() -> Self {
         Self::new(&[Permission::ReadFiles, Permission::GitAccess])
+    }
+
+    /// Derive an appropriate `PermissionSet` from an [`AgentRole`].
+    ///
+    /// Only roles that carry [`crate::role::CapabilityClass::Act`] receive full
+    /// permissions. Every other role gets the read-only set so that the
+    /// `check_tool` gate in `execute.rs` is not permanently bypassed.
+    #[must_use]
+    pub fn for_role(role: &AgentRole) -> Self {
+        use crate::role::CapabilityClass;
+        if role.has(CapabilityClass::Act) {
+            Self::all()
+        } else {
+            Self::read_only()
+        }
     }
 
     /// Check whether a specific permission is granted.
@@ -226,6 +242,43 @@ mod tests {
                 set.check_tool(tool).is_ok(),
                 "all() should allow {:?}",
                 tool,
+            );
+        }
+    }
+
+    #[test]
+    fn inspector_role_cannot_run_commands() {
+        use crate::role::AgentRole;
+        let roles = [AgentRole::Reflector, AgentRole::Indexer, AgentRole::Watcher];
+        for role in &roles {
+            let set = PermissionSet::for_role(role);
+            let err = set.check_tool(&ToolType::RunCommand).unwrap_err();
+            assert_eq!(
+                err.required,
+                Permission::RunCommands,
+                "{role:?} must not have RunCommands permission"
+            );
+        }
+    }
+
+    #[test]
+    fn non_actor_roles_retain_read_permission() {
+        use crate::role::AgentRole;
+        let roles = [
+            AgentRole::Reflector,
+            AgentRole::Indexer,
+            AgentRole::Watcher,
+            AgentRole::Conversational,
+        ];
+        for role in &roles {
+            let set = PermissionSet::for_role(role);
+            assert!(
+                set.check_tool(&ToolType::ReadFile).is_ok(),
+                "{role:?} must retain ReadFile permission"
+            );
+            assert!(
+                set.check_tool(&ToolType::GitStatus).is_ok(),
+                "{role:?} must retain GitStatus permission"
             );
         }
     }

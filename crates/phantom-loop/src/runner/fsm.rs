@@ -64,6 +64,14 @@ use crate::spec::{LoopQuarantinePolicy, LoopSpec};
 /// available work. C3's CLI can promote this to a config knob if needed.
 const IDLE_BACKOFF: Duration = Duration::from_millis(100);
 
+/// Max consecutive transient source errors before the loop gives up.
+/// GitHub's GraphQL search occasionally returns HTTP 504; we don't want one
+/// flaky poll to kill a long-running discovery loop.
+const MAX_SOURCE_ERROR_STREAK: u32 = 5;
+
+/// Exponential backoff cap when retrying after a source error.
+const SOURCE_ERROR_BACKOFF_CAP: Duration = Duration::from_secs(60);
+
 // ---------------------------------------------------------------------------
 // LoopState
 // ---------------------------------------------------------------------------
@@ -140,6 +148,9 @@ pub struct LoopRunner {
     /// the `Awaiting → Validating` edge.
     pending_completion:
         Option<tokio::sync::oneshot::Receiver<Result<serde_json::Value, DispatchError>>>,
+    /// Consecutive transient source errors. Reset on any non-error pull.
+    /// When this exceeds [`MAX_SOURCE_ERROR_STREAK`] the loop stops.
+    pull_error_streak: u32,
 }
 
 impl LoopRunner {
@@ -164,6 +175,7 @@ impl LoopRunner {
                 since: Instant::now(),
             },
             pending_completion: None,
+            pull_error_streak: 0,
         }
     }
 
@@ -242,6 +254,7 @@ impl LoopRunner {
         let ctx = self.ctx();
         match self.source.next(&ctx) {
             LoopPullResult::Available(input) => {
+                self.pull_error_streak = 0;
                 tracing::debug!(
                     loop_id = %self.spec.id,
                     key = %input.key,
@@ -251,6 +264,7 @@ impl LoopRunner {
                 LoopState::Dispatching { input }
             }
             LoopPullResult::Empty => {
+                self.pull_error_streak = 0;
                 tracing::trace!(loop_id = %self.spec.id, "source empty; backing off");
                 tokio::time::sleep(IDLE_BACKOFF).await;
                 LoopState::Pulling
@@ -262,10 +276,31 @@ impl LoopRunner {
                 }
             }
             LoopPullResult::Error(e) => {
-                tracing::warn!(loop_id = %self.spec.id, error = %e, "source error; stopping");
-                LoopState::Stopped {
-                    reason: format!("source error: {e}"),
+                self.pull_error_streak += 1;
+                if self.pull_error_streak > MAX_SOURCE_ERROR_STREAK {
+                    tracing::warn!(
+                        loop_id = %self.spec.id,
+                        error = %e,
+                        streak = self.pull_error_streak,
+                        "source error streak exceeded; stopping",
+                    );
+                    return LoopState::Stopped {
+                        reason: format!("source error: {e}"),
+                    };
                 }
+                let backoff = std::cmp::min(
+                    Duration::from_secs(1u64 << (self.pull_error_streak - 1).min(6)),
+                    SOURCE_ERROR_BACKOFF_CAP,
+                );
+                tracing::warn!(
+                    loop_id = %self.spec.id,
+                    error = %e,
+                    streak = self.pull_error_streak,
+                    backoff_secs = backoff.as_secs(),
+                    "source error; retrying after backoff",
+                );
+                tokio::time::sleep(backoff).await;
+                LoopState::Pulling
             }
         }
     }
@@ -350,6 +385,29 @@ impl LoopRunner {
     }
 
     async fn validate(&mut self, input: LoopInput, result: Value) -> LoopState {
+        // `abort_task` short-circuit. The agent emits the `abort_task`
+        // lifecycle tool when it has decided the task is infeasible. The
+        // api.rs parser converts that into a synthetic complete_task payload
+        // `{aborted: true, reason: "..."}`. Without this short-circuit the
+        // payload would be schema-checked against the loop's exit_schema —
+        // which it never satisfies — and the quarantine policy would either
+        // park the loop or silently drop the abort signal. Treat the abort
+        // as a clean terminal state for this iteration: skip effects, log
+        // the reason, and resume pulling.
+        if result.get("aborted").and_then(|v| v.as_bool()) == Some(true) {
+            let reason = result
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no reason supplied)");
+            tracing::info!(
+                loop_id = %self.spec.id,
+                key = %input.key,
+                reason = %reason,
+                "agent emitted abort_task — skipping iteration cleanly",
+            );
+            return LoopState::Pulling;
+        }
+
         // Validate against the compiled schema if present.
         if let Some(schema) = self.exit_schema.as_ref()
             && let Err(errors) = schema.validate(&result)
@@ -386,9 +444,21 @@ impl LoopRunner {
         }
     }
 
-    /// Translate a [`DispatchError`] into the runner's stop reason. All
-    /// three variants are terminal: a failed dispatch indicates a broken
-    /// substrate, which we don't retry-around in MVP.
+    /// Translate a [`DispatchError`] into the runner's next state.
+    ///
+    /// `DispatchError::Execution` (agent thrashed past iteration limit,
+    /// agent timed out, agent panicked on a tool) is a PER-ITERATION
+    /// failure, not substrate breakage — under
+    /// [`LoopQuarantinePolicy::SkipAndContinue`] we log it, skip the
+    /// iteration, and resume pulling. Without that, a single bad agent
+    /// prompt kills the whole loop and the autonomous chain dies (the
+    /// 2026-05-20 triager → implementer chain hit this exactly once and
+    /// took the implementer down).
+    ///
+    /// `DispatchError::Spawn` and `DispatchError::Cancelled` remain
+    /// terminal — those indicate the substrate itself is broken (queue
+    /// poisoned, completion channel closed prematurely) and retrying
+    /// past them is futile until the substrate is rebuilt.
     fn handle_dispatch_failure(
         &self,
         input: LoopInput,
@@ -398,10 +468,21 @@ impl LoopRunner {
             loop_id = %self.spec.id,
             key = %input.key,
             error = %err,
-            "dispatch/await failed; stopping",
+            on_quarantine = ?self.spec.on_quarantine,
+            "dispatch/await failed",
         );
-        LoopState::Stopped {
-            reason: format!("dispatch failure: {err}"),
+        match (&err, self.spec.on_quarantine) {
+            (DispatchError::Execution(_), LoopQuarantinePolicy::SkipAndContinue) => {
+                tracing::warn!(
+                    loop_id = %self.spec.id,
+                    key = %input.key,
+                    "agent execution failure — skipping iteration under SkipAndContinue policy",
+                );
+                LoopState::Pulling
+            }
+            _ => LoopState::Stopped {
+                reason: format!("dispatch failure: {err}"),
+            },
         }
     }
 
@@ -409,6 +490,16 @@ impl LoopRunner {
     /// produced `result`, then decide whether to continue or stop based on
     /// the presence of [`LoopEffect::StopLoop`].
     fn run_effects_and_continue(&self, input: &LoopInput, result: &Value) -> LoopState {
+        // Visibility: every successful complete_task payload is logged at
+        // INFO so operators can trace what each agent decided (the
+        // log_to_bus effect is still a C2 stub). The triager loop's
+        // refine/close/comment decisions are otherwise invisible.
+        tracing::info!(
+            loop_id = %self.spec.id,
+            key = %input.key,
+            result = %result,
+            "iteration completed; result payload",
+        );
         let effects: &[LoopEffect] = &self.spec.on_complete;
         let ctx = EffectContext {
             result,
@@ -595,5 +686,64 @@ mod tests {
         // The synthetic result wraps the LoopInput verbatim.
         let msg = queues.get_or_create("out").pop().expect("one enqueued message");
         assert_eq!(msg.payload, json!({"key": "k", "payload": {"surfaced": true}}));
+    }
+
+    #[tokio::test]
+    async fn abort_task_short_circuits_schema_validation() {
+        // Regression: the agent's `abort_task` lifecycle signal is mapped by
+        // api.rs to a synthetic `complete_task` payload `{aborted: true,
+        // reason: "..."}`. That payload should NOT be schema-checked against
+        // the loop's exit_schema (which the abort payload never satisfies);
+        // it should resume pulling cleanly. Without this short-circuit a
+        // strict schema like the triager's would quarantine on every abort.
+        let strict_schema = json!({
+            "type": "object",
+            "required": ["issue_number", "decision"],
+            "properties": {
+                "issue_number": {"type": "integer"},
+                "decision": {"type": "string"}
+            }
+        });
+        let mut spec = make_spec_with_agent(strict_schema);
+        // Quarantine policy that WOULD stop the loop if schema validation
+        // ran. The short-circuit must skip the validator entirely.
+        spec.on_quarantine = LoopQuarantinePolicy::FailAndStop;
+        // Sanity: enqueue effect — must NOT fire under abort_task.
+        spec.on_complete = vec![LoopEffect::EnqueueTo {
+            queue: "downstream".to_string(),
+            fields: vec![],
+        }];
+
+        let schema = ExitSchema::compile(&spec.agent.as_ref().unwrap().exit_schema).ok();
+        assert!(schema.is_some(), "schema must compile");
+
+        let source = Box::new(OneShotSource {
+            input: Some(LoopInput {
+                key: "issue-42".to_string(),
+                payload: json!({"issue_number": 42}),
+                correlation_id: CorrelationId::new("c"),
+            }),
+        });
+        let queues = Arc::new(LoopQueueRegistry::new());
+        let runner = LoopRunner::new(
+            Arc::new(spec),
+            schema,
+            source,
+            queues.clone(),
+            // Dispatcher returns an abort_task payload — exactly what
+            // api.rs would emit on `abort_task`.
+            Arc::new(StubOk {
+                result: json!({"aborted": true, "reason": "infeasible"}),
+            }),
+        );
+        let reason = runner.run().await;
+        // Loop should exit because the source is exhausted, NOT because of
+        // schema-validation quarantine.
+        assert_eq!(reason, "source exhausted");
+        // Effects must NOT run on an abort — downstream queue stays empty.
+        assert!(
+            queues.get_or_create("downstream").pop().is_none(),
+            "abort_task must not fire on_complete effects"
+        );
     }
 }

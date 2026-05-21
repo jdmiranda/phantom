@@ -275,9 +275,16 @@ impl HardExclusions {
             }
         }
         // Labels that explicitly opt out (§5.3 #4).
+        // `auto-triage-skip` is applied by the triager loop when it decides
+        // the issue is not directly actionable (tracking epics, meta-work).
+        // Without this exclusion the brain re-enqueues the same epic every
+        // daemon restart and the triager bills another agent run to make
+        // the same skip decision again.
         if candidate.has_label("do-not-auto-implement")
             || candidate.has_label("needs-discussion")
             || candidate.has_label("needs-spec")
+            || candidate.has_label("auto-triage-skip")
+            || candidate.has_label("auto-triage-close")
         {
             return Some("opt-out label present");
         }
@@ -732,8 +739,16 @@ impl SelfImprovementState {
             );
         }
 
-        // 5. Threshold (§5.4 per-band).
-        let threshold = self.trust_budget.threshold();
+        // 5. Threshold (§5.4 per-band). The env var
+        // `PHANTOM_SCORE_THRESHOLD` overrides the band threshold for live
+        // testing — useful when phantom's own issue board has no signals
+        // that the scorer rewards (no priority labels, no recent CI fails,
+        // no comments) and every candidate scores ~0.25, which can't cross
+        // any band's default threshold.
+        let threshold = std::env::var("PHANTOM_SCORE_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or_else(|| self.trust_budget.threshold());
         if score < threshold {
             return self.record(
                 candidate,

@@ -5,13 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+phantom-recall = { path = "../phantom-recall" }
+phantom-embeddings = { path = "../phantom-embeddings" }
 phantom-semantic = { path = "../phantom-semantic" }
 phantom-agents = { path = "../phantom-agents" }
 phantom-adapter = { path = "../phantom-adapter" }
 phantom-context = { path = "../phantom-context" }
 phantom-memory = { path = "../phantom-memory" }
 phantom-history = { path = "../phantom-history" }
-phantom-recall = { path = "../phantom-recall" }
 
 log.workspace = true
 anyhow.workspace = true

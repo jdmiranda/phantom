@@ -31,6 +31,20 @@ pub enum LoopEffect {
         fields: Vec<FieldMap>,
     },
 
+    /// Conditionally push a typed message onto a named queue. The effect
+    /// fires iff the iteration result has a string-valued field at
+    /// `when.field` equal to `when.equals`. Used by triager-style loops
+    /// that fan out by decision: the triager agent emits
+    /// `{decision: "implement", ...}` and only the matching `EnqueueToIf`
+    /// effects forward to the implementer queue; `close` / `comment` /
+    /// `research` decisions skip the enqueue silently.
+    EnqueueToIf {
+        queue: String,
+        when: WhenClause,
+        #[serde(default)]
+        fields: Vec<FieldMap>,
+    },
+
     /// Emit a custom event on the cross-loop bus. The runner will forward
     /// the iteration result verbatim under the given `event_kind`.
     LogToBus { event_kind: String },
@@ -39,6 +53,18 @@ pub enum LoopEffect {
     /// transitions to a terminal `Stopped` state — restarting requires a
     /// fresh `phantom loop run`.
     StopLoop,
+}
+
+/// Guard for [`LoopEffect::EnqueueToIf`]. Resolves a dotted path inside
+/// the iteration result and fires the effect when the resolved value is a
+/// string equal to `equals`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WhenClause {
+    /// Dotted JSON pointer-like path into the iteration result, e.g.
+    /// `result.decision`.
+    pub field: String,
+    /// String the resolved value must equal.
+    pub equals: String,
 }
 
 /// Maps a dotted path inside an iteration result onto a target field on the
