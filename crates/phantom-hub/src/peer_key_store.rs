@@ -37,10 +37,13 @@
 //! ```
 //!
 //! The file is written atomically: a sibling `*.tmp` is created with mode
-//! `0600` set in the same `open(2)` call, fsync'd, then `hard_link`-ed into
+//! `0600` set in the same `open(2)` call, fsync'd, then `rename(2)`-d into
 //! place at the destination so a crash mid-write cannot leave a partial file.
-//! If the link fails because some other writer beat us, we re-read their
-//! canonical file rather than clobber it.
+//! `rename` (rather than the `hard_link`-with-fallback used by
+//! `phantom-net::identity` for first-write-wins identity bootstrapping) is
+//! the right primitive here because [`PeerKeyStore`] is the authoritative
+//! writer: it always wants to replace the previous map, not "lose gracefully
+//! on conflict".
 //!
 //! # Per-process cache
 //!
@@ -63,6 +66,25 @@ use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
 use crate::registry::PhantomId;
+
+// ---------------------------------------------------------------------------
+// Shared env-mutation serial (used by tests and by the test-helper in
+// `registry::new_shared_for_tests`).  A single crate-level `Mutex` ensures
+// `PHANTOM_PEER_KEYS_FILE` mutations are serialised across every call site —
+// unit tests in either module and the in-tree test-helper that is always
+// compiled.
+//
+// Previously each module defined its own `ENV_SERIAL` static, which left two
+// callers free to interleave their env mutations.  See PR #640 review.
+// ---------------------------------------------------------------------------
+
+/// Process-wide serialisation point for `PHANTOM_PEER_KEYS_FILE` mutations.
+///
+/// `pub(crate)` so the test-helper in `registry.rs` and the unit tests in
+/// `peer_key_store.rs` can both lock the same mutex.  Held across the
+/// `set_var` / `PeerKeyStore::open` / `remove_var` sequence so that two
+/// concurrent calls cannot trample each other's env state.
+pub(crate) static ENV_SERIAL: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Path resolution
@@ -192,26 +214,35 @@ impl PeerKeyStore {
     /// Remove the verifying key for `id` and atomically persist the full map
     /// to disk.
     ///
-    /// Removing an id that is not registered is not an error — the on-disk
-    /// file is rewritten to confirm the empty entry.
+    /// Removing an id that is not registered is a no-op — the on-disk file
+    /// is left untouched.  This skips an unnecessary fsync round-trip for the
+    /// common case where the caller defensively removes a key that was never
+    /// registered.
     pub fn remove(&self, id: &PhantomId) -> Result<()> {
         let mut cache = self
             .cache
             .lock()
             .map_err(|_| anyhow!("peer-key cache mutex poisoned"))?;
-        cache.remove(id);
+        if cache.remove(id).is_none() {
+            return Ok(());
+        }
         flush_locked(&self.path, &cache)
     }
 }
 
 impl std::fmt::Debug for PeerKeyStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Don't dump the keys themselves in Debug output.
-        let len = self.cache.lock().map(|c| c.len()).unwrap_or(0);
-        f.debug_struct("PeerKeyStore")
-            .field("path", &self.path)
-            .field("entries", &len)
-            .finish()
+        // Don't dump the keys themselves in Debug output.  Use `try_lock`
+        // rather than `lock` so a format call that occurs while a panic
+        // unwinds (and the same thread already holds the mutex) cannot
+        // deadlock — `Debug` should never block, never panic.
+        let mut dbg = f.debug_struct("PeerKeyStore");
+        dbg.field("path", &self.path);
+        match self.cache.try_lock() {
+            Ok(c) => dbg.field("entries", &c.len()),
+            Err(_) => dbg.field("entries", &"<locked>"),
+        };
+        dbg.finish()
     }
 }
 
@@ -360,9 +391,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn encode_hex_32(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
     let mut s = String::with_capacity(64);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        // `write!` on a `String` is infallible; the `unwrap` here cannot
+        // panic in practice.  Writing two ASCII hex digits per iteration
+        // avoids the per-byte `format!` allocation of the previous impl.
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -400,10 +435,12 @@ mod tests {
     use rand::rngs::OsRng;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Tests that mutate `PHANTOM_PEER_KEYS_FILE` serialize through ENV_SERIAL
-    // because env vars are process-global.
+    // Tests that mutate `PHANTOM_PEER_KEYS_FILE` serialize through the
+    // crate-level `super::ENV_SERIAL` because env vars are process-global.
+    // The shared mutex is also used by `registry::new_shared_for_tests`, so
+    // unit tests here and the helper there can never interleave.
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ENV_SERIAL: Mutex<()> = Mutex::new(());
+    use super::ENV_SERIAL;
 
     fn tmp_peer_keys_file() -> PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);

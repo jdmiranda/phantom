@@ -394,15 +394,18 @@ pub fn new_shared_with_store(peer_keys: PeerKeyStore) -> SharedRegistry {
 /// itself.  Production code paths use [`new_shared`] instead.
 #[must_use]
 pub fn new_shared_for_tests() -> SharedRegistry {
-    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ENV_SERIAL: StdMutex<()> = StdMutex::new(());
 
     // Serialise env mutation across concurrent calls — the env var is set
     // just long enough for `PeerKeyStore::open` to capture the path, then
-    // cleared so it does not leak into other code paths.
-    let _serial = ENV_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    // cleared so it does not leak into other code paths.  We share the
+    // crate-level `peer_key_store::ENV_SERIAL` mutex so that unit tests in
+    // `peer_key_store` and registry-side helpers never interleave their
+    // env mutations.
+    let _serial = crate::peer_key_store::ENV_SERIAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!(
         "phantom-hub-test-shared-{}-{}.json",
@@ -410,7 +413,7 @@ pub fn new_shared_for_tests() -> SharedRegistry {
         n
     ));
 
-    // SAFETY: env mutation is serialised via ENV_SERIAL.
+    // SAFETY: env mutation is serialised via the crate-level ENV_SERIAL.
     unsafe { std::env::set_var("PHANTOM_PEER_KEYS_FILE", &path) };
     let store = PeerKeyStore::open().expect("test peer-key store must open");
     unsafe { std::env::remove_var("PHANTOM_PEER_KEYS_FILE") };
@@ -447,13 +450,19 @@ mod tests {
     /// behind on disk; tests that care about cleanup pass an explicit
     /// `CleanupGuard`.
     fn make_registry() -> ConnectionRegistry {
+        // Serialise env mutation via the crate-level shared mutex.  Without
+        // this, two concurrent `make_registry` calls (or one concurrent with
+        // a `peer_key_store` unit test) could race on the env var and the
+        // wrong path would be captured by `PeerKeyStore::open` (see PR #640
+        // review).
+        let _serial = crate::peer_key_store::ENV_SERIAL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let n = REG_TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
         let path: PathBuf =
             std::env::temp_dir().join(format!("phantom-hub-registry-test-{pid}-{n}.json"));
-        // SAFETY: each call uses a unique path so concurrent tests do not race
-        // on the env var; the value the store reads is captured at the
-        // PeerKeyStore::open call below.
+        // SAFETY: env mutation is serialised via the crate-level ENV_SERIAL.
         unsafe { std::env::set_var("PHANTOM_PEER_KEYS_FILE", &path) };
         let reg = ConnectionRegistry::new().expect("registry new must succeed in tests");
         // Best-effort cleanup of the env var so it doesn't leak into other

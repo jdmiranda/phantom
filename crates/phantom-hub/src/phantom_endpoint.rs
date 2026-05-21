@@ -244,9 +244,23 @@ pub async fn register(
                 .into_response();
         }
     };
-    {
+    // Persisting the key is synchronous fs I/O (open / write_all / fsync /
+    // rename / parent-dir fsync) — running it inline on a Tokio worker would
+    // block the executor under registration bursts.  We:
+    //   1. Clone the `Arc`-backed `PeerKeyStore` handle out of the registry
+    //      so we don't hold any registry lock across the blocking call.
+    //   2. Dispatch the synchronous write to `spawn_blocking`, awaiting the
+    //      JoinHandle.
+    // Cloning the store is cheap: both `path` and `cache` live behind an Arc.
+    let store = {
         let reg = state.registry.read().await;
-        if let Err(e) = reg.insert_peer_key(PhantomId::new(body.peer_id.clone()), vk) {
+        reg.peer_key_store().clone()
+    };
+    let phantom_id_for_store = PhantomId::new(body.peer_id.clone());
+    let blocking_result = tokio::task::spawn_blocking(move || store.insert(phantom_id_for_store, vk)).await;
+    match blocking_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
             // Non-fatal: a disk-write failure should not block JWT issuance,
             // but we log loudly so operators can investigate.  The peer can
             // still connect with the JWT we just issued; signature-checked
@@ -255,6 +269,12 @@ pub async fn register(
             warn!(
                 phantom_id = %body.peer_id,
                 "register: persisting peer key failed: {e}"
+            );
+        }
+        Err(join_err) => {
+            warn!(
+                phantom_id = %body.peer_id,
+                "register: peer-key persistence task panicked: {join_err}"
             );
         }
     }
