@@ -18,6 +18,22 @@ pub type SessionId = u32;
 /// Unique job identifier.
 pub type JobId = u64;
 
+/// Identifies which fast-path lifecycle gate an agent took.
+///
+/// Issue #648 — used by [`Event::FastPathTaken`] so consumers can
+/// distinguish auto-approve (Queued → Working skipping AwaitingApproval)
+/// from a future skip-planning fast path without string-matching the
+/// `reason` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FastPathKind {
+    /// `Agent::try_auto_approve` — the `auto_approve()` disposition fast
+    /// path that bypasses `Planning → AwaitingApproval`.
+    AutoApprove,
+    /// `policy.skip_planning` — reserved for the loop-overseer audit work
+    /// once a production reader exists (issue #648 defers wiring this).
+    SkipPlanning,
+}
+
 /// Typed event variants for the Phantom event bus.
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -72,8 +88,39 @@ pub enum Event {
         /// Reconciler spawn tag echoed back so the brain can route the
         /// completion to the correct `active_dispatches` entry.
         spawn_tag: Option<u64>,
+        /// Issue #646 spike: typed result payload supplied by the agent
+        /// through `complete_task`, when the agent was spawned with
+        /// `requires_complete_task = true`.
+        ///
+        /// Phase 1 (this spike) preserves the JSON object end-to-end;
+        /// Phase 2 binds it to a per-task JSON schema.
+        ///
+        /// `None` for agents that do not opt into `requires_complete_task`,
+        /// for legacy state-implicit terminations, and for `AgentError` →
+        /// `AgentTaskComplete { success: false, .. }` synthesis paths.
+        result: Option<serde_json::Value>,
     },
     AgentError { agent_id: AgentId, error: String },
+
+    /// Issue #648: a fast-path lifecycle gate was bypassed.
+    ///
+    /// Emitted by `Agent::try_auto_approve_with_audit` (and any future
+    /// fast-path entry point) so consumers — inspector pane, brain
+    /// reconciler, policy auditors — can see *why* the normal
+    /// `Planning → AwaitingApproval` gate was skipped. The variant is fired
+    /// even when the FSM transition fails, so observers also catch the
+    /// case where a fast-path was *attempted* but refused (`kind` tells
+    /// which fast-path was requested; the audit log envelope carries the
+    /// `approved` boolean).
+    FastPathTaken {
+        /// Which agent took (or attempted) the fast path.
+        agent_id: AgentId,
+        /// Which fast-path the agent used.
+        kind: FastPathKind,
+        /// Short human-readable explanation (e.g. the disposition name,
+        /// or `"disposition <X> is not auto-approvable"` on refusal).
+        reason: String,
+    },
 
     // -- Sessions / Focus ----------------------------------------------------
     SessionSwitched { from: SessionId, to: SessionId },
@@ -129,7 +176,8 @@ impl Event {
             Self::AgentSpawned { .. }
             | Self::AgentProgress { .. }
             | Self::AgentTaskComplete { .. }
-            | Self::AgentError { .. } => EventTopic::Agents,
+            | Self::AgentError { .. }
+            | Self::FastPathTaken { .. } => EventTopic::Agents,
 
             Self::SessionSwitched { .. } | Self::FocusChanged { .. } => EventTopic::Sessions,
 
@@ -220,12 +268,39 @@ mod tests {
                 success: true,
                 summary: "done".into(),
                 spawn_tag: None,
+                result: None,
             },
             Event::AgentError { agent_id: 1, error: "oops".into() },
         ];
         for event in &events {
             assert_eq!(event.topic(), EventTopic::Agents);
         }
+    }
+
+    #[test]
+    fn fast_path_taken_has_agents_topic() {
+        // Issue #648: the new fast-path audit variant must route on the
+        // same topic as the other agent lifecycle events so existing
+        // subscribers pick it up without rewiring.
+        let event = Event::FastPathTaken {
+            agent_id: 42,
+            kind: FastPathKind::AutoApprove,
+            reason: "Disposition::Chat is auto-approvable".into(),
+        };
+        assert_eq!(event.topic(), EventTopic::Agents);
+    }
+
+    #[test]
+    fn fast_path_taken_is_clone_and_debug() {
+        let event = Event::FastPathTaken {
+            agent_id: 7,
+            kind: FastPathKind::SkipPlanning,
+            reason: "policy.skip_planning=true".into(),
+        };
+        let cloned = event.clone();
+        let s = format!("{cloned:?}");
+        assert!(s.contains("FastPathTaken"));
+        assert!(s.contains("SkipPlanning"));
     }
 
     #[test]

@@ -39,6 +39,37 @@ impl App {
         &mut self,
         opts: AgentSpawnOpts,
     ) -> Option<u64> {
+        // -- MCP discovery barrier (Bug 3 fix) --------------------------------
+        //
+        // Wait up to 500 ms for the async MCP external-server discovery task to
+        // complete so that the spawned agent receives the full external tool
+        // list.  If discovery is still running after 500 ms we proceed anyway —
+        // the agent will have an empty external tool list but can still function
+        // (it degrades gracefully, e.g. only built-in tools are available).
+        //
+        // This is a spin-wait on the background thread; the winit event loop
+        // will be briefly blocked only on the very first agent spawn immediately
+        // after boot.  Subsequent spawns see `mcp_discovery_complete = true`
+        // instantly and take the fast path.
+        {
+            use std::sync::atomic::Ordering;
+            const DISCOVERY_TIMEOUT_MS: u64 = 500;
+            const POLL_INTERVAL_MS: u64 = 10;
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(DISCOVERY_TIMEOUT_MS);
+
+            while !self.mcp_discovery_complete.load(Ordering::Acquire) {
+                if std::time::Instant::now() >= deadline {
+                    warn!(
+                        "agent spawn: MCP discovery not complete after {DISCOVERY_TIMEOUT_MS} ms, \
+                         proceeding with empty external tool list"
+                    );
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            }
+        }
+
         // Extract metadata before opts is moved into spawn_with_opts.
         let spawn_tag = opts.spawn_tag;
         // role/label carry Composer spawn_subagent metadata (#224).
@@ -92,6 +123,19 @@ impl App {
             );
         }
 
+        // Snapshot project memory so the agent has stored facts (conventions,
+        // warnings, config) in its system prompt from the first turn.
+        let memory_snapshot: Vec<(String, String)> = self
+            .memory
+            .as_ref()
+            .map(|m| {
+                m.all()
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Create the agent and register in the new split pane.
         //
         // Hand the App's canonical `BlockedEventSink` to the pane so that
@@ -108,6 +152,7 @@ impl App {
             Some(self.blocked_event_sink.clone()),
             None,
             self.privacy_mode,
+            memory_snapshot,
         );
 
         // Wire the substrate handles so chat-tool / composer-tool dispatch
@@ -140,6 +185,11 @@ impl App {
         // App-owned queue when it reaches Done or Failed.  The App drains this
         // at shutdown and persists the snapshots via AgentStatePersister.
         agent_pane.set_snapshot_sink(self.agent_snapshot_queue.clone());
+
+        // Wire the MCP tool registry so this pane can fall back to external
+        // MCP servers for tool names not in the built-in surface. The same
+        // Arc is shared across all panes spawned in this session.
+        agent_pane.set_mcp_registry(std::sync::Arc::clone(&self.mcp_registry));
 
         // Issue #235: inject the ticket dispatcher for Dispatcher-role panes.
         // `agent_pane.role` was just set by `set_substrate_handles` above.
@@ -174,11 +224,25 @@ impl App {
             agent_pane.set_agent_capture(capture.clone(), self.session_uuid);
         }
 
+        // Wire TTS: when a pipeline is active, hand the pane a clone of the
+        // sender so completed assistant messages are forwarded for speech
+        // playback. No-op when TTS is disabled (None).
+        if let Some(ref tts) = self.tts
+            && let Some(ref tx) = tts.tts_tx
+        {
+            agent_pane.set_tts_tx(tx.clone());
+        }
+
         // Capture the stable AgentId BEFORE the pane is moved into the adapter.
         // This is the value returned to MCP callers (issue #399).
         let agent_id = agent_pane.agent_id();
 
-        let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
+        // Thread the substrate-owned QuarantineRegistry into the adapter
+        // (issue #649) so it can detect quarantine-coincident failures on
+        // the `AgentPane::Failed → AgentTaskComplete` emit and annotate
+        // the summary for the brain reconciler.
+        let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag)
+            .with_quarantine_registry(self.quarantine_registry.clone());
 
         let scene_node = self
             .scene
@@ -239,5 +303,82 @@ impl App {
                 Vec::new()
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// Simulate the discovery barrier logic: verify that when the flag is
+    /// initially false and then set to true from a background thread, the
+    /// polling loop exits before the 500 ms deadline expires.
+    ///
+    /// This is a self-contained unit test of the polling logic extracted from
+    /// `spawn_agent_pane_with_opts` — it does not require a GPU or full App.
+    #[test]
+    fn discovery_barrier_prevents_empty_tool_list_on_fast_spawn() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+
+        // Simulate the discovery task completing after a short delay.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            flag_clone.store(true, Ordering::Release);
+        });
+
+        // Mirror the barrier logic from spawn_agent_pane_with_opts.
+        const DISCOVERY_TIMEOUT_MS: u64 = 500;
+        const POLL_INTERVAL_MS: u64 = 10;
+        let deadline = Instant::now() + Duration::from_millis(DISCOVERY_TIMEOUT_MS);
+        let mut timed_out = false;
+
+        while !flag.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+        }
+
+        assert!(
+            !timed_out,
+            "discovery barrier timed out — agent would get empty tool list on fast spawn"
+        );
+        assert!(
+            flag.load(Ordering::Acquire),
+            "flag should be true after the barrier exits without timeout"
+        );
+    }
+
+    /// When discovery never completes (e.g. all servers are unreachable), the
+    /// barrier must give up after 500 ms and not block forever.
+    #[test]
+    fn discovery_barrier_times_out_if_discovery_never_completes() {
+        let flag = Arc::new(AtomicBool::new(false)); // never set to true
+
+        const DISCOVERY_TIMEOUT_MS: u64 = 100; // shorter for test speed
+        const POLL_INTERVAL_MS: u64 = 10;
+        let deadline = Instant::now() + Duration::from_millis(DISCOVERY_TIMEOUT_MS);
+        let mut timed_out = false;
+
+        while !flag.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+        }
+
+        assert!(
+            timed_out,
+            "barrier should have timed out when discovery never completes"
+        );
     }
 }

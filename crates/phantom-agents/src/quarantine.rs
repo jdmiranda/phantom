@@ -834,14 +834,16 @@ mod tests {
             role: AgentRole::Conversational,
             working_dir: tmp.path(),
             registry: Arc::new(Mutex::new(AgentRegistry::new())),
-            event_log: None,
+            // #645: every DispatchContext now carries a real event log.
+            event_log: crate::test_support::fresh_log(),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: Some(rt.registry_handle()),
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        dag_explorer: None,
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,
+            mcp_registry: None,
         };
 
         // A normal read that would otherwise succeed must be blocked.
@@ -896,14 +898,16 @@ mod tests {
             role: AgentRole::Conversational,
             working_dir: tmp.path(),
             registry: Arc::new(Mutex::new(AgentRegistry::new())),
-            event_log: None,
+            // #645: every DispatchContext now carries a real event log.
+            event_log: crate::test_support::fresh_log(),
             pending_spawn: new_spawn_subagent_queue(),
             source_event_id: None,
             quarantine: Some(rt.registry_handle()),
             correlation_id: None,
             ticket_dispatcher: None,
-        runtime_mode: RuntimeMode::Normal,
-        dag_explorer: None,
+            runtime_mode: RuntimeMode::Normal,
+            dag_explorer: None,
+            mcp_registry: None,
         };
 
         let res = dispatch_tool("read_file", &serde_json::json!({"path": "probe.txt"}), &ctx);

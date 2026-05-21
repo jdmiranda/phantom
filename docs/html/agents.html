@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PHANTOM · agents</title>
+<link rel="stylesheet" href="assets/phantom.css">
+</head>
+<body>
+<div class="ribbon">SEC 05 · AGENT SYSTEM · 12 ROLES · 5 CAPABILITY AXES</div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html">PHANTOM<span class="v">v0.1.0</span></a>
+    <nav class="nav">
+      <a href="index.html">README</a>
+      <span class="sep">·</span>
+      <a href="architecture.html">ARCH</a>
+      <a href="boot.html">BOOT</a>
+      <a href="rendering.html">RENDER</a>
+      <a href="supervisor.html">SUPERVISOR</a>
+      <span class="sep">·</span>
+      <a href="agents.html" class="active">AGENTS</a>
+      <a href="brain.html">BRAIN</a>
+      <a href="harness.html">HARNESS</a>
+      <a href="loop.html">LOOP</a>
+      <a href="self-improvement.html">SELF-IMPROVE</a>
+      <a href="fleet.html">FLEET</a>
+      <span class="sep">·</span>
+      <a href="build-run.html">BUILD/RUN</a>
+    </nav>
+    <span class="grow"></span>
+    <span class="muted" style="font-size:11px;letter-spacing:0.1em" data-clock>--:--:--</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <div class="page-eyebrow">
+    <span>SECTION 05 · AGENT SYSTEM</span>
+    <span class="sysid">SYS://agents.0</span>
+  </div>
+  <h1 class="page-title">Agent System</h1>
+  <p class="page-lede">
+    Phantom doesn't have <em>one</em> agent. It has a <strong>population</strong> of typed agents — 12
+    specialized roles, each constrained by an explicit capability manifest. Tool calls are checked at a
+    <strong>dispatch gate</strong> the agent cannot bypass. Termination is contractual:
+    <code>complete_task</code> with a schema-valid payload, or 3 strikes and the pane flatlines.
+  </p>
+
+  <div class="status-strip">
+    <div class="status-cell"><div class="label">Roles</div><div class="value">12</div></div>
+    <div class="status-cell"><div class="label">Capability axes</div><div class="value">5</div></div>
+    <div class="status-cell"><div class="label">Lifecycle tools</div><div class="value">complete_task · abort_task</div></div>
+    <div class="status-cell"><div class="label">Validation</div><div class="value">ExitSchema · 3-strike flatline</div></div>
+  </div>
+
+  <h2>The 12 roles</h2>
+  <p>Defined at <code>phantom-agents/src/role.rs:48</code>. Each role is a distinct specialist with a curated tool whitelist.</p>
+
+  <div class="grid grid-2">
+    <div class="card"><div class="card-h"><span class="card-title">Conversational</span><span class="card-sub">turn-based</span></div>
+      <div class="card-body">User-facing chat agent. Full LLM. Cannot directly <code>Act</code> — must delegate via an <code>Actor</code> child. This is the agent you talk to.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Watcher</span><span class="card-sub">long-lived</span></div>
+      <div class="card-body">Stream observer. Reads-only. Watches for events of interest and emits structured signals. No write tools.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Capturer</span><span class="card-sub">i/o only</span></div>
+      <div class="card-body">Pure I/O. Frames / audio / scroll-back capture. No LLM. The dumbest, most reliable worker in the mesh.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Transcriber</span><span class="card-sub">transform</span></div>
+      <div class="card-body">Single-purpose audio → transcript. One job. No tools beyond the STT primitive.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Reflector</span><span class="card-sub">periodic</span></div>
+      <div class="card-body">Summarizes the memory stream. Emits day-notes. Runs on a cadence, not a trigger.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Indexer</span><span class="card-sub">substrate</span></div>
+      <div class="card-body">Maintains vector indexes. Tools: embedding + bundle-store writes. Never speaks to the user.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Actor</span><span class="card-sub">short-lived</span></div>
+      <div class="card-body">Scoped Act executor. Spawned explicitly with consent. The only role that can mutate the user's world.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Composer</span><span class="card-sub">multi-step</span></div>
+      <div class="card-body">Plans and delegates. Spawned by Conversational for multi-step work. Reads, decomposes, dispatches Actors.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Fixer</span><span class="card-sub">unblock</span></div>
+      <div class="card-body">Short-lived scoped fixer. Spawned when an agent blocks. Reads blockage, proposes fix, exits.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Defender</span><span class="card-sub">security</span></div>
+      <div class="card-body">Security observer auto-spawned on capability denial. Sense + Coordinate only. Never executes.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Dispatcher</span><span class="card-sub">coordinator</span></div>
+      <div class="card-body">Queries GitHub issues, steers agent allocation. The traffic controller for the implementer loop.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title">Cartographer</span><span class="card-sub">DAG nav</span></div>
+      <div class="card-body">Conversational DAG navigator. Reads the code DAG, sends commands to the viewer surface. Issue <code>#67</code>.</div></div>
+  </div>
+
+  <h2>The 5 capability axes</h2>
+  <p>
+    Orthogonal — every tool belongs to exactly one capability class. Every role has a manifest mapping the
+    classes it may use. The capability gate enforces this at the dispatch boundary.
+  </p>
+
+  <div class="grid grid-4">
+    <div class="card"><div class="card-h"><span class="card-title amber">Sense</span></div>
+      <div class="card-body">Read-only observation. <code>read_file</code>, <code>list_dir</code>, <code>git_status</code>, <code>tail_log</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title amber">Reflect</span></div>
+      <div class="card-body">Write substrate-internal state. <code>memory_write</code>, <code>embedding_index</code>, <code>note_append</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title amber">Compute</span></div>
+      <div class="card-body">LLM / embedding calls. <code>llm_chat</code>, <code>embed</code>, <code>summarize</code>.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title vapor">Act</span></div>
+      <div class="card-body">Mutate the user's world. <code>write_file</code>, <code>run_command</code>, <code>gh_pr_create</code>. The dangerous class.</div></div>
+    <div class="card"><div class="card-h"><span class="card-title vapor">Coordinate</span></div>
+      <div class="card-body">Spawn / steer agents. <code>spawn_subagent</code>, <code>enqueue_loop_message</code>, <code>request_review</code>.</div></div>
+  </div>
+
+  <h2>The dispatch gate</h2>
+  <p>
+    The single most important line of code in the agent system lives at
+    <code>phantom-agents/src/dispatch/mod.rs</code>. Every tool call routes through it. There is no path around.
+    On denial the model receives a canonical error string and self-corrects on the next turn.
+  </p>
+
+<pre class="code-rust"><code><span class="c">// dispatch/mod.rs — the gate</span>
+<span class="k">pub async fn</span> <span class="fn">dispatch_tool</span>(
+    ctx:  &amp;<span class="t">DispatchContext</span>,
+    tool: &amp;<span class="k">dyn</span> <span class="t">Tool</span>,
+    args: <span class="t">serde_json</span>::<span class="t">Value</span>,
+) -> <span class="t">ToolResult</span> {
+    <span class="k">if let</span> <span class="t">Err</span>(denied) = <span class="n">capability</span>::<span class="fn">check_capability</span>(ctx.role, tool.<span class="fn">class</span>()) {
+        ctx.event_log.<span class="fn">push</span>(<span class="t">Event</span>::<span class="n">CapabilityDenied</span> {
+            agent_id: ctx.agent_id,
+            tool:     tool.<span class="fn">name</span>().<span class="fn">to_owned</span>(),
+            class:    tool.<span class="fn">class</span>(),
+            role:     ctx.role,
+        });
+        <span class="k">return</span> <span class="t">ToolResult</span>::<span class="fn">denied</span>(<span class="k">format!</span>(
+            <span class="s">"capability denied: {:?} not in {:?} manifest"</span>,
+            tool.<span class="fn">class</span>(), ctx.role,
+        ));
+    }
+    tool.<span class="fn">invoke</span>(ctx, args).<span class="k">await</span>
+}</code></pre>
+
+  <p>
+    The event log being <strong>non-optional</strong> at this boundary (PR <code>#655</code>) is what closes the
+    last audit gap. There is no construction path that produces a <code>DispatchContext</code> without an event log
+    — so denials cannot be silently swallowed.
+  </p>
+
+  <h2>The complete_task lifecycle contract</h2>
+  <p>
+    Spawning an agent with <code>AgentSpawnOpts::with_requires_complete_task(true)</code> turns
+    "the agent is done when its stream ends" into "the agent is done when it calls <code>complete_task</code>
+    with a payload that validates against the <code>ExitSchema</code>." Strings-as-status is gone.
+  </p>
+
+<pre class="code-rust"><code><span class="k">let</span> opts = <span class="t">AgentSpawnOpts</span>::<span class="fn">new</span>(<span class="t">AgentRole</span>::<span class="n">Actor</span>, task)
+    .<span class="fn">with_requires_complete_task</span>(<span class="lit">true</span>)
+    .<span class="fn">with_auto_approve</span>(<span class="lit">true</span>)
+    .<span class="fn">with_exit_schema</span>(schema);
+
+<span class="c">// agent calls complete_task with typed payload:</span>
+<span class="c">// {</span>
+<span class="c">//   "issue_number": 642,</span>
+<span class="c">//   "pr_url":       "https://github.com/jdmiranda/phantom/pull/681",</span>
+<span class="c">//   "summary":      "Fixed the alacritty scroll-back overflow."</span>
+<span class="c">// }</span>
+
+<span class="c">// validation failure → validation_failure_count++</span>
+<span class="c">// 3 strikes → AgentPane flatline. Manual retry required.</span></code></pre>
+
+  <div class="callout callout-ok">
+    <div class="callout-title">Why this matters</div>
+    Before <code>complete_task</code>, the substrate read agent-as-text. An agent could say
+    <code>"PARTIAL: I think the PR was opened, see above"</code> and the dispatcher would shrug and pass that
+    string downstream. After: <em>the schema rejects "PARTIAL"</em>. The substrate refuses to advance until the
+    agent produces a structured exit. Three failures and we don't trust the agent — we flatline and require a
+    human to look at it.
+  </div>
+
+  <h2>The fast-path audit</h2>
+  <p>
+    Any time the harness <em>skips</em> a gate, it must be observable. PR <code>#653</code> introduced
+    <code>Event::FastPathTaken { agent_id, kind, reason }</code> with two variants:
+  </p>
+
+<pre class="code-rust"><code><span class="k">pub enum</span> <span class="t">FastPathKind</span> {
+    <span class="n">AutoApprove</span>,    <span class="c">// AwaitingApproval skipped because auto_approve=true</span>
+    <span class="n">SkipPlanning</span>,   <span class="c">// Planning skipped because the task was simple enough</span>
+}</code></pre>
+
+  <p>
+    Every skip ends up in the event log with a human-readable reason. The audit trail says
+    "we skipped this <em>here</em> for <em>this reason</em>." If a regression slips, you can grep the log and find
+    the exact moment the harness gave too much rope.
+  </p>
+
+  <h2>Spawning an agent</h2>
+<pre class="code-bash"><code><span class="c"># inside phantom, press ` (backtick) to open command mode, then:</span>
+agent <span class="s">"fix the failing tests"</span>          <span class="c"># spawns Conversational</span>
+agents                                <span class="c"># list active agents</span>
+agent --role actor <span class="s">"rebuild target"</span>   <span class="c"># scoped one-shot Act</span></code></pre>
+
+  <h2>The taint model</h2>
+  <p>
+    Every output an agent produces carries a <strong>taint level</strong>: <code>Clean</code>,
+    <code>AgentDerived</code>, <code>UserConfirmed</code>. Downstream tools refuse to consume <code>AgentDerived</code>
+    data as command input without <code>UserConfirmed</code> escalation. This is what prevents prompt-injection
+    pivots — an agent reading a webpage cannot turn the webpage's contents into a <code>run_command</code> argument
+    without going through the user.
+  </p>
+
+  <footer class="footer">
+    <span>SEC 05 · AGENTS</span>
+    <span><a href="supervisor.html">↩ SEC 04 · SUPERVISOR</a> · <a href="brain.html">next → SEC 06 · BRAIN</a></span>
+    <span>PHANTOM v0.1.0</span>
+  </footer>
+</main>
+
+<script src="assets/phantom.js"></script>
+</body>
+</html>

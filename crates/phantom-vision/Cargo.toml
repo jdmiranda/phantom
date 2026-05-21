@@ -12,6 +12,7 @@ async-trait = "0.1"
 base64 = "0.22"
 png = "0.17"
 reqwest = { version = "0.12", features = ["json"] }
+zeroize = "1"
 
 [features]
 # Exposes `MockVisionBackend` for integration tests in downstream crates.
@@ -21,6 +22,7 @@ test-utils = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+httptest = "0.15"
 
 [lints]
 workspace = true

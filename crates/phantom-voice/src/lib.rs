@@ -30,6 +30,7 @@ use lru::LruCache;
 pub mod openai;
 pub mod piper;
 pub use piper::PiperVoiceBackend;
+pub mod player;
 
 // ── OpenAiVoice enum ──────────────────────────────────────────────────────────
 

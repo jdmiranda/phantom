@@ -353,6 +353,16 @@ pub struct InspectorView {
     /// unset (zero overhead in non-hot builds).  Capped at [`MAX_SWAP_ROWS`]
     /// by [`InspectorBuilder`].
     pub swap_states: Vec<SwapRow>,
+    /// Number of active panes (coordinator adapter count) at snapshot time.
+    pub pane_count: usize,
+    /// Approximate number of running tokio tasks at snapshot time.
+    /// `0` when the runtime cannot be queried (non-tokio build or task count
+    /// is unavailable through the current API).
+    pub active_task_count: usize,
+    /// Resident-set size of the current process in megabytes, sampled via
+    /// `getrusage(RUSAGE_SELF)` on macOS/Linux.  `None` when the syscall is
+    /// unavailable (e.g. Windows builds or permission errors).
+    pub memory_mb: Option<f32>,
 }
 
 impl InspectorView {
@@ -369,6 +379,9 @@ impl InspectorView {
             peers: Vec::new(),
             local_node_id: String::from("localhost"),
             swap_states: Vec::new(),
+            pane_count: 0,
+            active_task_count: 0,
+            memory_mb: None,
         }
     }
 }
@@ -398,6 +411,9 @@ pub struct InspectorBuilder {
     spawned_total_override: Option<u32>,
     running_count_override: Option<u32>,
     local_node_id: String,
+    pane_count: usize,
+    active_task_count: usize,
+    memory_mb: Option<f32>,
 }
 
 impl InspectorBuilder {
@@ -474,13 +490,40 @@ impl InspectorBuilder {
 
     /// Override the derived `running_count` counter. Same rationale as
     /// [`Self::spawned_total`].
-    #[must_use] 
+    #[must_use]
     pub fn running_count(mut self, n: u32) -> Self {
         self.running_count_override = Some(n);
         self
     }
 
-    #[must_use] 
+    /// Set the active pane count for the snapshot.
+    ///
+    /// Pass `coordinator.adapter_count()` at snapshot time.
+    #[must_use]
+    pub fn pane_count(mut self, n: usize) -> Self {
+        self.pane_count = n;
+        self
+    }
+
+    /// Set the approximate tokio task count for the snapshot.
+    ///
+    /// Pass `0` when a count is not available.
+    #[must_use]
+    pub fn active_task_count(mut self, n: usize) -> Self {
+        self.active_task_count = n;
+        self
+    }
+
+    /// Set the resident-set size in megabytes for the snapshot.
+    ///
+    /// Pass `None` when the value cannot be obtained.
+    #[must_use]
+    pub fn memory_mb(mut self, mb: Option<f32>) -> Self {
+        self.memory_mb = mb;
+        self
+    }
+
+    #[must_use]
     pub fn build(mut self) -> InspectorView {
         // Sort agents alphabetically by label for stable rendering. We use
         // `sort_by` (not `sort_by_key`) to avoid cloning the label.
@@ -529,6 +572,9 @@ impl InspectorBuilder {
             peers: self.peers,
             local_node_id: self.local_node_id,
             swap_states: self.swap_states,
+            pane_count: self.pane_count,
+            active_task_count: self.active_task_count,
+            memory_mb: self.memory_mb,
         }
     }
 }
