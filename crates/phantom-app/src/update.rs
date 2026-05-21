@@ -10,6 +10,7 @@ use log::{debug, info, warn};
 
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::WorldState;
+use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AgentStatusInfo, AppCommand, PaneInfo, ScreenshotReply, SpawnAgentReply};
 use phantom_protocol::Event;
@@ -23,14 +24,27 @@ impl App {
     pub fn update(&mut self) {
         crate::profile_scope!("update");
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32();
-        let dt_duration = now.duration_since(self.last_frame);
+        let raw_dt_duration = now.duration_since(self.last_frame);
         self.last_frame = now;
 
         // Warn if a frame takes abnormally long (> 2 seconds).
-        if dt > 2.0 {
-            warn!("SLOW FRAME: dt={dt:.2}s — previous frame blocked the event loop");
+        if raw_dt_duration.as_secs_f32() > 2.0 {
+            warn!(
+                "SLOW FRAME: dt={:.2}s — previous frame blocked the event loop",
+                raw_dt_duration.as_secs_f32()
+            );
         }
+
+        // Clamp dt to [target_dt, max_dt] to prevent animation explosions on
+        // debugger pauses, GC spikes, or OS suspends. Large raw deltas are
+        // replaced with the nominal 16.6 ms target so physics/animation math
+        // stays bounded regardless of wall-clock stalls.
+        let dt_duration = self.dt_clamp.apply(raw_dt_duration);
+        let dt = dt_duration.as_secs_f32();
+
+        // Advance the scene clock with the clamped delta so all subsystems
+        // share a monotonic time base that cannot jump on pause/resume.
+        self.scene_clock.tick(dt_duration);
 
         // Coordinator: tick all registered adapters and deliver bus messages.
         self.coordinator.update_all(dt_duration);
@@ -39,6 +53,9 @@ impl App {
         // manage the secondary split-pane lifecycle.
         self.poll_alt_screen_transitions();
         self.tick_alt_screen_fade(dt);
+
+        // Drain OSC 52 clipboard sequences from all terminal adapters.
+        self.drain_osc52_clipboard();
 
         // Substrate runtime: reap dead supervisor children, drain pending
         // substrate events into the on-disk log, and evaluate spawn rules.
@@ -84,17 +101,6 @@ impl App {
             self.quit_requested = true;
         }
 
-        // Periodic GC: sweep adapters that transitioned to Dead via the registry
-        // (e.g. kill() called directly) but were not caught by the is_alive() reap
-        // above. Runs at most once every 30 seconds to amortize the scan cost.
-        if now.duration_since(self.last_gc) >= std::time::Duration::from_secs(30) {
-            let removed = self.coordinator.registry_mut().gc();
-            if removed > 0 {
-                debug!("GC: removed {} dead adapter(s)", removed);
-            }
-            self.last_gc = now;
-        }
-
         // Boot state machine.
         if self.state == AppState::Boot {
             self.boot.update(dt);
@@ -107,6 +113,38 @@ impl App {
                 info!("Boot sequence complete, transitioning to terminal");
                 self.state = AppState::Terminal;
             }
+        }
+
+        // Session resume prompt: fire exactly once on the first Terminal tick
+        // when previous-session sidecar files contained live agents or goals.
+        // We drain `restored_session` via `.take()` so this block runs at most
+        // once per process lifetime (subsequent frames see `None`).
+        if self.state == AppState::Terminal
+            && let Some(session) = self.restored_session.take()
+        {
+            let n_agents = session.agent_count();
+            let n_goals = session.goal_count();
+            let msg = if n_agents > 0 && n_goals > 0 {
+                format!(
+                    "Resume previous session? ({n_agents} agent{}, {n_goals} goal{})",
+                    if n_agents == 1 { "" } else { "s" },
+                    if n_goals == 1 { "" } else { "s" },
+                )
+            } else if n_agents > 0 {
+                format!(
+                    "Resume previous session? ({n_agents} agent{})",
+                    if n_agents == 1 { "" } else { "s" },
+                )
+            } else {
+                format!(
+                    "Resume previous session? ({n_goals} goal{})",
+                    if n_goals == 1 { "" } else { "s" },
+                )
+            };
+            if let Some(ref brain) = self.brain {
+                let _ = brain.send_event(AiEvent::Interrupt(msg));
+            }
+            // session is dropped here; self.restored_session is None for all future frames.
         }
 
         // Demo mode: spawn one example agent pane the first time we land in
@@ -334,16 +372,11 @@ impl App {
                 self.git_refresh_last = now;
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
-                let assembler_arc = self.context_assembler.clone();
                 self.git_refresh_handle = std::thread::Builder::new()
                     .name("git-refresh".into())
                     .spawn(move || {
-                        // Use the shared ContextAssembler so DAG caching is
-                        // preserved across periodic git refreshes.
-                        let path = std::path::Path::new(&project_dir);
-                        if let Ok(mut asm) = assembler_arc.lock() {
-                            asm.assemble(path);
-                        }
+                        let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
+                        fresh.refresh_git();
                         if let Some(tx) = brain_tx {
                             let _ = tx.send(AiEvent::GitStateChanged);
                         }
@@ -429,10 +462,11 @@ impl App {
         // Tick the notification center every frame so banners expire on time
         // even when no new denials arrive. Cheap (linear in the active banner
         // count, which is tiny by construction).
-        let now_ms_tick: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        //
+        // Use the scene clock's elapsed millis rather than SystemTime::now() so
+        // that the notification/cursor/shader timer domain is consistent with
+        // the clamped frame delta and cannot jump on OS clock adjustments.
+        let now_ms_tick: u64 = self.scene_clock.elapsed().as_millis() as u64;
         self.notifications.tick(now_ms_tick);
 
         // Advance the clock-driven cursor blink timer.  This runs once per
@@ -587,6 +621,17 @@ impl App {
                         if let Err(e) = store.append(&entry) {
                             warn!("history append failed: {e}");
                         }
+                        // Refresh the brain's history snapshot every 10 commands.
+                        // This keeps the snapshot fresh without hammering the JSONL
+                        // file on every single command.
+                        if store.count() % 10 == 0
+                            && let Ok(recent) = store.recent(20)
+                            && let Some(ref brain) = self.brain
+                        {
+                            let _ = brain.send_event(
+                                phantom_brain::events::AiEvent::HistorySnapshot(recent),
+                            );
+                        }
                     }
                     // OODA cache (#358): store the parsed result so
                     // build_world_state() can derive has_errors / error_count.
@@ -601,8 +646,8 @@ impl App {
                         .unwrap_or_default();
                     let parsed = self.semantic_skill.parse(
                         &command,
-                        "",
                         &raw_output,
+                        "",
                         Some(*exit_code),
                     );
                     self.ooda_last_parsed = Some(parsed);
@@ -649,7 +694,13 @@ impl App {
                         success,
                         summary,
                         spawn_tag,
+                        result: _,
                     } => Some(AiEvent::AgentComplete {
+                        // Issue #646 spike: `result` is the typed payload from
+                        // `complete_task`. The brain `AiEvent::AgentComplete`
+                        // shape predates this field; downstream PRs will widen
+                        // it. For the spike we ignore the payload here so
+                        // existing brain routing keeps working.
                         id: *agent_id,
                         success: *success,
                         summary: summary.clone(),
@@ -1336,6 +1387,34 @@ impl App {
             suggestions_since_input,
         )
     }
+
+    /// Drain OSC 52 clipboard texts from all terminal adapters and write them
+    /// to the system clipboard via `arboard`.
+    ///
+    /// Called once per frame. Each OSC 52 sequence decoded by alacritty results
+    /// in one text being pushed to the system clipboard (last writer wins).
+    pub(crate) fn drain_osc52_clipboard(&mut self) {
+        for app_id in self.coordinator.all_app_ids() {
+            let Some(adapter) = self
+                .coordinator
+                .registry_mut()
+                .get_adapter_mut(app_id) else { continue; };
+
+            let texts = adapter.drain_osc52();
+            for text in texts {
+                match arboard::Clipboard::new() {
+                    Ok(mut cb) => {
+                        if let Err(e) = cb.set_text(&text) {
+                            warn!("OSC 52: failed to set clipboard text: {e}");
+                        } else {
+                            debug!("OSC 52: wrote {} bytes to clipboard", text.len());
+                        }
+                    }
+                    Err(e) => warn!("OSC 52: failed to open clipboard: {e}"),
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1749,5 +1828,80 @@ mod tests {
         assert!(!in_repl(&no_repl), "all-false detached map must yield in_repl=false");
         assert!(in_repl(&repl), "one true entry must yield in_repl=true");
         assert!(!in_repl(&empty), "empty map must yield in_repl=false");
+    }
+
+    // ---- DtClamp + SceneClock integration tests --------------------------
+    //
+    // These tests exercise the clamping and clock logic introduced to prevent
+    // animation explosions on debugger pauses and OS suspends. They operate
+    // directly on the `phantom_scene` types, mirroring the exact code path in
+    // `App::update`, so a green test here is a green production path.
+
+    /// A 5-second frame spike must be clamped to `target_dt` (16.6 ms),
+    /// keeping the downstream delta well inside the 100 ms `max_dt` bound.
+    #[test]
+    fn dt_clamp_prevents_large_spike_from_propagating() {
+        use std::time::Duration;
+
+        let clamp = phantom_scene::DtClamp::default_60fps();
+        let huge_spike = Duration::from_secs(5);
+
+        let clamped = clamp.apply(huge_spike);
+
+        assert!(
+            clamped <= Duration::from_millis(100),
+            "clamped dt {clamped:?} must not exceed 100 ms after a 5-second spike"
+        );
+        assert!(
+            clamped < huge_spike,
+            "clamped dt must be strictly less than the raw 5-second spike"
+        );
+    }
+
+    /// After two distinct ticks, `elapsed()` must exceed the first tick's
+    /// contribution, proving the clock advances monotonically.
+    #[test]
+    fn scene_clock_advances_each_frame() {
+        use std::time::Duration;
+
+        let mut clock = phantom_scene::Clock::new();
+
+        clock.tick(Duration::from_millis(16));
+        let after_first = clock.elapsed();
+
+        clock.tick(Duration::from_millis(16));
+        let after_second = clock.elapsed();
+
+        assert!(
+            after_second > after_first,
+            "elapsed after two ticks ({after_second:?}) must exceed elapsed after one tick ({after_first:?})"
+        );
+    }
+
+    /// When a large raw dt is clamped before being passed to `Clock::tick`,
+    /// the clock's elapsed must reflect the *clamped* delta, not the spike.
+    /// This mirrors the exact pipeline in `App::update`.
+    #[test]
+    fn scene_clock_delta_is_clamped() {
+        use std::time::Duration;
+
+        let clamp = phantom_scene::DtClamp::default_60fps();
+        let mut clock = phantom_scene::Clock::new();
+
+        let raw_spike = Duration::from_secs(5);
+        let clamped_dt = clamp.apply(raw_spike);
+
+        clock.tick(clamped_dt);
+
+        let elapsed = clock.elapsed();
+
+        assert!(
+            elapsed <= Duration::from_millis(100),
+            "clock elapsed {elapsed:?} must not reflect the raw 5-second spike"
+        );
+        assert!(
+            elapsed > Duration::ZERO,
+            "clock must have advanced by at least one clamped tick"
+        );
     }
 }

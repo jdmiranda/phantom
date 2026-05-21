@@ -69,6 +69,14 @@ impl ToolCall {
     /// Timestamp of the invocation.
     #[must_use]
     pub fn called_at(&self) -> DateTime<Utc> { self.called_at }
+
+    /// Set the output JSON for this tool call.
+    ///
+    /// Called after the tool result arrives so the capture record carries the
+    /// full input→output pair rather than a one-sided input-only snapshot.
+    pub fn set_output_json(&mut self, output: String) {
+        self.output_json = Some(output);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,5 +483,53 @@ mod tests {
         assert_eq!(tc.name(), "WriteFile");
         assert!(tc.input_json().contains("/tmp/x"));
         assert!(tc.output_json().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. set_output_json populates the output field after construction
+    //
+    //    Bug 2 fix: ToolCall records are initially created with output_json = None
+    //    and later updated when the tool result arrives.  set_output_json must
+    //    make the value visible through the output_json() getter.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_output_json_populates_output_field() {
+        let mut tc = ToolCall::new("RunCommand", r#"{"command":"ls"}"#, None);
+        assert!(tc.output_json().is_none(), "output must start as None");
+
+        tc.set_output_json(r#"{"stdout":"file.txt","exit_code":0}"#.to_string());
+        assert!(
+            tc.output_json().is_some(),
+            "output_json must be Some after set_output_json"
+        );
+        assert_eq!(
+            tc.output_json().unwrap(),
+            r#"{"stdout":"file.txt","exit_code":0}"#
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Tool call with output_json set survives round-trip through the sidecar
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_call_with_output_json_round_trips() {
+        let (cap, _dir) = temp_capture();
+        let session = Uuid::new_v4();
+
+        let mut tc = ToolCall::new("ReadFile", r#"{"path":"/etc/hosts"}"#, None);
+        tc.set_output_json(r#"{"content":"127.0.0.1 localhost"}"#.to_string());
+
+        cap.append("agent-z", session, vec![tc], "done reading").unwrap();
+
+        let records = cap.recent(1).unwrap();
+        assert_eq!(records.len(), 1);
+        let calls = records[0].tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].output_json().unwrap(),
+            r#"{"content":"127.0.0.1 localhost"}"#
+        );
     }
 }
