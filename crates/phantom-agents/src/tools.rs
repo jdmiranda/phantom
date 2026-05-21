@@ -492,6 +492,43 @@ const MAX_READ_SIZE: u64 = 50 * 1024;
 /// Command execution timeout.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Filename patterns that agents are not allowed to read regardless of where
+/// they sit inside the sandbox.  The matcher compares against the basename
+/// only — directory prefixes do not bypass the denylist.
+///
+/// Entries beginning with `.` are matched as exact-name OR prefix-of-name
+/// (so `.env` blocks both `.env` and `.env.local`).  Entries containing `.`
+/// in their tail (e.g. `*.pem`) match by extension.  Other entries match
+/// the full basename exactly (e.g. `id_rsa`).
+const SENSITIVE_FILENAME_PREFIXES: &[&str] = &[".env"];
+const SENSITIVE_FILENAME_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];
+const SENSITIVE_FILENAME_EXACT: &[&str] = &["id_rsa", "id_dsa", "id_ed25519", "id_ecdsa"];
+
+/// Return true if the basename of `path` matches any entry in the sensitive
+/// filename denylist.  Used by `execute_read_file` to refuse to surface
+/// secrets to an agent regardless of where they sit inside the sandbox.
+fn is_sensitive_filename(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if SENSITIVE_FILENAME_EXACT.contains(&name) {
+        return true;
+    }
+    if SENSITIVE_FILENAME_PREFIXES
+        .iter()
+        .any(|prefix| name == *prefix || name.starts_with(&format!("{prefix}.")))
+    {
+        return true;
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext_lower = ext.to_ascii_lowercase();
+        if SENSITIVE_FILENAME_EXTENSIONS.contains(&ext_lower.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Resolve a relative path within `working_dir`, rejecting path traversal.
 ///
 /// Returns `Err` if the path contains `..`, is absolute, or escapes the sandbox.
@@ -668,6 +705,16 @@ fn execute_read_file(root: &Path, args: &serde_json::Value) -> ToolResult {
         Err(e) => return tool_err(tool, e),
     };
 
+    // Refuse to surface secrets to the agent.  Check basename of both the
+    // user-supplied path and the canonicalized resolved path so a symlink
+    // such as `notes -> .env` cannot launder the denylist.
+    if is_sensitive_filename(Path::new(path_str)) || is_sensitive_filename(&resolved) {
+        return tool_err(
+            tool,
+            format!("capability denied: refusing to read sensitive file '{path_str}'"),
+        );
+    }
+
     match fs::metadata(&resolved) {
         Ok(meta) if meta.len() > MAX_READ_SIZE => {
             return tool_err(
@@ -831,23 +878,42 @@ pub(crate) fn execute_run_command_with_policy(
     }
 }
 
+/// Upper bound on entries returned by `execute_search_files`.  Caps the
+/// damage of a glob-bomb pattern such as `**/**/**/**/*.rs` — even if the
+/// `glob` walker is cheap per-step, we stop iterating after this many
+/// matches.
+const MAX_GLOB_RESULTS: usize = 10_000;
+
+/// Upper bound on `**` recursive-wildcards in a single pattern.  More than
+/// two recursive wildcards has no legitimate use and amplifies directory
+/// walk cost.
+const MAX_RECURSIVE_WILDCARDS: usize = 2;
+
+/// Upper bound on raw pattern length.  Defensive cap against pathological
+/// inputs.
+const MAX_GLOB_PATTERN_LEN: usize = 1024;
+
 /// Validate and sanitise a user-supplied glob pattern for use within `base_dir`.
 ///
 /// # Security contract
 ///
 /// Agents supply glob patterns as untrusted input.  Without sanitisation a
 /// pattern such as `../../../*` or `/**/*` lets an agent escape the intended
-/// working-directory sandbox.  This function enforces three layered guards:
+/// working-directory sandbox.  This function enforces four layered guards:
 ///
-/// 1. **No `..` components** — the raw pattern string must not contain the
-///    literal substring `..`.  This catches the common traversal forms
-///    (`../`, `../../`, embedded `foo/../bar`, etc.) before any filesystem
-///    access occurs.
+/// 1. **No `..` path components** — any path component that is exactly `..`
+///    is rejected.  We split on `/` so literal-`..`-in-filename cases such
+///    as `archive..v1.zip` are still accepted, but `../foo`, `foo/../bar`,
+///    and a bare `..` are not.
 ///
-/// 2. **No absolute paths** — if the pattern starts with `/` it is a global
-///    filesystem path, not a relative project path.  Reject immediately.
+/// 2. **No absolute paths** — `Path::is_absolute()` catches both Unix
+///    (`/etc/passwd`) and Windows (`C:\Windows\*`, `\\UNC\path\*`) forms.
 ///
-/// 3. **Canonical root check** — the directory prefix of the full pattern
+/// 3. **Complexity caps** — overall pattern length and recursive-wildcard
+///    count are bounded to limit the cost of the directory walk and head
+///    off "glob bomb" denial-of-service inputs.
+///
+/// 4. **Canonical root check** — the directory prefix of the full pattern
 ///    (everything up to the first glob metacharacter) is canonicalized.  If
 ///    the resolved path does not start with the canonicalized `base_dir`, the
 ///    pattern has escaped the sandbox (e.g. via a symlink).
@@ -855,24 +921,50 @@ pub(crate) fn execute_run_command_with_policy(
 /// Returns the validated full pattern string (ready to pass to
 /// [`glob::glob`]) on success, or a human-readable error string on failure.
 fn sanitize_glob_pattern(pattern: &str, base_dir: &Path) -> Result<String, String> {
-    // Guard 1: reject `..` traversal components.
-    if pattern.contains("..") {
+    // Bounded length up front so later checks don't have to defend against
+    // multi-megabyte inputs.
+    if pattern.len() > MAX_GLOB_PATTERN_LEN {
         return Err(format!(
-            "glob pattern must not contain '..': {pattern}"
+            "glob pattern too long ({} > {MAX_GLOB_PATTERN_LEN} bytes)",
+            pattern.len()
         ));
     }
 
-    // Guard 2: reject absolute paths.
-    if pattern.starts_with('/') {
+    // Guard 1: reject any path component that is exactly "..".  A literal
+    // ".." inside a filename (e.g. `archive..v1.zip`) is allowed; a `..`
+    // traversal component is not.
+    if pattern.split('/').any(|c| c == "..") {
+        return Err(format!(
+            "glob pattern must not contain '..' path components: {pattern}"
+        ));
+    }
+
+    // Guard 2: reject absolute paths (cross-platform).
+    if Path::new(pattern).is_absolute() {
         return Err(format!(
             "glob pattern must be a relative path, not absolute: {pattern}"
         ));
     }
 
-    // Compose the full pattern the way glob::glob will see it.
-    let full_pattern = format!("{}/{pattern}", base_dir.display());
+    // Guard 3: cap the number of recursive wildcards.  `**` anywhere in the
+    // pattern triggers a recursive descent; we allow at most two so that
+    // `dir/**/foo/**/*.rs` is acceptable but `**/**/**/**/*.rs` is not.
+    let recursive_count = pattern.matches("**").count();
+    if recursive_count > MAX_RECURSIVE_WILDCARDS {
+        return Err(format!(
+            "glob pattern has too many recursive wildcards ({recursive_count} > {MAX_RECURSIVE_WILDCARDS}): {pattern}"
+        ));
+    }
 
-    // Guard 3: canonicalize the non-glob prefix and verify it stays inside
+    // Compose the full pattern via Path::join so separators are correct on
+    // every platform.
+    let full_pattern_path = base_dir.join(pattern);
+    let full_pattern = full_pattern_path
+        .to_str()
+        .ok_or_else(|| format!("non-UTF8 path produced by base_dir/pattern join: {pattern}"))?
+        .to_string();
+
+    // Guard 4: canonicalize the non-glob prefix and verify it stays inside
     // base_dir.  We split on the first glob metacharacter to obtain a
     // filesystem-resolvable prefix.
     let prefix_end = full_pattern
@@ -882,18 +974,30 @@ fn sanitize_glob_pattern(pattern: &str, base_dir: &Path) -> Result<String, Strin
 
     // Trim a trailing slash or partial path component so we canonicalize a
     // directory that actually exists.
-    let probe = {
+    let probe_opt: Option<PathBuf> = {
         let p = Path::new(static_prefix.trim_end_matches('/'));
-        // Walk up until we find a component that exists.
+        // Walk up until we find a component that exists.  If we walk all the
+        // way to the filesystem root without finding an existing parent, we
+        // refuse — silently falling back to `base_dir` here would let an
+        // edge-case pattern (e.g. one whose prefix walks past base_dir) pass
+        // Guard 4 trivially.
         let mut cur = p;
         loop {
             if cur.exists() {
-                break cur.to_path_buf();
+                break Some(cur.to_path_buf());
             }
             match cur.parent() {
                 Some(parent) => cur = parent,
-                None => break base_dir.to_path_buf(),
+                None => break None,
             }
+        }
+    };
+    let probe = match probe_opt {
+        Some(p) => p,
+        None => {
+            return Err(format!(
+                "glob pattern static prefix has no existing ancestor inside base_dir: {pattern}"
+            ));
         }
     };
 
@@ -934,28 +1038,45 @@ fn execute_search_files(root: &Path, args: &serde_json::Value) -> ToolResult {
         Err(e) => return tool_err(tool, format!("cannot canonicalize working dir: {e}")),
     };
 
-    let matches: Vec<String> = match glob::glob(&full_pattern) {
-        Ok(paths) => paths
-            .filter_map(|entry| entry.ok())
-            .filter_map(|path| {
+    // Bounded iteration: stop after MAX_GLOB_RESULTS sandbox-valid matches so
+    // a pathological pattern cannot pin the CPU.  We also signal truncation
+    // to the agent so it knows to narrow its query.
+    let mut matches: Vec<String> = Vec::new();
+    let mut truncated = false;
+    match glob::glob(&full_pattern) {
+        Ok(paths) => {
+            for entry in paths {
+                let Ok(path) = entry else { continue };
                 // Canonicalize each match and verify it is still inside the
                 // sandbox root.  This catches symlinks that point outside the
                 // working directory even when the pattern itself looked safe.
-                let canon = path.canonicalize().ok()?;
+                let Ok(canon) = path.canonicalize() else { continue };
                 if !canon.starts_with(&canon_root) {
-                    return None;
+                    continue;
                 }
-                canon
-                    .strip_prefix(&canon_root)
-                    .ok()
-                    .map(|rel| rel.display().to_string())
-            })
-            .collect(),
+                let Ok(rel) = canon.strip_prefix(&canon_root) else {
+                    continue;
+                };
+                matches.push(rel.display().to_string());
+                if matches.len() >= MAX_GLOB_RESULTS {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
         Err(e) => return tool_err(tool, format!("invalid glob pattern: {e}")),
-    };
+    }
 
     if matches.is_empty() {
         tool_ok(tool, "no files matched".into())
+    } else if truncated {
+        tool_ok(
+            tool,
+            format!(
+                "{}\n... (truncated at {MAX_GLOB_RESULTS} matches; narrow your pattern)",
+                matches.join("\n")
+            ),
+        )
     } else {
         tool_ok(tool, matches.join("\n"))
     }
@@ -2089,5 +2210,155 @@ mod tests {
             msg.contains("escapes sandbox"),
             "error message must mention 'escapes sandbox'; got: {msg}",
         );
+    }
+
+    /// A literal `..` inside a filename (component containing but not equal
+    /// to `..`) is allowed; only `..` as its own path component is rejected.
+    /// Regression test for the "Guard 1 is a substring match" feedback.
+    #[test]
+    fn glob_literal_dotdot_in_filename_is_accepted() {
+        let tmp = TempDir::new().unwrap();
+        // Create a file whose name embeds `..` but is not `..` itself.
+        fs::write(tmp.path().join("archive..v1.zip"), b"x").unwrap();
+
+        let result = sanitize_glob_pattern("archive..v1.zip", tmp.path());
+        assert!(
+            result.is_ok(),
+            "literal '..' inside a filename must be accepted; got Err({:?})",
+            result.unwrap_err(),
+        );
+    }
+
+    /// A glob pattern exceeding `MAX_RECURSIVE_WILDCARDS` `**` segments must
+    /// be rejected.  Defense against glob-bomb denial-of-service.
+    #[test]
+    fn glob_too_many_recursive_wildcards_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        // Five `**` segments — well over the cap of two.
+        let result = sanitize_glob_pattern("**/**/**/**/**/*.rs", tmp.path());
+        assert!(
+            result.is_err(),
+            "expected Err for excessive recursive wildcards, got Ok({:?})",
+            result.unwrap(),
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("recursive wildcards"),
+            "error message must mention 'recursive wildcards'; got: {msg}",
+        );
+    }
+
+    /// An overlong glob pattern must be rejected up front.
+    #[test]
+    fn glob_overlong_pattern_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let long = "a/".repeat(MAX_GLOB_PATTERN_LEN / 2 + 1) + "*.rs";
+        let result = sanitize_glob_pattern(&long, tmp.path());
+        assert!(
+            result.is_err(),
+            "expected Err for overlong pattern, got Ok({:?})",
+            result.unwrap(),
+        );
+        assert!(
+            result.unwrap_err().contains("too long"),
+            "error message must mention 'too long'",
+        );
+    }
+
+    /// `execute_read_file` must refuse to surface a `.env` file even if it
+    /// lives inside the sandbox.  Tests the SENSITIVE_FILENAME_PREFIXES
+    /// denylist that closes the .env read leak vector.
+    #[test]
+    fn read_file_dotenv_is_denied() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join(".env"),
+            "ANTHROPIC_API_KEY=sk-test-do-not-leak\n",
+        )
+        .unwrap();
+
+        let result = execute_tool(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": ".env" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+
+        assert!(
+            !result.success,
+            "ReadFile must refuse .env; got success with output: {}",
+            result.output,
+        );
+        assert!(
+            result.output.contains("sensitive") || result.output.contains("capability denied"),
+            "denial message must explain the refusal; got: {}",
+            result.output,
+        );
+        // Critical: the secret must NOT appear in the tool output.
+        assert!(
+            !result.output.contains("sk-test-do-not-leak"),
+            "ABSOLUTE failure: secret leaked into tool output: {}",
+            result.output,
+        );
+    }
+
+    /// `execute_read_file` must refuse `.env.local`, `.env.production`, etc.
+    #[test]
+    fn read_file_dotenv_variants_are_denied() {
+        let tmp = TempDir::new().unwrap();
+        for name in [".env.local", ".env.production", ".env.development"] {
+            fs::write(tmp.path().join(name), "SECRET=xxx\n").unwrap();
+            let result = execute_tool(
+                ToolType::ReadFile,
+                &serde_json::json!({ "path": name }),
+                tmp.path().to_str().unwrap(),
+                &AgentRole::Actor,
+            );
+            assert!(
+                !result.success,
+                "ReadFile must refuse {name}; got success with output: {}",
+                result.output,
+            );
+        }
+    }
+
+    /// `execute_read_file` must refuse common private-key filenames.
+    #[test]
+    fn read_file_private_keys_are_denied() {
+        let tmp = TempDir::new().unwrap();
+        for name in ["id_rsa", "id_ed25519", "server.pem", "client.key"] {
+            fs::write(tmp.path().join(name), "-----BEGIN PRIVATE KEY-----\n").unwrap();
+            let result = execute_tool(
+                ToolType::ReadFile,
+                &serde_json::json!({ "path": name }),
+                tmp.path().to_str().unwrap(),
+                &AgentRole::Actor,
+            );
+            assert!(
+                !result.success,
+                "ReadFile must refuse {name}; got success with output: {}",
+                result.output,
+            );
+        }
+    }
+
+    /// `execute_read_file` must still accept legitimate files.  Smoke test
+    /// that the denylist does not over-match.
+    #[test]
+    fn read_file_normal_file_still_works() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("README.md"), "hello").unwrap();
+        let result = execute_tool(
+            ToolType::ReadFile,
+            &serde_json::json!({ "path": "README.md" }),
+            tmp.path().to_str().unwrap(),
+            &AgentRole::Actor,
+        );
+        assert!(
+            result.success,
+            "ReadFile must succeed for non-sensitive file; got: {}",
+            result.output,
+        );
+        assert_eq!(result.output, "hello");
     }
 }
