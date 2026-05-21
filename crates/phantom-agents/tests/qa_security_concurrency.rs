@@ -58,7 +58,8 @@ fn build_dispatch_ctx<'a>(
         role,
         working_dir: dir,
         registry,
-        event_log: None,
+        // #645: DispatchContext::event_log is non-optional.
+        event_log: phantom_agents::test_support::fresh_log(),
         pending_spawn: new_spawn_subagent_queue(),
         source_event_id: None,
         quarantine: None,
@@ -66,6 +67,7 @@ fn build_dispatch_ctx<'a>(
         ticket_dispatcher: None,
         runtime_mode: RuntimeMode::Normal,
         dag_explorer: None,
+        mcp_registry: None,
     }
 }
 

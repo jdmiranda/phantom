@@ -222,6 +222,16 @@ impl App {
                 self.build_context_menu_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
             }
 
+            // -- Keybind help overlay (F1 / ?) — rendered above all other overlays --
+            if self.keybind_help.visible() {
+                self.build_keybind_help_overlay(screen_size, &mut chrome_quads, &mut chrome_glyphs);
+            }
+
+            // -- Find-in-terminal search bar (Cmd+F) --
+            if self.search_bar.visible {
+                self.build_search_overlay(&mut chrome_quads, &mut chrome_glyphs);
+            }
+
             // -- Alt-screen bezier tether (issue #323) --
             if !self.alt_screen_secondaries.is_empty() {
                 self.build_alt_screen_tether(&mut chrome_quads);
@@ -312,6 +322,8 @@ impl App {
                         line.color[2],
                         line.color[3] * opacity,
                     ],
+                    bold: false,
+                    italic: false,
                 })
                 .collect();
 
@@ -371,6 +383,8 @@ impl App {
                             ch: tc.ch,
                             fg: tc.fg,
                             bg: tc.bg,
+                            bold: tc.bold,
+                            italic: tc.italic,
                         }));
 
                     let (mut bg_quads, batch) = GridRenderData::prepare(
@@ -646,6 +660,8 @@ impl App {
                         ch: tc.ch,
                         fg: tc.fg,
                         bg: tc.bg,
+                        bold: tc.bold,
+                        italic: tc.italic,
                     }));
 
                 let origin = (grid.origin.0, grid.origin.1);
@@ -798,7 +814,7 @@ impl App {
             self.text_cell_buf.extend(
                 seg.text
                     .chars()
-                    .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: seg.color }),
+                    .map(|ch| phantom_renderer::text::TerminalCell { ch, fg: seg.color, bold: false, italic: false }),
             );
 
             if self.text_cell_buf.is_empty() {
@@ -820,5 +836,161 @@ impl App {
             // Widget text segments are always monochrome; color batch is empty.
             glyphs.extend(batch.mono);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Headless unit tests — no GPU / winit required
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_shape_size;
+    use phantom_adapter::adapter::CursorShape;
+
+    // -----------------------------------------------------------------------
+    // cursor_shape_size — Block
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn block_returns_full_cell() {
+        let (w, h) = cursor_shape_size(CursorShape::Block, (12.0, 24.0));
+        assert_eq!(w, 12.0);
+        assert_eq!(h, 24.0);
+    }
+
+    #[test]
+    fn block_zero_size_cell_returns_zero() {
+        let (w, h) = cursor_shape_size(CursorShape::Block, (0.0, 0.0));
+        assert_eq!(w, 0.0);
+        assert_eq!(h, 0.0);
+    }
+
+    #[test]
+    fn block_large_cell_returns_full_size() {
+        let (w, h) = cursor_shape_size(CursorShape::Block, (1000.0, 2000.0));
+        assert_eq!(w, 1000.0);
+        assert_eq!(h, 2000.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // cursor_shape_size — Bar (2-px-min vertical bar)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bar_normal_cell_is_10pct_width_and_full_height() {
+        // 12 * 0.1 = 1.2 → clamped to 2.0 minimum
+        let (w, h) = cursor_shape_size(CursorShape::Bar, (12.0, 24.0));
+        assert_eq!(w, 2.0, "bar width should clamp to 2 px minimum");
+        assert_eq!(h, 24.0, "bar height should equal full cell height");
+    }
+
+    #[test]
+    fn bar_wide_cell_uses_10pct_of_width() {
+        // 100 * 0.1 = 10.0 → exceeds 2 px floor
+        let (w, h) = cursor_shape_size(CursorShape::Bar, (100.0, 200.0));
+        assert_eq!(w, 10.0);
+        assert_eq!(h, 200.0);
+    }
+
+    #[test]
+    fn bar_zero_width_cell_clamps_to_2px() {
+        let (w, h) = cursor_shape_size(CursorShape::Bar, (0.0, 20.0));
+        assert_eq!(w, 2.0, "zero-width cell must clamp bar width to 2 px");
+        assert_eq!(h, 20.0);
+    }
+
+    #[test]
+    fn bar_very_large_cell_uses_10pct() {
+        let (w, h) = cursor_shape_size(CursorShape::Bar, (10_000.0, 5_000.0));
+        assert_eq!(w, 1_000.0);
+        assert_eq!(h, 5_000.0);
+    }
+
+    #[test]
+    fn bar_exactly_20px_wide_uses_10pct() {
+        // 20 * 0.1 = 2.0 — sits exactly at the minimum boundary
+        let (w, h) = cursor_shape_size(CursorShape::Bar, (20.0, 30.0));
+        assert_eq!(w, 2.0);
+        assert_eq!(h, 30.0);
+    }
+
+    #[test]
+    fn bar_just_below_20px_wide_clamps_to_2px() {
+        // 19 * 0.1 = 1.9 → clamped to 2 px
+        let (w, h) = cursor_shape_size(CursorShape::Bar, (19.0, 30.0));
+        assert_eq!(w, 2.0);
+        assert_eq!(h, 30.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // cursor_shape_size — Underline (2-px-min horizontal bar)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn underline_normal_cell_is_full_width_and_10pct_height() {
+        // 24 * 0.1 = 2.4 → exceeds 2 px floor
+        let (w, h) = cursor_shape_size(CursorShape::Underline, (12.0, 24.0));
+        assert_eq!(w, 12.0, "underline width should equal full cell width");
+        assert!(h >= 2.0, "underline height must be at least 2 px");
+        let expected_h = 2.0_f32.max(24.0 * 0.1);
+        assert!((h - expected_h).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn underline_short_cell_clamps_to_2px_height() {
+        // 10 * 0.1 = 1.0 → clamped to 2 px
+        let (w, h) = cursor_shape_size(CursorShape::Underline, (15.0, 10.0));
+        assert_eq!(w, 15.0);
+        assert_eq!(h, 2.0, "short cell must clamp underline height to 2 px");
+    }
+
+    #[test]
+    fn underline_zero_height_cell_clamps_to_2px() {
+        let (w, h) = cursor_shape_size(CursorShape::Underline, (20.0, 0.0));
+        assert_eq!(w, 20.0);
+        assert_eq!(h, 2.0, "zero-height cell must clamp underline height to 2 px");
+    }
+
+    #[test]
+    fn underline_very_large_cell_uses_10pct_height() {
+        let (w, h) = cursor_shape_size(CursorShape::Underline, (5_000.0, 10_000.0));
+        assert_eq!(w, 5_000.0);
+        assert_eq!(h, 1_000.0);
+    }
+
+    #[test]
+    fn underline_exactly_20px_tall_uses_10pct() {
+        // 20 * 0.1 = 2.0 — sits exactly at the minimum boundary
+        let (w, h) = cursor_shape_size(CursorShape::Underline, (30.0, 20.0));
+        assert_eq!(w, 30.0);
+        assert_eq!(h, 2.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // cursor_shape_size — typical font metrics (regression anchors)
+    // -----------------------------------------------------------------------
+
+    /// Typical HiDPI cell at 2× scale: ~9 × 20 logical pixels.
+    #[test]
+    fn regression_hidpi_cell_block() {
+        let (w, h) = cursor_shape_size(CursorShape::Block, (9.0, 20.0));
+        assert_eq!((w, h), (9.0, 20.0));
+    }
+
+    #[test]
+    fn regression_hidpi_cell_bar() {
+        // 9 * 0.1 = 0.9 → clamped to 2.0
+        let (w, h) = cursor_shape_size(CursorShape::Bar, (9.0, 20.0));
+        assert_eq!(w, 2.0);
+        assert_eq!(h, 20.0);
+    }
+
+    #[test]
+    fn regression_hidpi_cell_underline() {
+        // 20 * 0.1 = 2.0 — at floor
+        let (w, h) = cursor_shape_size(CursorShape::Underline, (9.0, 20.0));
+        assert_eq!(w, 9.0);
+        assert_eq!(h, 2.0);
     }
 }

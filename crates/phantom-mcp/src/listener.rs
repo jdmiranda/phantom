@@ -305,7 +305,11 @@ fn handle_connection(stream: UnixStream, cmd_tx: Sender<AppCommand>) {
     // registries. Stateful handlers go through the command channel instead.
     let server = PhantomMcpServer::new();
 
-    // Stream wrapper: JSON-RPC 2.0 over MCP uses newline-delimited JSON.
+    // Stream wrapper: JSON-RPC 2.0 over MCP uses Content-Length header framing
+    // (same as LSP). Each message is preceded by:
+    //   Content-Length: <byte-count>\r\n
+    //   \r\n
+    //   <json-body>
     let mut write_half = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -313,19 +317,22 @@ fn handle_connection(stream: UnixStream, cmd_tx: Sender<AppCommand>) {
             return;
         }
     };
-    let reader = BufReader::new(stream);
+    let mut reader = BufReader::new(stream);
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) if l.trim().is_empty() => continue,
-            Ok(l) => l,
+    loop {
+        let body = match read_json_rpc_message(&mut reader) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                debug!("mcp: client {peer_addr} disconnected");
+                break;
+            }
             Err(e) => {
                 debug!("mcp: client {peer_addr} read error: {e}");
                 break;
             }
         };
 
-        let request: JsonRpcRequest = match serde_json::from_str(&line) {
+        let request: JsonRpcRequest = match serde_json::from_str(&body) {
             Ok(r) => r,
             Err(e) => {
                 let resp = protocol::create_error(
@@ -351,15 +358,96 @@ fn handle_connection(stream: UnixStream, cmd_tx: Sender<AppCommand>) {
     debug!("MCP client disconnected: {peer_addr}");
 }
 
+/// Write a single JSON-RPC message with MCP-standard `Content-Length` framing.
+///
+/// The wire format is:
+/// ```text
+/// Content-Length: <byte-count>\r\n
+/// \r\n
+/// <json-body>
+/// ```
+///
+/// This matches the MCP specification and is compatible with LSP clients that
+/// speak the same framing (e.g. Claude Code, rust-analyzer).
+fn write_json_rpc_message(writer: &mut impl Write, json: &str) -> std::io::Result<()> {
+    let bytes = json.as_bytes();
+    write!(writer, "Content-Length: {}\r\n\r\n", bytes.len())?;
+    writer.write_all(bytes)?;
+    writer.flush()
+}
+
+/// Read a single JSON-RPC message that uses `Content-Length` header framing.
+///
+/// Reads headers line-by-line (each terminated by `\r\n`) until a blank
+/// `\r\n` separator is reached, extracts the `Content-Length` value, then
+/// reads exactly that many bytes for the body.
+///
+/// Returns `Err(io::ErrorKind::InvalidData)` when:
+/// - No `Content-Length` header is present before the blank separator.
+/// - The declared length is too large (> 64 MiB guard).
+/// - The body is shorter than the declared length.
+fn read_json_rpc_message(reader: &mut impl BufRead) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind};
+
+    let mut content_length: Option<usize> = None;
+
+    // Read header lines until the blank \r\n separator.
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            // EOF before complete header block.
+            return Err(Error::new(ErrorKind::UnexpectedEof, "connection closed mid-header"));
+        }
+
+        // Strip the CRLF (or bare LF for robustness).
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+
+        if trimmed.is_empty() {
+            // Blank line — end of headers.
+            break;
+        }
+
+        // Parse Content-Length (case-insensitive per HTTP convention).
+        if let Some(rest) = trimmed.to_ascii_lowercase().strip_prefix("content-length:") {
+            let value = rest.trim();
+            content_length = Some(value.parse::<usize>().map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("invalid Content-Length value: {e}"),
+                )
+            })?);
+        }
+        // Ignore other headers (Content-Type, etc.).
+    }
+
+    let length = content_length.ok_or_else(|| {
+        Error::new(ErrorKind::InvalidData, "missing Content-Length header")
+    })?;
+
+    // Sanity cap to guard against malformed frames.
+    const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+    if length > MAX_MESSAGE_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Content-Length {length} exceeds 64 MiB limit"),
+        ));
+    }
+
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+
+    String::from_utf8(body).map_err(|e| {
+        Error::new(ErrorKind::InvalidData, format!("message body is not valid UTF-8: {e}"))
+    })
+}
+
 fn write_response(
     stream: &mut UnixStream,
     response: &protocol::JsonRpcResponse,
 ) -> std::io::Result<()> {
-    let mut bytes = serde_json::to_vec(response).unwrap_or_else(|_| b"{}".to_vec());
-    bytes.push(b'\n');
-    stream.write_all(&bytes)?;
-    stream.flush()?;
-    Ok(())
+    let json = serde_json::to_string(response).unwrap_or_else(|_| "{}".to_owned());
+    write_json_rpc_message(stream, &json)
 }
 
 // ---------------------------------------------------------------------------
@@ -996,16 +1084,16 @@ fn dispatch_get_agent_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::BufReader;
 
+    /// Send a JSON-RPC request with Content-Length framing and read the
+    /// Content-Length-framed response.
     fn send_and_recv(stream: &mut UnixStream, req: &str) -> String {
-        stream.write_all(req.as_bytes()).unwrap();
-        stream.write_all(b"\n").unwrap();
-        stream.flush().unwrap();
+        // Write with Content-Length framing.
+        write_json_rpc_message(stream, req).unwrap();
+        // Read the framed response.
         let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        line
+        read_json_rpc_message(&mut reader).unwrap()
     }
 
     #[test]
@@ -1366,5 +1454,82 @@ mod tests {
         let req = r#"{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"phantom.get_agent_status","arguments":{}}}"#;
         let resp = send_and_recv(&mut stream, req);
         assert!(resp.contains("missing"), "should reject missing agent_id: {resp}");
+    }
+
+    // ── Content-Length framing unit tests ────────────────────────────────────
+
+    /// Write a JSON-RPC message with `write_json_rpc_message`, then read it
+    /// back with `read_json_rpc_message`; the body must round-trip exactly.
+    #[test]
+    fn content_length_framing_roundtrip() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
+        let mut buf: Vec<u8> = Vec::new();
+        write_json_rpc_message(&mut buf, json).unwrap();
+
+        // Verify the wire bytes contain the header.
+        let wire = std::str::from_utf8(&buf).unwrap();
+        assert!(
+            wire.starts_with(&format!("Content-Length: {}\r\n\r\n", json.len())),
+            "wire frame missing correct Content-Length header: {wire:?}"
+        );
+
+        // Round-trip: read back through the framing decoder.
+        let mut reader = std::io::BufReader::new(buf.as_slice());
+        let recovered = read_json_rpc_message(&mut reader).unwrap();
+        assert_eq!(recovered, json, "body must round-trip through framing");
+    }
+
+    /// A valid Content-Length frame followed by a truncated body must return
+    /// an error rather than silently returning partial JSON.
+    #[test]
+    fn content_length_framing_rejects_truncated_message() {
+        let json = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+        let declared_len = json.len() + 20; // lie: claim more bytes than we send
+
+        let mut buf: Vec<u8> = format!("Content-Length: {declared_len}\r\n\r\n").into_bytes();
+        buf.extend_from_slice(json.as_bytes()); // only `json.len()` bytes, not `declared_len`
+
+        let mut reader = std::io::BufReader::new(buf.as_slice());
+        let result = read_json_rpc_message(&mut reader);
+        assert!(
+            result.is_err(),
+            "truncated body should produce an error, got Ok({:?})",
+            result.ok()
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "truncated body must be UnexpectedEof, got {err}"
+        );
+    }
+
+    /// A frame with no `Content-Length` header must be rejected.
+    #[test]
+    fn content_length_framing_rejects_missing_header() {
+        // Send headers without Content-Length, then the blank separator.
+        let buf = b"Content-Type: application/json\r\n\r\n{}".to_vec();
+        let mut reader = std::io::BufReader::new(buf.as_slice());
+        let result = read_json_rpc_message(&mut reader);
+        assert!(result.is_err(), "missing Content-Length should be an error");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// Over-the-wire integration: a complete initialize request written with
+    /// Content-Length framing is received and answered by the listener.
+    #[test]
+    fn initialize_works_over_socket_with_content_length_framing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("phantom-mcp-cl-framing.sock");
+        let (cmd_tx, _cmd_rx) = mpsc::channel();
+        let _listener = spawn(sock.clone(), cmd_tx).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let mut stream = UnixStream::connect(&sock).unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let resp = send_and_recv(&mut stream, req);
+        assert!(resp.contains("\"serverInfo\""), "expected serverInfo in: {resp}");
+        assert!(resp.contains("phantom"), "expected phantom in: {resp}");
     }
 }
