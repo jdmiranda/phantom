@@ -67,19 +67,19 @@ impl SttPipeline {
     pub fn build() -> Option<Self> {
         // Privacy-mode check is handled by the caller (App::with_config_scaled)
         // before calling build(), so we don't re-examine it here.
-
-        if let Ok(key) = std::env::var("OPENAI_API_KEY")
-            && !key.trim().is_empty()
-        {
-            let backend = phantom_stt::openai::OpenAiBackend::new(key);
-            tracing_or_log::info("STT: using OpenAI backend (gpt-4o-transcribe)");
-            return Some(Self::start(Arc::new(backend), SttStreamConfig::default(), 64));
+        //
+        // Delegate env-var probing + whitespace-guard to `OpenAiBackend::from_env`
+        // so the two code paths can't diverge.
+        match phantom_stt::openai::OpenAiBackend::from_env() {
+            Ok(backend) => {
+                log::info!("STT: using OpenAI backend (gpt-4o-transcribe)");
+                Some(Self::start(Arc::new(backend), SttStreamConfig::default(), 64))
+            }
+            Err(_) => {
+                log::warn!("STT: no OPENAI_API_KEY found — voice input disabled");
+                None
+            }
         }
-
-        tracing_or_log::warn(
-            "STT: no OPENAI_API_KEY found — voice input disabled",
-        );
-        None
     }
 
     /// Start the STT pipeline with the given backend and config.
@@ -103,6 +103,9 @@ impl SttPipeline {
         let (event_tx, event_rx) = mpsc::channel::<CaptureEvent>(64);
 
         let stream = SttStream::new(backend, config);
+        // FIXME(#56/#68): these tasks are live but produce no output until mic
+        // capture is wired. They idle on `audio_rx.recv()` with zero CPU cost
+        // and shut down cleanly when `audio_tx` is dropped (pipeline dropped).
         tokio::spawn(async move {
             stream.run(audio_rx, partial_tx).await;
         });
@@ -167,17 +170,6 @@ async fn forward_partials(
         if event_tx.send(event).await.is_err() {
             break;
         }
-    }
-}
-
-// ── Minimal logging shim (avoids tracing dep in phantom-app for this module) ──
-
-mod tracing_or_log {
-    pub fn info(msg: &str) {
-        log::info!("{}", msg);
-    }
-    pub fn warn(msg: &str) {
-        log::warn!("{}", msg);
     }
 }
 
