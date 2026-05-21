@@ -122,17 +122,26 @@ impl PhantomSettings {
     }
 
     /// Build a [`PhantomSettings`] from a UI snapshot produced by
-    /// [`SettingsPanel::to_snapshot`](crate::settings_ui::SettingsPanel::to_snapshot).
+    /// [`SettingsPanel::to_snapshot`](crate::settings_ui::SettingsPanel::to_snapshot),
+    /// preserving any settings the snapshot does not cover.
     ///
-    /// Maps every snapshot field to the corresponding settings field so that
-    /// values edited interactively in the settings overlay are faithfully written
-    /// to disk when the user presses Escape.
+    /// The settings UI only edits theme, font size, and CRT shader params.
+    /// Fields the panel does not surface (e.g. [`ScrollSettings`]) must carry
+    /// through from `base` — otherwise an Escape-save would silently reset
+    /// any value the user had hand-edited in `settings.toml`.
+    ///
+    /// Pass the currently-loaded `PhantomSettings` as `base` so the resulting
+    /// struct merges the snapshot over the existing on-disk state.
     #[must_use]
-    pub(crate) fn from_snapshot(snap: &crate::settings_ui::SettingsSnapshot) -> Self {
+    pub(crate) fn from_snapshot(
+        snap: &crate::settings_ui::SettingsSnapshot,
+        base: &PhantomSettings,
+    ) -> Self {
         Self {
             theme: snap.theme_name.clone(),
             font_size: snap.font_size,
-            scroll: ScrollSettings::default(),
+            // Preserve fields the UI does not edit (history_lines, scroll_lines).
+            scroll: base.scroll.clone(),
             crt: CrtSettings {
                 scanline_intensity: snap.scanline_intensity,
                 bloom_intensity: snap.bloom_intensity,
@@ -233,7 +242,8 @@ mod tests {
             noise_intensity: 0.04,
         };
 
-        let settings = PhantomSettings::from_snapshot(&snap);
+        let base = PhantomSettings::default();
+        let settings = PhantomSettings::from_snapshot(&snap, &base);
 
         assert_eq!(settings.theme, "ice");
         assert!((settings.font_size - 22.0).abs() < f32::EPSILON);
@@ -243,5 +253,38 @@ mod tests {
         assert!((settings.crt.curvature - 0.12).abs() < f32::EPSILON);
         assert!((settings.crt.vignette_intensity - 0.33).abs() < f32::EPSILON);
         assert!((settings.crt.noise_intensity - 0.04).abs() < f32::EPSILON);
+    }
+
+    /// Regression: the settings UI does not edit [`ScrollSettings`], so an
+    /// Escape-save must preserve any user-edited `history_lines` /
+    /// `scroll_lines` from disk rather than resetting them to defaults.
+    #[test]
+    fn from_snapshot_preserves_scroll_settings_from_base() {
+        use crate::settings_ui::SettingsSnapshot;
+
+        let base = PhantomSettings {
+            scroll: ScrollSettings {
+                history_lines: 50_000,
+                scroll_lines: 7,
+            },
+            ..PhantomSettings::default()
+        };
+
+        let snap = SettingsSnapshot {
+            theme_name: "amber".into(),
+            font_size: 20.0,
+            scanline_intensity: 0.2,
+            bloom_intensity: 0.3,
+            chromatic_aberration: 0.003,
+            curvature: 0.05,
+            vignette_intensity: 0.3,
+            noise_intensity: 0.02,
+        };
+
+        let merged = PhantomSettings::from_snapshot(&snap, &base);
+
+        assert_eq!(merged.scroll.history_lines, 50_000);
+        assert_eq!(merged.scroll.scroll_lines, 7);
+        assert_eq!(merged.theme, "amber");
     }
 }

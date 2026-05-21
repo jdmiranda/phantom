@@ -596,8 +596,15 @@ impl App {
                 // and write to disk atomically. The config watcher will pick up
                 // the change on the next poll; CRT changes are already applied
                 // live below so the user sees them immediately.
+                //
+                // The panel only edits theme, font size, and CRT params, so we
+                // load the on-disk state first and merge the snapshot over it.
+                // Otherwise any user-edited scroll settings (history_lines,
+                // scroll_lines) would silently revert to defaults on every
+                // Escape-save.
+                let base = PhantomSettings::load();
                 let snapshot = self.settings_panel.to_snapshot();
-                let settings = PhantomSettings::from_snapshot(&snapshot);
+                let settings = PhantomSettings::from_snapshot(&snapshot, &base);
                 match settings.save() {
                     Ok(path) => info!("Settings saved to {}", path.display()),
                     Err(e) => warn!("Failed to save settings on Escape: {e}"),
