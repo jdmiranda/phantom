@@ -17,21 +17,25 @@
 //!     ▼
 //! FrameDedup::should_process
 //!     ├── first frame ever        → true  (always forward)
-//!     ├── hamming_distance > thr  → true  (visually distinct)
+//!     ├── hamming_distance > thr  → true  (visually distinct, SAD skipped)
 //!     ├── sad > thr               → true  (pixel-level distinct)
 //!     └── both ≤ thr              → false (near-duplicate, skip)
 //! ```
 
-use crate::{box_downsample_gray, check_rgba, VisionError};
+use crate::{box_downsample_gray, box_downsample_gray_from_gray, dhash_pack_from_9x8, VisionError};
 
 // ── DHash ─────────────────────────────────────────────────────────────────────
 
 /// 64-bit difference hash (dHash) of a frame, stored as eight bytes.
 ///
+/// `DHash` is an ergonomic namespace over the crate's authoritative dHash
+/// implementation in [`crate::dhash`]. [`DHash::compute`] delegates to that
+/// function and packs the result big-endian; the two paths cannot drift.
+///
 /// Algorithm: downsample the input RGBA image to 9×8 grayscale, then for each
-/// row compare adjacent horizontal pixels — set the corresponding bit if the
-/// left pixel is brighter than the right. The resulting 64 bits are packed into
-/// `[u8; 8]` in big-endian order (most-significant bit first).
+/// row compare adjacent horizontal pixels — set the corresponding bit when the
+/// left pixel is brighter than the right. The 64 bits are packed into
+/// `[u8; 8]` MSB-first.
 ///
 /// # Example
 ///
@@ -48,28 +52,15 @@ pub struct DHash;
 impl DHash {
     /// Compute the dHash of an RGBA image.
     ///
-    /// Downsamples `pixels` to 9×8 grayscale (box filter) then derives 64
-    /// gradient bits, packed into `[u8; 8]` big-endian.
+    /// Delegates to [`crate::dhash`] and returns the 64-bit result packed as
+    /// `[u8; 8]` big-endian (MSB first).
     ///
     /// # Errors
     ///
     /// - [`VisionError::ZeroDim`] if `width` or `height` is zero.
     /// - [`VisionError::SizeMismatch`] if `pixels.len() != width * height * 4`.
     pub fn compute(pixels: &[u8], width: u32, height: u32) -> Result<[u8; 8], VisionError> {
-        check_rgba(pixels, width, height)?;
-        let small = box_downsample_gray(pixels, width, height, 9, 8);
-
-        let mut bits = 0u64;
-        for row in 0..8usize {
-            let base = row * 9;
-            for col in 0..8usize {
-                let left = small[base + col];
-                let right = small[base + col + 1];
-                bits = (bits << 1) | u64::from(left > right);
-            }
-        }
-
-        Ok(bits.to_be_bytes())
+        crate::dhash(pixels, width, height).map(u64::to_be_bytes)
     }
 
     /// Count the number of differing bits between two dHash values.
@@ -99,6 +90,10 @@ impl SadGate {
     ///
     /// Returns the mean per-pixel absolute difference in `[0.0, 255.0]`.
     ///
+    /// Prefer [`SadGate::try_compute_sad`] when the caller does not control
+    /// both sides of the comparison and cannot guarantee equal, non-empty
+    /// slices.
+    ///
     /// # Panics
     ///
     /// Panics if `a.len() != b.len()` or if either slice is empty.
@@ -106,7 +101,25 @@ impl SadGate {
     pub fn compute_sad(a: &[u8], b: &[u8]) -> f32 {
         assert_eq!(a.len(), b.len(), "SadGate::compute_sad: slice lengths differ");
         assert!(!a.is_empty(), "SadGate::compute_sad: slices must not be empty");
+        Self::sad_unchecked(a, b)
+    }
 
+    /// Fallible variant of [`SadGate::compute_sad`] that returns `None`
+    /// instead of panicking on mismatched or empty input.
+    ///
+    /// Returns `None` when `a.len() != b.len()` or when both slices are empty,
+    /// otherwise the mean per-pixel absolute difference in `[0.0, 255.0]`.
+    #[must_use]
+    pub fn try_compute_sad(a: &[u8], b: &[u8]) -> Option<f32> {
+        if a.len() != b.len() || a.is_empty() {
+            return None;
+        }
+        Some(Self::sad_unchecked(a, b))
+    }
+
+    /// Inner SAD body. Caller is responsible for verifying `a.len() == b.len()`
+    /// and `!a.is_empty()`.
+    fn sad_unchecked(a: &[u8], b: &[u8]) -> f32 {
         let total: u64 = a
             .iter()
             .zip(b.iter())
@@ -124,15 +137,28 @@ const THUMB_W: u32 = 64;
 /// Height of the stored thumbnail used for SAD comparisons.
 const THUMB_H: u32 = 48;
 
+/// Default Hamming-distance threshold for the dedup gate.
+const DEFAULT_HAMMING_THRESHOLD: u32 = 10;
+/// Default mean SAD threshold for the dedup gate.
+const DEFAULT_SAD_THRESHOLD: f32 = 15.0;
+
 /// Stateful two-stage frame deduplication gate.
 ///
 /// Keeps the dHash and a downsampled 64×48 grayscale thumbnail of the last
-/// forwarded frame. On each call to [`FrameDedup::should_process`] it checks
-/// both the Hamming distance between the stored and incoming dHash, **and** the
-/// mean SAD between the stored and incoming 64×48 thumbnails. The frame is
-/// considered novel (returns `true`) if **either** signal exceeds its threshold.
+/// forwarded frame as a single atomic tuple. On each call to
+/// [`FrameDedup::should_process`] it computes the 64×48 thumbnail once, derives
+/// the 9×8 dHash thumb from it (avoiding a second pass over the full RGBA
+/// source frame), then evaluates the gate:
 ///
-/// The first frame always returns `true` regardless of thresholds.
+/// 1. Compare Hamming distance against `hamming_threshold`. If it exceeds the
+///    threshold the frame is forwarded immediately and the SAD comparison is
+///    skipped.
+/// 2. Otherwise compute mean SAD on the 64×48 thumb and compare against
+///    `sad_threshold`.
+///
+/// The frame is considered novel (returns `true`) if **either** signal exceeds
+/// its threshold. The first frame always returns `true` regardless of
+/// thresholds.
 ///
 /// # Defaults
 ///
@@ -141,12 +167,14 @@ const THUMB_H: u32 = 48;
 /// | `hamming_threshold` | `10`     |
 /// | `sad_threshold`     | `15.0`   |
 ///
+/// Use [`FrameDedup::default`] to obtain a gate with these values.
+///
 /// # Example
 ///
 /// ```
 /// use phantom_vision::dedup::FrameDedup;
 ///
-/// let mut gate = FrameDedup::new(10, 15.0);
+/// let mut gate = FrameDedup::default();
 /// let frame = vec![128u8; 64 * 48 * 4];
 ///
 /// // First call always forwards.
@@ -157,10 +185,11 @@ const THUMB_H: u32 = 48;
 pub struct FrameDedup {
     hamming_threshold: u32,
     sad_threshold: f32,
-    /// dHash of the last forwarded frame, or `None` before any frame.
-    last_hash: Option<[u8; 8]>,
-    /// 64×48 grayscale thumbnail of the last forwarded frame (3 072 bytes).
-    last_thumb: Option<Vec<u8>>,
+    /// dHash + 64×48 thumbnail of the last forwarded frame.
+    ///
+    /// Kept as a single `Option` so the two halves of the dedup state cannot
+    /// disagree about whether a previous frame exists.
+    last: Option<([u8; 8], Vec<u8>)>,
 }
 
 impl FrameDedup {
@@ -175,8 +204,7 @@ impl FrameDedup {
         Self {
             hamming_threshold,
             sad_threshold,
-            last_hash: None,
-            last_thumb: None,
+            last: None,
         }
     }
 
@@ -196,8 +224,15 @@ impl FrameDedup {
     ///
     /// Panics if `width == 0`, `height == 0`, or
     /// `frame.len() != width * height * 4`. These conditions indicate a
-    /// programming error at the call site.
+    /// programming error at the call site. Validation happens once inside the
+    /// shared `check_rgba` path used by [`crate::dhash`].
     pub fn should_process(&mut self, frame: &[u8], width: u32, height: u32) -> bool {
+        // Downsample the full RGBA frame to the 64×48 SAD thumb **once**.
+        // The dHash thumb is derived from this buffer instead of re-traversing
+        // the multi-megapixel source. `box_downsample_gray` validates the
+        // buffer/dimensions invariants implicitly via the index arithmetic; we
+        // assert the surface contract here so a malformed call panics with a
+        // clear message instead of producing a wrong-shaped output.
         assert!(width > 0 && height > 0, "FrameDedup: dimensions must be non-zero");
         assert_eq!(
             frame.len(),
@@ -205,25 +240,36 @@ impl FrameDedup {
             "FrameDedup: frame buffer length does not match dimensions"
         );
 
-        let hash = DHash::compute(frame, width, height)
-            .expect("dimensions already validated above");
         let thumb = box_downsample_gray(frame, width, height, THUMB_W, THUMB_H);
+        let dhash_thumb = box_downsample_gray_from_gray(&thumb, THUMB_W, THUMB_H, 9, 8);
+        let hash = dhash_pack_from_9x8(&dhash_thumb).to_be_bytes();
 
-        let novel = match (&self.last_hash, &self.last_thumb) {
-            (None, _) | (_, None) => true,
-            (Some(last_hash), Some(last_thumb)) => {
+        let novel = match &self.last {
+            None => true,
+            Some((last_hash, last_thumb)) => {
                 let hamming = DHash::hamming_distance(last_hash, &hash);
-                let sad = SadGate::compute_sad(last_thumb, &thumb);
-                hamming > self.hamming_threshold || sad > self.sad_threshold
+                if hamming > self.hamming_threshold {
+                    // Cheap signal already decisive; skip the SAD pass.
+                    true
+                } else {
+                    SadGate::compute_sad(last_thumb, &thumb) > self.sad_threshold
+                }
             }
         };
 
         if novel {
-            self.last_hash = Some(hash);
-            self.last_thumb = Some(thumb);
+            self.last = Some((hash, thumb));
         }
 
         novel
+    }
+}
+
+impl Default for FrameDedup {
+    /// Build a [`FrameDedup`] gate with the documented default thresholds
+    /// (`hamming_threshold = 10`, `sad_threshold = 15.0`).
+    fn default() -> Self {
+        Self::new(DEFAULT_HAMMING_THRESHOLD, DEFAULT_SAD_THRESHOLD)
     }
 }
 
@@ -294,11 +340,31 @@ mod tests {
 
     #[test]
     fn dhash_matches_existing_free_function() {
-        // DHash::compute must agree with the module-level `dhash` free function.
+        // DHash::compute must agree with the module-level `dhash` free function
+        // (since the former delegates to the latter, this enforces the
+        // delegation contract rather than two independent implementations).
         let pixels = gradient_rgba(48, 32);
         let via_struct = DHash::compute(&pixels, 48, 32).unwrap();
         let via_fn = crate::dhash(&pixels, 48, 32).unwrap();
         assert_eq!(via_struct, via_fn.to_be_bytes());
+    }
+
+    #[test]
+    fn dhash_compute_rejects_zero_dim() {
+        let err = DHash::compute(&[], 0, 16).unwrap_err();
+        assert!(matches!(err, VisionError::ZeroDim));
+        let err = DHash::compute(&[], 16, 0).unwrap_err();
+        assert!(matches!(err, VisionError::ZeroDim));
+    }
+
+    #[test]
+    fn dhash_compute_rejects_size_mismatch() {
+        let bad = vec![0u8; 10];
+        let err = DHash::compute(&bad, 4, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            VisionError::SizeMismatch { expected: 64, got: 10 }
+        ));
     }
 
     // ── SadGate ───────────────────────────────────────────────────────────────
@@ -327,6 +393,27 @@ mod tests {
         let full = vec![255u8; 256];
         let sad = SadGate::compute_sad(&zeros, &full);
         assert!((sad - 255.0).abs() < 0.01, "max SAD should be 255.0, got {sad}");
+    }
+
+    #[test]
+    fn try_compute_sad_returns_none_on_length_mismatch() {
+        let a = vec![0u8; 16];
+        let b = vec![0u8; 32];
+        assert!(SadGate::try_compute_sad(&a, &b).is_none());
+    }
+
+    #[test]
+    fn try_compute_sad_returns_none_on_empty_input() {
+        assert!(SadGate::try_compute_sad(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn try_compute_sad_matches_compute_sad_for_valid_input() {
+        let a = vec![10u8; 64];
+        let b = vec![40u8; 64];
+        let panicking = SadGate::compute_sad(&a, &b);
+        let fallible = SadGate::try_compute_sad(&a, &b).unwrap();
+        assert!((panicking - fallible).abs() < 1e-6);
     }
 
     // ── FrameDedup ────────────────────────────────────────────────────────────
@@ -391,5 +478,39 @@ mod tests {
         let white = solid(64, 48, [255, 255, 255, 255]);
         assert!(gate.should_process(&black, 64, 48)); // first always true
         assert!(!gate.should_process(&white, 64, 48), "max threshold: white after black is deduplicated");
+    }
+
+    #[test]
+    fn default_uses_documented_thresholds() {
+        // FrameDedup::default() must match the thresholds documented in the
+        // rustdoc table (hamming=10, sad=15.0). Verify by behaviour: a small
+        // perturbation that would pass `new(0, 0.0)` must be deduplicated by
+        // the loose default thresholds.
+        let mut default_gate = FrameDedup::default();
+        let frame = solid(64, 48, [100, 100, 100, 255]);
+        let mut tweaked = frame.clone();
+        // Flip a single pixel: hamming distance from a uniform image will be 0
+        // (no gradient change), and mean SAD across 64×48 = 3072 pixels is
+        // ~255/3072 ≈ 0.08, well below the default 15.0 threshold.
+        tweaked[0] = 255;
+        tweaked[1] = 255;
+        tweaked[2] = 255;
+        assert!(default_gate.should_process(&frame, 64, 48));
+        assert!(
+            !default_gate.should_process(&tweaked, 64, 48),
+            "single-pixel change must be deduplicated under default thresholds"
+        );
+    }
+
+    #[test]
+    fn handles_minimum_valid_1x1_frame() {
+        // 1×1 input still satisfies width > 0 && height > 0 and len = 4.
+        // box_downsample_gray will broadcast the single luma value across the
+        // 64×48 thumb, and dHash of a uniform image is all-zero — so the gate
+        // must accept the first frame and deduplicate the second.
+        let mut gate = FrameDedup::default();
+        let frame = vec![123u8, 45, 67, 255];
+        assert!(gate.should_process(&frame, 1, 1));
+        assert!(!gate.should_process(&frame, 1, 1));
     }
 }
