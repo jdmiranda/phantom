@@ -641,8 +641,8 @@ impl Commandable for TerminalAdapter {
             "hyperlink_at" => {
                 let col = args.get("col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let row = args.get("row").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                match self.terminal.hit_test_hyperlink(col, row) {
-                    Some(url) => Ok(url.to_owned()),
+                match self.terminal.hyperlink_at(col, row) {
+                    Some(url) => Ok(url),
                     None => Ok(String::new()),
                 }
             }

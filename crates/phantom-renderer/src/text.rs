@@ -121,28 +121,6 @@ impl Default for TerminalCell {
     }
 }
 
-/// Pixel-space rectangle used in hit-test results.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-/// Result of a hyperlink hit-test on the rendered terminal grid.
-///
-/// Returned by renderer-layer hit-testing when a mouse click lands on a
-/// cell that carries an OSC 8 hyperlink (or URL regex fallback annotation).
-/// The `cell_rect` gives the pixel bounds of the cell for tooltip placement.
-#[derive(Debug, Clone)]
-pub struct HitTestResult {
-    /// The hyperlink URL.
-    pub url: String,
-    /// Pixel-space bounding rectangle of the clicked cell.
-    pub cell_rect: Rect,
-}
-
 /// Handles font loading, text shaping, glyph rasterization, and atlas upload.
 ///
 /// Owns a `FontSystem` for system font discovery and shaping, and a `SwashCache`
