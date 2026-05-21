@@ -10,7 +10,8 @@
 //!    in-memory deterministic stub).
 //! 3. **Encrypted frame and audio blobs** sealed with XChaCha20-Poly1305
 //!    using a per-bundle data-encryption key derived via HKDF-SHA256 from a
-//!    master key stored in the OS keychain.
+//!    master key persisted in a `0600`-mode JSON file under the user's
+//!    config directory (see [`crypto::MasterKey::load_or_generate`]).
 //!
 //! Writes go through a two-phase protocol: SQLite first inside a
 //! transaction, then LanceDB. If the LanceDB step fails we roll the SQLite
@@ -82,9 +83,9 @@ pub enum StoreError {
     #[error("crypto: {0}")]
     Crypto(String),
 
-    /// Master key could not be loaded from the keychain.
-    #[error("keyring: {0}")]
-    Keyring(String),
+    /// Master key could not be loaded from the on-disk file.
+    #[error("master-key: {0}")]
+    MasterKey(String),
 
     /// Vector index error (LanceDB or stub).
     #[error("vector index: {0}")]
@@ -153,8 +154,9 @@ pub struct StoreConfig {
     /// Directory that will hold `bundles.db` (SQLite) and `vectors/`
     /// (LanceDB), plus an `objects/` directory for encrypted blob files.
     pub root: PathBuf,
-    /// Master key. In production this is loaded from the OS keychain via
-    /// [`MasterKey::from_keyring`]. In tests we pass an explicit key.
+    /// Master key. In production this is loaded from the on-disk JSON
+    /// file via [`MasterKey::load_or_generate`]. In tests we pass an
+    /// explicit key.
     pub master_key: MasterKey,
 }
 
@@ -381,7 +383,7 @@ pub mod testing {
     use super::*;
 
     /// Construct a master key from raw bytes. Production code should use
-    /// [`MasterKey::from_keyring`].
+    /// [`MasterKey::load_or_generate`].
     #[must_use]
     pub fn fixed_master_key(bytes: [u8; 32]) -> MasterKey {
         MasterKey::from_bytes(bytes)

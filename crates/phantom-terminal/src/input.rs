@@ -119,6 +119,93 @@ pub fn encode_key(event: &KeyEvent) -> Vec<u8> {
     }
 }
 
+// ─── Kitty keyboard protocol (CSI u) ──────────────────────────────────────
+
+/// Key event type for the Kitty keyboard protocol.
+///
+/// The Kitty protocol distinguishes press, repeat, and release events by
+/// appending `:1`, `:2`, or `:3` to the CSI u sequence's event-type field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KittyEventType {
+    /// Key was pressed (default; event-type suffix `:1`).
+    Press,
+    /// Key is auto-repeating (event-type suffix `:2`).
+    Repeat,
+    /// Key was released (event-type suffix `:3`).
+    Release,
+}
+
+/// Encode a key event using the Kitty keyboard protocol (CSI u format).
+///
+/// Format: `\x1b[{codepoint};{mods}:{event_type}u`
+///
+/// The modifier field uses a bitmask where Shift=1, Alt=2, Ctrl=4,
+/// Super=8, and 1 is added so that "no modifiers" encodes as `1`.
+///
+/// Returns `None` for keys that have no Kitty codepoint mapping (unknown
+/// keys, modifier-only presses).  The caller is expected to fall back to
+/// the legacy VT sequence in that case.
+#[must_use]
+pub fn encode_kitty_key(
+    key: PhantomKey,
+    mods: PhantomModifiers,
+    event_type: KittyEventType,
+) -> Option<Vec<u8>> {
+    let codepoint: u32 = match key {
+        PhantomKey::Enter => 13,
+        PhantomKey::Tab => 9,
+        PhantomKey::Backspace => 127,
+        PhantomKey::Escape => 27,
+        PhantomKey::Char(' ') => 32,
+        PhantomKey::Char(ch) => ch as u32,
+        // Arrow keys — Kitty-assigned codepoints (above Unicode range).
+        PhantomKey::Up => 57352,
+        PhantomKey::Down => 57353,
+        PhantomKey::Left => 57354,
+        PhantomKey::Right => 57355,
+        // Function keys F1–F12 — Kitty-assigned codepoints.
+        PhantomKey::F(1) => 57364,
+        PhantomKey::F(2) => 57365,
+        PhantomKey::F(3) => 57366,
+        PhantomKey::F(4) => 57367,
+        PhantomKey::F(5) => 57368,
+        PhantomKey::F(6) => 57369,
+        PhantomKey::F(7) => 57370,
+        PhantomKey::F(8) => 57371,
+        PhantomKey::F(9) => 57372,
+        PhantomKey::F(10) => 57373,
+        PhantomKey::F(11) => 57374,
+        PhantomKey::F(12) => 57375,
+        // Home / End / Page navigation — Kitty-assigned codepoints.
+        PhantomKey::Home => 57356,
+        PhantomKey::End => 57358,
+        PhantomKey::PageUp => 57360,
+        PhantomKey::PageDown => 57361,
+        PhantomKey::Delete => 57363,
+        PhantomKey::Insert => 57362,
+        // Out-of-range function keys: fall back to legacy.
+        PhantomKey::F(_) => return None,
+    };
+
+    // Modifier bitmask: Shift=1, Alt=2, Ctrl=4, Super=8.  Add 1 so that
+    // "no modifiers" encodes as `1` rather than `0`.
+    let m: u8 = (mods.shift as u8)
+        | (mods.alt as u8 * 2)
+        | (mods.ctrl as u8 * 4)
+        | (mods.logo as u8 * 8);
+    let mods_param = m + 1;
+
+    let event_id: u8 = match event_type {
+        KittyEventType::Press => 1,
+        KittyEventType::Repeat => 2,
+        KittyEventType::Release => 3,
+    };
+
+    Some(
+        format!("\x1b[{codepoint};{mods_param}:{event_id}u").into_bytes(),
+    )
+}
+
 /// Encode a paste payload using bracketed paste mode.
 #[must_use]
 pub fn encode_paste(text: &str) -> Vec<u8> {
@@ -663,5 +750,145 @@ mod mouse_tests {
     fn sgr_middle_click() {
         let bytes = encode_mouse_sgr(MouseButton::Middle, 0, 0, true);
         assert_eq!(bytes, b"\x1b[<1;1;1M");
+    }
+}
+
+// ─── Kitty keyboard protocol tests ──────────────────────────────────────────
+
+#[cfg(test)]
+mod kitty_tests {
+    use super::*;
+
+    fn no_mods() -> PhantomModifiers {
+        PhantomModifiers::NONE
+    }
+
+    fn ctrl_mods() -> PhantomModifiers {
+        PhantomModifiers {
+            ctrl: true,
+            ..PhantomModifiers::NONE
+        }
+    }
+
+    fn shift_mods() -> PhantomModifiers {
+        PhantomModifiers {
+            shift: true,
+            ..PhantomModifiers::NONE
+        }
+    }
+
+    /// Ctrl+C: codepoint 99 ('c'), Ctrl bit = 4, mods_param = 4+1 = 5,
+    /// event_type Press = 1.  Expected: `\x1b[99;5:1u`.
+    #[test]
+    fn encode_kitty_key_ctrl_c_is_correct() {
+        let bytes = encode_kitty_key(
+            PhantomKey::Char('c'),
+            ctrl_mods(),
+            KittyEventType::Press,
+        )
+        .expect("Ctrl+c must have a Kitty mapping");
+        assert_eq!(bytes, b"\x1b[99;5:1u");
+    }
+
+    /// F1: Kitty codepoint 57364, no mods → mods_param = 0+1 = 1,
+    /// Press event type = 1.  Expected: `\x1b[57364;1:1u`.
+    #[test]
+    fn encode_kitty_key_f1_is_correct() {
+        let bytes = encode_kitty_key(
+            PhantomKey::F(1),
+            no_mods(),
+            KittyEventType::Press,
+        )
+        .expect("F1 must have a Kitty mapping");
+        assert_eq!(bytes, b"\x1b[57364;1:1u");
+    }
+
+    /// Shift+Enter: Enter codepoint = 13, Shift bit = 1, mods_param = 1+1 = 2,
+    /// Press event type = 1.  Expected: `\x1b[13;2:1u`.
+    #[test]
+    fn encode_kitty_key_shift_enter_is_correct() {
+        let bytes = encode_kitty_key(
+            PhantomKey::Enter,
+            shift_mods(),
+            KittyEventType::Press,
+        )
+        .expect("Shift+Enter must have a Kitty mapping");
+        assert_eq!(bytes, b"\x1b[13;2:1u");
+    }
+
+    /// No-modifier key: mods bitmask is 0; adding 1 gives mods_param = 1.
+    #[test]
+    fn encode_kitty_key_no_mods_adds_1_to_mods_field() {
+        let bytes = encode_kitty_key(
+            PhantomKey::Escape,
+            no_mods(),
+            KittyEventType::Press,
+        )
+        .expect("Escape must have a Kitty mapping");
+        // Escape codepoint = 27, mods_param = 1, event_type = 1.
+        assert_eq!(bytes, b"\x1b[27;1:1u");
+    }
+
+    /// Out-of-range function key (F13+): no Kitty mapping → must return None.
+    /// The caller then falls back to the legacy VT path.
+    #[test]
+    fn kitty_mode_falls_back_to_legacy_for_unknown_keys() {
+        let result = encode_kitty_key(
+            PhantomKey::F(13),
+            no_mods(),
+            KittyEventType::Press,
+        );
+        assert!(result.is_none(), "F13 has no Kitty mapping; must return None");
+    }
+
+    /// Verify Release event type encodes `:3` suffix.
+    #[test]
+    fn encode_kitty_key_release_event_type() {
+        let bytes = encode_kitty_key(
+            PhantomKey::Enter,
+            no_mods(),
+            KittyEventType::Release,
+        )
+        .expect("Enter release must have a Kitty mapping");
+        assert_eq!(bytes, b"\x1b[13;1:3u");
+    }
+
+    /// Verify Repeat event type encodes `:2` suffix.
+    #[test]
+    fn encode_kitty_key_repeat_event_type() {
+        let bytes = encode_kitty_key(
+            PhantomKey::Tab,
+            no_mods(),
+            KittyEventType::Repeat,
+        )
+        .expect("Tab repeat must have a Kitty mapping");
+        assert_eq!(bytes, b"\x1b[9;1:2u");
+    }
+
+    /// Arrow keys use Kitty-specific high codepoints.
+    #[test]
+    fn encode_kitty_key_arrow_up() {
+        let bytes = encode_kitty_key(
+            PhantomKey::Up,
+            no_mods(),
+            KittyEventType::Press,
+        )
+        .expect("Up arrow must have a Kitty mapping");
+        assert_eq!(bytes, b"\x1b[57352;1:1u");
+    }
+
+    /// Ctrl+Alt+Shift modifier combination: bitmask = 1+2+4 = 7, mods_param = 8.
+    #[test]
+    fn encode_kitty_key_ctrl_alt_shift_combo() {
+        let mods = PhantomModifiers {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            logo: false,
+        };
+        let bytes = encode_kitty_key(PhantomKey::Enter, mods, KittyEventType::Press)
+            .expect("Ctrl+Alt+Shift+Enter must have a Kitty mapping");
+        // mods_param = (1 | 2 | 4) + 1 = 8
+        assert_eq!(bytes, b"\x1b[13;8:1u");
     }
 }

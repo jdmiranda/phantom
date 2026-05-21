@@ -15,6 +15,8 @@ thiserror = "2"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 bytes = "1"
 lru = "0.12"
+rodio = { version = "0.19", features = ["mp3"] }
+log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
