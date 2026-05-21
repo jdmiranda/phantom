@@ -6176,6 +6176,7 @@ dependencies = [
  "phantom-adapter",
  "phantom-agents",
  "phantom-context",
+ "phantom-embeddings",
  "phantom-history",
  "phantom-loop",
  "phantom-memory",
@@ -6461,6 +6462,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "phantom-bundles",
+ "phantom-embeddings",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

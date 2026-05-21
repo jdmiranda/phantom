@@ -41,6 +41,7 @@
 
 pub mod attention;
 pub mod brain;
+pub mod recall;
 pub mod capability_audit;
 pub mod chat_backend;
 pub mod claude;
@@ -63,7 +64,6 @@ pub mod router;
 pub mod scoring;
 pub mod self_improvement;
 pub mod skill_store;
-pub mod recall;
 
 pub use attention::{Attention, PaneSnapshot};
 pub use brain::*;
