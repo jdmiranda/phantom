@@ -363,7 +363,7 @@ impl OodaLoop {
             let allowed = self
                 .last_emitted
                 .get(&eval.winner_id)
-                .map_or(true, |&last| now.duration_since(last) >= cooldown);
+                .is_none_or(|&last| now.duration_since(last) >= cooldown);
             if allowed {
                 self.last_emitted.insert(eval.winner_id.clone(), now);
                 self.metrics.actions_emitted += 1;

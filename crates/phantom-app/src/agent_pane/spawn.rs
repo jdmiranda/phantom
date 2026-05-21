@@ -123,6 +123,19 @@ impl App {
             );
         }
 
+        // Snapshot project memory so the agent has stored facts (conventions,
+        // warnings, config) in its system prompt from the first turn.
+        let memory_snapshot: Vec<(String, String)> = self
+            .memory
+            .as_ref()
+            .map(|m| {
+                m.all()
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Create the agent and register in the new split pane.
         //
         // Hand the App's canonical `BlockedEventSink` to the pane so that
@@ -139,6 +152,7 @@ impl App {
             Some(self.blocked_event_sink.clone()),
             None,
             self.privacy_mode,
+            memory_snapshot,
         );
 
         // Wire the substrate handles so chat-tool / composer-tool dispatch
@@ -223,7 +237,12 @@ impl App {
         // This is the value returned to MCP callers (issue #399).
         let agent_id = agent_pane.agent_id();
 
-        let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag);
+        // Thread the substrate-owned QuarantineRegistry into the adapter
+        // (issue #649) so it can detect quarantine-coincident failures on
+        // the `AgentPane::Failed → AgentTaskComplete` emit and annotate
+        // the summary for the brain reconciler.
+        let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag)
+            .with_quarantine_registry(self.quarantine_registry.clone());
 
         let scene_node = self
             .scene

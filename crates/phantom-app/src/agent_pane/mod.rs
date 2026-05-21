@@ -23,7 +23,7 @@ use phantom_agents::chat::{ChatBackend, ChatError, ChatModel, build_backend_with
 use phantom_agents::permissions::PermissionSet;
 use phantom_agents::role::{AgentRole, CapabilityClass};
 use phantom_agents::spawn_rules::SubstrateEvent;
-use phantom_agents::tools::{ToolCall, available_tools};
+use phantom_agents::tools::{ToolCall, available_tools, lifecycle_tools};
 use phantom_agents::{AgentSpawnOpts, AgentTask};
 use phantom_history::{AgentOutputCapture, ToolCall as HistoryToolCall};
 use phantom_session::AgentSnapshot;
@@ -44,7 +44,14 @@ pub(crate) use events::{new_blocked_event_sink, new_denied_event_sink};
 const DEFAULT_AGENT_PANE_ROLE: AgentRole = AgentRole::Conversational;
 
 /// Maximum number of tool-use rounds before the agent is force-stopped.
-const MAX_TOOL_ROUNDS: u32 = 25;
+pub(super) const MAX_TOOL_ROUNDS: u32 = 25;
+
+/// Issue #646: consecutive `complete_task` schema validation failures that
+/// trigger an [`AgentPaneStatus::Failed`] transition with the canonical
+/// `"complete_task: schema validation failed 3x"` reason. Per the issue's
+/// acceptance criteria this is a hard 3-strike — there is no exponential
+/// back-off or recovery window beyond the consecutive-failure reset.
+pub(super) const COMPLETE_TASK_VALIDATION_FLATLINE: u8 = 3;
 
 /// Number of consecutive tool-call failures before the pane emits a substrate
 /// `AgentBlocked` event.
@@ -311,6 +318,21 @@ pub(crate) struct AgentPane {
     /// the agent pane's render loop.
     pub(super) tts_tx: Option<tokio::sync::mpsc::Sender<String>>,
 
+    /// Issue #646: consecutive `complete_task` schema validation failures.
+    ///
+    /// Incremented every time the agent emits a `complete_task` lifecycle
+    /// signal whose `result` payload fails the must-be-an-object gate.
+    /// Reset to 0 on either a successful `complete_task` call OR any
+    /// non-`complete_task` tool call — consecutive-failure semantics so a
+    /// single bad call followed by recovery does not flatline.
+    ///
+    /// When the counter reaches [`COMPLETE_TASK_VALIDATION_FLATLINE`], the
+    /// pane transitions to [`AgentPaneStatus::Failed`] with the reason
+    /// `"complete_task: schema validation failed 3x"`. Per-loop `exit_schema`
+    /// binding (beyond the must-be-object gate) is out of scope here and
+    /// deferred to the loop overseer.
+    pub(super) validation_failure_count: u8,
+
     /// Shared MCP tool registry for external tool fallback.
     ///
     /// Set at spawn time by [`App::spawn_agent_pane_with_opts`] via
@@ -362,7 +384,7 @@ impl AgentPane {
             chat_backend: None,
             turn_count: 0,
             current_assistant_text: String::new(),
-            permissions: PermissionSet::all(),
+            permissions: PermissionSet::for_role(&DEFAULT_AGENT_PANE_ROLE),
             input_tokens: 0,
             output_tokens: 0,
             tool_call_count: 0,
@@ -383,6 +405,7 @@ impl AgentPane {
             pane_messages: Vec::new(),
             tts_tx: None,
             mcp_registry: None,
+            validation_failure_count: 0,
         }
     }
 
@@ -396,7 +419,7 @@ impl AgentPane {
     /// substrate `AgentBlocked` events.
     #[allow(dead_code)]
     pub(crate) fn spawn(task: AgentTask, claude_config: &ClaudeConfig) -> Self {
-        Self::spawn_with_opts(AgentSpawnOpts::new(task), claude_config, None, None, false)
+        Self::spawn_with_opts(AgentSpawnOpts::new(task), claude_config, None, None, false, Vec::new())
     }
 
     /// Create a new agent pane with explicit spawn options.
@@ -418,6 +441,7 @@ impl AgentPane {
         blocked_event_sink: Option<BlockedEventSink>,
         denied_event_sink: Option<DeniedEventSink>,
         privacy_mode: bool,
+        memory_snapshot: Vec<(String, String)>,
     ) -> Self {
         let task = opts.task.clone();
         // Capture the requested role before opts fields are consumed.
@@ -469,6 +493,9 @@ impl AgentPane {
         // Allocate from the process-global counter so the id is distinct from
         // any id produced via AgentManager::spawn on another path (fixes #513).
         let mut agent = Agent::new(allocate_agent_id(), task.clone());
+        // Issue #646: forward the spawn-opt opt-in to the agent so the loop
+        // can enforce the `complete_task` termination contract end-to-end.
+        agent.set_requires_complete_task(opts.requires_complete_task());
         let sys_prompt = agent.system_prompt();
         agent.push_message(AgentMessage::System(sys_prompt));
 
@@ -476,6 +503,17 @@ impl AgentPane {
         let codebase_context = build_codebase_context();
         if !codebase_context.is_empty() {
             agent.push_message(AgentMessage::System(codebase_context));
+        }
+
+        // Inject project memory snapshot so the agent can read stored facts
+        // (conventions, warnings, config) without a memory-lookup tool call.
+        // Only appended when the caller supplied a non-empty snapshot.
+        if !memory_snapshot.is_empty() {
+            let mut mem_block = String::from("## Stored Context\n");
+            for (k, v) in &memory_snapshot {
+                mem_block.push_str(&format!("- {k}: {v}\n"));
+            }
+            agent.push_message(AgentMessage::System(mem_block));
         }
 
         // Claude API requires at least one user message. Push the task
@@ -502,7 +540,14 @@ impl AgentPane {
         };
         agent.push_message(AgentMessage::User(user_prompt));
 
-        let tools = available_tools();
+        // Issue #646: agents that opt in to the lifecycle contract see
+        // `complete_task` and `abort_task` in their LLM tool manifest so the
+        // model can emit the terminal signal. The parser diverts these names
+        // ahead of `ToolType::from_api_name` into `ApiEvent::CompleteTask`.
+        let mut tools = available_tools();
+        if agent.requires_complete_task() {
+            tools.extend(lifecycle_tools());
+        }
 
         info!(
             "Agent pane spawning: {} messages (system={}, user={}, backend={})",
@@ -542,7 +587,7 @@ impl AgentPane {
             chat_backend,
             turn_count: 0,
             current_assistant_text: String::new(),
-            permissions: PermissionSet::all(),
+            permissions: PermissionSet::for_role(&initial_role),
             input_tokens: 0,
             output_tokens: 0,
             tool_call_count: 0,
@@ -572,6 +617,7 @@ impl AgentPane {
             )],
             tts_tx: None,
             mcp_registry: None,
+            validation_failure_count: 0,
         }
     }
 
@@ -755,7 +801,96 @@ impl AgentPane {
                     ));
                     self.tool_use_ids.push(id.clone());
                     self.pending_tools.push((id, call));
+                    // Issue #646: any non-`complete_task` tool call resets the
+                    // consecutive validation-failure streak. The counter only
+                    // tracks back-to-back invalid `complete_task` calls; a
+                    // single bad call followed by recovery should not
+                    // flatline the pane.
+                    self.validation_failure_count = 0;
                     got_content = true;
+                }
+                Some(ApiEvent::CompleteTask { id: _, result }) => {
+                    // Issue #646 broader implementation: schema-validate the
+                    // payload, count consecutive failures, and flatline after
+                    // three back-to-back invalid calls.
+                    //
+                    // Validation gate: `result` must be a JSON Object. The
+                    // parser at `phantom_agents::api::parse_response` lets
+                    // non-object inputs through specifically for
+                    // `complete_task` so this consumer-side gate can count
+                    // them. Per-loop `exit_schema` binding (beyond
+                    // must-be-object) is out of scope.
+                    if !result.is_object() {
+                        self.validation_failure_count =
+                            self.validation_failure_count.saturating_add(1);
+                        warn!(
+                            "AgentPane #{}: complete_task schema validation failed (count={}/{}, got {result})",
+                            self.agent.id(),
+                            self.validation_failure_count,
+                            COMPLETE_TASK_VALIDATION_FLATLINE
+                        );
+                        self.output.push_str(&format!(
+                            "\n⚠ complete_task: result must be a JSON object (failure {}/{})\n",
+                            self.validation_failure_count,
+                            COMPLETE_TASK_VALIDATION_FLATLINE
+                        ));
+
+                        if self.validation_failure_count >= COMPLETE_TASK_VALIDATION_FLATLINE {
+                            let reason = "complete_task: schema validation failed 3x".to_string();
+                            if let Some(ref mut j) = self.journal
+                                && let Err(e) = j.record_flatline(self.agent.id(), reason.clone()) {
+                                    warn!("AgentJournal::record_flatline (validation) failed: {e}");
+                                }
+                            self.output.push_str(&format!("\n\n✗ {reason}\n"));
+                            self.rollback_if_dirty();
+                            self.flush_capture_record();
+                            self.status = AgentPaneStatus::Failed;
+                            self.api_handle = None;
+                            self.push_snapshot();
+                            self.save_conversation();
+                            got_content = true;
+                            break;
+                        }
+
+                        // Sub-threshold failure: do NOT end the loop. The
+                        // model may emit a valid `complete_task` next turn.
+                        // Surface the validation error back to the model via
+                        // the conversation so it can self-correct.
+                        self.agent.push_message(AgentMessage::User(format!(
+                            "Your last complete_task call's result was not a JSON object \
+                             (got {result}). Try again — `result` must be an object."
+                        )));
+                        got_content = true;
+                        continue;
+                    }
+
+                    // Valid schema. Reset the counter, capture the payload
+                    // on the agent, and end the loop. The pane transitions
+                    // to `Done` to mirror the bookkeeping the `ApiEvent::Done`
+                    // arm performs for state-implicit termination.
+                    self.validation_failure_count = 0;
+                    self.agent.complete_with_result(result);
+
+                    if let Some(ref mut j) = self.journal {
+                        let summary = format!(
+                            "complete_task; ~{}in/~{}out tokens, {} tool calls",
+                            self.input_tokens, self.output_tokens, self.tool_call_count
+                        );
+                        if let Err(e) = j.record_completion(self.agent.id(), true, summary) {
+                            warn!("AgentJournal::record_completion failed: {e}");
+                        }
+                    }
+                    self.output.push_str(&format!(
+                        "\n\n✓ Agent completed (complete_task) | ~{}in / ~{}out tokens | {} tool calls\n",
+                        self.input_tokens, self.output_tokens, self.tool_call_count,
+                    ));
+                    self.status = AgentPaneStatus::Done;
+                    self.api_handle = None;
+                    self.push_snapshot();
+                    self.flush_capture_record();
+                    self.save_conversation();
+                    got_content = true;
+                    break;
                 }
                 Some(ApiEvent::Done) => {
                     // Flush accumulated assistant text into the conversation.
@@ -881,7 +1016,7 @@ impl AgentPane {
     /// millisecond-precision timestamp so adapters can render a rich timeline
     /// instead of scanning the raw `output` string.
     #[allow(dead_code)] // Called by the timeline adapter (Phase 2) and tests
-    pub(crate) fn messages(&self) -> &[PaneMessage] {
+    pub(crate) fn pane_messages(&self) -> &[PaneMessage] {
         &self.pane_messages
     }
 
@@ -968,7 +1103,12 @@ impl AgentPane {
         self.agent.push_message(AgentMessage::User(message));
 
         // Re-invoke the chat backend with the updated conversation.
-        let tools = available_tools();
+        // Issue #646: extend the tool manifest with lifecycle tools when the
+        // agent opted into the `complete_task` contract.
+        let mut tools = available_tools();
+        if self.agent.requires_complete_task() {
+            tools.extend(lifecycle_tools());
+        }
         let handle = Self::dispatch(
             self.chat_backend.as_deref(),
             &self.claude_config,
