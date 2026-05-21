@@ -70,12 +70,46 @@ pub enum HookType {
     OnInterval(u64),
 }
 
+impl HookType {
+    /// Returns the [`Permission`] required before a plugin may receive this
+    /// hook, or `None` when the hook is always allowed.
+    ///
+    /// # Policy
+    ///
+    /// - Lifecycle hooks (`OnStartup`, `OnShutdown`, `OnInterval`) require no
+    ///   privilege — they convey timing, not data.
+    /// - Command/output hooks (`OnCommand`, `OnOutput`) require
+    ///   [`Permission::RunCommands`] because they expose the user's command
+    ///   stream and its output.
+    /// - `OnError` is **intentionally** allowed without a permission. Error
+    ///   hooks may include a command name + exit code (similar surface to
+    ///   `OnOutput`), but Phantom treats failure reporting as essential
+    ///   plumbing that all plugins should be able to observe (e.g. for
+    ///   diagnostics widgets). If you tighten this in the future, prefer a new
+    ///   `Permission::ObserveErrors` variant rather than reusing `RunCommands`,
+    ///   so the privilege surface stays self-documenting.
+    #[must_use]
+    pub fn required_permission(&self) -> Option<Permission> {
+        match self {
+            HookType::OnStartup | HookType::OnShutdown | HookType::OnInterval(_) => None,
+            HookType::OnCommand(_) | HookType::OnOutput => Some(Permission::RunCommands),
+            HookType::OnError => None,
+        }
+    }
+}
+
 /// A command that a plugin registers with Phantom.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandDef {
     pub name: String,
     pub description: String,
     pub usage: String,
+    /// `true` when this command may modify files on disk. When set, the plugin
+    /// must declare `Permission::WriteFiles` in addition to `Permission::RunCommands`
+    /// or the executor will reject the call. Defaults to `false` so existing
+    /// manifests remain backward compatible.
+    #[serde(default)]
+    pub write_access: bool,
 }
 
 /// Configuration for a status-bar widget provided by a plugin.
@@ -230,6 +264,7 @@ mod tests {
                 name: "git-stats".into(),
                 description: "Show git statistics".into(),
                 usage: "git-stats [--verbose]".into(),
+                write_access: false,
             }],
             status_bar: Some(StatusBarDef {
                 position: StatusBarPosition::Right,

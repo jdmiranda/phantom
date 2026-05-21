@@ -1129,7 +1129,7 @@ impl App {
         );
 
         // -- Plugin registry --
-        let plugin_registry = match PluginRegistry::new() {
+        let mut plugin_registry = match PluginRegistry::new() {
             Ok(reg) => reg,
             Err(e) => {
                 warn!("Failed to create plugin registry: {e}");
@@ -1145,6 +1145,39 @@ impl App {
                 }
             }
         };
+
+        // Scan for installed plugins and auto-load them; errors per-plugin are
+        // logged as warnings inside scan() so one bad plugin cannot block boot.
+        match plugin_registry.scan() {
+            Ok(manifests) => {
+                info!(
+                    "Plugin scan complete: {} manifest(s) found, {} plugin(s) loaded",
+                    manifests.len(),
+                    plugin_registry.len()
+                );
+            }
+            Err(e) => {
+                warn!("Plugin scan failed: {e}");
+            }
+        }
+
+        // Dispatch OnStartup to all loaded plugins now that the registry is ready.
+        //
+        // TODO(#48): Phase-1 limitation — responses are logged but not acted on.
+        // `HookResponse::RunCommand`, `ModifyOutput`, and `Notification` returned
+        // from `OnStartup` are intentionally dropped here because the agent /
+        // terminal / notification dispatch surfaces are not wired into this boot
+        // path. When the plugin host gains a typed response router, route the
+        // matched arms (`RunCommand` -> command bus, `Notification` -> notifier,
+        // etc.) instead of unconditionally logging.
+        {
+            let startup_ctx = phantom_plugins::HookContext::startup(&project_dir);
+            let responses = plugin_registry
+                .dispatch_hook(&phantom_plugins::HookType::OnStartup, &startup_ctx);
+            for resp in &responses {
+                info!("[plugin startup]: {resp:?}");
+            }
+        }
 
         // -- Job pool (4 workers for async brain queries, resource loading, etc.) --
         let job_pool = crate::jobs::JobPool::start_up(4);

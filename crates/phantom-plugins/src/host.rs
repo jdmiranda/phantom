@@ -306,6 +306,7 @@ mod tests {
                 name: "hello".into(),
                 description: "say hello".into(),
                 usage: "hello".into(),
+                write_access: false,
             }],
             status_bar: None,
             scaffold: false,
