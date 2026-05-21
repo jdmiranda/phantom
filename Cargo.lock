@@ -6329,6 +6329,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-test",
+ "dirs 5.0.1",
  "ed25519-dalek",
  "futures-util",
  "jsonwebtoken",
@@ -6550,12 +6551,14 @@ name = "phantom-skill-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "libloading",
  "log",
  "notify",
  "phantom-nlp",
  "phantom-semantic",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
