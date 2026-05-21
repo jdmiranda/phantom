@@ -115,8 +115,12 @@ impl ResponseCurve {
                 steepness,
                 max_score,
             } => {
-                let exp = (-steepness * (input - midpoint)).exp();
-                (max_score / (1.0 + exp)).clamp(0.0, *max_score)
+                // Clamp the exponent argument to the safe f32 range before
+                // calling exp().  e^88 ≈ 1.6e38 which is below f32::MAX, so
+                // the result stays finite and downstream NaN is prevented.
+                let exponent = (-steepness * (input - midpoint)).clamp(-88.0, 88.0);
+                let exp_val = exponent.exp();
+                (max_score / (1.0 + exp_val)).clamp(0.0, *max_score)
             }
             Self::Step {
                 threshold,
@@ -508,6 +512,26 @@ pub struct EvalSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Score sanitization helper
+// ---------------------------------------------------------------------------
+
+/// Sanitize a floating-point score before sorting or comparison.
+///
+/// NaN and infinite values produced by degenerate curve evaluations (e.g.
+/// logistic overflow with extreme steepness) are mapped to `0.0` rather than
+/// silently treating them as tied with legitimate scores via
+/// `partial_cmp().unwrap_or(Equal)`. Finite values — including scores well
+/// above 1.0 as produced by the BDS action-class system — are passed through
+/// unchanged.
+fn sanitize_score(s: f32) -> f32 {
+    if s.is_nan() || s.is_infinite() {
+        0.0
+    } else {
+        s
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BehaviorDecisionSystem — the full DA:I BDS
 // ---------------------------------------------------------------------------
 
@@ -553,8 +577,8 @@ impl BehaviorDecisionSystem {
             .behaviors
             .iter()
             .map(|b| {
-                let raw = b.evaluate(ctx);
-                let bonus = self.momentum.bonus_for(&b.id);
+                let raw = sanitize_score(b.evaluate(ctx));
+                let bonus = sanitize_score(self.momentum.bonus_for(&b.id));
                 BehaviorScore {
                     behavior_id: b.id.clone(),
                     class: b.class,
@@ -566,9 +590,10 @@ impl BehaviorDecisionSystem {
             .collect();
 
         scores.sort_by(|a, b| {
-            b.final_score
-                .partial_cmp(&a.final_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let sa = sanitize_score(a.final_score);
+            let sb = sanitize_score(b.final_score);
+            // After sanitization both values are finite; total_cmp is infallible.
+            sb.total_cmp(&sa)
         });
 
         let (winner_id, winner_score) = scores
@@ -945,8 +970,17 @@ pub struct LogisticCurve {
 
 impl LogisticCurve {
     /// Create a logistic curve with custom midpoint and steepness.
-    #[must_use] 
+    ///
+    /// Steepness values above 1000 are accepted but unusual; the exp() argument
+    /// is clamped at evaluation time so output remains finite. A log warning is
+    /// emitted at construction to flag potential misconfiguration.
+    #[must_use]
     pub fn new(midpoint: f32, steepness: f32) -> Self {
+        if steepness.abs() > 1000.0 {
+            log::warn!(
+                "LogisticCurve: extreme steepness {steepness} — curve will be a near-perfect step function"
+            );
+        }
         Self {
             midpoint,
             steepness,
@@ -975,8 +1009,11 @@ impl LogisticCurve {
 impl UtilityCurve for LogisticCurve {
     fn score(&self, x: f32) -> f32 {
         let x = x.clamp(0.0, 1.0);
-        let exp = (-self.steepness * (x - self.midpoint)).exp();
-        (1.0 / (1.0 + exp)).clamp(0.0, 1.0)
+        // Clamp the exponent argument to the safe f32 range before calling
+        // exp() to prevent overflow to Infinity with extreme steepness values.
+        let exponent = (-self.steepness * (x - self.midpoint)).clamp(-88.0, 88.0);
+        let exp_val = exponent.exp();
+        (1.0 / (1.0 + exp_val)).clamp(0.0, 1.0)
     }
 }
 
@@ -1915,5 +1952,112 @@ mod tests {
         // which is Send+Sync because UtilityCurve: Send + Sync.
         assert_send_sync::<InvertedCurve>();
         assert_send_sync::<CompositeCurve>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug-fix tests: sanitize_score (Bug 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_score_clamps_nan_to_zero() {
+        let nan = f32::NAN;
+        assert_eq!(
+            sanitize_score(nan),
+            0.0,
+            "NaN should be sanitized to 0.0"
+        );
+    }
+
+    #[test]
+    fn sanitize_score_clamps_infinity_to_zero() {
+        assert_eq!(
+            sanitize_score(f32::INFINITY),
+            0.0,
+            "Infinity should be sanitized to 0.0"
+        );
+        assert_eq!(
+            sanitize_score(f32::NEG_INFINITY),
+            0.0,
+            "Negative infinity should be sanitized to 0.0"
+        );
+    }
+
+    #[test]
+    fn sanitize_score_clamps_above_one_to_one() {
+        // BDS scores can legitimately exceed 1.0 (e.g. Reaction base is 50.0).
+        // sanitize_score only neutralizes NaN/Infinity; it does not clamp finite
+        // values. A score of 2.5 is valid and must pass through unchanged.
+        assert!(
+            (sanitize_score(2.5) - 2.5).abs() < f32::EPSILON,
+            "Finite value > 1.0 should pass through, got {}",
+            sanitize_score(2.5)
+        );
+    }
+
+    #[test]
+    fn sanitize_score_preserves_valid_midrange() {
+        let v = sanitize_score(0.75);
+        assert!((v - 0.75).abs() < f32::EPSILON, "Valid value 0.75 should pass through unchanged");
+    }
+
+    #[test]
+    fn sanitize_score_preserves_large_bds_scores() {
+        // Reaction class scores reach 50-70 — these are finite and must survive.
+        assert!((sanitize_score(60.0) - 60.0).abs() < f32::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug-fix tests: logistic sigmoid overflow (Bug 3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sigmoid_extreme_steepness_doesnt_overflow() {
+        // steepness=10000 would produce exp(±10000) = Infinity without clamping.
+        let curve = LogisticCurve::new(0.5, 10_000.0);
+        let score_low = curve.score(0.0);
+        let score_high = curve.score(1.0);
+        assert!(
+            score_low.is_finite(),
+            "sigmoid(0.0) with extreme steepness must be finite, got {score_low}"
+        );
+        assert!(
+            score_high.is_finite(),
+            "sigmoid(1.0) with extreme steepness must be finite, got {score_high}"
+        );
+    }
+
+    #[test]
+    fn sigmoid_output_always_in_zero_one_range() {
+        // Sweep a range of extreme steepness values and confirm output is bounded.
+        for steepness in [1.0f32, 10.0, 100.0, 1000.0, 10_000.0, 1_000_000.0] {
+            let curve = LogisticCurve::new(0.5, steepness);
+            for &x in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
+                let s = curve.score(x);
+                assert!(
+                    (0.0..=1.0).contains(&s),
+                    "sigmoid output {s} out of [0,1] at x={x}, steepness={steepness}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn response_curve_logistic_extreme_steepness_stays_finite() {
+        let curve = ResponseCurve::Logistic {
+            midpoint: 0.5,
+            steepness: 50_000.0,
+            max_score: 10.0,
+        };
+        for &x in &[0.0f32, 0.499, 0.5, 0.501, 1.0] {
+            let s = curve.evaluate(x);
+            assert!(
+                s.is_finite(),
+                "ResponseCurve::Logistic output must be finite at x={x}, got {s}"
+            );
+            assert!(
+                (0.0..=10.0).contains(&s),
+                "ResponseCurve::Logistic output {s} out of [0, max_score] at x={x}"
+            );
+        }
     }
 }

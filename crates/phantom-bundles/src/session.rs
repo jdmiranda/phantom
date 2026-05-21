@@ -32,7 +32,8 @@ pub type SessionId = uuid::Uuid;
 
 // ─── CaptureFrame ────────────────────────────────────────────────────────────
 
-/// A raw captured frame: pixel data, wall-clock timestamp, and perceptual hash.
+/// A raw captured frame: pixel data, wall-clock timestamp, perceptual hash,
+/// and the pixel dimensions needed by the blob-encoding layer.
 ///
 /// All fields are private.  Use the accessor methods to read them.
 #[derive(Debug, Clone)]
@@ -41,8 +42,12 @@ pub struct CaptureFrame {
     timestamp_ms: u64,
     /// Perceptual hash (dHash) used for near-duplicate detection.
     phash: u64,
-    /// Raw pixel bytes (e.g. PNG-encoded).
+    /// Raw pixel bytes (RGBA, row-major).
     pixels: Vec<u8>,
+    /// Frame width in pixels. Zero means unknown / not set.
+    width: u32,
+    /// Frame height in pixels. Zero means unknown / not set.
+    height: u32,
 }
 
 impl CaptureFrame {
@@ -50,13 +55,17 @@ impl CaptureFrame {
     ///
     /// - `timestamp_ms` — wall-clock capture time in Unix milliseconds.
     /// - `phash`        — perceptual hash for deduplication.
-    /// - `pixels`       — raw pixel bytes (e.g. PNG-encoded image data).
+    /// - `pixels`       — raw RGBA pixel bytes (row-major).
+    /// - `width`        — frame width in pixels (`0` if unknown).
+    /// - `height`       — frame height in pixels (`0` if unknown).
     #[must_use]
-    pub fn new(timestamp_ms: u64, phash: u64, pixels: Vec<u8>) -> Self {
+    pub fn new(timestamp_ms: u64, phash: u64, pixels: Vec<u8>, width: u32, height: u32) -> Self {
         Self {
             timestamp_ms,
             phash,
             pixels,
+            width,
+            height,
         }
     }
 
@@ -76,6 +85,18 @@ impl CaptureFrame {
     #[must_use]
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// Frame width in pixels. Returns `0` when not set.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Frame height in pixels. Returns `0` when not set.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
     }
 }
 
@@ -224,6 +245,19 @@ impl CaptureSession {
         let mut assembler = BundleAssembler::new(pane_id);
 
         for frame in self.frames {
+            // Validate dimensions: a frame with zero width or height cannot be
+            // encoded as a PNG blob and would silently corrupt the bundle.
+            // Skip it with a warning rather than failing the whole finalize.
+            if frame.width == 0 || frame.height == 0 {
+                log::warn!(
+                    "CaptureSession::finalize: skipping frame at {}ms with zero dimensions ({}x{})",
+                    frame.timestamp_ms,
+                    frame.width,
+                    frame.height,
+                );
+                continue;
+            }
+
             // Convert CaptureFrame → FrameRef.  The pixel bytes are not stored
             // in the FrameRef schema (they belong to the blob layer); we embed a
             // minimal sha stub derived from the phash so round-trip tests remain
@@ -233,8 +267,8 @@ impl CaptureSession {
                 sha: format!("{:016x}", frame.phash),
                 blob_path: format!("frames/{:016x}.bin", frame.phash),
                 dhash: frame.phash,
-                width: 0,
-                height: 0,
+                width: frame.width,
+                height: frame.height,
             };
             assembler.push_frame(frame_ref);
         }
@@ -272,7 +306,7 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn frame(timestamp_ms: u64, phash: u64) -> CaptureFrame {
-        CaptureFrame::new(timestamp_ms, phash, vec![0xDE, 0xAD, 0xBE, 0xEF])
+        CaptureFrame::new(timestamp_ms, phash, vec![0xDE, 0xAD, 0xBE, 0xEF], 1, 1)
     }
 
     fn segment(timestamp_ms: u64, text: &str) -> TranscriptSegment {
@@ -430,10 +464,12 @@ mod tests {
     #[test]
     fn capture_frame_accessors_return_correct_values() {
         let pixels = vec![1u8, 2, 3, 4];
-        let f = CaptureFrame::new(999, 0xCAFE, pixels.clone());
+        let f = CaptureFrame::new(999, 0xCAFE, pixels.clone(), 640, 480);
         assert_eq!(f.timestamp_ms(), 999);
         assert_eq!(f.phash(), 0xCAFE);
         assert_eq!(f.pixels(), pixels.as_slice());
+        assert_eq!(f.width(), 640);
+        assert_eq!(f.height(), 480);
     }
 
     #[test]
@@ -449,5 +485,78 @@ mod tests {
         let id = fresh_id();
         let session = CaptureSession::new(id);
         assert_eq!(session.session_id(), id);
+    }
+
+    // ── New tests for Problem 1 wiring ────────────────────────────────────────
+
+    /// `capture_session_push_frame_increments_count`
+    ///
+    /// Each call to `add_frame` with a distinct perceptual hash must increment
+    /// `frame_count()` by one.  This confirms that the accumulator is wired and
+    /// that non-duplicate frames are not silently dropped.
+    #[test]
+    fn capture_session_push_frame_increments_count() {
+        let mut session = CaptureSession::new(fresh_id());
+        assert_eq!(session.frame_count(), 0, "starts empty");
+        session.add_frame(CaptureFrame::new(10, 0x01, vec![0; 4], 2, 2));
+        assert_eq!(session.frame_count(), 1, "after first push");
+        session.add_frame(CaptureFrame::new(20, 0x02, vec![0; 4], 2, 2));
+        assert_eq!(session.frame_count(), 2, "after second push");
+        session.add_frame(CaptureFrame::new(30, 0x03, vec![0; 4], 2, 2));
+        assert_eq!(session.frame_count(), 3, "after third push");
+    }
+
+    /// `capture_session_skips_zero_dimension_frame`
+    ///
+    /// A frame whose width **or** height is zero must be silently excluded from
+    /// the sealed bundle (logged at `warn!`).  This guards the PNG encoder in
+    /// the persistence job against empty/invalid bitmaps.
+    ///
+    /// The session still accumulates the frame in memory (it has not yet called
+    /// `finalize`), but `finalize` must exclude all zero-dimension entries.
+    #[test]
+    fn capture_session_skips_zero_dimension_frame() {
+        let mut session = CaptureSession::new(fresh_id());
+
+        // One valid frame (2×2, phash=1).
+        session.add_frame(CaptureFrame::new(10, 0x01, vec![0; 16], 2, 2));
+        // Zero-width frame: should be excluded at finalize time.
+        session.add_frame(CaptureFrame::new(20, 0x02, vec![], 0, 4));
+        // Zero-height frame: same.
+        session.add_frame(CaptureFrame::new(30, 0x03, vec![], 2, 0));
+
+        // Three frames were accepted by the accumulator (dedup runs on phash,
+        // and all three phashes are distinct).
+        assert_eq!(session.frame_count(), 3, "accumulator holds all three before finalize");
+
+        // After finalize, only the valid frame survives.
+        let bundle = session.finalize().expect("at least one valid frame → Ok");
+        assert_eq!(
+            bundle.frames.len(),
+            1,
+            "zero-dimension frames must be excluded from sealed bundle"
+        );
+        assert_eq!(bundle.frames[0].dhash, 0x01, "only the valid frame remains");
+    }
+
+    /// `capture_session_seal_returns_bundle`
+    ///
+    /// A session with valid frames must produce a sealed `CaptureBundle` via
+    /// `finalize()`.  The returned bundle carries the `sealed` flag and
+    /// preserves all valid frames in push order.
+    #[test]
+    fn capture_session_seal_returns_bundle() {
+        let mut session = CaptureSession::new(fresh_id());
+        session.add_frame(CaptureFrame::new(100, 0xAA, vec![0; 4], 1, 1));
+        session.add_frame(CaptureFrame::new(200, 0xBB, vec![0; 4], 1, 1));
+
+        let bundle = session.finalize().expect("two valid frames must seal cleanly");
+        assert!(bundle.sealed, "finalize must return a sealed bundle");
+        assert_eq!(bundle.frames.len(), 2, "both valid frames in the sealed bundle");
+        assert_eq!(bundle.frames[0].dhash, 0xAA);
+        assert_eq!(bundle.frames[1].dhash, 0xBB);
+        // Timestamp-to-nanosecond conversion must be correct.
+        assert_eq!(bundle.frames[0].t_offset_ns, 100 * 1_000_000);
+        assert_eq!(bundle.frames[1].t_offset_ns, 200 * 1_000_000);
     }
 }

@@ -1,0 +1,47 @@
+[package]
+name = "phantom-builder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "phantom_builder"
+path = "src/lib.rs"
+
+[dependencies]
+# The two infrastructure crates we orchestrate. The builder is a thin layer
+# over `phantom-loop` (the runtime that owns the FSM, queues, and dispatchers)
+# and `phantom-brain` (the OODA loop that emits goal-candidates).
+phantom-loop = { path = "../phantom-loop" }
+phantom-brain = { path = "../phantom-brain" }
+phantom-protocol = { path = "../phantom-protocol" }
+phantom-agents = { path = "../phantom-agents" }
+
+# Plain-data shapes: BuilderConfig is serde so future callers can ship one
+# from a TOML on disk if they want a `phantom-builder.toml`.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+
+# Error plumbing matches the CLI conventions: anyhow at the top, custom error
+# types only where the public API needs to discriminate.
+anyhow = { workspace = true }
+thiserror = "1"
+
+# Observability.
+tracing = "0.1"
+
+# Async runtime — the builder's `run_builder` consumes a tokio runtime so the
+# CLI can construct it once and share it with the substrate driver tick loop
+# and the substrate completion router.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
+
+# Path helpers for the default clone destination (`~/.phantom/builds/...`).
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+phantom-loop = { path = "../phantom-loop" }
+
+[lints]
+workspace = true

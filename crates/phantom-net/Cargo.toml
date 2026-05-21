@@ -21,6 +21,12 @@ futures-util = "0.3"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 
+# Payload encryption: X25519 ECDH key agreement + ChaCha20-Poly1305 AEAD.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+# HKDF-SHA256 over the raw X25519 output before use as an AEAD key.
+hkdf = "0.12"
+
 # PeerId display: SHA-256(pubkey) encoded as base58.
 sha2 = "0.10"
 bs58 = "0.5"

@@ -66,7 +66,7 @@ impl LlmSkill for StaticLlmSkill {
 #[cfg(all(debug_assertions, feature = "hot-modules"))]
 pub(crate) mod dylib_impl {
     use super::{LlmSkill, TranslateError};
-    use crate::llm_ffi::{LlmErrorDisc, LlmSkillVtable};
+    use crate::llm_ffi::LlmSkillVtable;
     use std::sync::Arc;
 
     /// Dylib-backed LLM skill.

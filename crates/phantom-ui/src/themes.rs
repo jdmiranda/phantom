@@ -69,8 +69,11 @@ pub struct UiColors {
     pub status_bar_bg: [f32; 4],
     pub status_bar_fg: [f32; 4],
     pub tab_bar_bg: [f32; 4],
+    /// Foreground color for inactive (non-selected) tab labels.
     pub tab_bar_fg: [f32; 4],
     pub tab_active_bg: [f32; 4],
+    /// Foreground color for the active (selected) tab label.
+    pub tab_active_fg: [f32; 4],
     pub border: [f32; 4],
 }
 
@@ -147,6 +150,7 @@ pub fn phosphor() -> Theme {
             tab_bar_bg: hex(0x06, 0x08, 0x0C),
             tab_bar_fg: hex(0x22, 0x99, 0x00),
             tab_active_bg: hex(0x12, 0x1A, 0x0E),
+            tab_active_fg: green,
             border: hex(0x1A, 0x33, 0x00),
         },
     }
@@ -205,6 +209,7 @@ pub fn amber() -> Theme {
             tab_bar_bg: hex(0x08, 0x06, 0x02),
             tab_bar_fg: hex(0x99, 0x6E, 0x00),
             tab_active_bg: hex(0x1A, 0x14, 0x06),
+            tab_active_fg: amber,
             border: hex(0x33, 0x24, 0x00),
         },
     }
@@ -263,6 +268,7 @@ pub fn ice() -> Theme {
             tab_bar_bg: hex(0x02, 0x05, 0x0C),
             tab_bar_fg: hex(0x00, 0x77, 0x99),
             tab_active_bg: hex(0x08, 0x14, 0x22),
+            tab_active_fg: cyan,
             border: hex(0x00, 0x2A, 0x44),
         },
     }
@@ -321,6 +327,7 @@ pub fn blood() -> Theme {
             tab_bar_bg: hex(0x06, 0x02, 0x04),
             tab_bar_fg: hex(0x88, 0x00, 0x1A),
             tab_active_bg: hex(0x18, 0x06, 0x0C),
+            tab_active_fg: red,
             border: hex(0x44, 0x00, 0x11),
         },
     }
@@ -382,6 +389,7 @@ pub fn vapor() -> Theme {
             tab_bar_bg: hex(0x08, 0x02, 0x0E),
             tab_bar_fg: hex(0x88, 0x44, 0x99),
             tab_active_bg: hex(0x18, 0x08, 0x28),
+            tab_active_fg: pink,
             border: hex(0x33, 0x11, 0x44),
         },
     }
@@ -442,6 +450,7 @@ pub fn pipboy() -> Theme {
             tab_bar_bg: hex(0x03, 0x08, 0x02),
             tab_bar_fg: dark_green,
             tab_active_bg: hex(0x0A, 0x1A, 0x06),
+            tab_active_fg: green,
             border: hex(0x14, 0x40, 0x0A),
         },
     }
@@ -534,6 +543,10 @@ mod tests {
             &theme.ui_colors.tab_active_bg,
             &format!("{n}.tab_active_bg"),
         );
+        assert_color_range(
+            &theme.ui_colors.tab_active_fg,
+            &format!("{n}.tab_active_fg"),
+        );
         assert_color_range(&theme.ui_colors.border, &format!("{n}.border"));
     }
 
@@ -544,6 +557,17 @@ mod tests {
         validate_theme(&ice());
         validate_theme(&blood());
         validate_theme(&vapor());
+        validate_theme(&pipboy());
+    }
+
+    #[test]
+    fn all_builtins_valid_includes_pipboy() {
+        let t = pipboy();
+        assert!(
+            t.shader_params.scanline_intensity >= 0.0,
+            "pipboy scanline_intensity must be non-negative"
+        );
+        validate_theme(&t);
     }
 
     #[test]
