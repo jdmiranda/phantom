@@ -87,6 +87,23 @@ pub enum ApiEvent {
         id: String,
         call: ToolCall,
     },
+    /// The assistant called the lifecycle tool `complete_task(result)`.
+    ///
+    /// Issue #646 spike: lifecycle signals are routed pre-`from_api_name` and
+    /// emitted as a distinct event variant rather than a `ToolUse`, because
+    /// they have no `ToolResult` round-trip — they end the agent's loop. The
+    /// agent loop matches on this variant and transitions to `AgentStatus::Done`
+    /// while preserving `result` on the agent for downstream consumers
+    /// (capture sidecar, parent-agent `wait_for_agent`, brain reconciler).
+    CompleteTask {
+        /// API-assigned ID echoed back so the conversation history can record
+        /// the call site if a downstream PR widens `AgentMessage::ToolCall` to
+        /// cover lifecycle signals.
+        id: String,
+        /// The typed result payload. Phase 1 enforces "must be a JSON object";
+        /// Phase 2 binds this to a per-task JSON schema (issue #646).
+        result: Value,
+    },
     /// The response is complete.
     Done,
     /// An error occurred.
@@ -297,7 +314,13 @@ fn build_request_body(
 // ---------------------------------------------------------------------------
 
 /// Parse the API response JSON and send events over the channel.
-fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
+///
+/// Exposed (with `#[doc(hidden)]`) so the issue #646 spike integration test
+/// at `crates/phantom-agents/tests/complete_task_spike.rs` can drive it
+/// directly without standing up a full HTTPS round-trip. Production callers
+/// reach this through [`send_message`].
+#[doc(hidden)]
+pub fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
     // Check for API-level error.
     if let Some(err) = body.get("error") {
         let msg = err["message"]
@@ -335,8 +358,29 @@ fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     .cloned()
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
+                // ---- Issue #646: lifecycle pre-parser filter --------------
+                //
+                // `complete_task` is a lifecycle signal, not a tool — it has
+                // no `ToolResult` round-trip. Diverting it ahead of both the
+                // non-object input guard AND `ToolType::from_api_name` keeps
+                // the 8-variant `ToolType` enum focused on file/git tools and
+                // gives the agent loop a dedicated
+                // `ApiEvent::CompleteTask { result }` to match on.
+                //
+                // The non-object guard is intentionally NOT applied here so
+                // the consumer-side validation gate in `phantom-app`
+                // (`agent_pane::poll`) can count schema-invalid calls toward
+                // the 3-strike `validation_failure_count` flatline. The
+                // file/git path below keeps the strict guard.
+                if name == "complete_task" {
+                    let _ = tx.send(ApiEvent::CompleteTask { id, result: raw_input });
+                    continue;
+                }
+
                 // Reject non-object `input` fields — the Claude API always
-                // sends an object here; a bare string or null is malformed.
+                // sends an object here for tool calls; a bare string or null
+                // is malformed. Lifecycle signals (`complete_task`) bypass
+                // this guard above so the consumer can validate.
                 if raw_input.as_object().is_none() {
                     let _ = tx.send(ApiEvent::Error(format!(
                         "tool_use block for '{name}' has non-object input: {raw_input}"
@@ -989,6 +1033,55 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(e, ApiEvent::Done)),
             "empty content must still emit Done, got: {events:?}"
+        );
+    }
+
+    // -- Bug 2: malformed content arrays must not panic ----------------------
+    //
+    // The Claude API contract guarantees `content` is an array of objects.
+    // When the API returns malformed responses (e.g. during a transient server
+    // error), `parse_response` must emit an `Error` event and never panic.
+    // All `.unwrap()` / `.expect()` in the production response-parsing path
+    // use `unwrap_or` / `and_then` / `?` forms — no bare panicking unwraps.
+    // This test documents and guards that contract.
+
+    /// A content array containing a `tool_use` block with a missing `id` field
+    /// must not panic. The missing field must fall back to an empty string and
+    /// the block must still be processed (or produce an error) gracefully.
+    #[test]
+    fn malformed_content_array_returns_error_not_panic() {
+        // Simulate a malformed response: content is an array, but the tool_use
+        // block is missing the `id` key entirely and has a non-object `input`.
+        let response = serde_json::json!({
+            "id": "msg_malformed",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    // `id` key intentionally absent
+                    "name": "read_file",
+                    "input": 12345  // non-object input — malformed
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 5}
+        });
+
+        let (tx, rx) = mpsc::channel();
+        // Must not panic.
+        parse_response(&response, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+
+        // The malformed input must produce at least one event (Error or Done).
+        assert!(
+            !events.is_empty(),
+            "parse_response must emit at least one event for malformed content, got none"
+        );
+        // Specifically the non-object input must produce an Error event.
+        assert!(
+            events.iter().any(|e| matches!(e, ApiEvent::Error(_))),
+            "non-object tool_use input must produce an Error event; got: {events:?}"
         );
     }
 

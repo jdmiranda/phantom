@@ -128,6 +128,10 @@ pub enum ContentType {
     CompilerOutput,
     TestResults(TestSummary),
     HttpResponse(HttpResponseData),
+    /// Parsed `docker ps` or `docker build` output.
+    DockerOutput(DockerOutputData),
+    /// Parsed `npm install` or `npm test` output.
+    NpmOutput(NpmOutputData),
 }
 
 /// Parsed `git status` output.
@@ -168,6 +172,39 @@ pub struct HttpResponseData {
     pub status_text: String,
     pub content_type: Option<String>,
     pub body_preview: String,
+}
+
+/// A single container row from `docker ps`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DockerContainer {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub ports: String,
+}
+
+/// Parsed Docker command output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DockerOutputData {
+    /// Containers listed by `docker ps`.
+    pub containers: Vec<DockerContainer>,
+    /// Image hash from a successful `docker build` (e.g. `sha256:abc123`).
+    pub built_image_hash: Option<String>,
+    /// True when the output contains a build error.
+    pub build_failed: bool,
+}
+
+/// Parsed npm command output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmOutputData {
+    /// Number of packages added/updated during `npm install`.
+    pub package_count: Option<u32>,
+    /// Number of security warnings from the audit summary.
+    pub audit_warnings: Option<u32>,
+    /// Test pass count from `npm test`.
+    pub tests_passed: Option<u32>,
+    /// Test fail count from `npm test`.
+    pub tests_failed: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
