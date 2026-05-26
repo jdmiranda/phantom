@@ -11,7 +11,9 @@ use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
+use phantom_ui::tokens::Tokens;
 use phantom_ui::widgets::AppHead;
+use phantom_ui::RenderCtx;
 
 /// ASCII PHANTOM banner — matches the mockup's `<pre>` block.
 pub const PHANTOM_BANNER: &str = " ██████╗ ██╗  ██╗ █████╗ ███╗   ██╗████████╗ ██████╗ ███╗   ███╗\n\
@@ -39,12 +41,12 @@ impl BootCheckState {
             Self::Failed => "[FAIL]",
         }
     }
-    fn color(self) -> [f32; 4] {
+    fn color(self, t: &Tokens) -> [f32; 4] {
         match self {
-            Self::Pending => [0.30, 0.55, 0.40, 0.85],
-            Self::Running => [0.40, 0.85, 1.00, 1.00],
-            Self::Ok => [0.30, 1.00, 0.55, 1.00],
-            Self::Failed => [1.00, 0.30, 0.25, 1.00],
+            Self::Pending => t.colors.text_dim,
+            Self::Running => t.colors.status_info,
+            Self::Ok => t.colors.status_ok,
+            Self::Failed => t.colors.status_danger,
         }
     }
 }
@@ -74,6 +76,7 @@ pub struct BootAdapter {
     total_phases: usize,
     finished: bool,
     app_id: u32,
+    tokens: Tokens,
 }
 
 impl BootAdapter {
@@ -96,7 +99,13 @@ impl BootAdapter {
             total_phases,
             finished: false,
             app_id: 0,
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
         }
+    }
+
+    /// Update the live color palette. The host App calls this on theme switch.
+    pub fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 
     /// Number of checks marked OK.
@@ -174,19 +183,35 @@ impl AppCore for BootAdapter {
 
 impl Renderable for BootAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
+        let t = self.tokens;
+
+        if self.finished {
+            // Pane is being torn down — emit minimal chrome only so the
+            // App's compositor doesn't flash empty content.
+            let mut quads = Vec::new();
+            let mut text_segments = Vec::new();
+            let head = AppHead::new("BOOT", "system check")
+                .with_icon("⊙")
+                .with_meta(format!("phase {} / {}", self.phase, self.total_phases))
+                .with_tokens(t);
+            head.render_into_adapter(rect, &mut quads, &mut text_segments);
+            return RenderOutput { quads, text_segments, grid: None, scroll: None, selection: None };
+        }
+
         let mut quads: Vec<QuadData> = Vec::new();
         let mut text_segments: Vec<TextData> = Vec::new();
 
         let head = AppHead::new("BOOT", "system check")
             .with_icon("⊙")
-            .with_meta(format!("phase {} / {}", self.phase, self.total_phases));
+            .with_meta(format!("phase {} / {}", self.phase, self.total_phases))
+            .with_tokens(t);
         head.render_into_adapter(rect, &mut quads, &mut text_segments);
 
         let body = head.body_rect_adapter(rect);
         let cell_w = if rect.cell_size.0 > 0.0 { rect.cell_size.0 } else { 8.0 };
         let cell_h = if rect.cell_size.1 > 0.0 { rect.cell_size.1 } else { 16.0 };
 
-        let banner_color = [0.65, 1.00, 0.80, 1.00];
+        let banner_color = t.colors.text_accent;
         let mut y = body.y + cell_h * 0.5;
         for line in PHANTOM_BANNER.lines() {
             if y + cell_h > body.y + body.height - cell_h * (self.checks.len() as f32 + 1.0) {
@@ -210,13 +235,13 @@ impl Renderable for BootAdapter {
                 text: c.state.marker().to_string(),
                 x: body.x + cell_w,
                 y,
-                color: c.state.color(),
+                color: c.state.color(&t),
             });
             text_segments.push(TextData {
                 text: c.label.clone(),
                 x: body.x + cell_w * 9.0,
                 y,
-                color: [0.85, 1.00, 0.95, 1.00],
+                color: t.colors.text_primary,
             });
             y += cell_h;
         }
@@ -335,5 +360,52 @@ mod tests {
             .text_segments
             .iter()
             .any(|t| t.text.contains("supervisor")));
+    }
+
+    #[test]
+    fn set_app_id_stores_id() {
+        let mut b = BootAdapter::new();
+        b.set_app_id(42);
+        assert_eq!(b.app_id, 42);
+    }
+
+    #[test]
+    fn finished_render_skips_body() {
+        let mut b = BootAdapter::new();
+        let before = b.render(&rect()).text_segments.len();
+        b.accept_command("finish", &serde_json::json!({})).unwrap();
+        let after = b.render(&rect()).text_segments.len();
+        assert!(
+            after < before,
+            "finished render must skip the body (banner + checks); got {after} vs {before}",
+        );
+    }
+
+    #[test]
+    fn theme_swap_propagates_to_check_marker() {
+        use phantom_ui::tokens::{ColorRoles, Tokens};
+        let b = BootAdapter::new();
+        let out_p = b.render(&rect());
+        let marker_p = out_p
+            .text_segments
+            .iter()
+            .find(|t| t.text == "[ OK ]")
+            .map(|t| t.color)
+            .expect("at least one OK marker must render");
+
+        let mut roles = ColorRoles::phosphor();
+        roles.status_ok = [0.0, 0.0, 1.0, 1.0];
+        let mut b2 = BootAdapter::new();
+        b2.set_tokens(Tokens::new(roles, RenderCtx::fallback()));
+        let out_b = b2.render(&rect());
+        let marker_b = out_b
+            .text_segments
+            .iter()
+            .find(|t| t.text == "[ OK ]")
+            .map(|t| t.color)
+            .expect("OK marker must render");
+
+        assert_ne!(marker_p, marker_b);
+        assert!(marker_b[2] > 0.9);
     }
 }
