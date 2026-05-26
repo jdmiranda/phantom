@@ -39,6 +39,9 @@ pub struct SettingsView {
     pub bloom: Slider01,
     pub curvature: Slider01,
     pub privacy_mode: bool,
+    /// CRT post-fx toggle — `false` disables scanlines/bloom/curvature
+    /// regardless of slider values. Matches the mockup's checkbox.
+    pub crt_enabled: bool,
 }
 
 impl Default for SettingsView {
@@ -51,6 +54,7 @@ impl Default for SettingsView {
             bloom: Slider01::new(0.5),
             curvature: Slider01::new(0.1),
             privacy_mode: false,
+            crt_enabled: true,
         }
     }
 }
@@ -137,6 +141,7 @@ impl AppCore for SettingsAdapter {
             "bloom": self.view.bloom.0,
             "curvature": self.view.curvature.0,
             "privacy_mode": self.view.privacy_mode,
+            "crt_enabled": self.view.crt_enabled,
             "revision": self.revision,
         })
     }
@@ -303,6 +308,14 @@ impl Commandable for SettingsAdapter {
             Ok::<String, anyhow::Error>(json!({ "status": "ok", "field": label }).to_string())
         };
         match cmd {
+            "set_theme_name" => {
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                self.view.theme = name.to_string();
+                bump_and_ok(self, "theme")
+            }
             "set_theme" => {
                 let name = args
                     .get("name")
@@ -348,6 +361,11 @@ impl Commandable for SettingsAdapter {
                 let on = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
                 self.view.privacy_mode = on;
                 bump_and_ok(self, "privacy_mode")
+            }
+            "set_crt_enabled" => {
+                let on = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                self.view.crt_enabled = on;
+                bump_and_ok(self, "crt_enabled")
             }
             "snapshot" => Ok(self.get_state().to_string()),
             other => Err(anyhow::anyhow!("unknown command: {other}")),

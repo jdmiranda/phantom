@@ -67,6 +67,21 @@ impl App {
         // events on the next render. No-op when no inspector pane is open.
         self.refresh_inspector_snapshot();
 
+        // FilesWatch pane: drain notify events into the adapter.
+        self.refresh_files_watch_pane();
+
+        // VoiceStt pane: tick the synthetic level envelope.
+        self.refresh_voice_stt_pane();
+
+        // Logs pane: push any new entries from the in-memory log ring.
+        self.refresh_logs_pane();
+
+        // Settings pane: persist + live-reload on any mutation.
+        self.refresh_settings_pane();
+
+        // Console pane: drain typed input and dispatch each line.
+        self.refresh_console_pane();
+
         // Bridge: drain bus events for the brain observer and forward as AiEvents.
         // Now an instance method so command-boundary events can also flow into
         // the per-pane capture pipeline (sealing open bundles on
@@ -1524,6 +1539,169 @@ impl App {
                     Err(e) => warn!("OSC 52: failed to open clipboard: {e}"),
                 }
             }
+        }
+    }
+
+    /// Drain pending user input from the ConsoleAdapter pane and dispatch
+    /// each line through `execute_user_command`. No-op when the pane is
+    /// closed.
+    pub(crate) fn refresh_console_pane(&mut self) {
+        let Some(pane_id) = self.console_pane_id else { return };
+
+        // Fetch the adapter's pending input via a state snapshot. We can't
+        // mutate the adapter directly from here without a downcast, so we
+        // poll a `drain_pending_input` command instead.
+        let drain_json = match self
+            .coordinator
+            .send_command(pane_id, "drain_pending", &serde_json::json!({}))
+        {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let lines: Vec<String> = serde_json::from_str::<Vec<String>>(&drain_json).unwrap_or_default();
+        for line in lines {
+            // Push the command into legacy execution path. Output lands in
+            // the legacy `self.console` buffer; mirror the most recent
+            // legacy line back into the pane so the user sees a response.
+            self.execute_user_command(&line);
+            let echo = format!("→ {line}");
+            let _ = self.coordinator.send_command(
+                pane_id,
+                "out",
+                &serde_json::json!({ "text": echo }),
+            );
+        }
+    }
+
+    /// Detect mutations to the Settings pane and persist them to
+    /// `~/.config/phantom/settings.toml`. The existing config watcher
+    /// picks the change back up and routes it through
+    /// `apply_config_reload`, which mutates `self.theme.shader_params`
+    /// (the renderer reads CRT uniforms from there each frame). No-op
+    /// when the pane is closed.
+    pub(crate) fn refresh_settings_pane(&mut self) {
+        let Some(pane_id) = self.settings_pane_id else { return };
+        let snapshot_json = match self
+            .coordinator
+            .send_command(pane_id, "snapshot", &serde_json::json!({}))
+        {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&snapshot_json) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let revision = v.get("revision").and_then(|r| r.as_u64()).unwrap_or(0);
+        if revision == self.settings_pane_revision {
+            return;
+        }
+        self.settings_pane_revision = revision;
+
+        // Build a PhantomSettings struct from the adapter snapshot and
+        // the current on-disk state, then atomically save it. The
+        // ConfigWatcher fires the live-reload path next frame.
+        let mut settings = crate::settings::PhantomSettings::load();
+        if let Some(theme) = v.get("theme").and_then(|s| s.as_str()) {
+            settings.theme = theme.to_string();
+        }
+        if let Some(scan) = v.get("scanlines").and_then(|f| f.as_f64()) {
+            settings.crt.scanline_intensity = scan as f32;
+        }
+        if let Some(bloom) = v.get("bloom").and_then(|f| f.as_f64()) {
+            settings.crt.bloom_intensity = bloom as f32;
+        }
+        if let Some(curv) = v.get("curvature").and_then(|f| f.as_f64()) {
+            settings.crt.curvature = curv as f32;
+        }
+        if let Some(font) = v.get("font_size_pt").and_then(|f| f.as_f64()) {
+            settings.font_size = font as f32;
+        }
+        if let Some(crt_on) = v.get("crt_enabled").and_then(|b| b.as_bool()) {
+            self.crt_enabled = crt_on;
+        }
+        if let Err(e) = settings.save() {
+            warn!("Settings persist failed: {e}");
+        } else {
+            // Apply immediately so the user doesn't have to wait for the
+            // config watcher to fire on the next frame.
+            self.apply_config_reload(&settings);
+        }
+    }
+
+    /// Push any new log entries past `self.logs_watermark` into the Logs
+    /// pane via `accept_command "push"`. No-op when the pane is closed.
+    pub(crate) fn refresh_logs_pane(&mut self) {
+        let Some(pane_id) = self.logs_pane_id else { return };
+        let ring = crate::logging::log_ring();
+        let new_entries: Vec<crate::logging::LogRingEntry> = match ring.lock() {
+            Ok(buf) => {
+                if buf.len() <= self.logs_watermark {
+                    self.logs_watermark = buf.len();
+                    return;
+                }
+                buf.iter().skip(self.logs_watermark).cloned().collect()
+            }
+            Err(_) => return,
+        };
+        let level_label = |l: log::Level| match l {
+            log::Level::Error => "error",
+            log::Level::Warn => "warn",
+            log::Level::Info => "info",
+            log::Level::Debug => "debug",
+            log::Level::Trace => "trace",
+        };
+        for entry in &new_entries {
+            let _ = self.coordinator.send_command(
+                pane_id,
+                "push",
+                &serde_json::json!({
+                    "level": level_label(entry.level),
+                    "source": entry.target,
+                    "message": entry.message,
+                }),
+            );
+        }
+        self.logs_watermark = self.logs_watermark.saturating_add(new_entries.len());
+    }
+
+    /// Animate the VoiceStt pane's level visualiser with a synthetic sine
+    /// envelope until a real STT backend lands. No-op when the pane is
+    /// closed.
+    pub(crate) fn refresh_voice_stt_pane(&mut self) {
+        let Some(pane_id) = self.voice_stt_pane_id else { return };
+        // Use scene clock as the phase source so all panes animate from
+        // the same time base.
+        let t = self.scene_clock.elapsed().as_secs_f32();
+        let level = 0.5 + 0.4 * (t * 3.0).sin();
+        let _ = self.coordinator.send_command(
+            pane_id,
+            "push_level",
+            &serde_json::json!({ "value": level }),
+        );
+    }
+
+    /// Drain the FilesWatch background watcher's event queue and route each
+    /// event into the FilesWatchAdapter via `accept_command "push"`. No-op
+    /// when the pane is closed or the watcher isn't running.
+    pub(crate) fn refresh_files_watch_pane(&mut self) {
+        let Some(pane_id) = self.files_watch_pane_id else { return };
+        let Some(ref watcher) = self.files_watcher else { return };
+        let events = watcher.drain(32);
+        if events.is_empty() {
+            return;
+        }
+        let stamp = crate::input::chrono_time_string();
+        for ev in events {
+            let _ = self.coordinator.send_command(
+                pane_id,
+                "push",
+                &serde_json::json!({
+                    "path": ev.path,
+                    "kind": ev.kind,
+                    "stamp": stamp,
+                }),
+            );
         }
     }
 }

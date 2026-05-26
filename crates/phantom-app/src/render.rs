@@ -175,7 +175,11 @@ impl App {
             let elapsed = self.start_time.elapsed().as_secs_f32();
 
             // During boot, scale CRT effect intensities by the boot warmup ramp.
-            let crt_scale = if self.state == AppState::Boot {
+            // When the user has disabled CRT via Settings, force the scale
+            // to zero so every shader intensity collapses to "no effect".
+            let crt_scale = if !self.crt_enabled {
+                0.0
+            } else if self.state == AppState::Boot {
                 self.boot.crt_intensity()
             } else {
                 1.0
