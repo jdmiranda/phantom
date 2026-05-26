@@ -4,14 +4,35 @@
 //! wrapped in an `Arc<Mutex<…>>` and cloned into each connection task.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use log::{debug, warn};
 
 use crate::envelope::{ClientMessage, Envelope, PeerId, RelayMessage};
 use crate::grant::{CapabilityClass, Grant, PeerGrantRegistry};
-use crate::rate_limit::TokenBucket;
+use crate::rate_limit::{SlidingWindow, TokenBucket};
 use crate::session::SessionHandle;
+
+/// Maximum payload size (in serialized bytes) for any single envelope.
+///
+/// Envelopes whose `payload` field serializes to more than this are rejected
+/// with [`RelayMessage::MessageTooLarge`] and the connection is closed with
+/// WS close code 1009 (Message Too Large).
+pub const MAX_MESSAGE_BYTES: usize = 1_048_576; // 1 MiB
+
+/// Maximum number of simultaneously connected peers.
+///
+/// When the active session count equals this value, [`Router::register`]
+/// returns an error and the server closes the incoming connection with WS
+/// close code 1013 (Try Again Later).
+pub const MAX_CONNECTIONS: usize = 1_000;
+
+/// Sliding-window message limit per connection.
+const WINDOW_MAX_MESSAGES: u32 = 100;
+
+/// Duration of the per-connection sliding window.
+const WINDOW_DURATION: Duration = Duration::from_secs(10);
 
 /// Environment variable that flips the unsigned-envelope policy from
 /// "accept with WARN" (migration window) to "deny" (issue #525).
@@ -20,6 +41,36 @@ use crate::session::SessionHandle;
 /// else — including an unset variable — preserves the migration-window
 /// behavior so existing peers continue to work during rollout.
 pub const ENV_REQUIRE_SIGNATURES: &str = "PHANTOM_RELAY_REQUIRE_SIGNATURES";
+
+/// A `std::io::Write` that discards bytes and counts them.
+///
+/// Used to measure the JSON-serialized size of an envelope payload without
+/// allocating an intermediate `String`. Cheap enough to call on the hot path.
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Measure the serialized JSON size of a payload in bytes without allocating
+/// a `String`. Returns `usize::MAX` on serialization failure so the caller's
+/// size-cap check treats the payload as oversized.
+fn measure_payload_bytes(payload: &serde_json::Value) -> usize {
+    let mut counter = CountingWriter { bytes: 0 };
+    match serde_json::to_writer(&mut counter, payload) {
+        Ok(()) => counter.bytes,
+        Err(_) => usize::MAX,
+    }
+}
 
 /// Returns `true` when [`ENV_REQUIRE_SIGNATURES`] is set to a truthy value.
 fn deny_unsigned_from_env() -> bool {
@@ -36,8 +87,10 @@ fn deny_unsigned_from_env() -> bool {
 pub struct Router {
     /// Live peer → session handle map.
     sessions: HashMap<PeerId, SessionHandle>,
-    /// Per-peer token buckets.
+    /// Per-peer token buckets (continuous throughput limiter).
     rate_buckets: HashMap<PeerId, TokenBucket>,
+    /// Per-peer sliding-window counters (hard burst limiter, WS 1008).
+    sliding_windows: HashMap<PeerId, SlidingWindow>,
     /// Per-peer capability grant registry (default-deny).
     grants: PeerGrantRegistry,
     /// Default rate limit (messages / second).
@@ -74,6 +127,7 @@ impl Router {
         Self {
             sessions: HashMap::new(),
             rate_buckets: HashMap::new(),
+            sliding_windows: HashMap::new(),
             grants: PeerGrantRegistry::new(),
             rate_limit,
             max_peers,
@@ -111,8 +165,8 @@ impl Router {
 
     /// Register a peer's session handle.
     ///
-    /// Returns an error when `max_peers` is already reached or the peer is
-    /// already registered.
+    /// Returns an error when `max_peers` (or [`MAX_CONNECTIONS`]) is already
+    /// reached, or the peer is already registered.
     pub fn register(&mut self, handle: SessionHandle) -> Result<()> {
         if self.sessions.len() >= self.max_peers {
             bail!("max_peers ({}) reached", self.max_peers);
@@ -124,8 +178,13 @@ impl Router {
         debug!("router: registered peer {}", id);
         self.sessions.insert(id.clone(), handle);
         self.rate_buckets
-            .entry(id)
+            .entry(id.clone())
             .or_insert_with(|| TokenBucket::new(self.rate_limit));
+        // Fresh sliding window per connection: do NOT inherit a stale window
+        // from a previous connection (unlike token buckets). A reconnecting
+        // peer starts with a clean budget.
+        self.sliding_windows
+            .insert(id, SlidingWindow::new(WINDOW_MAX_MESSAGES, WINDOW_DURATION));
         Ok(())
     }
 
@@ -156,7 +215,54 @@ impl Router {
         }
     }
 
-    fn forward(&mut self, sender: &PeerId, envelope: Envelope) -> RelayMessage {
+    fn forward(&mut self, sender: &PeerId, mut envelope: Envelope) -> RelayMessage {
+        // --- from-field identity validation (security: envelope forgery) ---
+        //
+        // The `envelope.from` field is user-controlled wire data. A malicious
+        // or buggy client can set `from` to any arbitrary PeerId, causing the
+        // recipient to believe the message originated from a different peer.
+        //
+        // Defense strategy: overwrite `envelope.from` with the server-side
+        // authenticated `sender` identity before any further processing or
+        // forwarding. This ensures correctness regardless of what the client
+        // sent. When a mismatch is detected we also emit a `FromMismatch`
+        // notification so that well-behaved clients can detect a bug in their
+        // envelope construction — the message is still delivered with the real
+        // sender identity stamped in.
+        let from_mismatch = if envelope.from != *sender {
+            warn!(
+                "router: envelope.from mismatch — authenticated sender={}, claimed={}; \
+                 overwriting with authenticated identity",
+                sender, envelope.from
+            );
+            let claimed = std::mem::replace(&mut envelope.from, sender.clone());
+            Some(claimed)
+        } else {
+            None
+        };
+
+        // --- message size cap ---
+        //
+        // Measure the serialized wire size of the payload. If it exceeds
+        // MAX_MESSAGE_BYTES we reject with MessageTooLarge (WS 1009). This
+        // check runs before signature validation and rate-limit accounting so
+        // no tokens are burned on oversized frames.
+        //
+        // We stream into a `CountingWriter` rather than `serde_json::to_string`
+        // so that large (~1 MiB) payloads do not allocate a transient String
+        // just to read its length.
+        let payload_bytes = measure_payload_bytes(&envelope.payload);
+        if payload_bytes > MAX_MESSAGE_BYTES {
+            warn!(
+                "router: oversized envelope from peer {} ({} bytes > {} limit); closing 1009",
+                sender, payload_bytes, MAX_MESSAGE_BYTES
+            );
+            return RelayMessage::MessageTooLarge {
+                peer_id: sender.clone(),
+                limit_bytes: MAX_MESSAGE_BYTES,
+            };
+        }
+
         // --- unsigned-envelope policy (issue #525) ---
         //
         // During the migration window we accept envelopes with an empty `sig`
@@ -209,7 +315,30 @@ impl Router {
             };
         }
 
-        // --- rate limit check ---
+        // --- per-connection sliding-window check (WS 1008) ---
+        //
+        // Hard cap: at most WINDOW_MAX_MESSAGES per WINDOW_DURATION per
+        // connection. Exceeding this triggers a policy-violation close rather
+        // than a soft retry — the peer is disconnected immediately.
+        //
+        // The sliding_windows map is populated by `register`; an entry should
+        // always be present for an authenticated peer. If it is missing for any
+        // reason, insert a fresh window so the check still runs.
+        let sw = self
+            .sliding_windows
+            .entry(sender.clone())
+            .or_insert_with(|| SlidingWindow::new(WINDOW_MAX_MESSAGES, WINDOW_DURATION));
+        if !sw.check() {
+            warn!(
+                "router: sliding-window rate limit exceeded for peer {} (>{}/{}s); closing 1008",
+                sender, WINDOW_MAX_MESSAGES, WINDOW_DURATION.as_secs()
+            );
+            return RelayMessage::SlidingWindowExceeded {
+                peer_id: sender.clone(),
+            };
+        }
+
+        // --- token-bucket rate limit check ---
         let bucket = self
             .rate_buckets
             .entry(sender.clone())
@@ -257,6 +386,19 @@ impl Router {
             "router: delivered envelope {} from {} to {}",
             nonce, sender, to
         );
+
+        // When a from-field mismatch was detected we notify the sender with
+        // `FromMismatch` rather than `Delivered`. The envelope has already been
+        // forwarded with the corrected `from` field, so this is purely advisory.
+        // Well-behaved clients should treat this as a bug signal; malicious
+        // clients learn only that the relay corrected their forgery attempt.
+        if let Some(claimed) = from_mismatch {
+            return RelayMessage::FromMismatch {
+                claimed,
+                actual: sender.clone(),
+            };
+        }
+
         RelayMessage::Delivered { nonce }
     }
 
@@ -743,5 +885,326 @@ mod tests {
             .try_recv()
             .expect("unsigned envelope must reach destination under default policy");
         assert!(raw.contains("hello"));
+    }
+
+    // ── From-field identity validation tests ──────────────────────────────────
+
+    /// A peer authenticated as "alice" that sends an envelope with `from` set
+    /// to "mallory" (a forged sender identity) must receive `FromMismatch`.
+    /// The envelope is still forwarded to the destination, but with the real
+    /// authenticated sender identity stamped in.
+    #[tokio::test]
+    async fn envelope_from_mismatch_is_rejected() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("fm-bob");
+        let (_, ha) = make_session("fm-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "fm-alice");
+        grant_relay(&mut router, "fm-bob");
+
+        // Alice is authenticated as "fm-alice" but claims to be "mallory".
+        let envelope = Envelope {
+            from: PeerId("mallory".into()), // forged sender identity
+            to: PeerId("fm-bob".into()),
+            payload: serde_json::json!("forged-message"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        let reply = router.route(&PeerId("fm-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(
+                reply,
+                RelayMessage::FromMismatch {
+                    ref claimed,
+                    ref actual
+                } if claimed == &PeerId("mallory".into()) && actual == &PeerId("fm-alice".into())
+            ),
+            "expected FromMismatch when from field is forged, got {reply:?}"
+        );
+
+        // The envelope must still have been forwarded to bob.
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("forged envelope must still be delivered to destination");
+        assert!(raw.contains("forged-message"), "payload must reach destination");
+    }
+
+    /// Normal case: a peer sends an envelope with `from` correctly set to its
+    /// own authenticated identity. The router must return `Delivered` (no
+    /// `FromMismatch`) and the message must reach the destination.
+    #[tokio::test]
+    async fn envelope_from_matching_is_forwarded() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("fm2-bob");
+        let (_, ha) = make_session("fm2-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "fm2-alice");
+        grant_relay(&mut router, "fm2-bob");
+
+        let envelope = Envelope {
+            from: PeerId("fm2-alice".into()), // correct sender identity
+            to: PeerId("fm2-bob".into()),
+            payload: serde_json::json!("legitimate-message"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("fm2-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "expected Delivered when from field matches authenticated sender, got {reply:?}"
+        );
+
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("legitimate envelope must be delivered to destination");
+        assert!(raw.contains("legitimate-message"), "payload must reach destination");
+    }
+
+    /// When a client forges `envelope.from`, the relay must stamp the real
+    /// authenticated `PeerId` into the forwarded envelope before it reaches
+    /// the destination. The destination must see the real sender, never the
+    /// claimed one.
+    #[tokio::test]
+    async fn server_overwrites_forged_from() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("ow-bob");
+        let (_, ha) = make_session("ow-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "ow-alice");
+        grant_relay(&mut router, "ow-bob");
+
+        // Authenticated as "ow-alice" but forging `from` as "evil-peer".
+        let envelope = Envelope {
+            from: PeerId("evil-peer".into()),
+            to: PeerId("ow-bob".into()),
+            payload: serde_json::json!("overwrite-test"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        let reply = router.route(&PeerId("ow-alice".into()), ClientMessage::Send(envelope));
+        // The reply must be FromMismatch (not Delivered), confirming the
+        // mismatch was detected.
+        assert!(
+            matches!(reply, RelayMessage::FromMismatch { .. }),
+            "expected FromMismatch for a forged from field, got {reply:?}"
+        );
+
+        // Deserialize the wire envelope that arrived in Bob's channel.
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("overwritten envelope must still be delivered to bob");
+
+        let client_msg: ClientMessage =
+            serde_json::from_str(&raw).expect("invalid JSON in bob's channel");
+        let ClientMessage::Send(wire_env) = client_msg else {
+            panic!("expected Send variant in bob's channel");
+        };
+
+        // The delivered envelope must carry the real authenticated sender
+        // identity, never the forged "evil-peer" claim.
+        assert_eq!(
+            wire_env.from,
+            PeerId("ow-alice".into()),
+            "delivered envelope.from must be the authenticated sender, not the forged claim"
+        );
+        assert_ne!(
+            wire_env.from,
+            PeerId("evil-peer".into()),
+            "delivered envelope must NOT contain the forged from identity"
+        );
+    }
+
+    // ── Message-size cap tests ────────────────────────────────────────────────
+
+    /// A payload that serializes to more than MAX_MESSAGE_BYTES must be
+    /// rejected with `MessageTooLarge`. The connection is then closed by
+    /// server.rs with WS 1009; the router itself just returns the variant.
+    #[test]
+    fn oversized_message_closes_connection_with_1009() {
+        let mut router = Router::new(100, 10);
+        let (_, ha) = make_session("alice");
+        let (_, hb) = make_session("bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
+
+        // Build a payload that is definitely > 1 MiB when serialized.
+        let big_string = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        let envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!(big_string),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(
+                reply,
+                RelayMessage::MessageTooLarge {
+                    ref peer_id,
+                    limit_bytes
+                } if peer_id == &PeerId("alice".into()) && limit_bytes == MAX_MESSAGE_BYTES
+            ),
+            "expected MessageTooLarge, got {reply:?}"
+        );
+    }
+
+    // ── Sliding-window rate-limit tests ────────────────────────────────────────
+
+    /// Sending more than WINDOW_MAX_MESSAGES within a window must return
+    /// `SlidingWindowExceeded`. The router uses configurable limits for test
+    /// isolation — we insert a custom window directly.
+    #[test]
+    fn rate_limit_exceeded_closes_connection_with_1008() {
+        let mut router = Router::new(1000, 10); // generous token-bucket so it doesn't interfere
+        let (_alice_session, ha) = make_session("sw-alice");
+        let (_bob_session, hb) = make_session("sw-bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "sw-alice");
+        grant_relay(&mut router, "sw-bob");
+
+        // Replace the sliding window with a tiny 2-message cap so the test
+        // runs quickly without a real 10-second window.
+        router.sliding_windows.insert(
+            PeerId("sw-alice".into()),
+            SlidingWindow::new(2, Duration::from_secs(10)),
+        );
+
+        let make_env = || Envelope {
+            from: PeerId("sw-alice".into()),
+            to: PeerId("sw-bob".into()),
+            payload: serde_json::json!(null),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+
+        // First 2 must be delivered.
+        for _ in 0..2 {
+            let reply = router.route(&PeerId("sw-alice".into()), ClientMessage::Send(make_env()));
+            assert!(
+                matches!(reply, RelayMessage::Delivered { .. }),
+                "expected Delivered within window, got {reply:?}"
+            );
+        }
+
+        // 3rd must be denied with SlidingWindowExceeded.
+        let reply = router.route(&PeerId("sw-alice".into()), ClientMessage::Send(make_env()));
+        assert!(
+            matches!(reply, RelayMessage::SlidingWindowExceeded { ref peer_id } if peer_id == &PeerId("sw-alice".into())),
+            "expected SlidingWindowExceeded, got {reply:?}"
+        );
+    }
+
+    /// After the window expires the counter resets and messages flow again.
+    #[test]
+    fn rate_limit_resets_after_window_expires() {
+        let mut router = Router::new(1000, 10);
+        let (_alice_session, ha) = make_session("rw-alice");
+        let (_bob_session, hb) = make_session("rw-bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "rw-alice");
+        grant_relay(&mut router, "rw-bob");
+
+        // Replace the window with a tiny cap and an already-expired start so
+        // the first check immediately starts a fresh window.
+        let mut sw = SlidingWindow::new(1, Duration::from_millis(1));
+        // Exhaust the window.
+        assert!(sw.check(), "first check must pass");
+        assert!(!sw.check(), "second check must fail");
+        // Back-date the window start so it has expired.
+        sw.backdate_window(Duration::from_millis(100));
+        router
+            .sliding_windows
+            .insert(PeerId("rw-alice".into()), sw);
+
+        // Next message should start a fresh window and be allowed.
+        let envelope = Envelope {
+            from: PeerId("rw-alice".into()),
+            to: PeerId("rw-bob".into()),
+            payload: serde_json::json!("fresh-window"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let reply = router.route(&PeerId("rw-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { .. }),
+            "expected Delivered after window reset, got {reply:?}"
+        );
+    }
+
+    // ── Connection-limit tests ────────────────────────────────────────────────
+
+    /// When the session count equals max_peers, `register` must fail.
+    /// server.rs interprets this as a 1013 close.
+    #[test]
+    fn connection_limit_rejects_new_connections_with_1013() {
+        // Use max_peers=2 so the test is fast.
+        let mut router = Router::new(100, 2);
+        let (_, h1) = make_session("cl-alice");
+        let (_, h2) = make_session("cl-bob");
+        let (_, h3) = make_session("cl-carol");
+
+        router.register(h1).unwrap();
+        router.register(h2).unwrap();
+
+        // Third registration must fail — this triggers the TryAgainLater path
+        // in server.rs (WS close 1013).
+        let err = router.register(h3).unwrap_err();
+        assert!(
+            err.to_string().contains("max_peers"),
+            "error message must mention max_peers, got: {err}"
+        );
+        assert_eq!(router.peer_count(), 2, "peer count must not increase");
+    }
+
+    // ── Normal-path regression test ───────────────────────────────────────────
+
+    /// Messages that are within all limits must still be routed normally.
+    #[tokio::test]
+    async fn messages_within_limit_are_routed_normally() {
+        let mut router = Router::new(100, 10);
+        let (mut bob_session, hb) = make_session("lim-bob");
+        let (_, ha) = make_session("lim-alice");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "lim-alice");
+        grant_relay(&mut router, "lim-bob");
+
+        // Small payload, first message in the window, within token-bucket.
+        let envelope = Envelope {
+            from: PeerId("lim-alice".into()),
+            to: PeerId("lim-bob".into()),
+            payload: serde_json::json!("within-limits"),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let nonce = envelope.nonce;
+
+        let reply = router.route(&PeerId("lim-alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::Delivered { nonce: n } if n == nonce),
+            "expected Delivered for a within-limit message, got {reply:?}"
+        );
+
+        let raw = bob_session
+            .rx
+            .try_recv()
+            .expect("within-limit message must be delivered to destination");
+        assert!(raw.contains("within-limits"));
     }
 }

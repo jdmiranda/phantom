@@ -41,6 +41,7 @@
 
 pub mod attention;
 pub mod brain;
+pub mod recall;
 pub mod capability_audit;
 pub mod chat_backend;
 pub mod claude;
@@ -50,6 +51,7 @@ pub mod decompose;
 pub mod dispatch;
 pub mod events;
 pub mod goal;
+pub mod goal_source;
 pub mod goals;
 pub mod ollama;
 pub mod ooda;
@@ -60,6 +62,7 @@ pub mod provider_catalog;
 pub mod reconciler;
 pub mod router;
 pub mod scoring;
+pub mod self_improvement;
 pub mod skill_store;
 
 pub use attention::{Attention, PaneSnapshot};
@@ -76,6 +79,7 @@ pub use dispatch::ActionHandler;
 pub use events::*;
 pub use goal::{ChatBackend, ClaudeChatBackend, Goal, Step, parse_steps};
 pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};
+pub use recall::BrainRecallContext;
 pub use orchestrator::*;
 pub use persistent_skill_registry::{
     AgentRef, PersistentSkillRegistry, Skill, SkillHandler, SkillId, SkillProvenance,
@@ -653,6 +657,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
 
         // Send an event.
@@ -679,6 +684,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
 
         assert!(handle.try_recv_action().is_none());
@@ -751,6 +757,7 @@ mod tests {
         let handle = BrainHandle {
             event_tx,
             action_rx,
+            brain_handle: None,
         };
         let sender_clone = handle.event_sender();
 

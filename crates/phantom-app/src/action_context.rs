@@ -225,4 +225,79 @@ mod tests {
         });
         assert!(!has_offline_chip(&status_bar), "chip must clear when disabled");
     }
+
+    // ── memory snapshot extraction (used by spawn_agent_pane_with_opts) ──────
+
+    /// Helper: extract a snapshot from an `Option<MemoryStore>` using the same
+    /// pattern as `App::spawn_agent_pane_with_opts`.
+    fn extract_snapshot(memory: &Option<phantom_memory::MemoryStore>) -> Vec<(String, String)> {
+        memory
+            .as_ref()
+            .map(|m| {
+                m.all()
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A store with 3 blocks must produce a snapshot with exactly 3 entries,
+    /// each containing the correct key and value.
+    #[test]
+    fn memory_snapshot_returns_all_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = phantom_memory::MemoryStore::open_in("/proj", dir.path()).unwrap();
+        store
+            .set(
+                "pkg_manager",
+                "pnpm",
+                phantom_memory::MemoryCategory::ProjectConfig,
+                phantom_memory::MemorySource::Auto,
+            )
+            .unwrap();
+        store
+            .set(
+                "style",
+                "snake_case",
+                phantom_memory::MemoryCategory::Convention,
+                phantom_memory::MemorySource::User,
+            )
+            .unwrap();
+        store
+            .set(
+                "port",
+                "3001",
+                phantom_memory::MemoryCategory::Context,
+                phantom_memory::MemorySource::Agent,
+            )
+            .unwrap();
+
+        let snapshot = extract_snapshot(&Some(store));
+        assert_eq!(snapshot.len(), 3, "snapshot must contain all 3 entries");
+
+        assert!(
+            snapshot.iter().any(|(k, v)| k == "pkg_manager" && v == "pnpm"),
+            "missing pkg_manager=pnpm in snapshot: {snapshot:?}",
+        );
+        assert!(
+            snapshot.iter().any(|(k, v)| k == "style" && v == "snake_case"),
+            "missing style=snake_case in snapshot: {snapshot:?}",
+        );
+        assert!(
+            snapshot.iter().any(|(k, v)| k == "port" && v == "3001"),
+            "missing port=3001 in snapshot: {snapshot:?}",
+        );
+    }
+
+    /// When `memory` is `None`, the extracted snapshot must be an empty `Vec`.
+    #[test]
+    fn memory_snapshot_returns_empty_when_no_store() {
+        let memory: Option<phantom_memory::MemoryStore> = None;
+        let snapshot = extract_snapshot(&memory);
+        assert!(
+            snapshot.is_empty(),
+            "snapshot must be empty when memory is None, got: {snapshot:?}",
+        );
+    }
 }

@@ -120,13 +120,13 @@ impl Drop for BrainHandle {
     /// A log message is emitted instead.
     fn drop(&mut self) {
         let _ = self.event_tx.send(AiEvent::Shutdown);
-        if let Some(handle) = self.brain_handle.take() {
-            if let Err(_payload) = handle.join() {
-                log::error!(
-                    "phantom-brain supervisor thread panicked during Drop; \
-                     the panic payload is suppressed to avoid a double-panic abort"
-                );
-            }
+        if let Some(handle) = self.brain_handle.take()
+            && let Err(_payload) = handle.join()
+        {
+            log::error!(
+                "phantom-brain supervisor thread panicked during Drop; \
+                 the panic payload is suppressed to avoid a double-panic abort"
+            );
         }
     }
 }
@@ -171,6 +171,12 @@ pub struct BrainConfig {
     ///
     /// `None` in standalone (non-relay) mode.
     pub relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>>,
+    /// In-memory recall context for seeding agent prompts with relevant
+    /// command history.  When `Some`, the brain indexes each observed command
+    /// and appends the top-K most relevant hits to Claude prompts.
+    ///
+    /// `None` disables recall-augmented prompt injection.
+    pub recall_context: Option<crate::recall::BrainRecallContext>,
 
     /// Initial history snapshot to seed the brain's in-memory context.
     ///
@@ -178,6 +184,29 @@ pub struct BrainConfig {
     /// Updated at runtime via [`crate::events::AiEvent::HistorySnapshot`] events
     /// so the brain always has the last N commands available for agent prompts.
     pub history_context: Vec<HistoryEntry>,
+
+    /// Optional pre-built self-improvement reconciler.
+    ///
+    /// When `Some`, the brain's 3-second timeout tick polls every registered
+    /// [`crate::goal_source::GoalSource`] (see [`Self::goal_sources`]) and
+    /// drives each candidate through
+    /// [`crate::self_improvement::SelfImprovementState::evaluate`]. Resulting
+    /// [`crate::events::AiAction::EnqueueLoopMessage`] actions are forwarded
+    /// to the action channel; the app handler is responsible for actually
+    /// pushing them onto a `phantom_loop::queue::LoopQueueRegistry`.
+    ///
+    /// `None` (the default) disables the feature entirely; see the
+    /// `enable_self_improvement` field on the config inside the state.
+    ///
+    /// Per design doc §5.1, defaults OFF — the operator must opt in.
+    pub self_improvement: Option<crate::self_improvement::SelfImprovementState>,
+
+    /// Goal sources polled by the self-improvement reconciler on every tick.
+    ///
+    /// Empty by default. Populated to a non-empty `Vec` enables auto-discovery
+    /// of candidate goals (e.g. `Box<GhIssueGoalSource>` for open issues,
+    /// `Box<GhCiFailureGoalSource>` for recent CI failures).
+    pub goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>>,
 }
 
 impl Default for BrainConfig {
@@ -191,7 +220,10 @@ impl Default for BrainConfig {
             router: None,
             catalog: None,
             relay_inbound_rx: None,
+            recall_context: Some(crate::recall::BrainRecallContext::new()),
             history_context: Vec::new(),
+            self_improvement: None,
+            goal_sources: Vec::new(),
         }
     }
 }
@@ -275,11 +307,23 @@ fn brain_supervised(
     // a fresh RelayConnected event from the app.
     let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
         config.relay_inbound_rx;
+    // recall_context is not Clone (InMemoryRecallEngine has mutable state);
+    // consumed on the first iteration. On panic-restart, a fresh empty context
+    // is used — history is observable via the output accumulation path.
+    let mut recall_context: Option<crate::recall::BrainRecallContext> =
+        config.recall_context;
     // History snapshot: Vec<HistoryEntry> is Clone, so each restart iteration
     // gets the same initial snapshot. The brain updates it via HistorySnapshot
     // events; restarts lose that incremental state but start from the same
     // seeded baseline.
     let history_context: Vec<HistoryEntry> = config.history_context;
+    // Self-improvement state and goal sources are non-Clone; consumed on
+    // first iteration only. On panic-restart iterations they are `None` —
+    // the brain skips the self-improvement tick. Matches the same pattern
+    // used for relay_inbound_rx above.
+    let mut self_improvement: Option<crate::self_improvement::SelfImprovementState> =
+        config.self_improvement;
+    let mut goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>> = config.goal_sources;
 
     // Shared slot: the supervisor writes a fresh `iter_tx` here after each
     // restart; the bridge thread reads it to redirect events.
@@ -333,14 +377,49 @@ fn brain_supervised(
             catalog: Some(catalog.clone()),
             // relay_inbound_rx is not Clone; taken on the first iteration only.
             relay_inbound_rx: relay_inbound_rx.take(),
+            // recall_context is not Clone; taken on the first iteration only.
+            // Subsequent restarts start with an empty recall context.
+            recall_context: recall_context.take(),
             // History snapshot is Clone; each restart gets the same seeded baseline.
             history_context: history_context.clone(),
+            // Self-improvement state and goal sources are taken on first
+            // iteration only — restart leaves the feature disabled.
+            self_improvement: self_improvement.take(),
+            goal_sources: std::mem::take(&mut goal_sources),
         };
+
+        // Forwarder thread: drains `iter_action_rx` and pushes to the
+        // external `action_tx` for the lifetime of this iteration. Without
+        // this, actions emitted by `brain_loop` sit unread until the loop
+        // exits — which never happens during normal operation, so every
+        // emitted action (including self-improvement `EnqueueLoopMessage`s)
+        // evaporates. The forwarder exits naturally when `iter_action_tx`
+        // is dropped at the end of `brain_loop`.
+        let action_tx_for_fwd = action_tx.clone();
+        let forwarder = std::thread::Builder::new()
+            .name("phantom-brain-action-fwd".into())
+            .spawn(move || {
+                while let Ok(action) = iter_action_rx.recv() {
+                    if action_tx_for_fwd.send(action).is_err() {
+                        break;
+                    }
+                }
+                iter_action_rx
+            })
+            .expect("failed to spawn brain action forwarder thread");
 
         // Run brain_loop under catch_unwind.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             brain_loop(iter_config, iter_rx, iter_action_tx);
         }));
+
+        // brain_loop dropped its `iter_action_tx`; the forwarder's recv()
+        // now returns Err, the thread exits, and we recover the receiver
+        // so the post-exit drain below has something to read. Joining is
+        // safe — the thread is bounded by the channel closing.
+        let iter_action_rx = forwarder
+            .join()
+            .expect("brain action forwarder thread panicked");
 
         // Drain any actions the iteration emitted before it exited / panicked.
         while let Ok(action) = iter_action_rx.try_recv() {
@@ -434,8 +513,20 @@ fn brain_loop(
     // Drained in the proactive timeout tick below.
     let mut relay_inbound_rx: Option<tokio::sync::mpsc::Receiver<String>> =
         config.relay_inbound_rx;
+    // Recall context: index commands and inject relevant hits into prompts.
+    let mut recall_ctx: Option<crate::recall::BrainRecallContext> = config.recall_context;
     // History snapshot: seeded from BrainConfig, refreshed by HistorySnapshot events.
     let mut history_snapshot: Vec<HistoryEntry> = config.history_context;
+    // Self-improvement reconciler — design doc §3–§5. Populated by the app
+    // when self-improvement is enabled; `None` keeps the feature dormant.
+    let mut self_improvement: Option<crate::self_improvement::SelfImprovementState> =
+        config.self_improvement;
+    let mut goal_sources: Vec<Box<dyn crate::goal_source::GoalSource>> = config.goal_sources;
+    // Self-improvement tick interval (60 s per design doc §4.2) — uses
+    // Instant rather than the OODA timeout so the brain does not poll `gh`
+    // every 3 seconds.
+    let self_improvement_interval = std::time::Duration::from_secs(60);
+    let mut last_self_improvement_tick: Option<std::time::Instant> = None;
 
     // Health-check Ollama at startup.
     if crate::ollama::is_available() {
@@ -483,6 +574,27 @@ fn brain_loop(
                 }
                 if terminal {
                     active_ledger = None;
+                }
+
+                // SELF-IMPROVEMENT TICK: every `self_improvement_interval`,
+                // poll every registered GoalSource and feed candidates through
+                // the SelfImprovementState. Resulting `AiAction::EnqueueLoopMessage`
+                // actions are forwarded to the action channel. The whole branch
+                // is a no-op when the feature is disabled (state == None).
+                if let Some(ref mut state) = self_improvement
+                    && !goal_sources.is_empty()
+                    && !config.privacy_mode
+                    && last_self_improvement_tick
+                        .map(|t| t.elapsed() >= self_improvement_interval)
+                        .unwrap_or(true)
+                {
+                    last_self_improvement_tick = Some(std::time::Instant::now());
+                    let actions = state.tick(&mut goal_sources);
+                    for action in actions {
+                        if action_tx.send(action).is_err() {
+                            break;
+                        }
+                    }
                 }
 
                 // RELAY INBOUND: drain any pending cross-peer frames.
@@ -712,7 +824,7 @@ fn brain_loop(
         // always respond. Try Claude first, fall back to heuristic acknowledgement.
         if let AiEvent::Interrupt(ref query) = event
             && !query.is_empty() {
-                let reply = handle_console_query(query, &context, &mut router, &history_snapshot);
+                let reply = handle_console_query(query, &context, &mut router, &recall_ctx, &history_snapshot);
                 if action_tx.send(reply).is_err() {
                     break;
                 }
@@ -722,6 +834,14 @@ fn brain_loop(
 
         // ORIENT: update world model.
         orient(&event, &mut scorer);
+
+        // RECALL INDEX: seed the recall engine with each completed command so
+        // subsequent agent prompts have relevant history injected.
+        if let AiEvent::CommandComplete(ref parsed) = event {
+            if let Some(ref mut rc) = recall_ctx {
+                rc.index_command(&parsed.command, &parsed.raw_output, vec![]);
+            }
+        }
 
         // PROACTIVE: run the trigger-based suggester on every event.
         // Emits AiAction::Suggest when a pattern is observed and the
@@ -1242,6 +1362,7 @@ fn handle_console_query(
     query: &str,
     context: &ProjectContext,
     router: &mut BrainRouter,
+    recall: &Option<crate::recall::BrainRecallContext>,
     history: &[HistoryEntry],
 ) -> AiAction {
     // Try to find a Claude backend.
@@ -1258,17 +1379,24 @@ fn handle_console_query(
             _ => unreachable!(),
         };
 
+        // Retrieve relevant context from recall index to augment the prompt.
+        let recall_section = recall
+            .as_ref()
+            .map(|r| r.format_for_prompt(query, 5))
+            .unwrap_or_default();
+
         let project_type = format!("{:?}", context.project_type);
         let history_section = history_context(history);
         let prompt = format!(
             "You are Phantom, an AI-native terminal emulator's brain. \
              The user is working in a {} project ({}) and typed this in the console:{}\n\n\
-             \"{}\"\n\n\
+             \"{}\"\n{}\n\
              Respond concisely (1-3 sentences). Be helpful and direct.",
             project_type,
             context.name,
             history_section,
             query,
+            recall_section,
         );
 
         match crate::claude::generate(model_name, &prompt, 200) {
@@ -1340,6 +1468,7 @@ pub(crate) fn action_name(action: &AiAction) -> &str {
         AiAction::UpdateConnectionState { .. } => "update_connection_state",
         AiAction::SetOfflineMode { .. } => "set_offline_mode",
         AiAction::DeliverInboundRelay { .. } => "deliver_inbound_relay",
+        AiAction::EnqueueLoopMessage { .. } => "enqueue_loop_message",
         AiAction::DoNothing => "quiet",
     }
 }

@@ -128,6 +128,14 @@ fn coordinator_starts_empty() {
 /// must allow sending an event without error on the very first call. We
 /// send `AiEvent::Shutdown` so the background thread exits cleanly and
 /// doesn't outlive the test binary.
+///
+/// A short sleep before sending the shutdown event closes a known race in
+/// `brain_supervised`: the bridge thread drops events when the per-iteration
+/// `iter_tx` slot has not yet been installed by the supervisor loop, so
+/// `Shutdown` sent immediately after `spawn_brain` may never reach
+/// `brain_loop`. The bridge then breaks on the in-flight `Shutdown`, leaving
+/// the brain thread stuck in its 3 s recv loop until `BrainHandle::Drop`
+/// joins it.
 #[test]
 fn brain_spawns_and_channel_is_open() {
     let handle = spawn_brain(BrainConfig {
@@ -139,7 +147,14 @@ fn brain_spawns_and_channel_is_open() {
         catalog: None,
         privacy_mode: false,
         relay_inbound_rx: None,
+        history_context: Vec::new(),
+        recall_context: None,
+        self_improvement: None,
+        goal_sources: Vec::new(),
     });
+
+    // Give the supervisor loop time to install the per-iteration `iter_tx`.
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     // The channel must be open immediately after spawn.
     let send_result = handle.send_event(AiEvent::Shutdown);
@@ -201,7 +216,15 @@ fn boot_smoke_full_invariants() {
         catalog: None,
         privacy_mode: false,
         relay_inbound_rx: None,
+        history_context: Vec::new(),
+        recall_context: None,
+        self_improvement: None,
+        goal_sources: Vec::new(),
     });
+
+    // Close the supervisor-install race before shutting down — see the
+    // sibling `brain_spawns_and_channel_is_open` test for the rationale.
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     assert!(
         brain.send_event(AiEvent::Shutdown).is_ok(),

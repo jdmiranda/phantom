@@ -5,6 +5,7 @@
 //! dispatch alongside terminals and other adapters.
 
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
@@ -15,6 +16,7 @@ use phantom_adapter::{
 };
 
 use phantom_agents::agent::AgentMessage;
+use phantom_agents::quarantine::{QuarantineRegistry, QuarantineState};
 use phantom_ui::render_ctx::RenderCtx;
 use phantom_ui::widgets::message_block::{MessageBlock, MessageRole};
 use phantom_ui::widgets::Widget;
@@ -61,6 +63,23 @@ pub struct AgentAdapter {
     /// Uses `Cell` because `render()` takes `&self` (required by the trait) but
     /// needs to update this value so command handlers stay consistent with it.
     cached_output_max_lines: Cell<usize>,
+    /// Substrate-owned [`QuarantineRegistry`] handle, threaded through from
+    /// `App::quarantine_registry` at adapter construction time (issue #649).
+    ///
+    /// `None` for test-only adapters and any future construction path that
+    /// has not yet wired the registry. When `Some`, the
+    /// `AgentPane::Failed → AgentTaskComplete { success: false }` emission
+    /// in [`Lifecycled::update`] queries this registry to detect a
+    /// quarantine-coincident failure and tags the emitted bus event's
+    /// summary with a typed marker so the brain reconciler can route the
+    /// completion to [`TaskLedger::record_quarantine_failure`] (the typed
+    /// recovery mutator defined in `phantom-brain`).
+    ///
+    /// Carrying the field as `Option` keeps existing constructor
+    /// signatures stable (test callers and the unmigrated production
+    /// `with_spawn_tag` path) while the typed mutator and the registry
+    /// wiring land together.
+    quarantine: Option<Arc<Mutex<QuarantineRegistry>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +101,7 @@ impl AgentAdapter {
             scroll_offset: 0,
             // Default to 20 until the first render() call provides the real value.
             cached_output_max_lines: Cell::new(20),
+            quarantine: None,
         }
     }
 
@@ -91,6 +111,58 @@ impl AgentAdapter {
         let mut adapter = Self::new(pane);
         adapter.spawn_tag = spawn_tag;
         adapter
+    }
+
+    /// Thread the substrate-owned [`QuarantineRegistry`] handle into the
+    /// adapter (issue #649).
+    ///
+    /// When set, the adapter consults the registry whenever the inner
+    /// pane transitions to [`AgentPaneStatus::Failed`] so a
+    /// quarantine-coincident failure can be flagged for the brain
+    /// reconciler (which then routes through the typed recovery mutator
+    /// `TaskLedger::record_quarantine_failure`). The registry is held as
+    /// `Arc<Mutex<…>>` so the substrate (`App`) keeps ownership and any
+    /// number of adapters share the same handle.
+    ///
+    /// The setter is builder-style so the production boot caller in
+    /// `agent_pane::spawn` can chain it after
+    /// [`AgentAdapter::with_spawn_tag`] without forcing a constructor
+    /// signature break for the existing test callers.
+    #[must_use]
+    pub(crate) fn with_quarantine_registry(
+        mut self,
+        quarantine: Arc<Mutex<QuarantineRegistry>>,
+    ) -> Self {
+        self.quarantine = Some(quarantine);
+        self
+    }
+
+    /// Returns `true` if the agent backing this adapter is in the
+    /// [`QuarantineState::Quarantined`] state, along with the
+    /// `since_ms` timestamp from the registry. Returns `None` when the
+    /// registry is unwired (test path) or the agent is not quarantined.
+    ///
+    /// Used by [`Lifecycled::update`] on the
+    /// `AgentPaneStatus::Failed` transition to flag quarantine-coincident
+    /// failures.
+    fn quarantined_since_ms(&self, agent_id: u64) -> Option<u64> {
+        let registry = self.quarantine.as_ref()?;
+        match registry.lock() {
+            Ok(guard) => match guard.state_of(agent_id) {
+                QuarantineState::Quarantined { since_ms, .. } => Some(since_ms),
+                _ => None,
+            },
+            Err(poisoned) => {
+                // A poisoned lock means another thread panicked while
+                // holding it; the data is still readable for our purpose
+                // (single-field state machine).
+                let guard = poisoned.into_inner();
+                match guard.state_of(agent_id) {
+                    QuarantineState::Quarantined { since_ms, .. } => Some(since_ms),
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// Immutable access to the inner agent pane.
@@ -132,7 +204,33 @@ impl AppCore for AgentAdapter {
         if self.pane.status() != self.prev_status {
             let event = match self.pane.status() {
                 AgentPaneStatus::Done => Some((true, "Agent finished successfully".to_string())),
-                AgentPaneStatus::Failed => Some((false, "Agent failed".to_string())),
+                AgentPaneStatus::Failed => {
+                    // Issue #649: detect quarantine-coincident failures so
+                    // the brain reconciler can route to the typed
+                    // recovery mutator `TaskLedger::record_quarantine_failure`
+                    // instead of the generic `PlanStep::record_failure`.
+                    //
+                    // The protocol's `AgentTaskComplete` event currently
+                    // carries only a free-text `summary`; we annotate the
+                    // summary with a stable, machine-parseable marker
+                    // (`"[quarantined since_ms=<u64>]"`) so the brain can
+                    // disambiguate without a protocol break. When the
+                    // protocol grows a typed `failure_cause` field
+                    // downstream, this annotation can be dropped.
+                    let stable_agent_id = self.pane.agent_id();
+                    let summary = match self.quarantined_since_ms(stable_agent_id) {
+                        Some(since_ms) => {
+                            log::warn!(
+                                "AgentAdapter: agent {stable_agent_id} failed while \
+                                 quarantined (since_ms={since_ms}); summary will carry \
+                                 the typed marker"
+                            );
+                            format!("Agent failed [quarantined since_ms={since_ms}]")
+                        }
+                        None => "Agent failed".to_string(),
+                    };
+                    Some((false, summary))
+                }
                 AgentPaneStatus::Working => None, // Not a completion event
             };
 
@@ -145,6 +243,12 @@ impl AppCore for AgentAdapter {
                         success,
                         summary,
                         spawn_tag: self.spawn_tag,
+                        // Issue #646 spike: this adapter path bridges the
+                        // pane-status FSM (Working/Done/Failed) — it does not
+                        // see the agents-side `complete_task` result payload,
+                        // which is captured on `Agent` directly. Future PRs
+                        // will plumb the typed result through to this site.
+                        result: None,
                     },
                     frame: 0,
                     timestamp: 0,
@@ -234,6 +338,7 @@ impl Renderable for AgentAdapter {
         let messages = self.pane.messages();
 
         let scroll;
+        let visible_count: usize;
         if !messages.is_empty() {
             // Build a MessageBlock per message, stack them top-down inside the
             // output area, and honour scroll_offset.
@@ -250,12 +355,29 @@ impl Renderable for AgentAdapter {
                 .collect();
             let total_content_h: f32 = block_heights.iter().sum();
 
-            // scroll_offset is in "lines" for the legacy path; here we convert
-            // it to pixels using LINE_HEIGHT so the scrollbar command keeps
-            // working without a deeper refactor.
-            let offset_px = (self.scroll_offset as f32 * LINE_HEIGHT).min(
-                (total_content_h - output_height).max(0.0),
-            );
+            // Output viewport bounds — text and quads emitted by a block
+            // are clipped against this rectangle so a message taller than
+            // the visible area cannot leak past the input bar (Bug 2).
+            let viewport_top = rect.y;
+            let viewport_bottom = rect.y + output_height;
+
+            // Maximum scroll offset in pixels: how much of the content
+            // history is *above* the viewport when fully scrolled up.
+            let max_offset_px = (total_content_h - output_height).max(0.0);
+
+            // Bug-2 fix: when `scroll_offset == 0` we want the LIVE view
+            // (newest messages anchored to the BOTTOM of the output area),
+            // matching the fallback cached-lines path below. The legacy
+            // code anchored to the top regardless of offset, which made
+            // long conversations always overflow past the input bar.
+            //
+            // `scroll_offset` is in "lines" (positive = scroll up away
+            // from live). Convert to pixels and treat the live tail as
+            // `offset_px = max_offset_px`; each line of upward scroll
+            // subtracts one `LINE_HEIGHT`.
+            let scroll_up_px = (self.scroll_offset as f32 * LINE_HEIGHT)
+                .min(max_offset_px);
+            let offset_px = max_offset_px - scroll_up_px;
 
             // Derive `history_size` in scroll units (lines) for ScrollState.
             let total_virtual_lines =
@@ -271,18 +393,21 @@ impl Renderable for AgentAdapter {
             } else {
                 None
             };
+            visible_count = total_virtual_lines.min(output_max_lines);
 
             // Render each block that intersects the visible viewport.
+            // `cursor_y` starts above the viewport when content is taller
+            // than the output area (live tail anchored to bottom).
             let mut cursor_y = rect.y + pad - offset_px;
             for (block, block_h) in blocks.iter_mut().zip(block_heights.iter()) {
                 let block_bottom = cursor_y + block_h;
                 // Skip blocks entirely above the viewport.
-                if block_bottom < rect.y {
+                if block_bottom < viewport_top {
                     cursor_y += block_h;
                     continue;
                 }
                 // Stop once we're below the output area.
-                if cursor_y > rect.y + output_height {
+                if cursor_y > viewport_bottom {
                     break;
                 }
 
@@ -293,19 +418,38 @@ impl Renderable for AgentAdapter {
                     height: *block_h,
                 };
 
-                // Quads (background).
+                // Quads (background) — clip to the output viewport so a
+                // tall message that straddles the bottom does not paint
+                // over the input bar.
                 for q in block.render_quads(&ui_rect) {
+                    let qx = q.pos[0];
+                    let qy = q.pos[1];
+                    let qw = q.size[0];
+                    let qh = q.size[1];
+                    let clipped_top = qy.max(viewport_top);
+                    let clipped_bottom = (qy + qh).min(viewport_bottom);
+                    if clipped_bottom <= clipped_top {
+                        continue;
+                    }
                     quads.push(QuadData {
-                        x: q.pos[0],
-                        y: q.pos[1],
-                        w: q.size[0],
-                        h: q.size[1],
+                        x: qx,
+                        y: clipped_top,
+                        w: qw,
+                        h: clipped_bottom - clipped_top,
                         color: q.color,
                     });
                 }
 
-                // Text segments.
+                // Text segments — drop any line whose baseline falls
+                // outside the output viewport. Without this clamp, long
+                // messages emitted text into the input bar area and below
+                // (Bug 2: "scrolled past its window").
                 for seg in block.render_text(&ui_rect) {
+                    if seg.y + LINE_HEIGHT <= viewport_top
+                        || seg.y >= viewport_bottom
+                    {
+                        continue;
+                    }
                     text_segments.push(TextData {
                         text: seg.text,
                         x: seg.x,
@@ -327,6 +471,7 @@ impl Renderable for AgentAdapter {
             let window_end = total_lines.saturating_sub(clamped_offset);
             let window_start = window_end.saturating_sub(output_max_lines);
             let visible = &lines[window_start..window_end];
+            visible_count = visible.len();
 
             for (i, line) in visible.iter().enumerate() {
                 text_segments.push(TextData {
@@ -351,7 +496,7 @@ impl Renderable for AgentAdapter {
         // Working indicator: a dim "▶ working..." line below the last visible
         // output line, only shown while the agent is still streaming.
         if self.pane.status() == AgentPaneStatus::Working {
-            let indicator_y = rect.y + pad + (visible.len() as f32) * LINE_HEIGHT;
+            let indicator_y = rect.y + pad + (visible_count as f32) * LINE_HEIGHT;
             if indicator_y + LINE_HEIGHT <= rect.y + output_height + pad {
                 text_segments.push(TextData {
                     text: "▶ working...".to_string(),
@@ -406,10 +551,17 @@ impl Renderable for AgentAdapter {
     }
 
     fn spatial_preference(&self) -> Option<SpatialPreference> {
+        // Agent is king — preferred_size is bumped to a "larger than any
+        // monitor" sentinel so the arbiter's Phase 2 greedy allocation eats
+        // ALL available height for the agent pane in the single-adapter
+        // case.  Earlier values (preferred 80x20, max 120x40) clamped the
+        // pane to ~680 physical px on Retina, leaving a massive black void
+        // below the agent content on fullscreen displays.  No max_size so
+        // the pane can grow to whatever the window provides.
         Some(SpatialPreference {
             min_size: (30, 8),
-            preferred_size: (80, 20),
-            max_size: Some((120, 40)),
+            preferred_size: (500, 200),
+            max_size: None,
             aspect_ratio: None,
             internal_panes: 1,
             internal_layout: InternalLayout::Single,
@@ -422,10 +574,23 @@ impl InputHandler for AgentAdapter {
     fn handle_input(&mut self, key: &str) -> bool {
         match key {
             "\r" | "\n" => {
+                // Bug-1 fix: refuse to dispatch a follow-up while the previous
+                // turn is still in flight. Without this, `send_followup` used
+                // to overwrite `api_handle` (silently leaking the running
+                // background thread) and push a fresh User message after an
+                // assistant turn that still had pending tool calls — Claude
+                // then rejected the malformed conversation and Phantom
+                // crashed deep in the response parser. We KEEP the input
+                // buffer so the user can hit Enter again once the agent
+                // finishes; this is friendlier than silently dropping their
+                // typed message.
+                if self.pane.is_busy() {
+                    return true;
+                }
                 let input = std::mem::take(&mut self.input_buffer);
                 let trimmed = input.trim().to_string();
                 if !trimmed.is_empty() {
-                    self.pane.send_followup(trimmed);
+                    let _ = self.pane.send_followup(trimmed);
                 }
                 true
             }

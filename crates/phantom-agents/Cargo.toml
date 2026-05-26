@@ -27,7 +27,27 @@ blake3 = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Optional: enabled by the `test-support` feature so callers (integration
+# tests, downstream crates' tests) can pull in `crate::test_support::fresh_log`
+# without taking on tempfile in their own dev-deps.
+tempfile = { version = "3", optional = true }
+
+[features]
+default = []
+# Exposes [`crate::test_support`] so integration tests and downstream test
+# code can construct fresh fixtures (`fresh_log`, …) without re-deriving the
+# tempdir/EventLog setup at every call site.  Issue #645 — the dispatch
+# boundary now requires a non-`Option` `EventLog`, so every test needs a
+# canonical builder.
+test-support = ["dep:tempfile"]
+
 [dev-dependencies]
+# Self-reference with `features = ["test-support"]` exposes
+# `crate::test_support` (issue #645) to this crate's integration tests
+# (`tests/*.rs`). Integration tests build the lib without `cfg(test)` so
+# the bare `#[cfg(test)] pub mod test_support` gate alone wouldn't reach
+# them — the feature flag is the canonical workaround.
+phantom-agents = { path = ".", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "test-util"] }
 

@@ -107,6 +107,10 @@ pub enum StoreError {
     /// Internal invariant violated (bug / corruption).
     #[error("invariant: {0}")]
     Invariant(String),
+
+    /// A `Mutex` was poisoned by a panicking thread.
+    #[error("lock poisoned")]
+    LockPoisoned,
 }
 
 /// Vector embeddings paired with the modality they were produced under, ready
@@ -164,7 +168,7 @@ pub struct StoreConfig {
 /// path here outweighs any throughput we'd gain from finer locking. Tests
 /// that exercise concurrent writers rely on this serial behavior.
 pub struct BundleStore {
-    inner: Mutex<Inner>,
+    pub(crate) inner: Mutex<Inner>,
 }
 
 impl std::fmt::Debug for BundleStore {
@@ -253,7 +257,7 @@ impl BundleStore {
         bundle: &Bundle,
         embeddings: &[BundleEmbeddings],
     ) -> Result<(), StoreError> {
-        let mut guard = self.inner.lock().expect("bundle store poisoned");
+        let mut guard = self.inner.lock().map_err(|_| StoreError::LockPoisoned)?;
         let inner = &mut *guard;
 
         let mut tx = inner.sqlite.transaction()?;
@@ -289,14 +293,14 @@ impl BundleStore {
 
     /// Read a bundle back. Returns `NotFound` if the id is unknown.
     pub fn read_bundle(&self, id: BundleId) -> Result<Bundle, StoreError> {
-        let guard = self.inner.lock().expect("bundle store poisoned");
+        let guard = self.inner.lock().map_err(|_| StoreError::LockPoisoned)?;
         sqlite::read_bundle(&guard.sqlite, id)
     }
 
     /// Vector similarity search. Backed by [`LanceDbIndex`] when the `lancedb`
     /// feature is enabled, or [`InMemoryVectorIndex`] otherwise.
     pub fn search_vectors(&self, query: &VectorQuery) -> Result<Vec<VectorHit>, StoreError> {
-        let guard = self.inner.lock().expect("bundle store poisoned");
+        let guard = self.inner.lock().map_err(|_| StoreError::LockPoisoned)?;
         guard
             .vectors
             .search(&query.modality, &query.vector, query.limit)
@@ -307,7 +311,7 @@ impl BundleStore {
     /// `query` is passed verbatim to `MATCH`. Callers can use FTS5 operators
     /// (`AND`, `OR`, `NEAR`) and column filters (`column:term`).
     pub fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<FtsHit>, StoreError> {
-        let guard = self.inner.lock().expect("bundle store poisoned");
+        let guard = self.inner.lock().map_err(|_| StoreError::LockPoisoned)?;
         sqlite::search_fts(&guard.sqlite, query, limit)
     }
 
@@ -334,7 +338,7 @@ impl BundleStore {
 
     /// Read and decrypt a previously-written blob using its relative path.
     pub fn read_blob(&self, bundle_id: BundleId, relpath: &str) -> Result<Vec<u8>, StoreError> {
-        let guard = self.inner.lock().expect("bundle store poisoned");
+        let guard = self.inner.lock().map_err(|_| StoreError::LockPoisoned)?;
         let abs = guard.root.join(relpath);
         let envelope_bytes = std::fs::read(&abs)?;
         let envelope = BlobEnvelope::from_bytes(&envelope_bytes)
@@ -349,7 +353,7 @@ impl BundleStore {
     /// the `encryption_at_rest_is_gibberish` test to scan raw bytes.
     #[must_use]
     pub fn database_path(&self) -> PathBuf {
-        let guard = self.inner.lock().expect("bundle store poisoned");
+        let guard = self.inner.lock().expect("bundle store poisoned (database_path)");
         guard.root.join("bundles.db")
     }
 
@@ -360,7 +364,7 @@ impl BundleStore {
         name: &str,
         plaintext: &[u8],
     ) -> Result<String, StoreError> {
-        let guard = self.inner.lock().expect("bundle store poisoned");
+        let guard = self.inner.lock().map_err(|_| StoreError::LockPoisoned)?;
         let dek = guard.master_key.derive_bundle_dek(bundle_id)?;
         let envelope = crypto::seal_blob(&dek, plaintext)
             .map_err(|e| StoreError::Crypto(format!("seal: {e}")))?;
@@ -768,5 +772,116 @@ mod tests {
                 found: 999
             }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_runs_on_empty_db() {
+        // Opening a fresh store should create the schema_version table and
+        // record exactly one row (version 1).
+        let tmp = TempDir::new().unwrap();
+        let key = testing::deterministic_master_key(0x01);
+        let store = testing::open_at(tmp.path(), key.clone()).expect("open");
+        drop(store);
+
+        let db_path = tmp.path().join("bundles.db");
+        let conn = sqlite::Connection::open_encrypted(&db_path, key.bytes()).unwrap();
+        let version: u32 = conn
+            .raw_query_row(
+                "SELECT MAX(version) FROM schema_version",
+                |row| row.get(0),
+            )
+            .expect("schema_version readable");
+        assert_eq!(version, STORE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        // Opening the same store twice must not error or duplicate rows
+        // in schema_version beyond the number of migrations.
+        let tmp = TempDir::new().unwrap();
+        let key = testing::deterministic_master_key(0x02);
+        {
+            let _store = testing::open_at(tmp.path(), key.clone()).expect("first open");
+        }
+        // Second open — migrations must be skipped, not re-applied.
+        testing::open_at(tmp.path(), key.clone()).expect("second open must succeed");
+
+        let db_path = tmp.path().join("bundles.db");
+        let conn = sqlite::Connection::open_encrypted(&db_path, key.bytes()).unwrap();
+        let row_count: u32 = conn
+            .raw_query_row(
+                "SELECT COUNT(*) FROM schema_version",
+                |row| row.get(0),
+            )
+            .expect("count");
+        // Exactly one row per migration version (currently just version 1).
+        assert_eq!(row_count, 1);
+    }
+
+    #[test]
+    fn migration_tracks_version() {
+        // schema_version table must hold a row for every applied migration.
+        let tmp = TempDir::new().unwrap();
+        let key = testing::deterministic_master_key(0x03);
+        testing::open_at(tmp.path(), key.clone()).expect("open");
+
+        let db_path = tmp.path().join("bundles.db");
+        let conn = sqlite::Connection::open_encrypted(&db_path, key.bytes()).unwrap();
+
+        // Every row must have version <= STORE_SCHEMA_VERSION.
+        let max_version: u32 = conn
+            .raw_query_row(
+                "SELECT MAX(version) FROM schema_version",
+                |row| row.get(0),
+            )
+            .expect("max version");
+        assert_eq!(max_version, STORE_SCHEMA_VERSION);
+
+        // applied_at must be a non-empty string (ISO-8601 from datetime('now')).
+        let applied_at: String = conn
+            .raw_query_row(
+                "SELECT applied_at FROM schema_version WHERE version = 1",
+                |row| row.get(0),
+            )
+            .expect("applied_at");
+        assert!(!applied_at.is_empty());
+    }
+
+    #[test]
+    fn lock_poisoning_returns_error() {
+        // Poison the inner mutex by panicking inside a lock guard on another
+        // thread, then verify subsequent API calls return Err(LockPoisoned).
+        use std::sync::Arc;
+
+        let tmp = TempDir::new().unwrap();
+        let key = testing::deterministic_master_key(0x04);
+        let store = Arc::new(testing::open_at(tmp.path(), key).expect("open"));
+
+        let store_clone = Arc::clone(&store);
+        let join = std::thread::spawn(move || {
+            let _guard = store_clone.inner.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        });
+        // The spawned thread panics; its JoinHandle carries the poison.
+        let _ = join.join(); // expect Err (panicked)
+
+        // Now every API call must return LockPoisoned, not panic.
+        let mut dummy = phantom_bundles::Bundle::new(99);
+        dummy.seal(None, vec![], 0.0);
+        let write_err = store.write_bundle(&dummy, &[]);
+        assert!(
+            matches!(write_err, Err(StoreError::LockPoisoned)),
+            "write_bundle must return LockPoisoned, got {write_err:?}"
+        );
+
+        let read_err = store.read_bundle(dummy.id);
+        assert!(
+            matches!(read_err, Err(StoreError::LockPoisoned)),
+            "read_bundle must return LockPoisoned, got {read_err:?}"
+        );
     }
 }

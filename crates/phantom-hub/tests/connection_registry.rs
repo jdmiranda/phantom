@@ -5,7 +5,7 @@
 //! stale-entry filtering behaviour.
 
 use phantom_hub::{
-    registry::{new_shared, PhantomId, OUTBOUND_CHANNEL_CAPACITY},
+    registry::{new_shared_for_tests, PhantomId, OUTBOUND_CHANNEL_CAPACITY},
     router::JsonRpcRequest,
 };
 use tokio::sync::mpsc;
@@ -24,7 +24,7 @@ fn make_tx() -> mpsc::Sender<JsonRpcRequest> {
 
 #[tokio::test]
 async fn register_single_phantom_appears_in_list_online() {
-    let reg = new_shared();
+    let reg = new_shared_for_tests();
     reg.write()
         .await
         .register(make_id("phantom-1"), make_tx(), "host".into(), "0.1.0".into())
@@ -37,7 +37,7 @@ async fn register_single_phantom_appears_in_list_online() {
 
 #[tokio::test]
 async fn unregister_removes_phantom_from_list_online() {
-    let reg = new_shared();
+    let reg = new_shared_for_tests();
     reg.write()
         .await
         .register(make_id("p1"), make_tx(), "h".into(), "v".into())
@@ -51,7 +51,7 @@ async fn unregister_removes_phantom_from_list_online() {
 
 #[tokio::test]
 async fn duplicate_register_returns_error() {
-    let reg = new_shared();
+    let reg = new_shared_for_tests();
     reg.write()
         .await
         .register(make_id("dup"), make_tx(), "h".into(), "v".into())
@@ -66,14 +66,14 @@ async fn duplicate_register_returns_error() {
 
 #[tokio::test]
 async fn unregister_unknown_id_returns_none() {
-    let reg = new_shared();
+    let reg = new_shared_for_tests();
     let result = reg.write().await.unregister(&make_id("ghost"));
     assert!(result.is_none());
 }
 
 #[tokio::test]
 async fn multiple_phantoms_all_appear_in_list_online() {
-    let reg = new_shared();
+    let reg = new_shared_for_tests();
     {
         let mut w = reg.write().await;
         for i in 0..5 {
@@ -96,7 +96,7 @@ async fn unregister_drops_pending_oneshots_signalling_disconnected() {
     use phantom_hub::registry::HubId;
     use tokio::sync::oneshot;
 
-    let reg = new_shared();
+    let reg = new_shared_for_tests();
     let (tx, _rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
     reg.write()
         .await
@@ -128,7 +128,7 @@ async fn unregister_drops_pending_oneshots_signalling_disconnected() {
 
 #[tokio::test]
 async fn empty_registry_reports_is_empty() {
-    let reg = new_shared();
+    let reg = new_shared_for_tests();
     assert!(reg.read().await.is_empty());
     reg.write()
         .await

@@ -1,0 +1,108 @@
+# Implementer loop — drains implementer-queue and ships PRs.
+#
+# Role
+# ----
+# Spawns an Actor agent per issue. The agent reads the relevant code,
+# writes tests, implements the change, runs cargo test, pushes a branch,
+# and opens a PR via gh. The PR URL is forwarded to the review-queue via
+# the on_complete effect so the reviewer loop picks it up on its next
+# drain.
+#
+# Tool whitelist is wider than reviewer's: file mutation plus run_command
+# (for cargo / gh) plus the PR creation tool. Same gh_pr_* caveat as the
+# reviewer spec: C3 resolves these names.
+
+id = "implementer"
+max_concurrent = 1
+on_quarantine = "skip_and_continue"
+
+[agent]
+role = "Actor"
+allow_tools = ["read_file", "write_file", "edit_file", "run_command", "gh_pr_create", "propose_skill"]
+system_prompt = """
+You are an implementation agent for the Phantom repo (jdmiranda/phantom).
+The repo lives at the agent's current working directory; the `run_command`
+tool runs shell commands relative to that root. The brain forwarded an
+issue from the triager because it decided the issue is ready to implement.
+
+Your input message contains `{"issue_number": <int>}`. Always start by
+fetching the issue body:
+
+  gh issue view <num> -R jdmiranda/phantom
+
+If this returns an empty response or an error, STOP and call abort_task
+with a reason; do not loop on the same command. The harness's `gh` binary
+is authenticated; commands that produce no output have produced no output
+on purpose (e.g. `git status --porcelain` on a clean tree). Do NOT poke at
+stdin redirection, `/dev/null`, the keychain, or credential helpers — the
+agent's shell is non-interactive by design and that is not a bug to debug.
+
+Workflow:
+1. `gh issue view <num> -R jdmiranda/phantom` — read body, labels, comments.
+2. `gh issue view <num> -R jdmiranda/phantom --json comments` to read prior
+   triage / reviewer findings if any were posted.
+3. Locate the relevant code with `read_file` or `grep -r`.
+4. Write or update the failing test FIRST (TDD discipline; the reviewer
+   loop will check that tests came with the change).
+5. Implement the change.
+6. `cargo test --workspace --no-run` then `cargo test --workspace` to
+   validate; iterate until green.
+7. Create a branch off the current HEAD with the format
+   `feat/issue-<num>-<slug>` or `fix/issue-<num>-<slug>`. Commit, push,
+   open a PR via `gh pr create -R jdmiranda/phantom`.
+8. The PR body must reference the issue (`Closes #<num>` if scope matches,
+   `Relates to #<num>` if partial) and summarise what you did.
+
+Issue hygiene — autonomous loop expectations:
+- If you spot a real bug UNRELATED to the assigned issue, do NOT fix it
+  inline. File a separate issue via
+  `gh issue create -R jdmiranda/phantom --title '<concise>' --body
+  '<context+repro+suggested fix>' --label 'phantom-discovered'`.
+- If you discover the assigned issue is actually duplicate / blocked /
+  misscoped after reading, post one
+  `gh issue comment <num> -R jdmiranda/phantom --body '<analysis>'`
+  and call abort_task with the analysis as the reason.
+- If a recurring pattern would benefit from a reusable skill, call the
+  `propose_skill` tool. Proposals land in `.phantom/proposed-skills/`
+  for human promotion.
+
+You MUST eventually call ONE of:
+- complete_task with {"issue_number": <int>, "pr_url": <string>,
+  "summary": <string>} when a PR is open
+- abort_task with {"reason": "<short explanation>"} when the issue is
+  infeasible, duplicate, or out of scope after reading
+"""
+
+[agent.policy]
+auto_approve = true
+timeout_seconds = 1800
+
+[agent.exit_schema]
+type = "object"
+required = ["issue_number", "pr_url", "summary"]
+
+[agent.exit_schema.properties.issue_number]
+type = "integer"
+
+[agent.exit_schema.properties.pr_url]
+type = "string"
+format = "uri"
+
+[agent.exit_schema.properties.summary]
+type = "string"
+
+[source]
+kind = "queue"
+name = "implementer-queue"
+
+[[on_complete]]
+kind = "enqueue_to"
+queue = "review-queue"
+
+[[on_complete.fields]]
+from = "result.pr_url"
+to = "pr_url"
+
+[[on_complete.fields]]
+from = "result.issue_number"
+to = "issue_number"

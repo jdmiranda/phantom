@@ -87,6 +87,23 @@ pub enum ApiEvent {
         id: String,
         call: ToolCall,
     },
+    /// The assistant called the lifecycle tool `complete_task(result)`.
+    ///
+    /// Issue #646 spike: lifecycle signals are routed pre-`from_api_name` and
+    /// emitted as a distinct event variant rather than a `ToolUse`, because
+    /// they have no `ToolResult` round-trip — they end the agent's loop. The
+    /// agent loop matches on this variant and transitions to `AgentStatus::Done`
+    /// while preserving `result` on the agent for downstream consumers
+    /// (capture sidecar, parent-agent `wait_for_agent`, brain reconciler).
+    CompleteTask {
+        /// API-assigned ID echoed back so the conversation history can record
+        /// the call site if a downstream PR widens `AgentMessage::ToolCall` to
+        /// cover lifecycle signals.
+        id: String,
+        /// The typed result payload. Phase 1 enforces "must be a JSON object";
+        /// Phase 2 binds this to a per-task JSON schema (issue #646).
+        result: Value,
+    },
     /// The response is complete.
     Done,
     /// An error occurred.
@@ -297,7 +314,13 @@ fn build_request_body(
 // ---------------------------------------------------------------------------
 
 /// Parse the API response JSON and send events over the channel.
-fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
+///
+/// Exposed (with `#[doc(hidden)]`) so the issue #646 spike integration test
+/// at `crates/phantom-agents/tests/complete_task_spike.rs` can drive it
+/// directly without standing up a full HTTPS round-trip. Production callers
+/// reach this through [`send_message`].
+#[doc(hidden)]
+pub fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
     // Check for API-level error.
     if let Some(err) = body.get("error") {
         let msg = err["message"]
@@ -335,8 +358,53 @@ fn parse_response(body: &Value, tx: &mpsc::Sender<ApiEvent>) {
                     .cloned()
                     .unwrap_or(Value::Object(serde_json::Map::new()));
 
+                // ---- Issue #646: lifecycle pre-parser filter --------------
+                //
+                // `complete_task` is a lifecycle signal, not a tool — it has
+                // no `ToolResult` round-trip. Diverting it ahead of both the
+                // non-object input guard AND `ToolType::from_api_name` keeps
+                // the 8-variant `ToolType` enum focused on file/git tools and
+                // gives the agent loop a dedicated
+                // `ApiEvent::CompleteTask { result }` to match on.
+                //
+                // The non-object guard is intentionally NOT applied here so
+                // the consumer-side validation gate in `phantom-app`
+                // (`agent_pane::poll`) can count schema-invalid calls toward
+                // the 3-strike `validation_failure_count` flatline. The
+                // file/git path below keeps the strict guard.
+                if name == "complete_task" {
+                    let _ = tx.send(ApiEvent::CompleteTask { id, result: raw_input });
+                    continue;
+                }
+
+                // `abort_task` is the second lifecycle signal (see
+                // `lifecycle_tools()` in tools.rs). It tells the runner the
+                // agent has decided the task is infeasible. We map it to a
+                // synthetic `complete_task` payload with `{aborted: true,
+                // reason: "..."}` so the existing exit_schema validation
+                // path treats it as a structured completion. Without this
+                // intercept the parser falls through to
+                // `ToolType::from_api_name` which fails with "unknown tool
+                // in response: abort_task" — the very escape hatch the
+                // agent was trying to use to avoid thrashing.
+                if name == "abort_task" {
+                    let reason = raw_input
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no reason supplied)")
+                        .to_string();
+                    let payload = serde_json::json!({
+                        "aborted": true,
+                        "reason": reason,
+                    });
+                    let _ = tx.send(ApiEvent::CompleteTask { id, result: payload });
+                    continue;
+                }
+
                 // Reject non-object `input` fields — the Claude API always
-                // sends an object here; a bare string or null is malformed.
+                // sends an object here for tool calls; a bare string or null
+                // is malformed. Lifecycle signals (`complete_task`) bypass
+                // this guard above so the consumer can validate.
                 if raw_input.as_object().is_none() {
                     let _ = tx.send(ApiEvent::Error(format!(
                         "tool_use block for '{name}' has non-object input: {raw_input}"
@@ -404,36 +472,102 @@ pub fn send_message(
 
         let body_str = serde_json::to_string(&request_body).unwrap_or_default();
 
-        let result = agent
-            .post(API_URL)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .send(body_str.as_bytes());
+        // Retry-with-backoff for transient Anthropic overload (529) and
+        // rate-limit (429). The autonomous loop runs many requests through
+        // here; without retry, a brief API congestion burst kills an
+        // entire 8-min daemon iteration. Backoff: 2s, 6s, 18s — total
+        // ~26 s worst case before giving up, which still fits in one
+        // triager iteration. A small random jitter (+0..30 % of the
+        // base delay) is added so a fleet of agents hitting a 429
+        // simultaneously does not re-synchronise on the next attempt.
+        const RETRY_DELAYS_SEC: [u64; 3] = [2, 6, 18];
+        let mut final_result: Option<Result<ureq::http::Response<ureq::Body>, String>> = None;
+        for (attempt, delay_secs) in
+            std::iter::once(0u64).chain(RETRY_DELAYS_SEC.iter().copied()).enumerate()
+        {
+            if delay_secs > 0 {
+                // Add jitter: 0..30 % of the base delay, derived from the
+                // system clock's nanos. No `rand` dependency; the goal is
+                // de-synchronisation across processes, not crypto-grade
+                // randomness.
+                let jitter_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as u64)
+                    .unwrap_or(0)
+                    % (delay_secs * 300).max(1); // up to 30 % of base in ms
+                let total_ms = delay_secs * 1000 + jitter_ms;
+                std::thread::sleep(std::time::Duration::from_millis(total_ms));
+            }
+            let result = agent
+                .post(API_URL)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .send(body_str.as_bytes());
 
-        match result {
-            Ok(mut response) => {
-                match response.body_mut().read_to_string() {
-                    Ok(text) => {
-                        match serde_json::from_str::<Value>(&text) {
-                            Ok(json) => parse_response(&json, &tx),
-                            Err(e) => {
-                                let _ = tx.send(ApiEvent::Error(format!(
-                                    "failed to parse response: {e}"
-                                )));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(ApiEvent::Error(format!(
-                            "failed to read response body: {e}"
-                        )));
+            match &result {
+                Ok(response) => {
+                    // 5xx (especially 529 overloaded) and 429 are retryable.
+                    let code = response.status().as_u16();
+                    if (code == 429 || (500..600).contains(&code))
+                        && attempt < RETRY_DELAYS_SEC.len()
+                    {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            status = code,
+                            "Anthropic API transient error — retrying after backoff"
+                        );
+                        continue;
                     }
                 }
+                Err(e) => {
+                    // ureq returns HTTP errors as Err. Match on the status
+                    // string for the same retryable classes. ureq's error
+                    // Debug looks like `http_status(529)`.
+                    let es = format!("{e}");
+                    let retryable = es.contains("status: 529")
+                        || es.contains("status: 503")
+                        || es.contains("status: 502")
+                        || es.contains("status: 429");
+                    if retryable && attempt < RETRY_DELAYS_SEC.len() {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            error = %es,
+                            "Anthropic API transient error — retrying after backoff"
+                        );
+                        continue;
+                    }
+                    final_result = Some(Err(es));
+                    break;
+                }
             }
-            Err(e) => {
-                // ureq returns HTTP errors (4xx, 5xx) as Err variants.
+            final_result = Some(result.map_err(|e| format!("{e}")));
+            break;
+        }
+
+        match final_result {
+            Some(Ok(mut response)) => match response.body_mut().read_to_string() {
+                Ok(text) => match serde_json::from_str::<Value>(&text) {
+                    Ok(json) => parse_response(&json, &tx),
+                    Err(e) => {
+                        let _ = tx.send(ApiEvent::Error(format!(
+                            "failed to parse response: {e}"
+                        )));
+                    }
+                },
+                Err(e) => {
+                    let _ = tx.send(ApiEvent::Error(format!(
+                        "failed to read response body: {e}"
+                    )));
+                }
+            },
+            Some(Err(e)) => {
                 let _ = tx.send(ApiEvent::Error(format!("request failed: {e}")));
+            }
+            None => {
+                let _ = tx.send(ApiEvent::Error(
+                    "request failed: no result after retry loop (bug)".into(),
+                ));
             }
         }
     });

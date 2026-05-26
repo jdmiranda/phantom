@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use phantom_embeddings::{EmbedItem, EmbedRequest, EmbeddingBackend, Modality as EmbedModality};
 
 use crate::RecallError;
 
@@ -326,6 +327,222 @@ impl RecallEngine for InMemoryRecallEngine {
     }
 }
 
+// ── RecallEntry ───────────────────────────────────────────────────────────────
+
+/// A document entry to be indexed by [`EmbeddedRecallEngine`].
+#[derive(Debug, Clone)]
+pub struct RecallEntry {
+    /// The text content to embed and retrieve.
+    pub text: String,
+    /// Optional session id used by `VectorQuery::session_filter`. When
+    /// `None`, the entry is matched only by queries that pass no filter.
+    pub session_id: Option<SessionId>,
+    /// Arbitrary caller-supplied metadata.
+    pub metadata: HashMap<String, String>,
+}
+
+impl RecallEntry {
+    /// Create a new entry with the given text, no session, and no metadata.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into(), session_id: None, metadata: HashMap::new() }
+    }
+
+    /// Create a new entry with text and metadata (no session id).
+    #[must_use]
+    pub fn with_metadata(text: impl Into<String>, metadata: HashMap<String, String>) -> Self {
+        Self { text: text.into(), session_id: None, metadata }
+    }
+
+    /// Create a new entry with text, an optional session id, and metadata.
+    #[must_use]
+    pub fn with_session(
+        text: impl Into<String>,
+        session_id: Option<SessionId>,
+        metadata: HashMap<String, String>,
+    ) -> Self {
+        Self { text: text.into(), session_id, metadata }
+    }
+}
+
+// ── EmbeddedRecallEngine ──────────────────────────────────────────────────────
+
+/// Vector recall engine backed by a real [`EmbeddingBackend`].
+///
+/// Unlike [`InMemoryRecallEngine`] (which uses a deterministic FNV mock
+/// embedder), `EmbeddedRecallEngine` calls out to the supplied backend — e.g.
+/// the OpenAI `text-embedding-3-small` model — so that retrieved entries are
+/// semantically ranked rather than hash-ranked.
+///
+/// The store is entirely in-memory; persistence is the caller's responsibility.
+///
+/// # Complexity
+///
+/// `query` performs a linear scan over the in-memory store and is therefore
+/// O(n) in the number of indexed entries (plus one network round-trip to the
+/// embedding backend for the query vector). There is no eviction or cap on
+/// store size; callers placing this engine on a hot path are expected to
+/// either bound the number of indexed entries themselves or replace this
+/// backend with an ANN index once the corpus grows large.
+///
+/// # Concurrency
+///
+/// `query` takes `&self` and may be invoked concurrently from multiple tasks.
+/// The cosine-similarity scan is purely local, but each call invokes
+/// `backend.embed(...)` to vectorise the query text; concurrent callers
+/// share the underlying `Box<dyn EmbeddingBackend + Send + Sync>`. The
+/// `Send + Sync` bound means the backend itself is safe to share, but
+/// stateful backends (rate limiters, connection pools) may serialise calls
+/// internally. `index` takes `&mut self` and therefore excludes concurrent
+/// `query` calls for the duration of the write.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use phantom_embeddings::MockEmbeddingBackend;
+/// use phantom_recall::engine::{EmbeddedRecallEngine, RecallEntry};
+///
+/// async fn demo() {
+///     let backend = Box::new(MockEmbeddingBackend::new());
+///     let mut engine = EmbeddedRecallEngine::new(backend);
+///     engine.index(RecallEntry::new("rust ownership rules")).await.unwrap();
+///     let _results = engine.query_text("ownership", 5, 0.0).await.unwrap();
+/// }
+/// ```
+pub struct EmbeddedRecallEngine {
+    backend: Box<dyn EmbeddingBackend + Send + Sync>,
+    store: Vec<(RecallEntry, Vec<f32>)>,
+}
+
+impl EmbeddedRecallEngine {
+    /// Create an engine backed by the given embedding provider.
+    #[must_use]
+    pub fn new(backend: Box<dyn EmbeddingBackend + Send + Sync>) -> Self {
+        Self { backend, store: Vec::new() }
+    }
+
+    /// Embed `entry.text` and add it to the in-memory index.
+    ///
+    /// Returns an error if the backend call fails.
+    pub async fn index(&mut self, entry: RecallEntry) -> Result<(), RecallError> {
+        let embedding = self.embed_text(&entry.text).await?;
+        self.store.push((entry, embedding));
+        Ok(())
+    }
+
+    /// Query the index using a [`VectorQuery`] and return matching results.
+    ///
+    /// The query text is embedded, then cosine similarity is computed against
+    /// every indexed entry. Entries that don't match `q.session_filter()` are
+    /// dropped before scoring; results that fall below `q.min_score()` or
+    /// produce a non-finite score are discarded; the remainder are sorted by
+    /// score descending (ties broken by insertion order ascending), truncated
+    /// to `q.top_k()`, and returned as [`RecallResult`]s.
+    pub async fn query(&self, q: VectorQuery) -> Result<Vec<RecallResult>, RecallError> {
+        let query_vec = self.embed_text(q.text()).await?;
+
+        let mut scored: Vec<(usize, f32, &RecallEntry)> = self
+            .store
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (entry, emb))| {
+                // Apply session filter.
+                if let Some(filter_id) = q.session_filter() {
+                    match entry.session_id {
+                        Some(sid) if sid == filter_id => {}
+                        _ => return None,
+                    }
+                }
+
+                let score = Self::cosine_similarity(&query_vec, emb);
+                // Drop non-finite scores defensively (NaN can sneak in if a
+                // backend returns degenerate vectors); they would otherwise
+                // poison the sort.
+                if !score.is_finite() {
+                    return None;
+                }
+                if score < q.min_score() { None } else { Some((idx, score, entry)) }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(q.top_k());
+
+        let results = scored
+            .into_iter()
+            .map(|(_, score, entry)| RecallResult {
+                text: entry.text.clone(),
+                score,
+                metadata: entry.metadata.clone(),
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Shorthand query: embed `text`, search with `top_k` and `min_score`.
+    pub async fn query_text(
+        &self,
+        text: &str,
+        top_k: usize,
+        min_score: f32,
+    ) -> Result<Vec<RecallResult>, RecallError> {
+        let q = VectorQuery::new(text, top_k, min_score, None);
+        self.query(q).await
+    }
+
+    /// Cosine similarity between two equal-length slices in `[-1.0, 1.0]`.
+    ///
+    /// Returns `0.0` for empty or differently-sized slices, and for
+    /// zero-magnitude vectors.
+    #[must_use]
+    pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        if a.len() != b.len() || a.is_empty() {
+            return 0.0;
+        }
+        let mut dot = 0.0_f32;
+        let mut na = 0.0_f32;
+        let mut nb = 0.0_f32;
+        for (x, y) in a.iter().zip(b.iter()) {
+            dot += x * y;
+            na += x * x;
+            nb += y * y;
+        }
+        if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na.sqrt() * nb.sqrt()) }
+    }
+
+    /// Call the backend to embed a single text string.
+    async fn embed_text(&self, text: &str) -> Result<Vec<f32>, RecallError> {
+        let request = EmbedRequest {
+            modality: EmbedModality::Text,
+            items: vec![EmbedItem::Text(text.to_string())],
+        };
+        let mut embeddings = self
+            .backend
+            .embed(request)
+            .await
+            .map_err(|e| RecallError::Index(e.to_string()))?;
+        embeddings
+            .pop()
+            .map(|e| e.vec)
+            .ok_or_else(|| RecallError::Index("backend returned no embeddings".into()))
+    }
+}
+
+#[async_trait]
+impl RecallEngine for EmbeddedRecallEngine {
+    async fn query(&self, q: VectorQuery) -> Result<Vec<RecallResult>, RecallError> {
+        // Delegate to the inherent method so callers using `dyn RecallEngine`
+        // observe identical filtering, scoring, and ordering semantics as the
+        // direct `EmbeddedRecallEngine::query` call.
+        EmbeddedRecallEngine::query(self, q).await
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -597,5 +814,137 @@ mod tests {
         let results = engine.query(q).await.expect("query");
         assert_eq!(results.len(), 1, "long embedding should still be queried");
         assert!(results[0].score().is_finite());
+    }
+
+    // ── EmbeddedRecallEngine tests ────────────────────────────────────────────
+
+    use phantom_embeddings::MockEmbeddingBackend;
+
+    fn mock_backend() -> Box<dyn phantom_embeddings::EmbeddingBackend + Send + Sync> {
+        // 16-dim mock — consistent dim for tests.
+        Box::new(MockEmbeddingBackend::with_dim(16))
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_indexes_and_queries() {
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        engine
+            .index(RecallEntry::new("rust ownership and borrowing"))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::new("async await futures in rust"))
+            .await
+            .expect("index");
+
+        // min_score = -1.0 so all entries are returned regardless of cosine sign.
+        let results = engine
+            .query_text("rust ownership", 10, -1.0)
+            .await
+            .expect("query");
+        assert_eq!(results.len(), 2, "both indexed entries should be returned");
+    }
+
+    #[test]
+    fn cosine_similarity_returns_one_for_identical_vectors() {
+        let v = vec![0.6_f32, 0.8_f32]; // already unit length: 0.36+0.64=1.0
+        let sim = EmbeddedRecallEngine::cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6, "identical vectors must give 1.0, got {sim}");
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_respects_top_k() {
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        for i in 0..5u32 {
+            engine.index(RecallEntry::new(format!("entry {i}"))).await.expect("index");
+        }
+        let results = engine.query_text("entry", 3, -1.0).await.expect("query");
+        assert_eq!(results.len(), 3, "top_k should cap results at 3");
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_min_score_filters() {
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        // Both entries get embeddings from the mock; the exact match scores 1.0.
+        engine.index(RecallEntry::new("phantom terminal emulator")).await.expect("index");
+        engine.index(RecallEntry::new("completely different topic xyz")).await.expect("index");
+
+        // With min_score = 1.0 only the exact-match entry passes (cosine = 1.0).
+        let results = engine
+            .query_text("phantom terminal emulator", 10, 1.0)
+            .await
+            .expect("query");
+        assert_eq!(results.len(), 1, "only the exact-match entry should survive min_score 1.0");
+        assert_eq!(results[0].text(), "phantom terminal emulator");
+        assert!((results[0].score() - 1.0).abs() < 1e-5, "score should be 1.0 for exact match");
+    }
+
+    #[test]
+    fn cosine_similarity_zero_for_mismatched_lengths() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![1.0_f32, 0.0, 0.0];
+        assert_eq!(EmbeddedRecallEngine::cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_for_zero_magnitude() {
+        let a = vec![0.0_f32, 0.0, 0.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+        assert_eq!(EmbeddedRecallEngine::cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_session_filter_excludes_other_sessions() {
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        engine
+            .index(RecallEntry::with_session("session one doc", Some(1), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("session two doc", Some(2), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("no session doc", None, no_meta()))
+            .await
+            .expect("index");
+
+        let q = VectorQuery::new("doc", 10, -1.0, Some(1));
+        let results = engine.query(q).await.expect("query");
+        assert_eq!(results.len(), 1, "only the session-1 entry should be returned");
+        assert_eq!(results[0].text(), "session one doc");
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_no_session_filter_returns_all() {
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        engine
+            .index(RecallEntry::with_session("a", Some(1), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("b", Some(2), no_meta()))
+            .await
+            .expect("index");
+        engine
+            .index(RecallEntry::with_session("c", None, no_meta()))
+            .await
+            .expect("index");
+
+        let q = VectorQuery::new("any", 10, -1.0, None);
+        let results = engine.query(q).await.expect("query");
+        assert_eq!(results.len(), 3, "no filter should include all sessions plus None");
+    }
+
+    #[tokio::test]
+    async fn embedded_recall_engine_implements_recall_engine_trait() {
+        // Confirm `EmbeddedRecallEngine` is usable as `dyn RecallEngine`.
+        let mut engine = EmbeddedRecallEngine::new(mock_backend());
+        engine.index(RecallEntry::new("polymorphic call")).await.expect("index");
+
+        let dyn_engine: &dyn RecallEngine = &engine;
+        let q = VectorQuery::new("polymorphic call", 10, -1.0, None);
+        let results = dyn_engine.query(q).await.expect("query");
+        assert_eq!(results.len(), 1, "dyn dispatch should produce the indexed entry");
     }
 }

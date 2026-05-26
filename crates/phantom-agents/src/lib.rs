@@ -39,6 +39,7 @@ pub mod render;
 pub mod role;
 pub mod router;
 pub mod sandbox;
+pub mod self_extension_tools;
 pub mod semantic_context;
 pub mod skill_registry;
 pub mod spawn_rules;
@@ -47,6 +48,8 @@ pub mod suggest;
 pub mod supervisor;
 pub mod system_prompt;
 pub mod taint;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod tools;
 
 pub use agent::*;

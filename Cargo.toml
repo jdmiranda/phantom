@@ -30,6 +30,8 @@ members = [
     "crates/phantom-voice",
     # Code dependency graph — DAG extraction + .planning/dag.json schema.
     "crates/phantom-dag",
+    # Audio capture backend abstraction — ScreenCaptureKit (macOS) + mock.
+    "crates/phantom-audio",
     # Speech-to-text backend abstraction (issues #56, #68).
     "crates/phantom-stt",
     # Stateless WebSocket message broker (issue #4).
@@ -40,6 +42,12 @@ members = [
     "crates/phantom-hub",
     # Hot-module reload host — Phase 1 dylib loading (issue #382).
     "crates/phantom-skill-host",
+    # Loop overseer — types and TOML spec parsing (C1 of issue #650).
+    "crates/phantom-loop",
+    # App-of-apps meta-orchestrator hosting multiple builders + loops.
+    "crates/phantom-fleet",
+    # Higher-level builder orchestration on top of phantom-loop + phantom-brain.
+    "crates/phantom-builder",
 ]
 resolver = "2"
 
@@ -84,3 +92,7 @@ chrono = { version = "0.4", features = ["serde"] }
 libloading = "0.8"
 notify     = "6"
 tempfile   = "3"
+
+# Cryptographic hashing (phantom-skill-host dylib signature verification).
+sha2 = "0.10"
+hex  = "0.4"
