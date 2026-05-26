@@ -11,7 +11,9 @@ use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
+use phantom_ui::tokens::Tokens;
 use phantom_ui::widgets::{AppHead, AppHeadDot};
+use phantom_ui::RenderCtx;
 
 /// Current state of the setup pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +48,7 @@ pub struct SetupAdapter {
     status: SetupStatus,
     status_message: String,
     hint: String,
+    tokens: Tokens,
     app_id: u32,
 }
 
@@ -57,8 +60,14 @@ impl SetupAdapter {
             status: SetupStatus::Waiting,
             status_message: "agent · waiting for API key".into(),
             hint: "set ANTHROPIC_API_KEY · or run `phantom auth login`".into(),
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
             app_id: 0,
         }
+    }
+
+    /// Update the live color palette. The host App calls this on theme switch.
+    pub fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 
     /// Update the visible status line.
@@ -112,11 +121,32 @@ impl Renderable for SetupAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
         let mut quads: Vec<QuadData> = Vec::new();
         let mut text_segments: Vec<TextData> = Vec::new();
+        let t = self.tokens;
+
+        // Render guard: once setup is Ready the pane is being torn down.
+        // Emit chrome-only output so the App's compositor doesn't flash a
+        // stale wordmark before despawn lands.
+        if self.status == SetupStatus::Ready {
+            let head = AppHead::new("SETUP", self.status.label())
+                .with_icon("◌")
+                .with_meta(self.status.label())
+                .with_dot(self.status.dot())
+                .with_tokens(t);
+            head.render_into_adapter(rect, &mut quads, &mut text_segments);
+            return RenderOutput {
+                quads,
+                text_segments,
+                grid: None,
+                scroll: None,
+                selection: None,
+            };
+        }
 
         let head = AppHead::new("SETUP", self.status.label())
             .with_icon("◌")
             .with_meta(self.status.label())
-            .with_dot(self.status.dot());
+            .with_dot(self.status.dot())
+            .with_tokens(t);
         head.render_into_adapter(rect, &mut quads, &mut text_segments);
 
         let body = head.body_rect_adapter(rect);
@@ -132,7 +162,7 @@ impl Renderable for SetupAdapter {
             text: wordmark.to_string(),
             x: wordmark_x,
             y: wordmark_y,
-            color: [0.65, 1.00, 0.80, 1.00],
+            color: t.colors.text_accent,
         });
 
         // Status row.
@@ -143,7 +173,7 @@ impl Renderable for SetupAdapter {
             text: self.status_message.clone(),
             x: status_x,
             y: status_y,
-            color: [0.85, 1.00, 0.95, 1.00],
+            color: t.colors.text_primary,
         });
 
         // Hint row.
@@ -154,7 +184,7 @@ impl Renderable for SetupAdapter {
             text: self.hint.clone(),
             x: hint_x,
             y: hint_y,
-            color: [0.30, 0.55, 0.40, 0.85],
+            color: t.colors.text_dim,
         });
 
         RenderOutput {
@@ -288,5 +318,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.status(), SetupStatus::Failed);
+    }
+
+    #[test]
+    fn set_app_id_stores_id() {
+        let mut s = SetupAdapter::new();
+        s.set_app_id(42);
+        assert_eq!(s.app_id, 42);
+    }
+
+    #[test]
+    fn ready_render_skips_body() {
+        let mut s = SetupAdapter::new();
+        let before = s.render(&rect()).text_segments.len();
+        s.accept_command("ready", &json!({})).unwrap();
+        let after = s.render(&rect()).text_segments.len();
+        assert!(
+            after < before,
+            "ready render must skip the body; got {after} vs {before}",
+        );
+    }
+
+    #[test]
+    fn theme_swap_propagates_to_wordmark() {
+        use phantom_ui::tokens::ColorRoles;
+        let s = SetupAdapter::new();
+        let out_p = s.render(&rect());
+        let mark_p = out_p
+            .text_segments
+            .iter()
+            .find(|t| t.text == "PHANTOM")
+            .map(|t| t.color)
+            .expect("wordmark must render");
+
+        let mut roles = ColorRoles::phosphor();
+        roles.text_accent = [0.0, 0.0, 1.0, 1.0];
+        let mut s2 = SetupAdapter::new();
+        s2.set_tokens(Tokens::new(roles, RenderCtx::fallback()));
+        let out_b = s2.render(&rect());
+        let mark_b = out_b
+            .text_segments
+            .iter()
+            .find(|t| t.text == "PHANTOM")
+            .map(|t| t.color)
+            .expect("wordmark must render");
+
+        assert_ne!(mark_p, mark_b);
+        assert!(mark_b[2] > 0.9);
     }
 }
