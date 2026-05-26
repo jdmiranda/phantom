@@ -13,7 +13,9 @@ use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
+use phantom_ui::tokens::Tokens;
 use phantom_ui::widgets::{AppHead, AppHeadDot};
+use phantom_ui::RenderCtx;
 
 /// How many recent audio-level samples drive the visualiser bars.
 pub const LEVEL_BUFFER: usize = 32;
@@ -25,6 +27,7 @@ pub struct VoiceSttAdapter {
     transcript_partial: String,
     listening: bool,
     backend: String,
+    tokens: Tokens,
     app_id: u32,
 }
 
@@ -38,8 +41,14 @@ impl VoiceSttAdapter {
             transcript_partial: String::new(),
             listening: false,
             backend: "mock".into(),
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
             app_id: 0,
         }
+    }
+
+    /// Update the live color palette. The host App calls this on theme switch.
+    pub fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 
     /// Append a level sample in `0.0..=1.0`.
@@ -118,13 +127,15 @@ impl Renderable for VoiceSttAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
         let mut quads: Vec<QuadData> = Vec::new();
         let mut text_segments: Vec<TextData> = Vec::new();
+        let t = self.tokens;
 
         let meta = if self.listening { "listening".to_string() } else { "idle".to_string() };
         let dot = if self.listening { AppHeadDot::Live } else { AppHeadDot::Info };
         let head = AppHead::new("VOICE", format!("stt · {}", self.backend))
             .with_icon("◉")
             .with_meta(meta)
-            .with_dot(dot);
+            .with_dot(dot)
+            .with_tokens(t);
         head.render_into_adapter(rect, &mut quads, &mut text_segments);
 
         let body = head.body_rect_adapter(rect);
@@ -140,18 +151,14 @@ impl Renderable for VoiceSttAdapter {
         let strip_x_start = body.x + cell_w;
         let strip_x_max = body.x + body.width - cell_w;
         let max_x_room = strip_x_max - strip_x_start;
-        let drawable_bars = ((max_x_room + bar_gap) / (bar_width + bar_gap)).floor().min(total_bars) as usize;
+        let drawable_bars = ((max_x_room + bar_gap) / (bar_width + bar_gap))
+            .floor()
+            .max(0.0)
+            .min(total_bars) as usize;
 
-        for (idx, &lvl) in self
-            .levels
-            .iter()
-            .rev()
-            .take(drawable_bars)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .enumerate()
-        {
+        let total = self.levels.len();
+        let skip = total.saturating_sub(drawable_bars);
+        for (idx, &lvl) in self.levels.iter().skip(skip).enumerate() {
             let h = (bar_strip_h * lvl).max(2.0);
             let x = strip_x_start + (idx as f32) * (bar_width + bar_gap);
             let y = bar_strip_y + bar_strip_h - h;
@@ -160,14 +167,14 @@ impl Renderable for VoiceSttAdapter {
                 y,
                 w: bar_width,
                 h,
-                color: [0.30, 1.00, 0.55, 0.95],
+                color: t.colors.status_ok,
             });
         }
 
         // Transcript below the bars.
         let transcript_y = body.y + bar_strip_h + cell_h * 1.5;
-        let committed_color = [0.85, 1.00, 0.95, 1.00];
-        let partial_color = [0.50, 0.65, 0.55, 0.85];
+        let committed_color = t.colors.text_accent;
+        let partial_color = t.colors.text_dim;
 
         if !self.transcript_committed.is_empty() {
             text_segments.push(TextData {
@@ -353,5 +360,47 @@ mod tests {
         a.accept_command("start", &json!({})).unwrap();
         let out = a.render(&rect());
         assert!(out.text_segments.iter().any(|t| t.text == "listening"));
+    }
+
+    #[test]
+    fn set_app_id_stores_id() {
+        let mut a = VoiceSttAdapter::new();
+        a.set_app_id(42);
+        assert_eq!(a.app_id, 42);
+    }
+
+    #[test]
+    fn drawable_bars_does_not_panic_on_narrow_rect() {
+        let mut a = VoiceSttAdapter::new();
+        a.push_level(0.5);
+        let narrow = Rect { x: 0.0, y: 0.0, width: 30.0, height: 100.0, cell_size: (8.0, 16.0) };
+        // Should not panic regardless of how narrow the rect is.
+        let _ = a.render(&narrow);
+    }
+
+    #[test]
+    fn theme_swap_propagates_to_level_bar() {
+        use phantom_ui::tokens::{ColorRoles, Tokens};
+        let mut a = VoiceSttAdapter::new();
+        a.push_level(0.8);
+        let out_p = a.render(&rect());
+        let bar_p = out_p
+            .quads
+            .iter()
+            .find(|q| (q.w - 3.0).abs() < 0.01)
+            .expect("level bar must render");
+
+        let mut roles = ColorRoles::phosphor();
+        roles.status_ok = [0.0, 0.0, 1.0, 1.0];
+        a.set_tokens(Tokens::new(roles, RenderCtx::fallback()));
+        let out_b = a.render(&rect());
+        let bar_b = out_b
+            .quads
+            .iter()
+            .find(|q| (q.w - 3.0).abs() < 0.01)
+            .expect("level bar must render");
+
+        assert_ne!(bar_p.color, bar_b.color);
+        assert!(bar_b.color[2] > 0.9);
     }
 }
