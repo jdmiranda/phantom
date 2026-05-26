@@ -277,6 +277,7 @@ mod tests {
             warnings,
             duration_ms: None,
             raw_output: raw_output.to_string(),
+            classification_notes: vec![],
         }
     }
 

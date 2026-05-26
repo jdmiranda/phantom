@@ -31,7 +31,13 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{
+    accept_async,
+    tungstenite::{
+        protocol::{frame::coding::CloseCode, CloseFrame},
+        Message,
+    },
+};
 
 use crate::envelope::{ClientMessage, PeerId, RelayMessage};
 use crate::grant::{CapabilityClass, Grant};
@@ -292,6 +298,30 @@ async fn handle_connection(
 
     {
         let mut guard = router.lock().await;
+
+        // Check the connection cap before registering. When the active
+        // session count equals the router's configured `max_peers` we close
+        // immediately with WS 1013 (Try Again Later) without burning any
+        // session state. The cap is read live from the router so it always
+        // matches the value `register` enforces — no hardcoded constant that
+        // can drift from the operator's configuration.
+        let cap = guard.max_peers();
+        if guard.peer_count() >= cap {
+            warn!(
+                "relay: connection limit ({}) reached; rejecting peer {} with 1013",
+                cap, peer_id
+            );
+            let body = serde_json::to_string(&RelayMessage::TryAgainLater)?;
+            let _ = ws_sink.send(Message::from(body)).await;
+            let _ = ws_sink
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Again,
+                    reason: "connection limit reached".into(),
+                })))
+                .await;
+            return Ok(());
+        }
+
         if let Err(e) = guard.register(handle) {
             let err = RelayMessage::Error {
                 code: "register_failed".into(),
@@ -358,9 +388,34 @@ async fn handle_connection(
                             continue;
                         }
 
+                        // Determine whether this reply also requires closing
+                        // the connection with a specific WS close code.
+                        let close_frame: Option<CloseFrame> = match &reply {
+                            RelayMessage::MessageTooLarge { .. } => {
+                                warn!("relay: closing peer {} with 1009 (message too large)", peer_id);
+                                Some(CloseFrame {
+                                    code: CloseCode::Size,
+                                    reason: "message too large".into(),
+                                })
+                            }
+                            RelayMessage::SlidingWindowExceeded { .. } => {
+                                warn!("relay: closing peer {} with 1008 (policy violation)", peer_id);
+                                Some(CloseFrame {
+                                    code: CloseCode::Policy,
+                                    reason: "rate limit exceeded".into(),
+                                })
+                            }
+                            _ => None,
+                        };
+
                         let _ = ws_sink
                             .send(Message::from(serde_json::to_string(&reply)?))
                             .await;
+
+                        if let Some(frame) = close_frame {
+                            let _ = ws_sink.send(Message::Close(Some(frame))).await;
+                            break;
+                        }
                     }
                     Some(Ok(Message::Ping(data))) => {
                         let _ = ws_sink.send(Message::Pong(data)).await;

@@ -3,6 +3,8 @@
 //! Bridges the `alacritty_terminal` grid to the renderer by extracting the
 //! visible region into a flat `Vec<RenderCell>` with RGBA float colors.
 
+use std::sync::Arc;
+
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
@@ -27,6 +29,8 @@ bitflags::bitflags! {
         const HIDDEN        = 1 << 6;
         const STRIKETHROUGH = 1 << 7;
         const WIDE_CHAR     = 1 << 8;
+        /// Cell carries an OSC 8 hyperlink emitted by the terminal program.
+        const HYPERLINK     = 1 << 9;
     }
 }
 
@@ -67,7 +71,10 @@ impl CellFlags {
 // ---------------------------------------------------------------------------
 
 /// A single cell ready for GPU consumption.
-#[derive(Debug, Clone, Copy)]
+///
+/// Note: `Copy` is intentionally not derived because `hyperlink: Option<Arc<str>>`
+/// is not `Copy`. Call `.clone()` where a copy is needed.
+#[derive(Debug, Clone)]
 pub struct RenderCell {
     /// The character to render (' ' for empty / spacer cells).
     pub ch: char,
@@ -77,6 +84,10 @@ pub struct RenderCell {
     pub bg: [f32; 4],
     /// Attribute flags (bold, italic, underline, etc.).
     pub flags: CellFlags,
+    /// OSC 8 hyperlink URI for this cell, if any. Populated from the native
+    /// `alacritty_terminal` hyperlink storage when the cell sits inside an
+    /// `\x1b]8;<params>;<uri>\x07 ... \x1b]8;;\x07` block.
+    pub hyperlink: Option<Arc<str>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +292,7 @@ pub fn extract_grid_themed<T: EventListener>(
                     fg,
                     bg,
                     flags: CellFlags::empty(),
+                    hyperlink: None,
                 });
                 continue;
             }
@@ -289,7 +301,7 @@ pub fn extract_grid_themed<T: EventListener>(
             let mut bg = color_to_rgba(cell.bg, &table, theme, false);
 
             let alac_flags = cell.flags;
-            let render_flags = CellFlags::from_alac(alac_flags);
+            let mut render_flags = CellFlags::from_alac(alac_flags);
 
             // Handle INVERSE: swap foreground and background.
             if alac_flags.contains(Flags::INVERSE) {
@@ -317,11 +329,20 @@ pub fn extract_grid_themed<T: EventListener>(
                 if bg[3] == 0.0 { bg[3] = 1.0; }
             }
 
+            // OSC 8 hyperlink — alacritty_terminal natively parses the
+            // sequence and stamps each affected cell's `hyperlink` field
+            // during VTE advance, so we just mirror it onto the render cell.
+            let hyperlink = cell.hyperlink().map(|h| Arc::from(h.uri()));
+            if hyperlink.is_some() {
+                render_flags |= CellFlags::HYPERLINK;
+            }
+
             cells.push(RenderCell {
                 ch: cell.c,
                 fg,
                 bg,
                 flags: render_flags,
+                hyperlink,
             });
         }
     }
@@ -457,6 +478,66 @@ pub fn ansi_color_table() -> [[f32; 4]; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // OSC 8 hyperlink tests
+    // =========================================================================
+
+    /// `CellFlags::HYPERLINK` must round-trip through the bitflag.
+    #[test]
+    fn cell_flags_hyperlink_bit() {
+        let flags = CellFlags::HYPERLINK;
+        assert!(flags.contains(CellFlags::HYPERLINK));
+        assert!(!flags.contains(CellFlags::BOLD));
+        assert_ne!(flags.bits(), 0);
+    }
+
+    /// Feeding an OSC 8 sequence through the alacritty VTE must surface the
+    /// hyperlink on the affected cell, and `extract_grid_themed` must propagate
+    /// it into `RenderCell::hyperlink` with the `HYPERLINK` flag set.
+    #[test]
+    fn extract_grid_propagates_native_osc8_hyperlink() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+        use alacritty_terminal::vte::ansi::{self, StdSyncHandler};
+        use alacritty_terminal::Term;
+
+        struct Sz;
+        impl Dimensions for Sz {
+            fn total_lines(&self) -> usize { self.screen_lines() }
+            fn screen_lines(&self) -> usize { 3 }
+            fn columns(&self) -> usize { 20 }
+        }
+
+        let mut term: Term<VoidListener> =
+            Term::new(Config::default(), &Sz, VoidListener);
+        let mut parser: ansi::Processor<StdSyncHandler> = ansi::Processor::new();
+
+        // ESC ] 8 ; ; https://example.com BEL  click  ESC ] 8 ; ; BEL
+        let seq = b"\x1b]8;;https://example.com\x07click\x1b]8;;\x07";
+        parser.advance(&mut term, seq);
+
+        let theme = TerminalThemeColors::default();
+        let (cells, _cols, _rows, _cursor) = extract_grid_themed(&term, &theme);
+
+        // First five cells of row 0 should carry the hyperlink.
+        for (i, ch) in "click".chars().enumerate() {
+            let cell = &cells[i];
+            assert_eq!(cell.ch, ch, "cell {i} char mismatch");
+            assert_eq!(
+                cell.hyperlink.as_deref(),
+                Some("https://example.com"),
+                "cell {i} must carry the hyperlink URI"
+            );
+            assert!(
+                cell.flags.contains(CellFlags::HYPERLINK),
+                "cell {i} must have HYPERLINK flag set"
+            );
+        }
+        // Cell after the hyperlink must NOT carry it.
+        assert!(cells["click".len()].hyperlink.is_none());
+        assert!(!cells["click".len()].flags.contains(CellFlags::HYPERLINK));
+    }
 
     #[test]
     fn color_table_has_correct_bounds() {

@@ -92,6 +92,34 @@ pub fn run_effects(
                     "enqueued message",
                 );
             }
+            LoopEffect::EnqueueToIf { queue, when, fields } => {
+                let observed = resolve_dotted(ctx.result, &when.field)
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if observed != when.equals {
+                    tracing::debug!(
+                        effect_idx = idx,
+                        from_loop = ctx.from_loop,
+                        queue = %queue,
+                        when_field = %when.field,
+                        when_equals = %when.equals,
+                        observed = %observed,
+                        "skipping enqueue_to_if: when clause did not match",
+                    );
+                    continue;
+                }
+                let payload = build_payload(fields, ctx.result, idx)?;
+                let msg = LoopMessage::new(ctx.from_loop.to_owned(), payload);
+                ctx.queues.push(queue, msg);
+                tracing::info!(
+                    effect_idx = idx,
+                    from_loop = ctx.from_loop,
+                    queue = %queue,
+                    when_field = %when.field,
+                    when_equals = %when.equals,
+                    "enqueued message via when clause",
+                );
+            }
             LoopEffect::LogToBus { event_kind } => {
                 // C2 stub: no bus reference yet. C3 wires this to the real
                 // cross-loop event bus.
@@ -276,6 +304,68 @@ mod tests {
         };
         let outcome = run_effects(&effects, &ctx).expect("ok");
         assert!(outcome.stop_requested);
+    }
+
+    #[test]
+    fn enqueue_to_if_fires_when_clause_matches() {
+        use crate::effect::WhenClause;
+        let reg = LoopQueueRegistry::new();
+        let effects = vec![LoopEffect::EnqueueToIf {
+            queue: "implementer-queue".to_string(),
+            when: WhenClause { field: "decision".into(), equals: "implement".into() },
+            fields: vec![FieldMap { from: "issue_number".into(), to: "issue_number".into() }],
+        }];
+        let result = json!({"decision": "implement", "issue_number": 570});
+        let ctx = EffectContext { result: &result, from_loop: "triager", queues: &reg };
+        run_effects(&effects, &ctx).expect("ok");
+        let msg = reg.pop("implementer-queue").expect("must enqueue when decision matches");
+        assert_eq!(msg.payload["issue_number"], 570);
+    }
+
+    #[test]
+    fn enqueue_to_if_skips_when_clause_does_not_match() {
+        use crate::effect::WhenClause;
+        let reg = LoopQueueRegistry::new();
+        let effects = vec![LoopEffect::EnqueueToIf {
+            queue: "implementer-queue".to_string(),
+            when: WhenClause { field: "decision".into(), equals: "implement".into() },
+            fields: vec![],
+        }];
+        for decision in ["close", "comment", "research", "skip", "unknown"] {
+            let result = json!({"decision": decision});
+            let ctx = EffectContext { result: &result, from_loop: "triager", queues: &reg };
+            run_effects(&effects, &ctx).expect("ok");
+        }
+        assert!(reg.pop("implementer-queue").is_none(), "no enqueue should have fired");
+    }
+
+    #[test]
+    fn enqueue_to_if_nested_when_path() {
+        use crate::effect::WhenClause;
+        let reg = LoopQueueRegistry::new();
+        let effects = vec![LoopEffect::EnqueueToIf {
+            queue: "q".to_string(),
+            when: WhenClause { field: "result.decision".into(), equals: "implement".into() },
+            fields: vec![],
+        }];
+        let result = json!({"result": {"decision": "implement", "issue_number": 99}});
+        let ctx = EffectContext { result: &result, from_loop: "triager", queues: &reg };
+        run_effects(&effects, &ctx).expect("ok");
+        assert!(reg.pop("q").is_some());
+    }
+
+    #[test]
+    fn enqueue_to_if_field_missing_treats_as_skip_not_error() {
+        use crate::effect::WhenClause;
+        let reg = LoopQueueRegistry::new();
+        let effects = vec![LoopEffect::EnqueueToIf {
+            queue: "q".to_string(),
+            when: WhenClause { field: "no.such.path".into(), equals: "x".into() },
+            fields: vec![],
+        }];
+        let ctx = EffectContext { result: &json!({}), from_loop: "p", queues: &reg };
+        run_effects(&effects, &ctx).expect("ok — missing path is a skip not an error");
+        assert!(reg.pop("q").is_none());
     }
 
     #[test]

@@ -260,6 +260,60 @@ pub async fn register(
 
     let exp = state.jwt.verify(&token).map(|c| c.exp).unwrap_or(0);
 
+    // Persist the verifying key to the on-disk peer-key registry (issue #527).
+    // We do this after JWT issuance so a write failure does not strand a
+    // peer with no token, but before responding so the registry is always
+    // at least as up-to-date as the most recently issued token.
+    //
+    // pubkey_bytes already round-tripped through verify_registration_signature
+    // above, so VerifyingKey::from_bytes here cannot fail — but we surface
+    // the error rather than unwrap, defending against future refactors.
+    let vk = match ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes) {
+        Ok(vk) => vk,
+        Err(e) => {
+            warn!(phantom_id = %body.peer_id, "register: pubkey decoded twice but failed canonicalisation: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to canonicalise public key",
+            )
+                .into_response();
+        }
+    };
+    // Persisting the key is synchronous fs I/O (open / write_all / fsync /
+    // rename / parent-dir fsync) — running it inline on a Tokio worker would
+    // block the executor under registration bursts.  We:
+    //   1. Clone the `Arc`-backed `PeerKeyStore` handle out of the registry
+    //      so we don't hold any registry lock across the blocking call.
+    //   2. Dispatch the synchronous write to `spawn_blocking`, awaiting the
+    //      JoinHandle.
+    // Cloning the store is cheap: both `path` and `cache` live behind an Arc.
+    let store = {
+        let reg = state.registry.read().await;
+        reg.peer_key_store().clone()
+    };
+    let phantom_id_for_store = PhantomId::new(body.peer_id.clone());
+    let blocking_result = tokio::task::spawn_blocking(move || store.insert(phantom_id_for_store, vk)).await;
+    match blocking_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            // Non-fatal: a disk-write failure should not block JWT issuance,
+            // but we log loudly so operators can investigate.  The peer can
+            // still connect with the JWT we just issued; signature-checked
+            // operations that depend on the persisted key will fail until
+            // the underlying disk issue is resolved.
+            warn!(
+                phantom_id = %body.peer_id,
+                "register: persisting peer key failed: {e}"
+            );
+        }
+        Err(join_err) => {
+            warn!(
+                phantom_id = %body.peer_id,
+                "register: peer-key persistence task panicked: {join_err}"
+            );
+        }
+    }
+
     info!(phantom_id = %body.peer_id, "register: device token issued");
     Json(RegisterResponse {
         device_token: token,
@@ -877,7 +931,7 @@ mod tests {
                 std::time::Duration::from_secs(60),
                 10,
             )),
-            registry: crate::registry::new_shared(),
+            registry: crate::registry::new_shared_for_tests(),
             registry_rate_limiter: Arc::new(crate::auth::IpRateLimiter::registry_default()),
             admin_token: Arc::new(crate::auth::AdminToken::disabled()),
         }

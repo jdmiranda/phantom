@@ -55,8 +55,13 @@ pub struct TtsPipeline {
 
 /// Join handles for background tasks spawned by [`TtsPipeline::start`].
 pub struct TtsTaskHandles {
-    /// The Tokio task that drives synthesis (async).
-    pub worker: tokio::task::JoinHandle<()>,
+    /// The OS thread that owns a single-threaded Tokio runtime and drives the
+    /// async TTS worker. A dedicated thread (rather than `tokio::spawn`) is
+    /// required because [`TtsPipeline::start`] is called from the winit GUI
+    /// thread, which has no ambient Tokio runtime. This mirrors the
+    /// `relay_task_body` / `mcp-discovery` pattern in [`crate::app`].
+    #[allow(dead_code)]
+    pub worker: std::thread::JoinHandle<()>,
     /// The OS thread that owns the rodio output stream (sync).
     #[allow(dead_code)]
     audio_thread: std::thread::JoinHandle<()>,
@@ -66,11 +71,14 @@ impl TtsPipeline {
     /// Start the TTS pipeline with the given backend.
     ///
     /// Spawns:
-    /// * A Tokio task that receives text, synthesizes PCM, and forwards it.
-    /// * A dedicated OS thread that owns `rodio::OutputStream` (which is
-    ///   `!Send`) and plays each buffer sequentially.
+    /// * A dedicated OS thread that owns a single-threaded Tokio runtime and
+    ///   drives the async synthesis worker. Avoids `tokio::spawn` because the
+    ///   caller (the winit GUI thread) is not inside a Tokio runtime — calling
+    ///   `tokio::spawn` there panics at startup.
+    /// * A second OS thread that owns `rodio::OutputStream` (which is `!Send`)
+    ///   and plays each buffer sequentially.
     ///
-    /// Returns the pipeline handle and the task/thread join handles.
+    /// Returns the pipeline handle and the thread join handles.
     pub fn start(
         backend: Arc<dyn VoiceSynth + Send + Sync>,
     ) -> (Self, TtsTaskHandles) {
@@ -85,7 +93,26 @@ impl TtsPipeline {
             run_audio_thread(audio_rx);
         });
 
-        let worker = tokio::spawn(run_tts_worker(backend, tts_rx, audio_tx));
+        // Build a one-shot single-threaded Tokio runtime on a background OS
+        // thread and `block_on` the async worker future there. This mirrors
+        // the pattern used by `relay_task_body` and `mcp-discovery` in
+        // `crate::app`.
+        let worker = std::thread::Builder::new()
+            .name("phantom-tts".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        warn!("[tts] failed to build worker runtime: {e} — TTS disabled");
+                        return;
+                    }
+                };
+                rt.block_on(run_tts_worker(backend, tts_rx, audio_tx));
+            })
+            .expect("phantom-tts worker thread spawn failed");
 
         let pipeline = Self {
             tts_tx: Some(tts_tx),
@@ -334,12 +361,13 @@ mod tests {
         // Drop the pipeline to close the channel so the worker exits.
         drop(pipeline);
 
-        // Worker should exit cleanly (no panic).
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handles.worker,
-        )
-        .await;
+        // Worker should exit cleanly (no panic). `handles.worker` is now a
+        // `std::thread::JoinHandle` (the worker owns its own runtime), so join
+        // it on a blocking thread to keep the async test cooperative.
+        let join = tokio::task::spawn_blocking(move || {
+            let _ = handles.worker.join();
+        });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), join).await;
     }
 
     /// A disabled pipeline (no backend) must never panic and always return

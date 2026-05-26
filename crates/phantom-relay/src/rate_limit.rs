@@ -1,6 +1,15 @@
-//! Token-bucket rate limiter, one bucket per `PeerId`.
+//! Rate limiters for the relay.
+//!
+//! Two complementary limiters are provided:
+//!
+//! - [`TokenBucket`]: a continuous token-bucket that smooths sustained
+//!   throughput (one bucket per peer, keyed in the router's `rate_buckets`
+//!   map).
+//! - [`SlidingWindow`]: a hard per-connection window that caps the absolute
+//!   number of messages in any rolling period. This is the basis of the
+//!   per-connection policy-violation close (WS 1008).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// A single token-bucket for one peer.
 ///
@@ -61,6 +70,90 @@ impl TokenBucket {
     }
 }
 
+// ── SlidingWindow ─────────────────────────────────────────────────────────────
+
+/// A fixed (tumbling) window counter for per-connection message rate limiting.
+///
+/// Within each `window` period the counter allows at most `max_count`
+/// messages. When a new message arrives after the window has expired, the
+/// counter resets and the message is counted as the first in the new window.
+///
+/// Unlike [`TokenBucket`] this does **not** smooth bursts — it grants the full
+/// `max_count` budget at the start of every window and denies all further
+/// messages until the window turns over.
+///
+/// # Tumbling vs. truly sliding
+///
+/// Despite the historic type name, this is a *fixed-window* (tumbling)
+/// counter, not a per-message-timestamp sliding window. The practical
+/// consequence is that a sender can deliver `max_count` messages near the end
+/// of one window and another `max_count` near the start of the next, yielding
+/// a short-lived burst of up to `2 * max_count` across the boundary. This is
+/// an acceptable trade-off for the relay (the absolute ceiling is still
+/// bounded and the implementation is allocation-free), but callers should
+/// size `max_count` and `window` with the worst-case `2 * max_count` burst
+/// in mind.
+#[derive(Debug)]
+pub struct SlidingWindow {
+    /// Maximum messages allowed per window.
+    max_count: u32,
+    /// Duration of each window.
+    window: Duration,
+    /// Messages counted in the current window.
+    message_count: u32,
+    /// Start of the current window.
+    window_start: Instant,
+}
+
+impl SlidingWindow {
+    /// Create a new sliding window allowing `max_count` messages per `window`.
+    #[must_use]
+    pub fn new(max_count: u32, window: Duration) -> Self {
+        Self {
+            max_count,
+            window,
+            message_count: 0,
+            window_start: Instant::now(),
+        }
+    }
+
+    /// Record one incoming message and decide whether it is within the limit.
+    ///
+    /// Returns `true` when the message is allowed, `false` when the sender has
+    /// exceeded `max_count` for the current window.
+    ///
+    /// When the window has expired since the last call the counter resets
+    /// before the check so the new window starts fresh.
+    pub fn check(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.window_start) >= self.window {
+            // Window has rolled over — start a new one.
+            self.message_count = 0;
+            self.window_start = now;
+        }
+        // `saturating_add` ensures a sustained-attack peer that pushes the
+        // counter to `u32::MAX` cannot wrap it back to zero and earn a fresh
+        // budget for free. Once saturated the comparison stays `false` until
+        // the window resets.
+        self.message_count = self.message_count.saturating_add(1);
+        self.message_count <= self.max_count
+    }
+
+    /// Remaining messages allowed in the current window (0 when exhausted).
+    #[must_use]
+    pub fn remaining(&self) -> u32 {
+        self.max_count.saturating_sub(self.message_count)
+    }
+
+    /// Back-date the window start by `delta` so the current window appears
+    /// expired. Intended exclusively for tests that need to simulate window
+    /// rollover without sleeping.
+    #[cfg(test)]
+    pub fn backdate_window(&mut self, delta: Duration) {
+        self.window_start -= delta;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +184,29 @@ mod tests {
         bucket.last_refill -= std::time::Duration::from_secs(1);
         let (ok, _) = bucket.check();
         assert!(ok, "bucket should have refilled after 1 s");
+    }
+
+    // ── SlidingWindow tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn sliding_window_allows_up_to_max() {
+        let mut sw = SlidingWindow::new(3, Duration::from_secs(10));
+        assert!(sw.check(), "msg 1 must be allowed");
+        assert!(sw.check(), "msg 2 must be allowed");
+        assert!(sw.check(), "msg 3 must be allowed");
+        assert!(!sw.check(), "msg 4 must be denied");
+    }
+
+    #[test]
+    fn sliding_window_resets_after_window_expires() {
+        let mut sw = SlidingWindow::new(2, Duration::from_millis(1));
+        assert!(sw.check());
+        assert!(sw.check());
+        assert!(!sw.check(), "must be denied while window is full");
+
+        // Back-date the window start so the window is expired.
+        sw.backdate_window(Duration::from_millis(10));
+        // Next check opens a new window.
+        assert!(sw.check(), "must allow after window resets");
     }
 }

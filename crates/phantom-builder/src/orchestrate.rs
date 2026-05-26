@@ -192,6 +192,20 @@ impl Builder {
         )?;
         tracing::info!(path = %repo_path.display(), "builder resolved local checkout");
 
+        // Pin the process cwd to the build checkout so the substrate
+        // driver's `std::env::current_dir()` resolves there. Without this
+        // pin, agent tool calls (read_file, write_file, run_command) and
+        // `gh pr create` all operate on the directory phantom was launched
+        // from — which can be the developer's live working tree.
+        std::env::set_current_dir(&repo_path).map_err(|source| BuilderError::Io {
+            path: repo_path.clone(),
+            source,
+        })?;
+        tracing::info!(
+            cwd = %repo_path.display(),
+            "builder pinned process cwd to checkout"
+        );
+
         // -- Phase 2: seed specs --------------------------------------------
         let seeded_specs =
             crate::templates::write_default_specs(&repo_path, &config.target_slug)?;
@@ -416,9 +430,18 @@ fn boot_brain(
     }
 
     let safety = &config.safety;
+    let audit_log_path = repo_path.join(".phantom").join("self_improvement.jsonl");
+    if let Some(parent) = audit_log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    tracing::info!(
+        path = %audit_log_path.display(),
+        "brain self-improvement audit log enabled",
+    );
     let si_config = SelfImprovementConfig {
         enabled: true,
         per_hour: safety.max_prs_per_hour,
+        audit_log_path: Some(audit_log_path),
         ..Default::default()
     };
     let starting_budget = config.trust_band.starting_budget();
@@ -440,6 +463,7 @@ fn boot_brain(
         catalog: None,
         privacy_mode: false,
         relay_inbound_rx: None,
+        recall_context: None,
         history_context: Vec::new(),
         self_improvement: Some(state),
         goal_sources,

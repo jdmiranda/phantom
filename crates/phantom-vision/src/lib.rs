@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod dedup;
 pub mod format;
 
 // Re-export commonly used types.
@@ -35,6 +36,7 @@ pub use analysis::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use analysis::MockVisionBackend;
+pub use dedup::{DHash, FrameDedup, SadGate};
 pub use format::{Screenshot, ScreenshotSource};
 
 /// Type alias matching the issue #71 spec name for the OpenAI backend.
@@ -242,7 +244,7 @@ fn rgba_to_luma(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Validate buffer size for an RGBA image of `width` x `height`.
-fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
+pub(crate) fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
     if width == 0 || height == 0 {
         return Err(VisionError::ZeroDim);
     }
@@ -263,7 +265,7 @@ fn check_rgba(rgba: &[u8], width: u32, height: u32) -> Result<(), VisionError> {
 }
 
 /// Box-filter downsample an RGBA image to a `target_w x target_h` grayscale buffer.
-fn box_downsample_gray(
+pub(crate) fn box_downsample_gray(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -303,6 +305,73 @@ fn box_downsample_gray(
     out
 }
 
+/// Box-filter downsample a grayscale buffer to a smaller grayscale buffer.
+///
+/// Mirrors [`box_downsample_gray`] but operates on a single-channel input,
+/// skipping the luma conversion. Used by [`crate::dedup::FrameDedup`] to derive
+/// a 9×8 dHash thumbnail from an already-computed 64×48 SAD thumbnail without
+/// re-traversing the full RGBA source frame.
+pub(crate) fn box_downsample_gray_from_gray(
+    gray: &[u8],
+    width: u32,
+    height: u32,
+    target_w: u32,
+    target_h: u32,
+) -> Vec<u8> {
+    let tw = target_w as usize;
+    let th = target_h as usize;
+    let w = width as usize;
+    let h = height as usize;
+
+    let mut sum = vec![0u32; tw * th];
+    let mut count = vec![0u32; tw * th];
+
+    for y in 0..h {
+        let ty = (y * th) / h;
+        let row = ty * tw;
+        let pix_row = y * w;
+        for x in 0..w {
+            let tx = (x * tw) / w;
+            let cell = row + tx;
+            sum[cell] += u32::from(gray[pix_row + x]);
+            count[cell] += 1;
+        }
+    }
+
+    let mut out = vec![0u8; tw * th];
+    for i in 0..(tw * th) {
+        out[i] = if count[i] == 0 {
+            0
+        } else {
+            (sum[i] / count[i]) as u8
+        };
+    }
+    out
+}
+
+/// Pack a 9×8 grayscale buffer into a 64-bit dHash.
+///
+/// Compares adjacent horizontal pixels in each row of the 9×8 input; sets the
+/// corresponding bit when the left pixel is brighter than the right. Bits are
+/// emitted MSB-first.
+///
+/// # Panics
+///
+/// Panics if `gray_9x8.len() != 72`.
+pub(crate) fn dhash_pack_from_9x8(gray_9x8: &[u8]) -> u64 {
+    assert_eq!(gray_9x8.len(), 9 * 8, "dhash_pack_from_9x8: buffer must be 9×8 = 72 bytes");
+    let mut hash: u64 = 0;
+    for row in 0..8usize {
+        let base = row * 9;
+        for col in 0..8usize {
+            let left = gray_9x8[base + col];
+            let right = gray_9x8[base + col + 1];
+            hash = (hash << 1) | u64::from(left > right);
+        }
+    }
+    hash
+}
+
 /// Compute a 64-bit difference hash (dHash) of an 8-bit RGBA image.
 ///
 /// Algorithm: downsample to 9x8 grayscale, compute differences between
@@ -315,18 +384,7 @@ fn box_downsample_gray(
 pub fn dhash(rgba: &[u8], width: u32, height: u32) -> Result<u64, VisionError> {
     check_rgba(rgba, width, height)?;
     let small = box_downsample_gray(rgba, width, height, 9, 8);
-
-    let mut hash: u64 = 0;
-    for row in 0..8 {
-        let base = row * 9;
-        for col in 0..8 {
-            let left = small[base + col];
-            let right = small[base + col + 1];
-            let bit = u64::from(left > right);
-            hash = (hash << 1) | bit;
-        }
-    }
-    Ok(hash)
+    Ok(dhash_pack_from_9x8(&small))
 }
 
 /// Hamming distance between two dhashes. A distance of <= 5 typically means duplicate.

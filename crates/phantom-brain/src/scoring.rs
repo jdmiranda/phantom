@@ -440,6 +440,7 @@ impl UtilityScorer {
                     warnings: vec![],
                     duration_ms: None,
                     raw_output: String::new(),
+                    classification_notes: vec![],
                 };
                 candidates.push(self.explain_score(&synthetic, *seconds));
             }

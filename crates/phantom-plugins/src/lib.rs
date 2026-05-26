@@ -23,6 +23,6 @@ pub use manifest::{
     CommandDef, HookType, Permission, PluginManifest, StatusBarDef, StatusBarPosition,
 };
 pub use marketplace::{Marketplace, MarketplaceListing, ScaffoldInstall};
-pub use registry::{LoadedPlugin, PluginInfo, PluginRegistry};
+pub use registry::{LoadedPlugin, PluginError, PluginInfo, PluginRegistry};
 pub use script::ScriptRuntime;
 pub use wasm_host::{SandboxViolation, WasmHost, WasmRuntime};

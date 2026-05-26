@@ -30,12 +30,27 @@ const TARGET_SAMPLE_RATE: u32 = 16_000;
 /// Backend that calls OpenAI's `gpt-4o-transcribe` endpoint.
 ///
 /// Cheap to clone; an internal [`reqwest::Client`] handles connection pooling.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually so the API key is never logged verbatim
+/// (e.g. via `tracing::debug!(?backend)`). The redacted form prints only the
+/// model and base URL.
+#[derive(Clone)]
 pub struct OpenAiBackend {
     api_key: String,
     model: String,
     base_url: String,
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for OpenAiBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiBackend")
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("http", &"<reqwest::Client>")
+            .finish()
+    }
 }
 
 impl OpenAiBackend {
@@ -105,6 +120,13 @@ impl TranscriptBackend for OpenAiBackend {
         "openai-gpt4o-transcribe"
     }
 
+    /// # Retries
+    ///
+    /// Transcription is a single POST with a 60 s timeout. There is **no**
+    /// automatic retry on transient failures (429, 5xx, network blip): the
+    /// call returns [`SttError::Backend`] and the caller is expected to skip
+    /// that segment. If retry semantics are needed they belong at the call
+    /// site (e.g. via `reqwest-retry` or a `tower::retry` layer).
     async fn transcribe(
         &self,
         mut audio_rx: mpsc::Receiver<AudioChunk>,

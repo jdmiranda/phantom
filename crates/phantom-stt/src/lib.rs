@@ -17,6 +17,28 @@ use futures_core::Stream;
 pub mod openai;
 pub mod stream;
 
+// ── Device enumeration ────────────────────────────────────────────────────────
+
+/// Return the name of the system's default audio-input device, if one can be
+/// determined without opening the audio subsystem.
+///
+/// Currently this always returns `None`; a proper `cpal`-backed implementation
+/// is tracked as a follow-up. The hook exists so callers can branch on device
+/// selection in advance of that work landing.
+///
+/// # Platform notes
+///
+/// * macOS: will query `AVAudioSession.sharedInstance().currentRoute` once
+///   a real implementation lands.
+/// * Linux/ALSA: will inspect `default` ALSA pcm device.
+/// * Windows/WASAPI: will call `IMMDeviceEnumerator::GetDefaultAudioEndpoint`.
+#[must_use]
+pub fn default_input_device_name() -> Option<String> {
+    // TODO(#56): implement via `cpal::default_input_device().name()` once
+    // the `cpal` dependency is added to phantom-stt's Cargo.toml.
+    None
+}
+
 /// A single transcription event emitted by a backend.
 ///
 /// Backends may emit interim events (`is_final == false`) followed by a final

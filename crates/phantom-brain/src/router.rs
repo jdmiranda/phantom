@@ -204,6 +204,121 @@ pub struct RouterConfig {
     pub offline_mode: bool,
 }
 
+impl RouterConfig {
+    /// Build a `RouterConfig` that promotes the named backend to the front of
+    /// the cascade so it is tried first across every task tier it supports.
+    ///
+    /// The `preferred_id` is matched against the default backend names:
+    /// - `"claude-default"` / `"claude-sonnet"` / `"claude"` → promote `claude-sonnet`
+    /// - `"claude-fast"` / `"claude-haiku"` → swap in a Haiku backend
+    /// - `"ollama-phi3.5"` / `"ollama"` / `"phi3.5"` → promote the Ollama backend
+    /// - `"ollama-llama3"` / `"llama3"` → swap in a llama3 Ollama backend
+    ///
+    /// Unknown IDs are silently ignored and the default cascade is returned.
+    ///
+    /// The heuristic backend is always present (it is free and zero-latency).
+    #[must_use]
+    pub fn with_preferred_provider(preferred_id: &str) -> Self {
+        let mut cfg = Self::default();
+
+        // Normalise the id: strip quotes and lower-case for loose matching.
+        let id = preferred_id.trim().to_lowercase();
+
+        match id.as_str() {
+            // Promote the existing claude-sonnet backend to index 1 (after heuristic).
+            "claude-default" | "claude-sonnet" | "claude" => {
+                if let Some(pos) = cfg
+                    .backends
+                    .iter()
+                    .position(|b| matches!(b.kind, BackendKind::Claude { .. }))
+                {
+                    let claude = cfg.backends.remove(pos);
+                    cfg.backends.insert(1, claude);
+                }
+            }
+
+            // Swap in a Haiku Claude backend and promote it.
+            "claude-fast" | "claude-haiku" => {
+                if let Some(pos) = cfg
+                    .backends
+                    .iter()
+                    .position(|b| matches!(b.kind, BackendKind::Claude { .. }))
+                {
+                    cfg.backends[pos] = ModelBackend {
+                        name: "claude-haiku".into(),
+                        kind: BackendKind::Claude {
+                            model: "claude-haiku-4-5".into(),
+                        },
+                        capabilities: vec![
+                            TaskComplexity::Trivial,
+                            TaskComplexity::Simple,
+                            TaskComplexity::Complex,
+                        ],
+                        available: std::env::var("ANTHROPIC_API_KEY").is_ok(),
+                        avg_latency_ms: 0.0,
+                        max_context: 200_000,
+                        cost_per_1k: 0.00025,
+                    };
+                    // Promote to index 1 (right after heuristic).
+                    let claude = cfg.backends.remove(pos);
+                    cfg.backends.insert(1, claude);
+                }
+            }
+
+            // Promote the Ollama phi3.5 backend to index 1 (it is already there
+            // by default, but this makes the intent explicit).
+            "ollama-phi3.5" | "ollama" | "phi3.5" => {
+                if let Some(pos) = cfg
+                    .backends
+                    .iter()
+                    .position(|b| matches!(b.kind, BackendKind::Ollama { .. }))
+                    && pos != 1
+                {
+                    let ollama = cfg.backends.remove(pos);
+                    cfg.backends.insert(1, ollama);
+                }
+            }
+
+            // Swap in a llama3 Ollama backend and promote it.
+            "ollama-llama3" | "llama3" => {
+                if let Some(pos) = cfg
+                    .backends
+                    .iter()
+                    .position(|b| matches!(b.kind, BackendKind::Ollama { .. }))
+                {
+                    cfg.backends[pos] = ModelBackend {
+                        name: "ollama-llama3".into(),
+                        kind: BackendKind::Ollama {
+                            model: "llama3:latest".into(),
+                        },
+                        capabilities: vec![
+                            TaskComplexity::Trivial,
+                            TaskComplexity::Simple,
+                            TaskComplexity::Complex,
+                        ],
+                        available: false, // health-checked at startup
+                        avg_latency_ms: 0.0,
+                        max_context: 8192,
+                        cost_per_1k: 0.0,
+                    };
+                    // Promote to index 1.
+                    let ollama = cfg.backends.remove(pos);
+                    cfg.backends.insert(1, ollama);
+                }
+            }
+
+            _ => {
+                log::warn!(
+                    "BrainRouter: unknown preferred_provider '{preferred_id}'; \
+                     using default cascade order"
+                );
+            }
+        }
+
+        cfg
+    }
+}
+
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
@@ -522,6 +637,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(5),
             raw_output: "file1".into(),
+            classification_notes: vec![],
         }
     }
 
@@ -535,6 +651,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(500),
             raw_output: "error: type mismatch".into(),
+            classification_notes: vec![],
         }
     }
 
@@ -552,6 +669,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(2000),
             raw_output: "errors".into(),
+            classification_notes: vec![],
         }
     }
 

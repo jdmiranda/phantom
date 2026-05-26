@@ -44,6 +44,7 @@
 //! is aborted on Ctrl-C alongside it.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use phantom_brain::dispatch::ActionHandler;
 use phantom_brain::events::{ConnectionState, SuggestionOption};
@@ -116,6 +117,15 @@ impl ActionHandler for NoopInner {
 pub struct LoopQueueActionHandler<I: ActionHandler = NoopInner> {
     registry: Arc<LoopQueueRegistry>,
     inner: I,
+    /// When true, every `enqueue_loop_message` call is logged + counted but
+    /// the message is NOT pushed onto the registry. Used by
+    /// `phantom loop run --dry-run` so the brain runs scoring + auditing
+    /// without spending any API tokens downstream.
+    dry_run: bool,
+    /// Counter incremented on every `enqueue_loop_message` call, before the
+    /// dry-run gate. The CLI clones the `Arc` so a bounded-mode watcher can
+    /// observe the count and trigger shutdown when a limit is hit.
+    enqueue_count: Arc<AtomicUsize>,
 }
 
 impl LoopQueueActionHandler<NoopInner> {
@@ -126,6 +136,8 @@ impl LoopQueueActionHandler<NoopInner> {
         Self {
             registry,
             inner: NoopInner,
+            dry_run: false,
+            enqueue_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -135,7 +147,30 @@ impl<I: ActionHandler> LoopQueueActionHandler<I> {
     /// forwarded to `inner` so a caller that wants to log brain commentary
     /// can supply a printing handler without losing the enqueue path.
     pub fn with_inner(registry: Arc<LoopQueueRegistry>, inner: I) -> Self {
-        Self { registry, inner }
+        Self {
+            registry,
+            inner,
+            dry_run: false,
+            enqueue_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Enable dry-run mode. Brain ticks + scoring + audit all still run; the
+    /// `enqueue_loop_message` path logs and increments the counter but does
+    /// NOT push onto the queue, so no downstream agent ever spawns and no
+    /// API tokens are spent.
+    #[must_use]
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    /// Install a caller-provided counter so a bounded-mode watcher can read
+    /// the same `AtomicUsize` and trigger shutdown when a limit is hit.
+    #[must_use]
+    pub fn with_enqueue_counter(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.enqueue_count = counter;
+        self
     }
 
     /// Borrow the registry handle. Used by tests to assert what landed on
@@ -143,6 +178,19 @@ impl<I: ActionHandler> LoopQueueActionHandler<I> {
     #[must_use]
     pub fn registry(&self) -> &Arc<LoopQueueRegistry> {
         &self.registry
+    }
+
+    /// Clone the counter handle. The CLI uses this to wire a bounded-mode
+    /// watcher that observes the same value from a separate tokio task.
+    #[must_use]
+    pub fn enqueue_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.enqueue_count)
+    }
+
+    /// True iff this handler is in dry-run mode.
+    #[must_use]
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
     }
 }
 
@@ -154,9 +202,23 @@ impl<I: ActionHandler> ActionHandler for LoopQueueActionHandler<I> {
         from_source: String,
         payload: serde_json::Value,
     ) {
+        let n = self.enqueue_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.dry_run {
+            tracing::info!(
+                queue = %queue,
+                from_source = %from_source,
+                count = n,
+                "[dry-run] brain would have enqueued loop message; skipping push",
+            );
+            eprintln!(
+                "[dry-run] brain would enqueue to {queue} (count={n}, source={from_source})"
+            );
+            return;
+        }
         tracing::info!(
             queue = %queue,
             from_source = %from_source,
+            count = n,
             "brain enqueued loop message",
         );
         self.registry
@@ -282,6 +344,66 @@ mod tests {
         AiAction::ConsoleReply("reply".into()).execute(&mut handler);
         AiAction::DoNothing.execute(&mut handler);
         assert!(registry.pop("any").is_none(), "no-op variants do not enqueue");
+    }
+
+    #[test]
+    fn dry_run_increments_counter_but_does_not_push_to_registry() {
+        let registry = Arc::new(LoopQueueRegistry::new());
+        let mut handler =
+            LoopQueueActionHandler::new(Arc::clone(&registry)).with_dry_run(true);
+        assert!(handler.is_dry_run());
+
+        AiAction::EnqueueLoopMessage {
+            queue: "implementer-queue".into(),
+            from_source: "gh-issues".into(),
+            payload: json!({"external_id": "gh-issue:999"}),
+        }
+        .execute(&mut handler);
+
+        assert_eq!(
+            handler.enqueue_counter().load(Ordering::SeqCst),
+            1,
+            "dry-run must still increment the counter so --max-iterations can fire"
+        );
+        assert!(
+            registry.pop("implementer-queue").is_none(),
+            "dry-run must NOT push to the registry — that's the whole point"
+        );
+    }
+
+    #[test]
+    fn counter_increments_in_live_mode_and_message_lands() {
+        let registry = Arc::new(LoopQueueRegistry::new());
+        let shared = Arc::new(AtomicUsize::new(0));
+        let mut handler = LoopQueueActionHandler::new(Arc::clone(&registry))
+            .with_enqueue_counter(Arc::clone(&shared));
+
+        for i in 0..3 {
+            AiAction::EnqueueLoopMessage {
+                queue: "q".into(),
+                from_source: "s".into(),
+                payload: json!({"i": i}),
+            }
+            .execute(&mut handler);
+        }
+
+        assert_eq!(shared.load(Ordering::SeqCst), 3, "external counter must see all enqueues");
+        assert_eq!(
+            handler.enqueue_counter().load(Ordering::SeqCst),
+            3,
+            "the handler-side handle observes the same value"
+        );
+        assert!(registry.pop("q").is_some());
+        assert!(registry.pop("q").is_some());
+        assert!(registry.pop("q").is_some());
+        assert!(registry.pop("q").is_none());
+    }
+
+    #[test]
+    fn default_handler_is_not_dry_run() {
+        let registry = Arc::new(LoopQueueRegistry::new());
+        let handler = LoopQueueActionHandler::new(registry);
+        assert!(!handler.is_dry_run());
     }
 
     #[test]

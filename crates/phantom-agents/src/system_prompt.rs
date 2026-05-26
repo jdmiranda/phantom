@@ -128,12 +128,23 @@ pub struct SystemPromptBuilder {
     ///
     /// [`inject_skills`]: SystemPromptBuilder::inject_skills
     pub injected_skills: Vec<SkillInjection>,
+    /// Snapshot of project memory blocks as `(key, value)` pairs.
+    ///
+    /// When non-empty, rendered under `## Stored Context` so the agent can
+    /// read persisted project facts without issuing a memory-lookup tool call.
+    /// Derived from `MemoryStore::all()` at spawn time so the agent starts
+    /// with an up-to-date picture of what the project knows.
+    ///
+    /// Empty by default. Attach via [`with_memory_snapshot`].
+    ///
+    /// [`with_memory_snapshot`]: SystemPromptBuilder::with_memory_snapshot
+    pub memory_snapshot: Vec<(String, String)>,
 }
 
 impl SystemPromptBuilder {
     /// Start a new builder for the given agent. All optional sections start
     /// `None` and must be attached explicitly with the `with_*` methods.
-    #[must_use] 
+    #[must_use]
     pub fn new(agent: AgentRef) -> Self {
         Self {
             agent,
@@ -144,6 +155,7 @@ impl SystemPromptBuilder {
             other_agents: None,
             semantic_context: None,
             injected_skills: Vec::new(),
+            memory_snapshot: Vec::new(),
         }
     }
 
@@ -202,6 +214,23 @@ impl SystemPromptBuilder {
     #[must_use] 
     pub fn with_semantic_context(mut self, ctx: &SemanticContext) -> Self {
         self.semantic_context = ctx.as_prompt_section();
+        self
+    }
+
+    /// Attach a snapshot of persisted project memory blocks.
+    ///
+    /// Each pair is `(key, value)` as returned by iterating
+    /// `MemoryStore::all()`. When the snapshot is non-empty, [`build`] appends
+    /// a `## Stored Context` section so the agent reads project facts without
+    /// issuing a memory-lookup tool call.
+    ///
+    /// Passing an empty `Vec` (the default) emits no section and does not
+    /// bloat the prompt.
+    ///
+    /// [`build`]: SystemPromptBuilder::build
+    #[must_use]
+    pub fn with_memory_snapshot(mut self, snapshot: Vec<(String, String)>) -> Self {
+        self.memory_snapshot = snapshot;
         self
     }
 
@@ -329,6 +358,17 @@ impl SystemPromptBuilder {
         // 7b. Injected skill modules (from SkillRegistry::inject_skills).
         for skill in &self.injected_skills {
             sections.push(skill.content.clone());
+        }
+
+        // 7c. Stored project memory snapshot (from MemoryStore::all).
+        // Omitted entirely when empty so prompts stay lean for agents
+        // spawned without a wired memory store.
+        if !self.memory_snapshot.is_empty() {
+            let mut mem_section = String::from("## Stored Context\n");
+            for (k, v) in &self.memory_snapshot {
+                mem_section.push_str(&format!("- {k}: {v}\n"));
+            }
+            sections.push(mem_section);
         }
 
         // 8. Closing line.
@@ -746,5 +786,77 @@ mod tests {
                 "{role:?} must NOT mention dag_find_blocking; got:\n{prompt}",
             );
         }
+    }
+
+    // --- memory_snapshot tests -----------------------------------------------
+
+    /// `with_memory_snapshot` with 3 entries produces a prompt that contains
+    /// each key and value under the `## Stored Context` heading.
+    #[test]
+    fn agent_prompt_includes_memory_when_present() {
+        let snapshot = vec![
+            ("pkg_manager".to_string(), "pnpm".to_string()),
+            ("style".to_string(), "snake_case".to_string()),
+            ("port".to_string(), "3001".to_string()),
+        ];
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Conversational, "chat", 1))
+            .with_memory_snapshot(snapshot)
+            .build();
+
+        assert!(
+            prompt.contains("## Stored Context"),
+            "prompt must contain the Stored Context heading; got:\n{prompt}",
+        );
+        assert!(prompt.contains("pkg_manager"), "key 'pkg_manager' must appear");
+        assert!(prompt.contains("pnpm"), "value 'pnpm' must appear");
+        assert!(prompt.contains("style"), "key 'style' must appear");
+        assert!(prompt.contains("snake_case"), "value 'snake_case' must appear");
+        assert!(prompt.contains("port"), "key 'port' must appear");
+        assert!(prompt.contains("3001"), "value '3001' must appear");
+    }
+
+    /// `with_memory_snapshot` with an empty vec must not emit the
+    /// `## Stored Context` section so the prompt stays lean.
+    #[test]
+    fn agent_prompt_omits_memory_section_when_empty() {
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Conversational, "chat", 1))
+            .with_memory_snapshot(Vec::new())
+            .build();
+
+        assert!(
+            !prompt.contains("## Stored Context"),
+            "empty snapshot must not emit the Stored Context section; got:\n{prompt}",
+        );
+    }
+
+    /// A builder with no `with_memory_snapshot` call must also omit the section
+    /// (default is empty).
+    #[test]
+    fn agent_prompt_omits_memory_section_by_default() {
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Actor, "act", 5)).build();
+
+        assert!(
+            !prompt.contains("## Stored Context"),
+            "default builder must not emit Stored Context section; got:\n{prompt}",
+        );
+    }
+
+    /// `## Stored Context` must appear after `## Tools you can call` and before
+    /// the closing line, so the memory snapshot sits near the end of the prompt
+    /// where it will not crowd out role, task, or context sections.
+    #[test]
+    fn memory_section_appears_after_tools_before_closing() {
+        let snapshot = vec![("key".to_string(), "val".to_string())];
+        let prompt = SystemPromptBuilder::new(agent(AgentRole::Conversational, "chat", 1))
+            .with_tool_summary("ReadFile, WriteFile".to_string())
+            .with_memory_snapshot(snapshot)
+            .build();
+
+        let tools_idx = prompt.find("## Tools you can call").expect("tools heading");
+        let mem_idx = prompt.find("## Stored Context").expect("memory heading");
+        let closing_idx = prompt.find(CLOSING_LINE).expect("closing line");
+
+        assert!(tools_idx < mem_idx, "memory must follow tools");
+        assert!(mem_idx < closing_idx, "memory must precede closing line");
     }
 }

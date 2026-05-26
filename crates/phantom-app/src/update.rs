@@ -10,7 +10,6 @@ use log::{debug, info, warn};
 
 use phantom_brain::events::AiEvent;
 use phantom_brain::ooda::WorldState;
-use phantom_context::ProjectContext;
 use phantom_history::HistoryEntry;
 use phantom_mcp::{AgentStatusInfo, AppCommand, PaneInfo, ScreenshotReply, SpawnAgentReply};
 use phantom_protocol::Event;
@@ -154,6 +153,51 @@ impl App {
             let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
                 prompt: "Demo mode: introduce yourself in one sentence and \
                     list a few tasks I can hand to you in this terminal."
+                    .to_owned(),
+            });
+        }
+
+        // Default to agent space: on the first normal (non-demo) Terminal frame,
+        // open an agent pane FULL-SIZE — the agent is the primary view, not a
+        // sidekick to the terminal. Phantom's identity is "AI with a terminal
+        // built in", not "terminal with AI bolted on" (see
+        // `feedback_agent_is_primary` memory).
+        //
+        // Implementation: spawn_agent_pane splits the focused pane (terminal)
+        // 50/50 so it can re-use the existing layout machinery. We then close
+        // the original terminal adapter, leaving the new agent as the sole
+        // pane — which the layout engine then resizes to fill the window.
+        if !self.demo_mode && self.state == AppState::Terminal && !self.post_boot_agent_spawned {
+            self.post_boot_agent_spawned = true;
+            // spawn_agent_pane internally takes the `replace_focused` path
+            // when adapter_count == 1 (post-boot single-SetupAdapter case),
+            // so the agent inherits the SetupAdapter's pane slot directly —
+            // no split, no half-window agent. If no API key is available the
+            // spawn returns None (see Change 2 in plan) and the SetupAdapter
+            // stays full-window with a "needs API key" panel. See
+            // `feedback_agent_is_primary` memory + the branch in
+            // `agent_pane::spawn`.
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+                prompt: "Welcome. I'm your Phantom agent — ready to help you build, debug, \
+                    or explore. What would you like to work on?"
+                    .to_owned(),
+            });
+        }
+
+        // Live SetupAdapter→Agent upgrade. When the user provisions an API
+        // key after launch, the live SetupAdapter flips `post_setup_upgrade`
+        // to `true` from its `update(dt)` hook. We drain the flag and fire a
+        // fresh agent spawn — the `adapter_count() == 1` replace-focused
+        // path inside `spawn_agent_pane_with_opts` swaps SetupAdapter out for
+        // the real agent at the same pane slot.
+        if self.state == AppState::Terminal
+            && self
+                .post_setup_upgrade
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            let _ = self.spawn_agent_pane(phantom_agents::AgentTask::FreeForm {
+                prompt: "API key detected. I'm your Phantom agent — what would you like \
+                    to work on first?"
                     .to_owned(),
             });
         }
@@ -356,11 +400,16 @@ impl App {
                         "git-refresh thread exceeded {}s timeout; abandoning handle",
                         GIT_REFRESH_TIMEOUT.as_secs()
                     );
+                    if let Some(ref cancel) = self.git_refresh_cancel {
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     self.git_refresh_handle = None;
                     self.git_refresh_spawned_at = None;
+                    self.git_refresh_cancel = None;
                 } else if finished {
                     self.git_refresh_handle = None;
                     self.git_refresh_spawned_at = None;
+                    self.git_refresh_cancel = None;
                     // Signal the OODA cache that git state just refreshed (#358).
                     self.ooda_git_changed = true;
                 }
@@ -372,19 +421,33 @@ impl App {
                 self.git_refresh_last = now;
                 let project_dir = ctx.root.clone();
                 let brain_tx = self.brain.as_ref().map(|b| b.event_sender());
+                let assembler_arc = self.context_assembler.clone();
+
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancel_clone = std::sync::Arc::clone(&cancel);
+
                 self.git_refresh_handle = std::thread::Builder::new()
                     .name("git-refresh".into())
                     .spawn(move || {
-                        let mut fresh = ProjectContext::detect(std::path::Path::new(&project_dir));
-                        fresh.refresh_git();
-                        if let Some(tx) = brain_tx {
-                            let _ = tx.send(AiEvent::GitStateChanged);
+                        // Use the shared ContextAssembler so DAG caching is
+                        // preserved across periodic git refreshes rather than
+                        // calling ProjectContext::detect() on every 30s tick.
+                        let path = std::path::Path::new(&project_dir);
+                        if let Ok(mut asm) = assembler_arc.lock() {
+                            let _ = asm.assemble(path);
+                        }
+                        if !cancel_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(tx) = brain_tx {
+                                let _ = tx.send(AiEvent::GitStateChanged);
+                            }
                         }
                     })
                     .ok();
                 self.git_refresh_spawned_at = if self.git_refresh_handle.is_some() {
+                    self.git_refresh_cancel = Some(cancel);
                     Some(now)
                 } else {
+                    self.git_refresh_cancel = None;
                     None
                 };
             }
@@ -402,6 +465,30 @@ impl App {
                     warn!("MCP command channel disconnected");
                     break;
                 }
+            }
+        }
+
+        // Federation relay: poll for handshake completion.
+        // The relay task sends a RelayHandshakeInfo once the WebSocket
+        // handshake is complete. We emit AiEvent::RelayConnected to the brain
+        // so the AgentRouter can start routing cross-peer messages.
+        // After the first message we set relay_connected_rx to None —
+        // handshake is a one-shot event.
+        if self.relay_connected_rx.is_some() {
+            let info = {
+                let rx = self.relay_connected_rx.as_ref().unwrap();
+                rx.try_recv().ok()
+            };
+            if let Some(handshake) = info {
+                info!("Federation relay connected (peer id = {})", handshake.local_peer_id);
+                if let Some(ref brain) = self.brain {
+                    let _ = brain.send_event(AiEvent::RelayConnected {
+                        outbound_tx: handshake.outbound_tx,
+                        local_peer_id: handshake.local_peer_id,
+                    });
+                }
+                // One-shot: discard the receiver so we do not poll again.
+                self.relay_connected_rx = None;
             }
         }
 
@@ -477,6 +564,17 @@ impl App {
         // Poll the live shader reloader (no-op in release builds).
         self.poll_shader_reload(now_ms_tick);
 
+        // Poll the config-file watcher: if settings.toml changed on disk,
+        // reload and apply the new values. Best-effort — a missing or
+        // unparseable file falls back to the previous live state.
+        if let Some(ref watcher) = self.config_watcher {
+            if watcher.drain_changes() {
+                let new_settings = crate::settings::PhantomSettings::load();
+                info!("Config live-reload: settings.toml changed, applying");
+                self.apply_config_reload(&new_settings);
+            }
+        }
+
         // Drain completed jobs from the worker pool.
         if let Some(ref pool) = self.job_pool {
             for (job_id, result) in pool.drain_completed() {
@@ -541,19 +639,31 @@ impl App {
         self.watchdog_frame += 1;
         if now.duration_since(self.watchdog_last).as_secs() >= 10 {
             let uptime = now.duration_since(self.start_time).as_secs();
+            let adapter_count = self.coordinator.adapter_count();
+            let agent_count = self
+                .coordinator
+                .registry()
+                .all_running()
+                .into_iter()
+                .filter_map(|id| self.coordinator.registry().get(id))
+                .filter(|e| e.app_type == "agent")
+                .count();
             info!(
                 "watchdog: alive frame={} uptime={}s adapters={} agents={}",
-                self.watchdog_frame,
-                uptime,
-                self.coordinator.adapter_count(),
-                self.coordinator
-                    .registry()
-                    .all_running()
-                    .into_iter()
-                    .filter_map(|id| self.coordinator.registry().get(id))
-                    .filter(|e| e.app_type == "agent")
-                    .count(),
+                self.watchdog_frame, uptime, adapter_count, agent_count,
             );
+
+            // Record an activity frame into the supervisor client's ring buffer
+            // so that if the supervisor-silence detector fires, the last N
+            // watchdog snapshots are available for diagnosis.
+            if let Some(ref mut sv) = self.supervisor {
+                let state = format!(
+                    "frame={} uptime={}s adapters={} agents={} state={:?}",
+                    self.watchdog_frame, uptime, adapter_count, agent_count, self.state,
+                );
+                sv.record_activity(state);
+            }
+
             self.watchdog_last = now;
         }
     }
@@ -686,6 +796,7 @@ impl App {
                                 warnings: Vec::new(),
                                 duration_ms: None,
                                 raw_output: String::new(),
+                                classification_notes: Vec::new(),
                             });
                         Some(AiEvent::CommandComplete(parsed))
                     }
@@ -1686,6 +1797,43 @@ mod tests {
         );
     }
 
+    // ---- git_refresh_cancel flag exits thread early ------------------------
+
+    /// When the cancel flag is set before the thread checks it, the thread
+    /// exits without sending a GitStateChanged event.
+    ///
+    /// Note: this test only exercises the happy path — the flag is set, then
+    /// the thread reads it. The cancellation is explicitly best-effort and
+    /// cannot interrupt a blocking `refresh_git()` call already in flight;
+    /// a TOCTOU race where the thread reads the flag *before* the cancel
+    /// store is therefore expected and not covered here.
+    #[test]
+    fn git_thread_cancels_on_signal() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = Arc::clone(&cancel);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        let thread = std::thread::Builder::new()
+            .name("test-cancel-git".into())
+            .spawn(move || {
+                if !cancel_clone.load(Ordering::Relaxed) {
+                    let _ = tx.send(());
+                }
+            })
+            .expect("spawn");
+
+        cancel.store(true, Ordering::Relaxed);
+        thread.join().expect("thread panicked");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "cancelled git-refresh thread must not send GitStateChanged"
+        );
+    }
+
     // ---- #358: build_world_state() signal mapping -------------------------
     //
     // Full `App` construction requires a GPU context, so these tests exercise
@@ -1723,6 +1871,7 @@ mod tests {
                 warnings: Vec::new(),
                 duration_ms: None,
                 raw_output: String::new(),
+                classification_notes: Vec::new(),
             }
         }
 

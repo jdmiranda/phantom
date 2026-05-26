@@ -71,6 +71,18 @@ pub struct PhantomConfig {
     /// or toggled at runtime with `offline on` / `offline off`.
     /// Can also be auto-enabled after 3 consecutive cloud backend failures.
     pub offline_mode: bool,
+    /// Preferred AI provider for the brain router.
+    ///
+    /// When set, the brain router promotes the named backend to the front of the
+    /// cascade so it is tried first for every task tier it supports. Valid values
+    /// are any profile ID registered in the [`ProviderCatalog`]:
+    /// `"claude-default"`, `"claude-fast"`, `"ollama-phi3.5"`, `"ollama-llama3"`,
+    /// or any custom profile added at runtime.
+    ///
+    /// Set via `preferred_provider = "claude-fast"` in
+    /// `~/.config/phantom/config.toml`. When absent or `None`, the default
+    /// cascade order (heuristic → ollama → claude) is used.
+    pub preferred_provider: Option<String>,
     /// Start in borderless fullscreen mode.
     ///
     /// Set via `fullscreen = true` in `~/.config/phantom/config.toml` or
@@ -127,7 +139,10 @@ impl Default for PhantomConfig {
             nlp_llm_enabled: true,
             privacy_mode: false,
             offline_mode: false,
-            fullscreen: false,
+            preferred_provider: None,
+            // Phantom IS the AI; the AI deserves the whole screen. Changed
+            // 2026-05-20 — see `feedback_agent_is_primary` memory entry.
+            fullscreen: true,
             notification_sounds: HashMap::new(),
             mcp_servers: Vec::new(),
         }
@@ -288,6 +303,12 @@ impl PhantomConfig {
                     "offline_mode" => {
                         config.offline_mode = matches!(value, "true" | "1" | "yes");
                     }
+                    "preferred_provider" => {
+                        // Accept any non-empty string; validated at router construction time.
+                        if !value.is_empty() {
+                            config.preferred_provider = Some(value.to_string());
+                        }
+                    }
                     "fullscreen" => {
                         config.fullscreen = matches!(value, "true" | "1" | "yes");
                     }
@@ -360,6 +381,15 @@ impl PhantomConfig {
     #[must_use]
     pub fn offline_mode(&self) -> bool {
         self.offline_mode
+    }
+
+    /// Returns the preferred AI provider ID, if configured.
+    ///
+    /// When `Some`, the brain router promotes the named backend to the front of
+    /// the cascade. `None` means use default cascade order.
+    #[must_use]
+    pub fn preferred_provider(&self) -> Option<&str> {
+        self.preferred_provider.as_deref()
     }
 
     /// Look up the configured sound path for a notification category.
@@ -578,13 +608,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn config_fullscreen_false_starts_windowed() {
-        // Default must be windowed (false) so existing users are not suddenly
-        // forced into fullscreen on upgrade.
+    fn default_fullscreen_is_true_for_agent_first_ux() {
+        // Phantom IS the AI; the AI deserves the whole screen.  The cold-launch
+        // first impression is a full-window agent (or SetupAdapter when no API
+        // key is provisioned).  Users who want a windowed shell set
+        // `fullscreen = false` in `~/.config/phantom/config.toml`.
         let config = PhantomConfig::default();
         assert!(
-            !config.fullscreen,
-            "fullscreen must default to false so the window starts in windowed mode"
+            config.fullscreen,
+            "fullscreen must default to true so the agent owns the whole screen on cold launch"
         );
     }
 
@@ -607,9 +639,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_config_fullscreen_is_false() {
+    fn parse_empty_config_inherits_default_fullscreen_true() {
+        // An empty config TOML inherits all defaults — including the
+        // agent-first fullscreen=true cold-launch default.  See
+        // `default_fullscreen_is_true_for_agent_first_ux`.
         let config = PhantomConfig::parse("").unwrap();
-        assert!(!config.fullscreen);
+        assert!(config.fullscreen);
     }
 
     #[test]
@@ -645,6 +680,78 @@ mod tests {
     fn parse_offline_mode_false_keeps_it_off() {
         let config = PhantomConfig::parse("offline_mode = false").unwrap();
         assert!(!config.offline_mode);
+    }
+
+    // -----------------------------------------------------------------------
+    // preferred_provider — BrainConfig router wiring
+    // -----------------------------------------------------------------------
+
+    /// When `preferred_provider` is set in config, the resulting `RouterConfig`
+    /// must promote the named backend so it appears before other non-heuristic
+    /// backends in the cascade.
+    ///
+    /// This exercises the construction path used in `app.rs` without spinning
+    /// up a real brain thread.
+    #[test]
+    fn brain_config_router_uses_preferred_provider_from_config() {
+        use phantom_brain::router::{BackendKind, RouterConfig};
+
+        let config = PhantomConfig::parse("preferred_provider = \"claude-fast\"").unwrap();
+        assert_eq!(
+            config.preferred_provider(),
+            Some("claude-fast"),
+            "config must expose the parsed preferred_provider"
+        );
+
+        // Replicate the construction logic from app.rs.
+        let router_config = match config.preferred_provider() {
+            Some(id) => RouterConfig::with_preferred_provider(id),
+            None => RouterConfig::default(),
+        };
+
+        // The first non-heuristic backend must be the promoted Claude backend.
+        let first_non_heuristic = router_config
+            .backends
+            .iter()
+            .find(|b| b.name != "heuristic")
+            .expect("must have at least one non-heuristic backend");
+
+        assert!(
+            matches!(first_non_heuristic.kind, BackendKind::Claude { .. }),
+            "preferred_provider='claude-fast' must promote a Claude backend to front; got '{}'",
+            first_non_heuristic.name
+        );
+    }
+
+    /// When `preferred_provider` is absent, the router uses the default cascade
+    /// order and still constructs without panicking.
+    #[test]
+    fn brain_config_router_is_none_without_preferred_provider() {
+        use phantom_brain::router::RouterConfig;
+
+        let config = PhantomConfig::parse("").unwrap();
+        assert!(
+            config.preferred_provider().is_none(),
+            "empty config must have no preferred_provider"
+        );
+
+        // Replicate the construction logic from app.rs.
+        let router_config = match config.preferred_provider() {
+            Some(id) => RouterConfig::with_preferred_provider(id),
+            None => RouterConfig::default(),
+        };
+
+        // Default cascade: first non-heuristic is Ollama (cost 0.0, before claude's 0.003).
+        let first_non_heuristic = router_config
+            .backends
+            .iter()
+            .find(|b| b.name != "heuristic")
+            .expect("must have at least one non-heuristic backend");
+
+        assert_eq!(
+            first_non_heuristic.name, "ollama-phi3.5",
+            "default cascade must keep ollama-phi3.5 before claude-sonnet"
+        );
     }
 
     // ------------------------------------------------------------------

@@ -638,6 +638,14 @@ impl Commandable for TerminalAdapter {
                 self.terminal.update_selection(end, Side::Right);
                 Ok("all selected".into())
             }
+            "hyperlink_at" => {
+                let col = args.get("col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let row = args.get("row").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                match self.terminal.hyperlink_at(col, row) {
+                    Some(url) => Ok(url),
+                    None => Ok(String::new()),
+                }
+            }
             "update_search" => {
                 let query = args
                     .get("query")

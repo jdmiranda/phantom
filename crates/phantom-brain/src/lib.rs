@@ -41,6 +41,7 @@
 
 pub mod attention;
 pub mod brain;
+pub mod recall;
 pub mod capability_audit;
 pub mod chat_backend;
 pub mod claude;
@@ -78,6 +79,7 @@ pub use dispatch::ActionHandler;
 pub use events::*;
 pub use goal::{ChatBackend, ClaudeChatBackend, Goal, Step, parse_steps};
 pub use ooda::{OodaConfig, OodaLoop, TickMetrics, WorldState};
+pub use recall::BrainRecallContext;
 pub use orchestrator::*;
 pub use persistent_skill_registry::{
     AgentRef, PersistentSkillRegistry, Skill, SkillHandler, SkillId, SkillProvenance,
@@ -165,6 +167,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(1500),
             raw_output: "error[E0308]: mismatched types".into(),
+            classification_notes: vec![],
         }
     }
 
@@ -179,6 +182,7 @@ mod tests {
             warnings: vec![],
             duration_ms: Some(800),
             raw_output: "Compiling phantom v0.1.0\n    Finished".into(),
+            classification_notes: vec![],
         }
     }
 

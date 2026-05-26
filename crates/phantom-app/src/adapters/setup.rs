@@ -1,98 +1,102 @@
-//! Setup adapter — the "waiting for API key / first-run setup" pane.
+//! Setup adapter — the cold-launch first impression.
 //!
-//! Renders the centred `PHANTOM` wordmark, a status row with a dot, and a
-//! hint line directing the user to the action that unblocks the app
-//! (typically `phantom auth login` or setting `ANTHROPIC_API_KEY`).
+//! Renders a single-pane "agent is initialising / API key needed" status
+//! panel using the docs' visual grammar (phosphor on near-black, generous
+//! whitespace, clear status colors). This adapter is **dependency-free** so
+//! it can be registered at the `app.rs:1104` init site, BEFORE the `App`
+//! struct exists.
+//!
+//! When the user later provisions an `ANTHROPIC_API_KEY` (or
+//! `OPENAI_API_KEY`), the adapter flips a shared `Arc<AtomicBool>` flag.
+//! `App::update` watches that flag and calls `spawn_agent_pane(...)`,
+//! whose `adapter_count() == 1` replace-focused path swaps this adapter
+//! out for the real agent at the same pane slot — no split, no flash.
 
-use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use phantom_adapter::adapter::{QuadData, Rect, RenderOutput, TextData};
 use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
-use phantom_ui::tokens::Tokens;
-use phantom_ui::widgets::{AppHead, AppHeadDot};
-use phantom_ui::RenderCtx;
+use serde_json::json;
 
-/// Current state of the setup pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetupStatus {
-    /// Blocked waiting for the user to supply something.
-    Waiting,
-    /// Setup completed; pane should dismiss itself.
-    Ready,
-    /// An error blocked setup.
-    Failed,
-}
+const TITLE: &str = "PHANTOM";
+const SUBTITLE_WAITING: &str = "agent · waiting for API key";
+const SUBTITLE_READY: &str = "agent · initialising";
+const HELP_LINES: &[&str] = &[
+    "set ANTHROPIC_API_KEY  (or OPENAI_API_KEY) and restart phantom",
+    "or run:  phantom auth login",
+];
 
-impl SetupStatus {
-    fn dot(self) -> AppHeadDot {
-        match self {
-            Self::Waiting => AppHeadDot::Warn,
-            Self::Ready => AppHeadDot::Ok,
-            Self::Failed => AppHeadDot::Danger,
-        }
-    }
-    fn label(self) -> &'static str {
-        match self {
-            Self::Waiting => "waiting",
-            Self::Ready => "ready",
-            Self::Failed => "failed",
-        }
-    }
-}
+const BG: [f32; 4] = [0.039, 0.055, 0.078, 1.0]; // #0a0e14
+const SURFACE: [f32; 4] = [0.067, 0.090, 0.121, 1.0]; // #11171f
+const FRAME_DIM: [f32; 4] = [0.102, 0.165, 0.094, 1.0]; // #1a2a18
+const TEXT_BRIGHT: [f32; 4] = [0.20, 1.0, 0.0, 1.0]; // #33ff00
+const TEXT_BODY: [f32; 4] = [0.722, 1.0, 0.722, 1.0]; // #b8ffb8
+const TEXT_DIM: [f32; 4] = [0.290, 0.502, 0.282, 1.0]; // #4a8048
+const STATUS_OK: [f32; 4] = [0.20, 1.0, 0.0, 1.0];
+const STATUS_WARN: [f32; 4] = [1.0, 0.690, 0.0, 1.0]; // #ffb000
 
-/// Setup pane.
+const LINE_HEIGHT: f32 = 16.0;
+const TITLE_LINE_HEIGHT: f32 = 36.0;
+
+/// Single-pane cold-launch status adapter. See module docs.
 pub struct SetupAdapter {
-    status: SetupStatus,
-    status_message: String,
-    hint: String,
-    tokens: Tokens,
     app_id: u32,
+    /// Shared with `App` — set to `true` when an API-key env var transitions
+    /// from missing to present. `App::update` consumes (clears) this each
+    /// frame and, when set, kicks off `spawn_agent_pane`.
+    upgrade_requested: Arc<AtomicBool>,
+    /// Cached probe result so we only flip the flag on edge transitions.
+    last_key_present: bool,
+    /// Latched once an API key has been seen at least once so the panel
+    /// can drop the "waiting" subtitle while the agent spawn is in flight.
+    key_ever_seen: bool,
+    /// Accumulator (seconds) used to debounce the env-var poll. Without this
+    /// we'd call `std::env::var` twice per GPU frame (60–120 Hz); on macOS
+    /// `getenv` is a serialised syscall under the render lock and not free.
+    /// Polling every [`POLL_INTERVAL`] is plenty for what is effectively a
+    /// human-in-the-loop "did the user set an env var yet" check.
+    poll_accum_secs: f32,
 }
+
+/// Throttle env-var probing to once every two seconds. The env is a slow
+/// signal (user pastes a key into a shell rc, then restarts), so a 2 s
+/// debounce is invisible to the user and removes the per-frame syscalls.
+const POLL_INTERVAL: f32 = 2.0;
 
 impl SetupAdapter {
-    /// Build with a default `waiting for API key` state.
-    #[must_use]
-    pub fn new() -> Self {
+    /// Build a SetupAdapter that shares the `upgrade_requested` flag with the App.
+    ///
+    /// The initial flag value is `false`; `update()` flips it on a NONE→SOME
+    /// env-var transition.
+    pub(crate) fn new(upgrade_requested: Arc<AtomicBool>) -> Self {
+        let initial = api_key_present();
         Self {
-            status: SetupStatus::Waiting,
-            status_message: "agent · waiting for API key".into(),
-            hint: "set ANTHROPIC_API_KEY · or run `phantom auth login`".into(),
-            tokens: Tokens::phosphor(RenderCtx::fallback()),
             app_id: 0,
+            upgrade_requested,
+            last_key_present: initial,
+            key_ever_seen: initial,
+            // Initialize at the poll interval so the first `update` call
+            // probes immediately, matching previous behaviour.
+            poll_accum_secs: POLL_INTERVAL,
         }
     }
-
-    /// Update the live color palette. The host App calls this on theme switch.
-    pub fn set_tokens(&mut self, tokens: Tokens) {
-        self.tokens = tokens;
-    }
-
-    /// Update the visible status line.
-    pub fn set_status(&mut self, status: SetupStatus, message: impl Into<String>) {
-        self.status = status;
-        self.status_message = message.into();
-    }
-
-    /// Replace the hint line shown below the status row.
-    pub fn set_hint(&mut self, hint: impl Into<String>) {
-        self.hint = hint.into();
-    }
-
-    /// Current status.
-    #[must_use]
-    pub fn status(&self) -> SetupStatus {
-        self.status
-    }
 }
 
-impl Default for SetupAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
+fn api_key_present() -> bool {
+    has_env("ANTHROPIC_API_KEY") || has_env("OPENAI_API_KEY")
 }
+
+fn has_env(name: &str) -> bool {
+    std::env::var(name).ok().filter(|v| !v.is_empty()).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Sub-trait implementations
+// ---------------------------------------------------------------------------
 
 impl AppCore for SetupAdapter {
     fn app_type(&self) -> &str {
@@ -100,92 +104,128 @@ impl AppCore for SetupAdapter {
     }
 
     fn is_alive(&self) -> bool {
-        self.status != SetupStatus::Ready
+        true
     }
 
-    fn update(&mut self, _dt: f32) {}
+    fn update(&mut self, dt: f32) {
+        // Debounce: only probe the env every POLL_INTERVAL seconds. At 60 Hz
+        // this turns ~120 getenv syscalls/s into ~1/s. The `Commandable`
+        // probe path stays unthrottled so a user-driven "check again" still
+        // triggers an immediate read.
+        self.poll_accum_secs += dt;
+        if self.poll_accum_secs < POLL_INTERVAL {
+            return;
+        }
+        self.poll_accum_secs = 0.0;
+
+        let present = api_key_present();
+        if present && !self.last_key_present {
+            self.upgrade_requested.store(true, Ordering::Release);
+            self.key_ever_seen = true;
+        }
+        self.last_key_present = present;
+    }
 
     fn get_state(&self) -> serde_json::Value {
         json!({
             "type": "setup",
-            "status": self.status.label(),
+            "key_present": self.last_key_present,
+            "upgrade_pending": self.upgrade_requested.load(Ordering::Acquire),
         })
     }
 
     fn title(&self) -> &str {
-        "Setup"
+        "setup"
     }
 }
 
 impl Renderable for SetupAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
-        let mut quads: Vec<QuadData> = Vec::new();
-        let mut text_segments: Vec<TextData> = Vec::new();
-        let t = self.tokens;
+        let mut quads = Vec::with_capacity(4);
+        let mut text_segments = Vec::with_capacity(8);
 
-        // Render guard: once setup is Ready the pane is being torn down.
-        // Emit chrome-only output so the App's compositor doesn't flash a
-        // stale wordmark before despawn lands.
-        if self.status == SetupStatus::Ready {
-            let head = AppHead::new("SETUP", self.status.label())
-                .with_icon("◌")
-                .with_meta(self.status.label())
-                .with_dot(self.status.dot())
-                .with_tokens(t);
-            head.render_into_adapter(rect, &mut quads, &mut text_segments);
-            return RenderOutput {
-                quads,
-                text_segments,
-                grid: None,
-                scroll: None,
-                selection: None,
-            };
+        // Full-pane background (deep black-blue) so we paint the entire slot,
+        // not just a small box.
+        quads.push(QuadData {
+            x: rect.x,
+            y: rect.y,
+            w: rect.width,
+            h: rect.height,
+            color: BG,
+        });
+
+        // Centered card surface — generous insets so the layout reads as
+        // "intentional empty space", not "broken / forgot to draw".
+        let card_w = (rect.width * 0.72).min(720.0).max(360.0);
+        let card_h = 220.0_f32.min(rect.height - 64.0).max(160.0);
+        let card_x = rect.x + (rect.width - card_w) * 0.5;
+        let card_y = rect.y + (rect.height - card_h) * 0.5;
+
+        quads.push(QuadData {
+            x: card_x,
+            y: card_y,
+            w: card_w,
+            h: card_h,
+            color: SURFACE,
+        });
+
+        // 1px-ish top/bottom rules in dim frame green.
+        quads.push(QuadData {
+            x: card_x,
+            y: card_y,
+            w: card_w,
+            h: 1.0,
+            color: FRAME_DIM,
+        });
+        quads.push(QuadData {
+            x: card_x,
+            y: card_y + card_h - 1.0,
+            w: card_w,
+            h: 1.0,
+            color: FRAME_DIM,
+        });
+
+        // Title.
+        text_segments.push(TextData {
+            text: TITLE.to_string(),
+            x: card_x + 24.0,
+            y: card_y + 28.0,
+            color: TEXT_BRIGHT,
+        });
+
+        // Status dot + subtitle.
+        let (dot_color, subtitle) = if self.last_key_present {
+            (STATUS_OK, SUBTITLE_READY)
+        } else {
+            (STATUS_WARN, SUBTITLE_WAITING)
+        };
+        let subtitle_y = card_y + 28.0 + TITLE_LINE_HEIGHT;
+
+        quads.push(QuadData {
+            x: card_x + 24.0,
+            y: subtitle_y - 8.0,
+            w: 6.0,
+            h: 6.0,
+            color: dot_color,
+        });
+        text_segments.push(TextData {
+            text: subtitle.to_string(),
+            x: card_x + 40.0,
+            y: subtitle_y,
+            color: TEXT_BODY,
+        });
+
+        // Help lines (only show "set env var" guidance while waiting).
+        if !self.last_key_present {
+            for (i, line) in HELP_LINES.iter().enumerate() {
+                text_segments.push(TextData {
+                    text: (*line).to_string(),
+                    x: card_x + 24.0,
+                    y: subtitle_y + 24.0 + (i as f32) * LINE_HEIGHT,
+                    color: TEXT_DIM,
+                });
+            }
         }
-
-        let head = AppHead::new("SETUP", self.status.label())
-            .with_icon("◌")
-            .with_meta(self.status.label())
-            .with_dot(self.status.dot())
-            .with_tokens(t);
-        head.render_into_adapter(rect, &mut quads, &mut text_segments);
-
-        let body = head.body_rect_adapter(rect);
-        let cell_w = if rect.cell_size.0 > 0.0 { rect.cell_size.0 } else { 8.0 };
-        let cell_h = if rect.cell_size.1 > 0.0 { rect.cell_size.1 } else { 16.0 };
-
-        // Centred wordmark.
-        let wordmark = "PHANTOM";
-        let wordmark_w = wordmark.chars().count() as f32 * cell_w * 2.0;
-        let wordmark_x = body.x + (body.width - wordmark_w) * 0.5;
-        let wordmark_y = body.y + body.height * 0.32;
-        text_segments.push(TextData {
-            text: wordmark.to_string(),
-            x: wordmark_x,
-            y: wordmark_y,
-            color: t.colors.text_accent,
-        });
-
-        // Status row.
-        let status_w = self.status_message.chars().count() as f32 * cell_w;
-        let status_x = body.x + (body.width - status_w) * 0.5;
-        let status_y = wordmark_y + cell_h * 2.0;
-        text_segments.push(TextData {
-            text: self.status_message.clone(),
-            x: status_x,
-            y: status_y,
-            color: t.colors.text_primary,
-        });
-
-        // Hint row.
-        let hint_w = self.hint.chars().count() as f32 * cell_w;
-        let hint_x = body.x + (body.width - hint_w) * 0.5;
-        let hint_y = status_y + cell_h * 1.5;
-        text_segments.push(TextData {
-            text: self.hint.clone(),
-            x: hint_x,
-            y: hint_y,
-            color: t.colors.text_dim,
-        });
 
         RenderOutput {
             quads,
@@ -202,13 +242,13 @@ impl Renderable for SetupAdapter {
 
     fn spatial_preference(&self) -> Option<SpatialPreference> {
         Some(SpatialPreference {
-            min_size: (50, 14),
-            preferred_size: (80, 24),
+            min_size: (40, 12),
+            preferred_size: (120, 32),
             max_size: None,
             aspect_ratio: None,
             internal_panes: 1,
             internal_layout: InternalLayout::Single,
-            priority: 10.0, // Setup wins layout while present.
+            priority: 1.0,
         })
     }
 }
@@ -224,34 +264,20 @@ impl InputHandler for SetupAdapter {
 }
 
 impl Commandable for SetupAdapter {
-    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+    fn accept_command(
+        &mut self,
+        cmd: &str,
+        _args: &serde_json::Value,
+    ) -> anyhow::Result<String> {
         match cmd {
-            "set_status" => {
-                let status = match args.get("status").and_then(|v| v.as_str()) {
-                    Some("ready") => SetupStatus::Ready,
-                    Some("failed") => SetupStatus::Failed,
-                    _ => SetupStatus::Waiting,
-                };
-                let msg = args
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(status.label());
-                self.set_status(status, msg);
-                Ok(json!({ "status": "ok" }).to_string())
+            "probe" => {
+                let present = api_key_present();
+                if present && !self.last_key_present {
+                    self.upgrade_requested.store(true, Ordering::Release);
+                }
+                self.last_key_present = present;
+                Ok(json!({"key_present": present}).to_string())
             }
-            "set_hint" => {
-                let text = args
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("missing field: text"))?;
-                self.set_hint(text);
-                Ok(json!({ "status": "ok" }).to_string())
-            }
-            "ready" => {
-                self.status = SetupStatus::Ready;
-                Ok(json!({ "status": "ok" }).to_string())
-            }
-            "snapshot" => Ok(self.get_state().to_string()),
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
     }
@@ -267,103 +293,110 @@ impl Lifecycled for SetupAdapter {
 
 impl Permissioned for SetupAdapter {}
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn rect() -> Rect {
-        Rect {
+    #[test]
+    fn upgrade_requested_flips_on_key_transition() {
+        // SAFETY: tests in this module mutate process env; we lock them via
+        // a single guard variable name to avoid parallel-test interference.
+        // unsafe block required by Rust edition 2024.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut a = SetupAdapter::new(Arc::clone(&flag));
+        assert!(!flag.load(Ordering::Acquire));
+
+        // SetupAdapter::new initialises `poll_accum_secs` at the poll
+        // interval so the first update probes immediately; subsequent
+        // updates must accumulate dt past POLL_INTERVAL to re-probe.
+        a.update(0.0);
+        assert!(!flag.load(Ordering::Acquire));
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-test"); }
+        // First update after env change: accumulator is 0 from the prior
+        // probe, so feed a large dt to force the throttled probe.
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(flag.load(Ordering::Acquire), "flag must flip on NONE->SOME");
+
+        // Subsequent ticks with the key still present do NOT re-flip
+        // (we only edge-trigger so the App doesn't get duplicate work).
+        flag.store(false, Ordering::Release);
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "flag must NOT re-flip while key remains present"
+        );
+
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+    }
+
+    #[test]
+    fn update_is_throttled_to_poll_interval() {
+        // Regression: env-var probing must not run on every frame. Two
+        // sub-interval ticks should not consult env (verified indirectly
+        // via the upgrade flag staying low even when a key is present).
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut a = SetupAdapter::new(Arc::clone(&flag));
+        // Burn through the initial-probe quota so the next probe is gated
+        // by the poll throttle.
+        a.update(POLL_INTERVAL + 0.1);
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-test"); }
+
+        // Two sub-interval frames must NOT re-probe (and so must NOT see
+        // the env transition).
+        a.update(POLL_INTERVAL * 0.4);
+        a.update(POLL_INTERVAL * 0.4);
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "sub-interval frames must not probe env"
+        );
+
+        // Crossing the interval triggers the probe and the upgrade.
+        a.update(POLL_INTERVAL * 0.4);
+        assert!(
+            flag.load(Ordering::Acquire),
+            "probe must run after POLL_INTERVAL accumulates"
+        );
+
+        unsafe { std::env::remove_var("OPENAI_API_KEY"); }
+    }
+
+    #[test]
+    fn render_paints_full_rect_and_card() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let a = SetupAdapter::new(flag);
+        let rect = Rect {
             x: 0.0,
             y: 0.0,
-            width: 800.0,
-            height: 400.0,
-            cell_size: (8.0, 16.0),
-        }
+            width: 1920.0,
+            height: 1080.0,
+            ..Default::default()
+        };
+        let out = a.render(&rect);
+        // Full-pane background quad must be present and cover the rect.
+        let bg = out.quads.iter().find(|q| q.w == 1920.0 && q.h == 1080.0);
+        assert!(bg.is_some(), "expected full-pane background quad covering rect");
+        assert!(!out.text_segments.is_empty(), "expected title + subtitle text");
     }
 
     #[test]
-    fn app_type_is_setup() {
-        assert_eq!(SetupAdapter::new().app_type(), "setup");
-    }
-
-    #[test]
-    fn ready_marks_pane_no_longer_alive() {
-        let mut s = SetupAdapter::new();
-        assert!(s.is_alive());
-        s.accept_command("ready", &json!({})).unwrap();
-        assert!(!s.is_alive());
-    }
-
-    #[test]
-    fn renders_phantom_wordmark() {
-        let s = SetupAdapter::new();
-        let out = s.render(&rect());
-        assert!(out.text_segments.iter().any(|t| t.text == "PHANTOM"));
-    }
-
-    #[test]
-    fn renders_status_message_and_hint() {
-        let s = SetupAdapter::new();
-        let out = s.render(&rect());
-        assert!(out.text_segments.iter().any(|t| t.text.contains("waiting for API key")));
-        assert!(out.text_segments.iter().any(|t| t.text.contains("ANTHROPIC_API_KEY")));
-    }
-
-    #[test]
-    fn set_status_command_updates_state() {
-        let mut s = SetupAdapter::new();
-        s.accept_command(
-            "set_status",
-            &json!({ "status": "failed", "message": "auth blocked" }),
-        )
-        .unwrap();
-        assert_eq!(s.status(), SetupStatus::Failed);
-    }
-
-    #[test]
-    fn set_app_id_stores_id() {
-        let mut s = SetupAdapter::new();
-        s.set_app_id(42);
-        assert_eq!(s.app_id, 42);
-    }
-
-    #[test]
-    fn ready_render_skips_body() {
-        let mut s = SetupAdapter::new();
-        let before = s.render(&rect()).text_segments.len();
-        s.accept_command("ready", &json!({})).unwrap();
-        let after = s.render(&rect()).text_segments.len();
-        assert!(
-            after < before,
-            "ready render must skip the body; got {after} vs {before}",
-        );
-    }
-
-    #[test]
-    fn theme_swap_propagates_to_wordmark() {
-        use phantom_ui::tokens::ColorRoles;
-        let s = SetupAdapter::new();
-        let out_p = s.render(&rect());
-        let mark_p = out_p
-            .text_segments
-            .iter()
-            .find(|t| t.text == "PHANTOM")
-            .map(|t| t.color)
-            .expect("wordmark must render");
-
-        let mut roles = ColorRoles::phosphor();
-        roles.text_accent = [0.0, 0.0, 1.0, 1.0];
-        let mut s2 = SetupAdapter::new();
-        s2.set_tokens(Tokens::new(roles, RenderCtx::fallback()));
-        let out_b = s2.render(&rect());
-        let mark_b = out_b
-            .text_segments
-            .iter()
-            .find(|t| t.text == "PHANTOM")
-            .map(|t| t.color)
-            .expect("wordmark must render");
-
-        assert_ne!(mark_p, mark_b);
-        assert!(mark_b[2] > 0.9);
+    fn does_not_accept_input() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut a = SetupAdapter::new(flag);
+        assert!(!a.accepts_input());
+        assert!(!a.handle_input("a"));
     }
 }

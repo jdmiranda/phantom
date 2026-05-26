@@ -39,6 +39,7 @@ pub mod render;
 pub mod role;
 pub mod router;
 pub mod sandbox;
+pub mod self_extension_tools;
 pub mod semantic_context;
 pub mod skill_registry;
 pub mod spawn_rules;

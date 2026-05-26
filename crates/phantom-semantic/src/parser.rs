@@ -236,7 +236,7 @@ impl SemanticParser {
             format!("{stdout}\n{stderr}")
         };
 
-        let (content_type, errors, warnings) =
+        let (content_type, errors, warnings, classification_notes) =
             Self::parse_output(&command_type, stdout, stderr, &combined);
 
         ParsedOutput {
@@ -248,7 +248,28 @@ impl SemanticParser {
             warnings,
             duration_ms: None,
             raw_output: combined,
+            classification_notes,
         }
+    }
+
+    /// Like [`SemanticParser::parse`] but stamps the caller-measured command
+    /// duration `elapsed_ms` into [`ParsedOutput::duration_ms`].
+    ///
+    /// Use this when the shell layer has already measured how long the command
+    /// ran (wall-clock) and wants to embed that into the parsed result for the
+    /// brain scoring loop.  This is distinct from [`parse_with_timing`], which
+    /// measures the latency of the parse operation itself.
+    #[must_use]
+    pub fn parse_with_command_timing(
+        cmd: &str,
+        stdout: &str,
+        stderr: &str,
+        exit_code: Option<i32>,
+        elapsed_ms: u64,
+    ) -> ParsedOutput {
+        let mut result = Self::parse(cmd, stdout, stderr, exit_code);
+        result.duration_ms = Some(elapsed_ms);
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -328,53 +349,83 @@ impl SemanticParser {
     // -----------------------------------------------------------------------
 
     /// Orchestrate content-type detection and error extraction.
+    /// Returns (content_type, errors, warnings, classification_notes).
     fn parse_output(
         cmd_type: &CommandType,
         stdout: &str,
         stderr: &str,
         combined: &str,
-    ) -> (ContentType, Vec<DetectedError>, Vec<DetectedError>) {
+    ) -> (ContentType, Vec<DetectedError>, Vec<DetectedError>, Vec<String>) {
         match cmd_type {
             CommandType::Git(GitCommand::Status) => {
                 let ct = Self::parse_git_status(combined);
-                (ct, vec![], vec![])
+                (ct, vec![], vec![], vec![])
             }
             CommandType::Git(GitCommand::Log) => {
                 let ct = Self::parse_git_log(combined);
-                (ct, vec![], vec![])
+                (ct, vec![], vec![], vec![])
             }
-            CommandType::Git(GitCommand::Diff) => (ContentType::GitDiff, vec![], vec![]),
-            CommandType::Cargo(_) => Self::parse_cargo_output(stdout, stderr),
+            CommandType::Git(GitCommand::Diff) => (ContentType::GitDiff, vec![], vec![], vec![]),
+            CommandType::Cargo(_) => {
+                let (ct, errs, warns) = Self::parse_cargo_output(stdout, stderr);
+                (ct, errs, warns, vec![])
+            }
             CommandType::Http(_) => {
                 if let Some(ct) = Self::parse_http_response(combined) {
-                    (ct, vec![], vec![])
+                    (ct, vec![], vec![], vec![])
                 } else {
                     Self::fallback_content_type(combined)
                 }
             }
             CommandType::Docker(sub) => {
                 let ct = Self::parse_docker_output(sub, combined);
-                (ct, vec![], vec![])
+                (ct, vec![], vec![], vec![])
             }
             CommandType::Npm(sub) => {
                 let ct = Self::parse_npm_output(sub, combined);
-                (ct, vec![], vec![])
+                (ct, vec![], vec![], vec![])
             }
             _ => Self::fallback_content_type(combined),
         }
     }
 
     /// Try JSON, then table, then plain text.
+    ///
+    /// Pushes a diagnostic note into the returned Vec<String> whenever a
+    /// structured content type could not be detected, so callers (e.g. the
+    /// brain scoring loop) can see that classification was degraded.
     fn fallback_content_type(
         output: &str,
-    ) -> (ContentType, Vec<DetectedError>, Vec<DetectedError>) {
-        if let Some(ct) = Self::parse_json(output) {
-            return (ct, vec![], vec![]);
+    ) -> (ContentType, Vec<DetectedError>, Vec<DetectedError>, Vec<String>) {
+        let trimmed = output.trim();
+
+        // Attempt JSON detection first.
+        if !trimmed.is_empty() && (trimmed.starts_with('{') || trimmed.starts_with('[')) {
+            if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+                return (ContentType::Json, vec![], vec![], vec![]);
+            }
+            // Starts with JSON-like characters but failed to parse.
+            let notes = vec!["json_parse_failed: input not valid JSON".to_string()];
+            if let Some(ct) = Self::detect_table(output) {
+                return (ct, vec![], vec![], notes);
+            }
+            return (ContentType::PlainText, vec![], vec![], notes);
         }
+
+        // No JSON gate triggered — try table.
         if let Some(ct) = Self::detect_table(output) {
-            return (ct, vec![], vec![]);
+            return (ct, vec![], vec![], vec![]);
         }
-        (ContentType::PlainText, vec![], vec![])
+
+        // Table detection failed; emit a note only when there was enough content
+        // to reasonably expect tabular structure (2+ non-empty lines).
+        let line_count = output.lines().filter(|l| !l.trim().is_empty()).count();
+        let notes = if line_count >= 2 {
+            vec!["table_detect_failed: insufficient columns".to_string()]
+        } else {
+            vec![]
+        };
+        (ContentType::PlainText, vec![], vec![], notes)
     }
 
     // -- git status ---------------------------------------------------------
@@ -683,25 +734,6 @@ impl SemanticParser {
             total,
             failures,
         })
-    }
-
-    // -- JSON detection -----------------------------------------------------
-
-    fn parse_json(output: &str) -> Option<ContentType> {
-        let trimmed = output.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        // Quick gate: must start with { or [
-        if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
-            return None;
-        }
-        // Try to parse as valid JSON.
-        if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
-            Some(ContentType::Json)
-        } else {
-            None
-        }
     }
 
     // -- HTTP response parsing (curl -i) ------------------------------------

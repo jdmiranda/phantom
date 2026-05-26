@@ -148,6 +148,9 @@ fn brain_spawns_and_channel_is_open() {
         privacy_mode: false,
         relay_inbound_rx: None,
         history_context: Vec::new(),
+        recall_context: None,
+        self_improvement: None,
+        goal_sources: Vec::new(),
     });
 
     // Give the supervisor loop time to install the per-iteration `iter_tx`.
@@ -214,6 +217,9 @@ fn boot_smoke_full_invariants() {
         privacy_mode: false,
         relay_inbound_rx: None,
         history_context: Vec::new(),
+        recall_context: None,
+        self_improvement: None,
+        goal_sources: Vec::new(),
     });
 
     // Close the supervisor-install race before shutting down — see the

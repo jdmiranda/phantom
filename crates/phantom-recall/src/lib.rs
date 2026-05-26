@@ -59,7 +59,7 @@ pub enum Modality {
 
 /// A structured retrieval query. Produced either directly by the caller or
 /// by a [`QueryRewriter`] from a natural-language phrase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RecallQuery {
     /// Original natural-language query, preserved for reranking and audit.
     pub natural_language: String,
@@ -73,6 +73,26 @@ pub struct RecallQuery {
     pub modality_hint: Option<Modality>,
     /// Maximum number of hits to return after fusion + rerank.
     pub limit: usize,
+    /// Rewritten or enriched query string produced by an LLM rewriter.
+    ///
+    /// Set by [`QueryRewriter`] implementations that expand or reformulate
+    /// the natural-language input before embedding. Falls back to
+    /// `natural_language` when absent — see [`RecallQuery::effective_query`].
+    #[serde(default)]
+    pub enriched_query: Option<String>,
+}
+
+impl RecallQuery {
+    /// The query text that backends should embed and search with.
+    ///
+    /// Returns `enriched_query` when an LLM rewriter populated it, otherwise
+    /// falls back to `natural_language`. Callers downstream of a rewriter
+    /// should prefer this accessor over reading the fields directly so the
+    /// fallback is applied uniformly.
+    #[must_use]
+    pub fn effective_query(&self) -> &str {
+        self.enriched_query.as_deref().unwrap_or(&self.natural_language)
+    }
 }
 
 /// A single retrieval hit with both raw signals and the fused score.
@@ -210,6 +230,15 @@ impl QueryRewriter for MockRewriter {
             None => Vec::new(),
         };
 
+        // Produce a deterministic enriched form so downstream consumers can
+        // exercise the `effective_query` fallback path in tests. Real LLM
+        // rewriters will overwrite this with a richer reformulation.
+        let enriched_query = if tags.is_empty() {
+            Some(natural.to_lowercase())
+        } else {
+            Some(format!("{} {}", natural.to_lowercase(), tags.join(" ")))
+        };
+
         Ok(RecallQuery {
             natural_language: natural.to_string(),
             intent_hint,
@@ -217,6 +246,7 @@ impl QueryRewriter for MockRewriter {
             time_window_unix_ms: None,
             modality_hint: Some(Modality::Text),
             limit: 10,
+            enriched_query,
         })
     }
 }
@@ -276,6 +306,7 @@ mod tests {
             time_window_unix_ms: Some((1_700_000_000_000, 1_710_000_000_000)),
             modality_hint: Some(Modality::Text),
             limit: 25,
+            enriched_query: Some("pricing meeting discussion argument".into()),
         };
         let json = serde_json::to_string(&q).expect("serialize");
         let restored: RecallQuery = serde_json::from_str(&json).expect("deserialize");
@@ -285,6 +316,35 @@ mod tests {
         assert_eq!(restored.time_window_unix_ms, q.time_window_unix_ms);
         assert!(matches!(restored.modality_hint, Some(Modality::Text)));
         assert_eq!(restored.limit, q.limit);
+        assert_eq!(restored.enriched_query, q.enriched_query);
+    }
+
+    #[test]
+    fn recall_query_has_enriched_query_field() {
+        // Verify the field exists, can be set, and defaults to None when absent
+        // (via serde default).
+        let q = RecallQuery {
+            natural_language: "search for something".into(),
+            intent_hint: None,
+            tags: vec![],
+            time_window_unix_ms: None,
+            modality_hint: None,
+            limit: 5,
+            enriched_query: Some("expanded search for something relevant".into()),
+        };
+        assert_eq!(
+            q.enriched_query.as_deref(),
+            Some("expanded search for something relevant")
+        );
+
+        // Deserializing JSON without the field must default to None.
+        let json_without = r#"{"natural_language":"hi","tags":[],"limit":1}"#;
+        let restored: RecallQuery =
+            serde_json::from_str(json_without).expect("deserialize without enriched_query");
+        assert!(
+            restored.enriched_query.is_none(),
+            "serde(default) must produce None when field is absent"
+        );
     }
 
     #[test]
@@ -396,6 +456,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_rewriter_populates_enriched_query() {
+        // The mock should produce a non-None enriched form so downstream
+        // consumers can exercise the `effective_query` fallback path.
+        let r = MockRewriter;
+        let q = r.rewrite("the meeting about pricing").await.expect("rewrite");
+        assert!(
+            q.enriched_query.is_some(),
+            "MockRewriter must populate enriched_query to exercise fallback logic"
+        );
+    }
+
+    #[test]
+    fn effective_query_prefers_enriched() {
+        let q = RecallQuery {
+            natural_language: "raw input".into(),
+            intent_hint: None,
+            tags: vec![],
+            time_window_unix_ms: None,
+            modality_hint: None,
+            limit: 5,
+            enriched_query: Some("rewritten input".into()),
+        };
+        assert_eq!(q.effective_query(), "rewritten input");
+    }
+
+    #[test]
+    fn effective_query_falls_back_to_natural_language() {
+        let q = RecallQuery {
+            natural_language: "raw input".into(),
+            intent_hint: None,
+            tags: vec![],
+            time_window_unix_ms: None,
+            modality_hint: None,
+            limit: 5,
+            enriched_query: None,
+        };
+        assert_eq!(q.effective_query(), "raw input");
+    }
+
+    #[tokio::test]
     async fn mock_recall_returns_hits_sorted_descending() {
         let backend = MockRecall::new(vec![hit(0.3), hit(0.9), hit(0.5), hit(0.7)]);
         let query = RecallQuery {
@@ -405,6 +505,7 @@ mod tests {
             time_window_unix_ms: None,
             modality_hint: None,
             limit: 10,
+            enriched_query: None,
         };
         let results = backend.search(query).await.expect("search");
         let scores: Vec<f32> = results.iter().map(|h| h.score).collect();
@@ -421,6 +522,7 @@ mod tests {
             time_window_unix_ms: None,
             modality_hint: None,
             limit: 2,
+            enriched_query: None,
         };
         let results = backend.search(query).await.expect("search");
         assert_eq!(results.len(), 2);

@@ -63,7 +63,17 @@ impl Connection {
         Ok(())
     }
 
-    fn raw(&self) -> &rusqlite::Connection {
+    /// Query a single row and map it. Used by migration tests to inspect the
+    /// `schema_version` table without going through the full `BundleStore` API.
+    pub fn raw_query_row<T, F>(&self, sql: &str, map: F) -> Result<T, StoreError>
+    where
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        let val = self.inner.query_row(sql, [], map)?;
+        Ok(val)
+    }
+
+    pub(crate) fn raw(&self) -> &rusqlite::Connection {
         &self.inner
     }
 }
@@ -89,12 +99,34 @@ impl<'a> Transaction<'a> {
 // Schema management
 // ---------------------------------------------------------------------------
 
-const SCHEMA_SQL: &str = r#"
+/// Bootstrap DDL run unconditionally on every open. Creates the `schema_version`
+/// tracking table and the legacy `meta` key-value table. Both use
+/// `IF NOT EXISTS` so this is a pure no-op on an already-initialised database.
+const BOOTSTRAP_SQL: &str = "
+CREATE TABLE IF NOT EXISTS schema_version (
+    version    INTEGER NOT NULL,
+    applied_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+";
 
+/// A single forward-only SQL migration.
+struct Migration {
+    version: u32,
+    sql: &'static str,
+}
+
+/// All migrations in strictly ascending version order. Version 1 establishes
+/// the full baseline schema so a fresh database and a migrated one are
+/// structurally identical.
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: "
 CREATE TABLE IF NOT EXISTS bundles (
     id              TEXT PRIMARY KEY,
     t_start_ns      INTEGER NOT NULL,
@@ -158,11 +190,69 @@ CREATE TABLE IF NOT EXISTS leaked_rows (
     logged_at  INTEGER NOT NULL,
     PRIMARY KEY (bundle_id, modality)
 );
-"#;
+",
+    },
+    // Future migrations appended here, e.g.:
+    // Migration { version: 2, sql: "ALTER TABLE bundles ADD COLUMN foo TEXT;" },
+];
 
-/// Create tables if missing, and stamp the schema version on first run.
+/// Read the highest applied migration version from `schema_version`.
+/// Returns `0` when the table is empty (fresh database).
+///
+/// `MAX()` over an empty set returns a SQL NULL, so we map to `Option<u32>`.
+fn current_schema_version(conn: &rusqlite::Connection) -> Result<u32, StoreError> {
+    let v: Option<u32> = conn
+        .query_row(
+            "SELECT MAX(version) FROM schema_version",
+            [],
+            |row| row.get::<_, Option<u32>>(0),
+        )?;
+    Ok(v.unwrap_or(0))
+}
+
+/// Apply all pending migrations in order, each inside its own transaction.
+///
+/// On success each applied migration version is recorded in `schema_version`.
+/// On failure the transaction for that migration is rolled back and an error
+/// is returned; previously applied migrations are not rolled back.
+pub fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
+    let current = current_schema_version(conn.raw())?;
+    for m in MIGRATIONS {
+        if m.version <= current {
+            continue;
+        }
+        // Run each migration in an explicit transaction so a partial failure
+        // rolls back cleanly.
+        conn.raw().execute_batch("BEGIN;")?;
+        let result = (|| -> Result<(), StoreError> {
+            conn.raw().execute_batch(m.sql)?;
+            conn.raw().execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                params![m.version],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.raw().execute_batch("COMMIT;")?;
+            }
+            Err(e) => {
+                let _ = conn.raw().execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Create tables if missing, run pending migrations, and stamp the legacy
+/// `meta.schema_version` row used by [`check_schema_version`].
 pub fn init_schema(conn: &Connection) -> Result<(), StoreError> {
-    conn.raw().execute_batch(SCHEMA_SQL)?;
+    // Always create the tracking table and meta table first.
+    conn.raw().execute_batch(BOOTSTRAP_SQL)?;
+    // Run forward migrations.
+    run_migrations(conn)?;
+    // Keep the legacy meta row in sync for callers that still use it.
     conn.raw().execute(
         "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)",
         params![STORE_SCHEMA_VERSION.to_string()],
@@ -171,6 +261,9 @@ pub fn init_schema(conn: &Connection) -> Result<(), StoreError> {
 }
 
 /// Verify the stored schema version matches what this build understands.
+///
+/// Reads from the legacy `meta` table. Called after [`init_schema`] so the
+/// row is guaranteed to exist.
 pub fn check_schema_version(conn: &Connection) -> Result<(), StoreError> {
     let raw: Option<String> = conn
         .raw()

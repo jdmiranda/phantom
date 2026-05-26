@@ -4,7 +4,7 @@
 //! inside the GUI coordinator, and the `drain_blocked_events` helper used
 //! by `update.rs`.
 
-use log::{info, warn};
+use log::{error, info, warn};
 
 use phantom_agents::AgentSpawnOpts;
 use phantom_agents::agent::AgentTask;
@@ -77,11 +77,24 @@ impl App {
         let spawn_label = opts.label().unwrap_or("agent-pane").to_string();
         let resolved_model = opts.resolve_model();
         let Some(claude_config) = resolve_api_config(&resolved_model) else {
-            warn!("Cannot spawn agent: no API key configured for model {:?}", resolved_model);
+            // The user sees the SetupAdapter still on screen — surface a loud
+            // message so the failure mode is obvious from logs and the
+            // in-app console rather than a single `warn!` line in journald.
+            error!(
+                "agent spawn blocked: no API key configured for model {:?} \
+                 — set ANTHROPIC_API_KEY (or OPENAI_API_KEY) and restart, \
+                 or run: phantom auth login",
+                resolved_model
+            );
+            self.console.system(
+                "agent spawn blocked: API key not set — \
+                 set ANTHROPIC_API_KEY (or OPENAI_API_KEY) and restart, \
+                 or run: phantom auth login"
+                    .to_string(),
+            );
             return None;
         };
 
-        // Split the focused pane to make room for the agent.
         let Some(focused_app_id) = self.coordinator.focused() else {
             warn!("Cannot spawn agent: no focused adapter");
             return None;
@@ -91,37 +104,99 @@ impl App {
             return None;
         };
 
-        let split_result = self.layout.split_vertical(current_pane_id);
-        let (existing_child, new_child) = match split_result {
-            Ok(ids) => ids,
-            Err(e) => {
-                warn!("Agent split failed: {e}");
-                return None;
+        // Two paths for placing the new agent pane:
+        //
+        // 1. Replace mode (used when this is the FIRST agent spawned and the
+        //    only existing adapter is the focused one — typically the
+        //    post-boot terminal). The agent takes over the focused adapter's
+        //    pane slot directly; no split, no half-window agent. This
+        //    realises the `feedback_agent_is_primary` UX promise: cold-start
+        //    session lands you in an agent that fills the entire window.
+        //
+        // 2. Split mode (used when other adapters already exist — typically
+        //    when a Composer-role agent spawns a sibling subagent or the
+        //    user manually opens a second pane). The focused pane is split
+        //    50/50 vertically; the existing adapter stays in the top half,
+        //    the new agent takes the bottom half.
+        let replace_focused = self.coordinator.adapter_count() == 1;
+
+        let (target_pane_id, target_scene_node) = if replace_focused {
+            // Snapshot the slot the focused adapter (terminal) lives in,
+            // kill the adapter without removing its pane/scene, and hand
+            // the slot to the about-to-be-created agent. The terminal's
+            // PTY is shut down by `kill_keeping_pane → registry.kill`.
+            match self.coordinator.kill_keeping_pane(focused_app_id) {
+                Some((pane_id, scene_node)) => {
+                    log::info!(
+                        "Agent replacing focused adapter {} (no split) — pane {:?} scene {:?}",
+                        focused_app_id, pane_id, scene_node
+                    );
+                    (pane_id, scene_node)
+                }
+                None => {
+                    warn!(
+                        "Cannot replace focused adapter {}: kill_keeping_pane returned None — falling back to split",
+                        focused_app_id
+                    );
+                    return None;
+                }
             }
+        } else {
+            // Split path (legacy behaviour, sibling-pane mode).
+            let split_result = self.layout.split_vertical(current_pane_id);
+            let (existing_child, new_child) = match split_result {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!("Agent split failed: {e}");
+                    return None;
+                }
+            };
+
+            // Equal split: existing 50%, agent 50%.
+            let _ = self.layout.set_flex_grow(existing_child, 1.0);
+            let _ = self.layout.set_flex_grow(new_child, 1.0);
+
+            // Resize layout after split.
+            let width = self.gpu.surface_config.width;
+            let height = self.gpu.surface_config.height;
+            let _ = self.layout.resize(width as f32, height as f32);
+
+            // Remap the existing adapter's PaneId.
+            self.coordinator
+                .remap_pane(focused_app_id, current_pane_id, existing_child);
+
+            // Resize the existing adapter to fit its new (smaller) pane.
+            if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
+                let (cols, rows) = crate::pane::pane_cols_rows(self.cell_size, rect);
+                let _ = self.coordinator.send_command(
+                    focused_app_id,
+                    "resize",
+                    &serde_json::json!({"cols": cols, "rows": rows}),
+                );
+            }
+
+            // In split mode, the agent gets its own fresh scene node.
+            let scene_node = self
+                .scene
+                .add_node(self.scene_content_node, phantom_scene::node::NodeKind::Pane);
+            (new_child, scene_node)
         };
 
-        // Equal split: terminal 50%, agent 50%.
-        let _ = self.layout.set_flex_grow(existing_child, 1.0);
-        let _ = self.layout.set_flex_grow(new_child, 1.0);
+        // Snapshot project memory so the agent has stored facts (conventions,
+        // warnings, config) in its system prompt from the first turn. Pulled
+        // out of the legacy split path so both replace_focused and split modes
+        // get the same memory context wired into `AgentPane::spawn_with_opts`.
+        let memory_snapshot: Vec<(String, String)> = self
+            .memory
+            .as_ref()
+            .map(|m| {
+                m.all()
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Resize layout after split.
-        let width = self.gpu.surface_config.width;
-        let height = self.gpu.surface_config.height;
-        let _ = self.layout.resize(width as f32, height as f32);
-
-        // Remap the existing terminal's PaneId.
-        self.coordinator
-            .remap_pane(focused_app_id, current_pane_id, existing_child);
-
-        // Resize the existing terminal to fit its new (smaller) pane.
-        if let Ok(rect) = self.layout.get_pane_rect(existing_child) {
-            let (cols, rows) = crate::pane::pane_cols_rows(self.cell_size, rect);
-            let _ = self.coordinator.send_command(
-                focused_app_id,
-                "resize",
-                &serde_json::json!({"cols": cols, "rows": rows}),
-            );
-        }
 
         // Create the agent and register in the new split pane.
         //
@@ -139,6 +214,7 @@ impl App {
             Some(self.blocked_event_sink.clone()),
             None,
             self.privacy_mode,
+            memory_snapshot,
         );
 
         // Wire the substrate handles so chat-tool / composer-tool dispatch
@@ -230,14 +306,12 @@ impl App {
         let adapter = crate::adapters::agent::AgentAdapter::with_spawn_tag(agent_pane, spawn_tag)
             .with_quarantine_registry(self.quarantine_registry.clone());
 
-        let scene_node = self
-            .scene
-            .add_node(self.scene_content_node, phantom_scene::node::NodeKind::Pane);
-
+        // target_pane_id and target_scene_node were set above by either the
+        // replace_focused or split branch; both paths land here.
         let app_id = self.coordinator.register_adapter_at_pane(
             Box::new(adapter),
-            new_child,
-            scene_node,
+            target_pane_id,
+            target_scene_node,
             phantom_scene::clock::Cadence::unlimited(),
             &mut self.layout,
         );
@@ -257,7 +331,7 @@ impl App {
                 },
                 payload: serde_json::json!({
                     "app_id": app_id,
-                    "pane_id": format!("{:?}", new_child),
+                    "pane_id": format!("{:?}", target_pane_id),
                 }),
                 source: phantom_agents::spawn_rules::EventSource::User,
             });
