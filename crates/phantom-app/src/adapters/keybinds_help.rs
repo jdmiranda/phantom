@@ -298,16 +298,17 @@ mod tests {
     #[test]
     fn theme_swap_propagates_to_row_color() {
         let mut a = KeybindsHelpAdapter::with_defaults();
-        // First render under phosphor.
+        // The combo column renders with `text_primary`. Find a row whose
+        // text starts with a modifier key (default macOS bindings use
+        // `Cmd+`) so we skip header segments.
         let out_p = a.render(&rect());
         let combo_p = out_p
             .text_segments
             .iter()
-            .find(|t| !t.text.is_empty() && t.x > 0.0 && t.text != "KEYBINDS")
+            .find(|t| t.text.starts_with("Cmd+"))
             .map(|t| t.color)
-            .expect("phosphor row must render");
+            .expect("at least one Cmd+ row must render under phosphor");
 
-        // Swap to a contrasting palette where text_primary is pure blue.
         let mut roles = ColorRoles::phosphor();
         roles.text_primary = [0.0, 0.0, 1.0, 1.0];
         a.set_tokens(Tokens::new(roles, RenderCtx::fallback()));
@@ -316,10 +317,11 @@ mod tests {
         let combo_b = out_b
             .text_segments
             .iter()
-            .find(|t| !t.text.is_empty() && t.x > 0.0 && t.text != "KEYBINDS")
+            .find(|t| t.text.starts_with("Cmd+"))
             .map(|t| t.color)
-            .expect("blue row must render");
+            .expect("at least one Cmd+ row must render under blue theme");
 
         assert_ne!(combo_p, combo_b, "row colors must change with theme");
+        assert!(combo_b[2] > 0.9, "blue theme: blue channel must dominate, got {combo_b:?}");
     }
 }
