@@ -489,16 +489,14 @@ impl Widget for MessageBlock {
         }
 
         // Standalone spinner row when body is empty.
-        if line_count == 0 {
-            if let Some(frame) = self.spinner_frame {
-                let spinner = SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()];
-                segments.push(TextSegment {
-                    text: spinner.to_string(),
-                    x: body_x,
-                    y: rect.y + cell_h,
-                    color: t.colors.text_primary,
-                });
-            }
+        if line_count == 0 && let Some(frame) = self.spinner_frame {
+            let spinner = SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()];
+            segments.push(TextSegment {
+                text: spinner.to_string(),
+                x: body_x,
+                y: rect.y + cell_h,
+                color: t.colors.text_primary,
+            });
         }
 
         segments

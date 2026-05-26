@@ -136,6 +136,7 @@ pub struct TextRenderer {
     /// Cached monospace cell dimensions: (width, height).
     cell_size: Option<(f32, f32)>,
     /// Cache: (char, bold, italic) → (CacheKey, baseline_y, phys_x).
+    #[allow(clippy::type_complexity)]
     glyph_key_cache: std::collections::HashMap<(char, bool, bool), Option<(CacheKey, f32, f32)>>,
 }
 
