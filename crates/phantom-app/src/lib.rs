@@ -31,6 +31,8 @@ pub mod profiler;
 mod render;
 mod render_overlay;
 mod search;
+mod spawn_chrome;
+mod files_watcher;
 pub mod resources;
 pub mod runtime;
 mod selftest;

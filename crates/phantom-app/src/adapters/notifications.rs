@@ -271,6 +271,13 @@ impl InputHandler for NotificationsAdapter {
 impl Commandable for NotificationsAdapter {
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "push" => {
                 let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("system");
                 let message = args

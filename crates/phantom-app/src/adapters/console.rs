@@ -252,6 +252,17 @@ impl InputHandler for ConsoleAdapter {
 impl Commandable for ConsoleAdapter {
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
+            "drain_pending" => {
+                let lines = self.drain_pending_input();
+                Ok(serde_json::to_string(&lines).unwrap_or_else(|_| "[]".to_string()))
+            }
             "out" => {
                 let text = args
                     .get("text")

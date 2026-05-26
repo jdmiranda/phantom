@@ -102,7 +102,31 @@ impl Renderable for KeybindsHelpAdapter {
         let mut text_segments: Vec<TextData> = Vec::new();
         let t = self.tokens;
 
-        let rows = self.rows();
+        let mut rows = self.rows();
+        // Augment registry rows with the hard-coded chrome-pane bindings
+        // wired in input.rs (these aren't represented by `Action` variants
+        // yet, so they don't appear in `KeybindRegistry::iter`). Sorted
+        // separately below the registry entries.
+        let chrome_bindings: &[(&str, &str)] = &[
+            ("F1 / ?", "Toggle keybinds pane"),
+            ("Cmd+,", "Settings pane"),
+            ("Cmd+M", "Memory inspector"),
+            ("Cmd+L", "Logs pane"),
+            ("Cmd+I", "Inspector pane"),
+            ("Cmd+Shift+N", "Notifications"),
+            ("Cmd+Shift+F", "File watch"),
+            ("Cmd+Shift+G", "Diff (git)"),
+            ("Cmd+Shift+L", "Fleet (nodes)"),
+            ("Cmd+Shift+P", "Plugins"),
+            ("Cmd+Shift+B", "Database"),
+            ("Cmd+Shift+V", "Voice / STT"),
+            ("Cmd+Shift+C", "Console pane"),
+            ("Cmd+Shift+K", "Keybinds pane"),
+        ];
+        for (combo, action) in chrome_bindings {
+            rows.push(((*combo).to_string(), (*action).to_string()));
+        }
+
         let head = AppHead::new("KEYBINDS", "F1")
             .with_icon("⌨")
             .with_meta(format!("{} bindings", rows.len()))
@@ -188,8 +212,15 @@ impl InputHandler for KeybindsHelpAdapter {
 }
 
 impl Commandable for KeybindsHelpAdapter {
-    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "snapshot" => {
                 let rows: Vec<serde_json::Value> = self
                     .rows()
@@ -254,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_registry_renders_hint() {
+    fn empty_registry_still_renders_chrome_bindings() {
         let reg = Arc::new(RwLock::new(KeybindRegistry::new()));
         {
             let combos: Vec<_> = {
@@ -268,7 +299,12 @@ mod tests {
         }
         let a = KeybindsHelpAdapter::new(reg);
         let out = a.render(&rect());
-        assert!(out.text_segments.iter().any(|t| t.text.contains("no bindings")));
+        // Registry is empty but the hard-coded chrome bindings always
+        // render (Cmd+, Settings, Cmd+Shift+N Notifications, etc.).
+        assert!(
+            out.text_segments.iter().any(|t| t.text.contains("Settings pane")),
+            "chrome bindings must render even when registry is empty",
+        );
     }
 
     #[test]
