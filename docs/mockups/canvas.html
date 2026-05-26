@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en" data-theme="phosphor">
+<head>
+<meta charset="utf-8">
+<title>Phantom · Canvas of Apps</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="system.css">
+<style>
+  /* full-window canvas grid */
+  .window {
+    display: grid;
+    grid-template-rows: 36px 1fr 28px;
+    height: 100vh;
+  }
+
+  /* top tab bar */
+  .tab-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 16px;
+    background: var(--surface-floating);
+    border-bottom: 1px solid var(--divider);
+  }
+  .tab-bar .brand {
+    font-family: var(--font-mono);
+    font-weight: 600; letter-spacing: 0.14em;
+    color: var(--text-bright);
+    font-size: 11px;
+    margin-right: 12px;
+  }
+  .tab {
+    padding: 4px 12px;
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .tab.active {
+    color: var(--text-bright);
+    background: var(--surface-raised);
+    border: 1px solid var(--frame-dim);
+  }
+  .tab-bar .spacer { flex: 1; }
+  .tab-bar .right { display: flex; align-items: center; gap: 8px; }
+
+  /* status bar */
+  .status-bar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 16px;
+    background: var(--surface-floating);
+    border-top: 1px solid var(--divider);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+  .status-bar .spacer { flex: 1; }
+  .status-bar strong { color: var(--text-primary); font-weight: 500; }
+
+  /* canvas grid — the spatial arbiter's output, as visual layout */
+  .canvas {
+    display: grid;
+    grid-template-columns: 1.6fr 0.9fr;
+    grid-template-rows: 2fr 1fr;
+    gap: 10px;
+    padding: 10px;
+    background: var(--surface-base);
+    position: relative;
+    min-height: 0;
+  }
+  .slot-agent     { grid-column: 1; grid-row: 1 / 3; }
+  .slot-inspector { grid-column: 2; grid-row: 1; }
+  .slot-monitor   { grid-column: 2; grid-row: 2; }
+
+  /* agent body specifics */
+  .agent-thread { flex: 1; overflow-y: auto; padding-right: 4px; }
+  .agent-thread .msg-row .body code { font-size: 11.5px; }
+  .tool-card {
+    background: var(--surface-recessed);
+    border: 1px solid var(--divider);
+    border-left: 2px solid var(--role-tool);
+    border-radius: 6px;
+    margin: 6px 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    overflow: hidden;
+  }
+  .tool-card .h {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px;
+    background: var(--surface-floating);
+    border-bottom: 1px solid var(--divider);
+    color: var(--text-secondary);
+  }
+  .tool-card .h .arr { color: var(--role-tool); }
+  .tool-card .h .dur { margin-left: auto; color: var(--text-dim); font-size: 10.5px; }
+  .tool-card .b { padding: 8px 10px; color: var(--text-primary); }
+
+  /* inspector body — event log + DAG mini */
+  .inspector-body { padding: 0; display: flex; flex-direction: column; }
+  .inspector-tabs {
+    display: flex; gap: 2px;
+    border-bottom: 1px solid var(--divider);
+    padding: 0 10px;
+  }
+  .inspector-tabs span {
+    padding: 6px 10px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-bottom: 2px solid transparent;
+  }
+  .inspector-tabs span.on {
+    color: var(--text-bright);
+    border-bottom-color: var(--frame-active);
+  }
+  .event-log {
+    flex: 1;
+    padding: 8px 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    overflow-y: auto;
+    color: var(--text-secondary);
+  }
+  .event-log .ts { color: var(--text-dim); }
+  .event-log .ev-agent { color: var(--role-agent); }
+  .event-log .ev-tool  { color: var(--role-tool); }
+  .event-log .ev-sys   { color: var(--role-system); }
+  .event-log .ev-ok    { color: var(--status-ok); }
+  .event-log .ev-warn  { color: var(--status-warn); }
+  .event-log .ev-danger{ color: var(--status-danger); }
+  .event-log .ev-info  { color: var(--status-info); }
+
+  /* monitor body — sysmon stats */
+  .gauges {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .gauge {
+    background: var(--surface-recessed);
+    border: 1px solid var(--divider);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: var(--font-mono);
+  }
+  .gauge .lbl { color: var(--text-dim); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .gauge .val { color: var(--text-primary); font-size: 14px; font-weight: 600; margin-top: 2px; }
+
+  /* pub/sub overlay — visualize event flow between apps */
+  .wires {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .wires text {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    fill: var(--text-dim);
+  }
+  .wires .wire { stroke-width: 1; fill: none; stroke-dasharray: 4 4; opacity: 0.35; }
+  .wires .pulse {
+    fill: var(--frame-active);
+    filter: drop-shadow(0 0 4px var(--frame-active));
+  }
+  @keyframes flow {
+    0%   { offset-distance: 0%;   opacity: 0;   }
+    20%  { opacity: 1; }
+    80%  { opacity: 1; }
+    100% { offset-distance: 100%; opacity: 0;   }
+  }
+
+  /* theme switcher */
+  .theme-switch {
+    display: flex; gap: 4px; align-items: center;
+  }
+  .theme-switch .sw {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    border: 1px solid var(--frame-dim);
+    cursor: pointer;
+    position: relative;
+  }
+  .theme-switch .sw[data-set="phosphor"] { background: #33ff00; }
+  .theme-switch .sw[data-set="amber"]    { background: #ffb000; }
+  .theme-switch .sw[data-set="ice"]      { background: #66ddff; }
+  .theme-switch .sw[data-set="blood"]    { background: #ff3344; }
+  .theme-switch .sw[data-set="vapor"]    { background: linear-gradient(135deg, #ff44dd 0%, #5fc4ff 100%); }
+  .theme-switch .sw[data-set="cyber"]    { background: linear-gradient(135deg, #ff007a 0%, #00ffd0 100%); }
+  .theme-switch .sw.active {
+    border-color: var(--frame-active);
+    box-shadow: var(--glow);
+    transform: scale(1.15);
+  }
+</style>
+</head>
+<body>
+
+<div class="window">
+
+  <!-- ─── top tab bar (TabBar widget) ─── -->
+  <div class="tab-bar">
+    <span class="brand">▶ PHANTOM</span>
+    <div class="tab active">canvas · agent-is-king</div>
+    <div class="tab">review-PR-#675</div>
+    <div class="tab">+</div>
+    <div class="spacer"></div>
+    <div class="theme-switch">
+      <span class="caption" style="margin-right:6px">theme</span>
+      <span class="sw active" data-set="phosphor" title="phosphor"></span>
+      <span class="sw" data-set="amber" title="amber"></span>
+      <span class="sw" data-set="ice" title="ice"></span>
+      <span class="sw" data-set="blood" title="blood"></span>
+      <span class="sw" data-set="vapor" title="vapor — miami vice"></span>
+      <span class="sw" data-set="cyber" title="cyber — cyberpunk"></span>
+    </div>
+    <span class="kbd">⌘K</span>
+    <span class="kbd">⌘T</span>
+    <span class="kbd">F1</span>
+  </div>
+
+  <!-- ─── canvas — three apps requesting real estate ─── -->
+  <div class="canvas">
+
+    <!-- ─── APP A · Agent (focused, king) ─── -->
+    <div class="app focused crt slot-agent" id="app-agent">
+      <div class="app-head">
+        <span class="ico">◆</span>
+        <span class="name">AGENT</span>
+        <span class="sep">·</span>
+        <span class="title">claude-opus-4-7 · conversational</span>
+        <span class="meta">
+          <span class="dot"></span>
+          live · 00:12:47 · 48.2k tok
+        </span>
+      </div>
+      <div class="app-body agent-thread">
+
+        <div class="msg-row user">
+          <div class="av">U</div>
+          <div>
+            <div class="who">you · 14:54</div>
+            <div class="body">
+              the agent pane keeps rendering with a giant black void below.
+              window <em>is</em> fullscreen but only the top third has anything in it.
+            </div>
+          </div>
+        </div>
+
+        <div class="msg-row agent">
+          <div class="av">A</div>
+          <div>
+            <div class="who">phantom · agent</div>
+            <div class="body">
+              the arbiter clamps the agent pane to <code>preferred_size: (80, 20)</code> =
+              680 px on your Retina display. that's the void you're seeing.
+              patching <code>spatial_preference</code> to drop the cap.
+              <div class="tool-card">
+                <div class="h"><span class="arr">▸</span> edit_file · adapters/agent.rs <span class="dur">12 ms</span></div>
+                <div class="b">
+- preferred_size: (80, 20)<br>
+- max_size: Some((120, 40))<br>
++ preferred_size: (500, 200)<br>
++ max_size: None
+                </div>
+              </div>
+              <div class="tool-card">
+                <div class="h"><span class="arr">▸</span> run_command · cargo build --release <span class="dur">12.3 s</span></div>
+                <div class="b" style="color: var(--status-ok)">Finished `release` profile [optimized] target(s) in 12.34s</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="msg-row tool">
+          <div class="av">T</div>
+          <div>
+            <div class="who">tool · take_screenshot</div>
+            <div class="body">
+              <span class="caption">/tmp/phantom-cold-launch-v4.png · 144 KiB · pane fills window</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="msg-row user">
+          <div class="av">U</div>
+          <div>
+            <div class="who">you · 14:57</div>
+            <div class="body">
+              i like fallout themes, miami vice with the neon, cyberpunk etc.
+              where are all our other capabilities? we were gonna pipe apps.
+            </div>
+          </div>
+        </div>
+
+        <div class="msg-row agent">
+          <div class="av">A</div>
+          <div>
+            <div class="who">phantom · agent</div>
+            <div class="body">
+              pivoting. this canvas is the answer — every app requests real estate
+              via <code>SpatialPreference</code> and renders within it using the
+              shared <code>Tokens</code>. switch themes top-right; every surface
+              redraws live. apps publish events on the bus; the dashed lines
+              between them are the live <code>pub/sub</code> topics.
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- input bar lives inside the agent app body, docked bottom -->
+      <div class="input-bar">
+        <span class="prompt">▸</span>
+        <input placeholder="ask the agent · ⌘K commands · ⌘T summons a terminal" />
+        <span class="caption">↵ send</span>
+      </div>
+    </div>
+
+    <!-- ─── APP B · Inspector (event log + DAG) ─── -->
+    <div class="app slot-inspector" id="app-inspector">
+      <div class="app-head">
+        <span class="ico">◇</span>
+        <span class="name">INSPECTOR</span>
+        <span class="sep">·</span>
+        <span class="title">event log</span>
+        <span class="meta">3 agents · 137 events</span>
+      </div>
+      <div class="app-body inspector-body">
+        <div class="inspector-tabs">
+          <span class="on">EVENTS</span>
+          <span>AGENTS</span>
+          <span>DAG</span>
+          <span>DENIALS</span>
+        </div>
+        <div class="event-log">
+          <div><span class="ts">21:42:32</span> <span class="ev-info">brain.observer</span> Initial SetupAdapter registered (AppId 1)</div>
+          <div><span class="ts">21:42:32</span> <span class="ev-agent">agent.spawn</span> ag-1 replacing focused 1 (no split)</div>
+          <div><span class="ts">21:42:32</span> <span class="ev-ok">agent.regist</span> AppId 2 · agent_id=1 · claude-opus-4-7</div>
+          <div><span class="ts">21:42:34</span> <span class="ev-tool">tool.use</span> edit_file · adapters/agent.rs</div>
+          <div><span class="ts">21:42:34</span> <span class="ev-tool">tool.use</span> run_command · cargo build</div>
+          <div><span class="ts">21:42:47</span> <span class="ev-ok">tool.result</span> build green · 12.34s</div>
+          <div><span class="ts">21:42:48</span> <span class="ev-tool">tool.use</span> take_screenshot</div>
+          <div><span class="ts">21:43:01</span> <span class="ev-agent">agent.progress</span> ag-1 · pane fills window ✓</div>
+          <div><span class="ts">21:43:12</span> <span class="ev-sys">brain.tick</span> ooda · idle 14s · quiet</div>
+          <div><span class="ts">21:43:18</span> <span class="ev-warn">denial</span> openai-tts http 429</div>
+          <div><span class="ts">21:43:24</span> <span class="ev-info">loop.tick</span> triager · 0 new issues</div>
+          <div><span class="ts">21:43:25</span> <span class="ev-info">loop.tick</span> implementer · 1 in flight</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── APP C · Monitor (sysmon) ─── -->
+    <div class="app slot-monitor" id="app-monitor">
+      <div class="app-head">
+        <span class="ico">▣</span>
+        <span class="name">MONITOR</span>
+        <span class="sep">·</span>
+        <span class="title">sysmon · 250 ms</span>
+        <span class="meta">M3 Max</span>
+      </div>
+      <div class="app-body">
+        <div class="gauges">
+          <div class="gauge">
+            <div class="lbl">cpu</div>
+            <div class="val">23%</div>
+            <div class="bar"><span style="width:23%"></span></div>
+          </div>
+          <div class="gauge">
+            <div class="lbl">mem</div>
+            <div class="val">14.2 / 64 GB</div>
+            <div class="bar"><span style="width:22%"></span></div>
+          </div>
+          <div class="gauge">
+            <div class="lbl">gpu</div>
+            <div class="val">8% · Metal</div>
+            <div class="bar"><span style="width:8%"></span></div>
+          </div>
+          <div class="gauge">
+            <div class="lbl">net</div>
+            <div class="val">↓ 412 K/s</div>
+            <div class="bar"><span style="width:14%"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── PUB/SUB WIRE OVERLAY ─── -->
+    <svg class="wires" preserveAspectRatio="none" viewBox="0 0 100 100">
+      <!-- agent → inspector: agent.event topic -->
+      <path class="wire" d="M 60 25 C 70 25 70 12 75 12" stroke="var(--role-agent)"></path>
+      <text x="68" y="20" text-anchor="middle">agent.event</text>
+      <!-- agent → monitor: tool.metric topic -->
+      <path class="wire" d="M 60 70 C 70 70 70 78 75 78" stroke="var(--role-tool)"></path>
+      <text x="68" y="76" text-anchor="middle">tool.metric</text>
+      <!-- monitor → inspector: sysmon.stats topic -->
+      <path class="wire" d="M 88 60 C 92 50 92 30 88 25" stroke="var(--status-info)"></path>
+      <text x="95" y="45" text-anchor="middle" transform="rotate(90, 95, 45)">sysmon.stats</text>
+    </svg>
+
+  </div>
+
+  <!-- ─── bottom status bar (StatusBar widget) ─── -->
+  <div class="status-bar">
+    <span><strong>badass-cli</strong></span>
+    <span>·</span>
+    <span class="mono">feat/fleet-builder-integration-shim</span>
+    <span class="spacer"></span>
+    <span class="dot"></span>
+    <span>brain · ollama + claude</span>
+    <span>·</span>
+    <span>3 loops</span>
+    <span>·</span>
+    <span>21:43:42</span>
+  </div>
+
+</div>
+
+<script>
+  // theme switcher
+  const root = document.documentElement;
+  const buttons = document.querySelectorAll('.theme-switch .sw');
+  buttons.forEach(b => {
+    b.addEventListener('click', () => {
+      buttons.forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      root.setAttribute('data-theme', b.dataset.set);
+    });
+  });
+</script>
+
+</body>
+</html>

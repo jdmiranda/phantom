@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phantom · Concept C · Canvas</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:         #f4f1ec;        /* paper */
+    --bg-grid:    rgba(0,0,0,0.04);
+    --card:       #ffffff;
+    --card-line:  rgba(15,17,21,0.08);
+    --card-shadow: 0 1px 2px rgba(15,17,21,0.05), 0 8px 32px rgba(15,17,21,0.06);
+    --ink:        #0f1115;
+    --ink-soft:   #4a4e57;
+    --ink-mute:   #8d919a;
+    --accent:     #2a5dff;        /* electric ink */
+    --accent-soft: rgba(42,93,255,0.08);
+    --ok:         #1c8b4f;
+    --warn:       #b88200;
+    --danger:     #c43a3a;
+    --thread-line: rgba(15,17,21,0.10);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; height:100%; }
+  body {
+    background:
+      radial-gradient(2px 2px at 20px 20px, var(--bg-grid) 1px, transparent 1px) 0 0 / 24px 24px,
+      var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13.5px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .frame { display: flex; flex-direction: column; min-height: 100vh; }
+
+  /* ─── top strip ─── */
+  .strip {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--card-line);
+    background: rgba(244,241,236,0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .strip .brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    font-size: 11px;
+    color: var(--ink);
+  }
+  .strip .brand .dot {
+    display: inline-block;
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--ok);
+    margin-right: 8px; transform: translateY(-1px);
+  }
+  .strip .crumb {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--ink-soft); font-size: 11.5px;
+  }
+  .strip .crumb strong { color: var(--ink); font-weight: 500; }
+  .strip .spacer { flex: 1; }
+  .strip .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--card-line); border-radius: 999px;
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--ink-soft);
+    background: var(--card);
+  }
+  .strip .chip.accent { color: var(--accent); border-color: rgba(42,93,255,0.25); background: var(--accent-soft); }
+  .kbd {
+    border: 1px solid var(--card-line);
+    border-radius: 4px; padding: 1px 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px; color: var(--ink-soft);
+    background: var(--card);
+  }
+
+  /* ─── canvas (the spatial idea) ─── */
+  .canvas-wrap {
+    flex: 1;
+    overflow-y: auto;
+    padding: 48px 24px 220px;
+  }
+  .thread-card {
+    max-width: 760px; margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--card-line);
+    border-radius: 18px;
+    box-shadow: var(--card-shadow);
+    overflow: hidden;
+  }
+
+  .thread-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--card-line);
+    background: linear-gradient(180deg, rgba(42,93,255,0.04), transparent);
+  }
+  .thread-head .icon {
+    width: 30px; height: 30px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: white;
+    display: grid; place-items: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700; font-size: 12px;
+  }
+  .thread-head .title {
+    font-weight: 600; color: var(--ink); font-size: 15px;
+  }
+  .thread-head .sub {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--ink-mute); font-size: 11.5px;
+  }
+  .thread-head .meta { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .thread-body { padding: 24px 28px 28px; }
+
+  .msg { margin-bottom: 22px; display: grid; grid-template-columns: 28px 1fr; gap: 14px; }
+  .msg:last-child { margin-bottom: 0; }
+  .msg .avatar {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    display: grid; place-items: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; font-size: 11px;
+    color: white;
+  }
+  .msg.user .avatar { background: var(--ink); }
+  .msg.agent .avatar { background: var(--accent); }
+  .msg.tool .avatar { background: var(--ok); }
+
+  .msg .col .head {
+    display: flex; align-items: baseline; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .msg .col .who { font-weight: 600; color: var(--ink); font-size: 13px; }
+  .msg.user .who { color: var(--ink); }
+  .msg.agent .who { color: var(--accent); }
+  .msg.tool .who { color: var(--ok); }
+  .msg .col .when { color: var(--ink-mute); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+
+  .msg .col .body { color: var(--ink); font-size: 14.5px; line-height: 1.65; }
+  .msg .col .body code:not(pre code) {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .msg .col .body pre {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    background: #0f1115; color: #d3d7df;
+    padding: 14px 16px;
+    border-radius: 10px;
+    margin: 12px 0;
+    overflow-x: auto;
+    line-height: 1.55;
+  }
+  .msg .col .body pre .ok { color: #5fff7a; }
+  .msg .col .body pre .info { color: #5fc4ff; }
+  .msg .col .body pre .dim { color: #707782; }
+  .msg .col .body pre .accent { color: #ffb663; }
+
+  /* tool callout (inline, lighter than a pre block) */
+  .callout {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent-soft);
+    border: 1px solid rgba(42,93,255,0.2);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--ink);
+    margin: 4px 0;
+  }
+  .callout .ico { color: var(--accent); }
+  .callout .ms { color: var(--ink-mute); margin-left: 6px; font-size: 11px; }
+
+  /* spatial hint: side-canvas card for "another thread on the canvas" */
+  .ghost-thread {
+    max-width: 760px;
+    margin: 24px auto 0;
+    border: 1px dashed var(--thread-line);
+    border-radius: 18px;
+    padding: 28px 32px;
+    color: var(--ink-mute);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(255,255,255,0.4);
+  }
+  .ghost-thread .plus { color: var(--accent); font-size: 16px; }
+
+  /* ─── input dock ─── */
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 20px 24px 28px;
+    background: linear-gradient(180deg, rgba(244,241,236,0) 0%, var(--bg) 35%);
+    pointer-events: none;
+  }
+  .dock-inner { max-width: 760px; margin: 0 auto; pointer-events: auto; }
+  .input {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--card);
+    border: 1px solid var(--card-line);
+    border-radius: 14px;
+    padding: 14px 18px;
+    box-shadow: var(--card-shadow);
+  }
+  .input:focus-within { border-color: rgba(42,93,255,0.4); box-shadow: var(--card-shadow), 0 0 0 3px rgba(42,93,255,0.08); }
+  .input .prompt { color: var(--accent); font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+  .input input {
+    flex: 1; background: transparent; border: 0; outline: 0;
+    color: var(--ink); font: inherit;
+  }
+  .input input::placeholder { color: var(--ink-mute); }
+  .input .hint {
+    color: var(--ink-mute);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px; display: flex; gap: 6px;
+  }
+  .input .hint .kbd { background: transparent; }
+
+  /* ─── scrollbar ─── */
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(15,17,21,0.10); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(15,17,21,0.20); }
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <!-- ─── top strip ─── -->
+  <div class="strip">
+    <span class="brand"><span class="dot"></span>PHANTOM</span>
+    <span class="crumb"><strong>badass-cli</strong> · feat/fleet-builder-integration-shim</span>
+    <span class="spacer"></span>
+    <span class="chip accent">● 1 thread live</span>
+    <span class="chip">claude-opus-4-7</span>
+    <span class="chip">3 loops</span>
+    <span class="kbd">⌘K</span>
+  </div>
+
+  <!-- ─── canvas with one active thread + a ghost thread (future spatial growth) ─── -->
+  <div class="canvas-wrap">
+
+    <div class="thread-card">
+
+      <div class="thread-head">
+        <div class="icon">A</div>
+        <div>
+          <div class="title">Agent · cold-launch full-window fix</div>
+          <div class="sub">started 14:54 · 8 steps · 4 done</div>
+        </div>
+        <div class="meta">
+          <span class="chip">48.2k tok</span>
+          <span class="chip">$0.41</span>
+        </div>
+      </div>
+
+      <div class="thread-body">
+
+        <div class="msg user">
+          <div class="avatar">YOU</div>
+          <div class="col">
+            <div class="head"><span class="who">You</span><span class="when">14:54</span></div>
+            <div class="body">
+              Make the agent pane fill the window on launch. I've asked three times.
+            </div>
+          </div>
+        </div>
+
+        <div class="msg agent">
+          <div class="avatar">PH</div>
+          <div class="col">
+            <div class="head"><span class="who">Phantom</span><span class="when">14:54</span></div>
+            <div class="body">
+              The arbiter clamps the agent pane to <code>preferred_size: (80, 20)</code>
+              ≈ 680 px on your Retina display. That's the void below the content.
+              Patching <code>spatial_preference</code> to drop the cap and bump the
+              preferred to a "larger than any monitor" sentinel so the
+              single-adapter case eats all available height.
+              <div class="callout"><span class="ico">▸</span> edit_file · adapters/agent.rs<span class="ms">12 ms</span></div>
+              <div class="callout"><span class="ico">▸</span> cargo build --release --bin phantom<span class="ms">12.3 s</span></div>
+<pre><span class="dim">[21:42:32]</span> Initial SetupAdapter registered (AppId 1) — agent is king
+<span class="dim">[21:42:32]</span> Agent replacing focused adapter 1 <span class="info">(no split)</span>
+<span class="dim">[21:42:32]</span> <span class="ok">Agent adapter registered (AppId 2)</span></pre>
+              Cold-launch verified — pane fills the window. Next: chrome.
+            </div>
+          </div>
+        </div>
+
+        <div class="msg user">
+          <div class="avatar">YOU</div>
+          <div class="col">
+            <div class="head"><span class="who">You</span><span class="when">14:57</span></div>
+            <div class="body">
+              the text looks like ass. doesn't look modern at all.
+            </div>
+          </div>
+        </div>
+
+        <div class="msg agent">
+          <div class="avatar">PH</div>
+          <div class="col">
+            <div class="head"><span class="who">Phantom</span><span class="when">14:57</span></div>
+            <div class="body">
+              Agreed. <code>AgentAdapter::render</code> emits raw quads with no
+              chrome, spacing rhythm, or status strip. Pivoting: three concept
+              directions for review, then I'll wire the chosen tokens into
+              <code>phantom-ui</code>.
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- spatial hint: the canvas can hold MORE threads later -->
+    <div class="ghost-thread">
+      <span class="plus">+</span>
+      <span>open another thread on the canvas — review-PR · debug-loop · spec-new-feature</span>
+    </div>
+
+  </div>
+
+  <!-- ─── input dock ─── -->
+  <div class="dock">
+    <div class="dock-inner">
+      <div class="input">
+        <span class="prompt">▸</span>
+        <input placeholder="ask the active thread — or ⌘K to open a new one" />
+        <span class="hint">
+          <span class="kbd">↵</span>
+          <span>send</span>
+          <span class="kbd">⌘N</span>
+          <span>new thread</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
