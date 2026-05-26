@@ -590,12 +590,12 @@ found 0 vulnerabilities
         assert!(deser["command_type"].is_object() || deser["command_type"].is_string());
     }
     // =======================================================================
-    // parse_with_timing
+    // parse_with_command_timing
     // =======================================================================
 
     #[test]
-    fn parse_with_timing_stores_elapsed_ms() {
-        let out = SemanticParser::parse_with_timing(
+    fn parse_with_command_timing_stores_elapsed_ms() {
+        let out = SemanticParser::parse_with_command_timing(
             "echo hello",
             "hello",
             "",
@@ -606,13 +606,13 @@ found 0 vulnerabilities
     }
 
     #[test]
-    fn parse_with_timing_same_result_as_parse() {
+    fn parse_with_command_timing_same_result_as_parse() {
         let cmd = "cargo build";
         let stderr = "error[E0308]: mismatched types
   --> src/main.rs:10:5
 ";
         let base = SemanticParser::parse(cmd, "", stderr, Some(101));
-        let timed = SemanticParser::parse_with_timing(cmd, "", stderr, Some(101), 999);
+        let timed = SemanticParser::parse_with_command_timing(cmd, "", stderr, Some(101), 999);
 
         // All fields except duration_ms must match.
         assert_eq!(timed.command, base.command);

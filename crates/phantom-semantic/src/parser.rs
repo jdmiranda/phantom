@@ -252,10 +252,15 @@ impl SemanticParser {
         }
     }
 
-    /// Like [] but records  in
-    /// [].
+    /// Like [`SemanticParser::parse`] but stamps the caller-measured command
+    /// duration `elapsed_ms` into [`ParsedOutput::duration_ms`].
+    ///
+    /// Use this when the shell layer has already measured how long the command
+    /// ran (wall-clock) and wants to embed that into the parsed result for the
+    /// brain scoring loop.  This is distinct from [`parse_with_timing`], which
+    /// measures the latency of the parse operation itself.
     #[must_use]
-    pub fn parse_with_timing(
+    pub fn parse_with_command_timing(
         cmd: &str,
         stdout: &str,
         stderr: &str,
@@ -374,11 +379,11 @@ impl SemanticParser {
             }
             CommandType::Docker(sub) => {
                 let ct = Self::parse_docker_output(sub, combined);
-                (ct, vec![], vec![])
+                (ct, vec![], vec![], vec![])
             }
             CommandType::Npm(sub) => {
                 let ct = Self::parse_npm_output(sub, combined);
-                (ct, vec![], vec![])
+                (ct, vec![], vec![], vec![])
             }
             _ => Self::fallback_content_type(combined),
         }
