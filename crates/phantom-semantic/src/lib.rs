@@ -589,4 +589,72 @@ found 0 vulnerabilities
         assert_eq!(deser["command"], "git status");
         assert!(deser["command_type"].is_object() || deser["command_type"].is_string());
     }
+    // =======================================================================
+    // parse_with_command_timing
+    // =======================================================================
+
+    #[test]
+    fn parse_with_command_timing_stores_elapsed_ms() {
+        let out = SemanticParser::parse_with_command_timing(
+            "echo hello",
+            "hello",
+            "",
+            Some(0),
+            42,
+        );
+        assert_eq!(out.duration_ms, Some(42));
+    }
+
+    #[test]
+    fn parse_with_command_timing_same_result_as_parse() {
+        let cmd = "cargo build";
+        let stderr = "error[E0308]: mismatched types
+  --> src/main.rs:10:5
+";
+        let base = SemanticParser::parse(cmd, "", stderr, Some(101));
+        let timed = SemanticParser::parse_with_command_timing(cmd, "", stderr, Some(101), 999);
+
+        // All fields except duration_ms must match.
+        assert_eq!(timed.command, base.command);
+        assert_eq!(timed.command_type, base.command_type);
+        assert_eq!(timed.exit_code, base.exit_code);
+        assert_eq!(timed.content_type, base.content_type);
+        assert_eq!(timed.errors.len(), base.errors.len());
+        assert_eq!(timed.warnings.len(), base.warnings.len());
+        assert_eq!(timed.raw_output, base.raw_output);
+        // duration_ms differs.
+        assert_eq!(timed.duration_ms, Some(999));
+    }
+
+    // =======================================================================
+    // classification_notes
+    // =======================================================================
+
+    #[test]
+    fn classification_notes_populated_on_json_failure() {
+        // Starts with '{' but is not valid JSON.
+        let stdout = "{not valid json at all";
+        let out = SemanticParser::parse("echo test", stdout, "", Some(0));
+        assert_eq!(out.content_type, ContentType::PlainText);
+        assert!(
+            out.classification_notes
+                .iter()
+                .any(|n| n.starts_with("json_parse_failed")),
+            "expected json_parse_failed note, got: {:?}",
+            out.classification_notes
+        );
+    }
+
+    #[test]
+    fn classification_notes_empty_on_clean_parse() {
+        let stdout = r#"{"name": "phantom", "version": "0.1.0"}"#;
+        let out = SemanticParser::parse("echo test", stdout, "", Some(0));
+        assert_eq!(out.content_type, ContentType::Json);
+        assert!(
+            out.classification_notes.is_empty(),
+            "expected no notes on successful JSON parse, got: {:?}",
+            out.classification_notes
+        );
+    }
+
 }

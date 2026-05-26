@@ -785,5 +785,6 @@ fn error_output(msg: &str) -> phantom_semantic::ParsedOutput {
         warnings: vec![],
         duration_ms: Some(1000),
         raw_output: msg.into(),
+        classification_notes: vec![],
     }
 }

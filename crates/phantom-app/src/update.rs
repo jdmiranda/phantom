@@ -796,6 +796,7 @@ impl App {
                                 warnings: Vec::new(),
                                 duration_ms: None,
                                 raw_output: String::new(),
+                                classification_notes: Vec::new(),
                             });
                         Some(AiEvent::CommandComplete(parsed))
                     }
@@ -1870,6 +1871,7 @@ mod tests {
                 warnings: Vec::new(),
                 duration_ms: None,
                 raw_output: String::new(),
+                classification_notes: Vec::new(),
             }
         }
 
