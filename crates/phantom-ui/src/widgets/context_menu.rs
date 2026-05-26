@@ -293,45 +293,44 @@ impl Widget for ContextMenu {
         let mh = self.menu_height();
         let (mx, my) = self.clamped_origin_from(mw, mh, rect);
 
-        let mut quads = Vec::new();
-
-        // 1. Background.
-        quads.push(QuadInstance {
-            pos: [mx, my],
-            size: [mw, mh],
-            color: t.colors.surface_raised,
-            border_radius: 0.0,
-        });
-
-        // 2. Border edges.
-        // Top
-        quads.push(QuadInstance {
-            pos: [mx, my],
-            size: [mw, border],
-            color: t.colors.chrome_frame,
-            border_radius: 0.0,
-        });
-        // Bottom
-        quads.push(QuadInstance {
-            pos: [mx, my + mh - border],
-            size: [mw, border],
-            color: t.colors.chrome_frame,
-            border_radius: 0.0,
-        });
-        // Left
-        quads.push(QuadInstance {
-            pos: [mx, my],
-            size: [border, mh],
-            color: t.colors.chrome_frame,
-            border_radius: 0.0,
-        });
-        // Right
-        quads.push(QuadInstance {
-            pos: [mx + mw - border, my],
-            size: [border, mh],
-            color: t.colors.chrome_frame,
-            border_radius: 0.0,
-        });
+        // 1. Background + 2. Border edges (top, bottom, left, right).
+        let mut quads = vec![
+            // Background
+            QuadInstance {
+                pos: [mx, my],
+                size: [mw, mh],
+                color: t.colors.surface_raised,
+                border_radius: 0.0,
+            },
+            // Top border
+            QuadInstance {
+                pos: [mx, my],
+                size: [mw, border],
+                color: t.colors.chrome_frame,
+                border_radius: 0.0,
+            },
+            // Bottom border
+            QuadInstance {
+                pos: [mx, my + mh - border],
+                size: [mw, border],
+                color: t.colors.chrome_frame,
+                border_radius: 0.0,
+            },
+            // Left border
+            QuadInstance {
+                pos: [mx, my],
+                size: [border, mh],
+                color: t.colors.chrome_frame,
+                border_radius: 0.0,
+            },
+            // Right border
+            QuadInstance {
+                pos: [mx + mw - border, my],
+                size: [border, mh],
+                color: t.colors.chrome_frame,
+                border_radius: 0.0,
+            },
+        ];
 
         // 3 & 4. Per-item quads.
         let mut cursor_y = my + border;
