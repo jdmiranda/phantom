@@ -35,6 +35,10 @@ pub use divider::{Divider, Orientation};
 pub mod panel;
 pub use panel::{Panel, TITLE_BAR_HEIGHT};
 
+// Shared app-head chrome — `ico · NAME · title … meta` strip.
+pub mod app_head;
+pub use app_head::{APP_HEAD_HEIGHT_CELLS, AppHead, AppHeadDot};
+
 // Issue #16 — 8px vertical scrollbar with token-driven colors.
 pub mod scrollbar;
 pub use scrollbar::{SCROLLBAR_WIDTH, ScrollState, ScrollbarAction, Scrollbar, track_y_to_offset};

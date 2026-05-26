@@ -456,10 +456,71 @@ pub fn pipboy() -> Theme {
     }
 }
 
+/// **Cyber** — Cyberpunk neon.
+///
+/// Black void with hot magenta (#FF007A) primary and electric cyan (#00FFD0)
+/// accent. Maximum saturation, heavy bloom, strong chromatic aberration —
+/// the look from the mockup's cyber swatch.
+#[must_use]
+pub fn cyber() -> Theme {
+    let magenta = hex(0xFF, 0x00, 0x7A);
+    let cyan = hex(0x00, 0xFF, 0xD0);
+    let dim_magenta = hex(0xA0, 0x00, 0x50);
+    let bg = hex(0x05, 0x02, 0x0A);
+
+    Theme {
+        name: "Cyber".into(),
+        colors: TerminalColors {
+            foreground: magenta,
+            background: bg,
+            cursor: hex(0xFF, 0x44, 0xAA),
+            selection: hexa(0xFF, 0x00, 0x7A, 0.25),
+            ansi: [
+                // Normal 0-7
+                hex(0x05, 0x02, 0x0A), // 0  black
+                hex(0xFF, 0x00, 0x7A), // 1  red (magenta-primary)
+                hex(0x00, 0xFF, 0xD0), // 2  green (cyan-accent)
+                hex(0xFF, 0xDD, 0x33), // 3  yellow (acid)
+                hex(0x66, 0x33, 0xFF), // 4  blue (electric violet)
+                hex(0xFF, 0x33, 0xCC), // 5  magenta (hot pink)
+                hex(0x33, 0xDD, 0xFF), // 6  cyan (ice blue)
+                hex(0xDD, 0xCC, 0xEE), // 7  white (lilac)
+                // Bright 8-15
+                hex(0x14, 0x08, 0x22), // 8  bright black
+                hex(0xFF, 0x55, 0xAA), // 9  bright red
+                hex(0x55, 0xFF, 0xDD), // 10 bright green
+                hex(0xFF, 0xFF, 0x66), // 11 bright yellow
+                hex(0x99, 0x66, 0xFF), // 12 bright blue
+                hex(0xFF, 0x77, 0xEE), // 13 bright magenta
+                hex(0x77, 0xEE, 0xFF), // 14 bright cyan
+                hex(0xEE, 0xDD, 0xFF), // 15 bright white
+            ],
+        },
+        shader_params: ShaderParams {
+            scanline_intensity: 0.10,
+            bloom_intensity: 0.55,        // strong neon bloom
+            chromatic_aberration: 0.10,   // pronounced RGB split
+            curvature: 0.04,
+            vignette_intensity: 0.20,
+            noise_intensity: 0.02,
+            glow_color: rgb3(cyan),       // cyan-tinted bloom against magenta text
+        },
+        ui_colors: UiColors {
+            status_bar_bg: hex(0x02, 0x01, 0x06),
+            status_bar_fg: dim_magenta,
+            tab_bar_bg: hex(0x02, 0x01, 0x06),
+            tab_bar_fg: hex(0x66, 0x00, 0x33),
+            tab_active_bg: hex(0x14, 0x04, 0x1C),
+            tab_active_fg: magenta,
+            border: hex(0x44, 0x00, 0x22),
+        },
+    }
+}
+
 /// Look up a built-in theme by name (case-insensitive).
 ///
 /// Returns `None` if the name doesn't match any built-in theme.
-#[must_use] 
+#[must_use]
 pub fn builtin_by_name(name: &str) -> Option<Theme> {
     match name.to_ascii_lowercase().as_str() {
         "phosphor" => Some(phosphor()),
@@ -468,12 +529,15 @@ pub fn builtin_by_name(name: &str) -> Option<Theme> {
         "blood" => Some(blood()),
         "vapor" | "vaporwave" => Some(vapor()),
         "pipboy" | "pip-boy" => Some(pipboy()),
+        "cyber" | "cyberpunk" => Some(cyber()),
         _ => None,
     }
 }
 
 /// Names of all built-in themes, in presentation order.
-pub const BUILTIN_NAMES: &[&str] = &["Phosphor", "Amber", "Ice", "Blood", "Vapor", "Pip-Boy"];
+pub const BUILTIN_NAMES: &[&str] = &[
+    "Phosphor", "Amber", "Ice", "Blood", "Vapor", "Pip-Boy", "Cyber",
+];
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -558,6 +622,14 @@ mod tests {
         validate_theme(&blood());
         validate_theme(&vapor());
         validate_theme(&pipboy());
+        validate_theme(&cyber());
+    }
+
+    #[test]
+    fn cyber_resolves_by_name() {
+        assert_eq!(builtin_by_name("cyber").unwrap().name, "Cyber");
+        assert_eq!(builtin_by_name("CYBER").unwrap().name, "Cyber");
+        assert_eq!(builtin_by_name("cyberpunk").unwrap().name, "Cyber");
     }
 
     #[test]
