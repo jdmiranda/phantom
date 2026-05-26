@@ -72,7 +72,7 @@ impl TokenBucket {
 
 // ── SlidingWindow ─────────────────────────────────────────────────────────────
 
-/// A sliding-window counter for per-connection message rate limiting.
+/// A fixed (tumbling) window counter for per-connection message rate limiting.
 ///
 /// Within each `window` period the counter allows at most `max_count`
 /// messages. When a new message arrives after the window has expired, the
@@ -81,6 +81,18 @@ impl TokenBucket {
 /// Unlike [`TokenBucket`] this does **not** smooth bursts — it grants the full
 /// `max_count` budget at the start of every window and denies all further
 /// messages until the window turns over.
+///
+/// # Tumbling vs. truly sliding
+///
+/// Despite the historic type name, this is a *fixed-window* (tumbling)
+/// counter, not a per-message-timestamp sliding window. The practical
+/// consequence is that a sender can deliver `max_count` messages near the end
+/// of one window and another `max_count` near the start of the next, yielding
+/// a short-lived burst of up to `2 * max_count` across the boundary. This is
+/// an acceptable trade-off for the relay (the absolute ceiling is still
+/// bounded and the implementation is allocation-free), but callers should
+/// size `max_count` and `window` with the worst-case `2 * max_count` burst
+/// in mind.
 #[derive(Debug)]
 pub struct SlidingWindow {
     /// Maximum messages allowed per window.
@@ -119,7 +131,11 @@ impl SlidingWindow {
             self.message_count = 0;
             self.window_start = now;
         }
-        self.message_count += 1;
+        // `saturating_add` ensures a sustained-attack peer that pushes the
+        // counter to `u32::MAX` cannot wrap it back to zero and earn a fresh
+        // budget for free. Once saturated the comparison stays `false` until
+        // the window resets.
+        self.message_count = self.message_count.saturating_add(1);
         self.message_count <= self.max_count
     }
 

@@ -74,7 +74,8 @@ pub enum RelayMessage {
     /// The connection will be closed with WS close code 1008 (Policy
     /// Violation) immediately after this reply is sent.
     SlidingWindowExceeded { peer_id: PeerId },
-    /// The relay has reached `MAX_CONNECTIONS` and cannot accept new peers.
+    /// The relay has reached its configured `max_peers` cap and cannot accept
+    /// new peers.
     ///
     /// The connection will be closed with WS close code 1013 (Try Again
     /// Later) immediately after this reply is sent.

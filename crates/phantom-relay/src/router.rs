@@ -14,19 +14,27 @@ use crate::grant::{CapabilityClass, Grant, PeerGrantRegistry};
 use crate::rate_limit::{SlidingWindow, TokenBucket};
 use crate::session::SessionHandle;
 
-/// Maximum payload size (in serialized bytes) for any single envelope.
+/// Maximum on-wire envelope size (in serialized JSON bytes) for any single
+/// `Send` frame.
 ///
-/// Envelopes whose `payload` field serializes to more than this are rejected
-/// with [`RelayMessage::MessageTooLarge`] and the connection is closed with
-/// WS close code 1009 (Message Too Large).
+/// The check measures the *full* serialized [`ClientMessage::Send`] envelope —
+/// including `from`, `to`, `sig`, `nonce`, and JSON structure overhead — not
+/// just the `payload` field, so an attacker cannot smuggle frames materially
+/// larger than the stated limit by inflating non-payload fields.
+///
+/// Envelopes whose full serialization exceeds this value are rejected with
+/// [`RelayMessage::MessageTooLarge`] and the connection is closed with WS
+/// close code 1009 (Message Too Large).
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576; // 1 MiB
 
-/// Maximum number of simultaneously connected peers.
+/// Default ceiling on simultaneously connected peers.
 ///
-/// When the active session count equals this value, [`Router::register`]
-/// returns an error and the server closes the incoming connection with WS
-/// close code 1013 (Try Again Later).
-pub const MAX_CONNECTIONS: usize = 1_000;
+/// This is the value used by `Router::default()` (and by tests / callers that
+/// do not pass an explicit `max_peers` to [`Router::new`]). The actual
+/// enforced cap is whatever was passed to [`Router::new`]; see
+/// [`Router::max_peers`] for the live value, which is what `server.rs`
+/// consults for the WS 1013 early-exit path.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 1_000;
 
 /// Sliding-window message limit per connection.
 const WINDOW_MAX_MESSAGES: u32 = 100;
@@ -61,16 +69,6 @@ impl std::io::Write for CountingWriter {
     }
 }
 
-/// Measure the serialized JSON size of a payload in bytes without allocating
-/// a `String`. Returns `usize::MAX` on serialization failure so the caller's
-/// size-cap check treats the payload as oversized.
-fn measure_payload_bytes(payload: &serde_json::Value) -> usize {
-    let mut counter = CountingWriter { bytes: 0 };
-    match serde_json::to_writer(&mut counter, payload) {
-        Ok(()) => counter.bytes,
-        Err(_) => usize::MAX,
-    }
-}
 
 /// Returns `true` when [`ENV_REQUIRE_SIGNATURES`] is set to a truthy value.
 fn deny_unsigned_from_env() -> bool {
@@ -163,10 +161,20 @@ impl Router {
         &self.grants
     }
 
+    /// Currently configured peer cap.
+    ///
+    /// This is the live value consulted by `server.rs` for the WS 1013
+    /// early-exit path so the cap stays consistent with the value passed to
+    /// [`Router::new`] — no hardcoded constant.
+    #[must_use]
+    pub fn max_peers(&self) -> usize {
+        self.max_peers
+    }
+
     /// Register a peer's session handle.
     ///
-    /// Returns an error when `max_peers` (or [`MAX_CONNECTIONS`]) is already
-    /// reached, or the peer is already registered.
+    /// Returns an error when `max_peers` is already reached, or the peer is
+    /// already registered.
     pub fn register(&mut self, handle: SessionHandle) -> Result<()> {
         if self.sessions.len() >= self.max_peers {
             bail!("max_peers ({}) reached", self.max_peers);
@@ -194,6 +202,11 @@ impl Router {
         self.sessions.remove(peer_id);
         // Keep the rate bucket so a reconnecting peer inherits its state —
         // prevents burst abuse via rapid reconnects.
+        //
+        // The sliding window, however, is intentionally fresh-per-connection
+        // (see `register`), so a stale entry serves no policy purpose and
+        // would just leak one HashMap slot per disconnect. Drop it here.
+        self.sliding_windows.remove(peer_id);
     }
 
     /// Route a [`ClientMessage`] from `sender`.
@@ -243,19 +256,27 @@ impl Router {
 
         // --- message size cap ---
         //
-        // Measure the serialized wire size of the payload. If it exceeds
-        // MAX_MESSAGE_BYTES we reject with MessageTooLarge (WS 1009). This
-        // check runs before signature validation and rate-limit accounting so
-        // no tokens are burned on oversized frames.
+        // Measure the serialized wire size of the *full* `ClientMessage::Send`
+        // frame (not just the `payload` field). Measuring only the payload
+        // would let an attacker smuggle frames materially larger than the
+        // stated limit by inflating non-payload fields (`from`, `to`, `sig`,
+        // `nonce`, JSON structure overhead).
         //
         // We stream into a `CountingWriter` rather than `serde_json::to_string`
-        // so that large (~1 MiB) payloads do not allocate a transient String
-        // just to read its length.
-        let payload_bytes = measure_payload_bytes(&envelope.payload);
-        if payload_bytes > MAX_MESSAGE_BYTES {
+        // so that large (~1 MiB) frames do not allocate a transient String
+        // just to read its length. The envelope is not moved/consumed here;
+        // it remains available for delivery below.
+        let wire_bytes = {
+            let mut counter = CountingWriter { bytes: 0 };
+            // `to_writer` failure is treated as oversized so the cap still fires.
+            serde_json::to_writer(&mut counter, &ClientMessage::Send(envelope.clone()))
+                .map(|()| counter.bytes)
+                .unwrap_or(usize::MAX)
+        };
+        if wire_bytes > MAX_MESSAGE_BYTES {
             warn!(
                 "router: oversized envelope from peer {} ({} bytes > {} limit); closing 1009",
-                sender, payload_bytes, MAX_MESSAGE_BYTES
+                sender, wire_bytes, MAX_MESSAGE_BYTES
             );
             return RelayMessage::MessageTooLarge {
                 peer_id: sender.clone(),
@@ -365,15 +386,14 @@ impl Router {
             return RelayMessage::PeerNotFound { peer_id: to };
         };
 
-        // Serialize and enqueue.  A send error means the destination task
-        // has already exited; treat it as "not found".
+        // Serialize and enqueue. A send error means the destination task has
+        // already exited; treat it as "not found".
         let Ok(json) = serde_json::to_string(&ClientMessage::Send(envelope)) else {
             return RelayMessage::Error {
                 code: "serialization_error".into(),
                 message: "failed to serialize envelope".into(),
             };
         };
-
         if dest.tx.try_send(json).is_err() {
             warn!(
                 "router: failed to enqueue to {}; channel full or closed",
@@ -1026,6 +1046,42 @@ mod tests {
 
     // ── Message-size cap tests ────────────────────────────────────────────────
 
+    /// The size check measures the *full* `ClientMessage::Send` JSON, not
+    /// just the payload field. A payload whose own bytes are at the limit
+    /// but whose wrapping envelope pushes the wire frame past the limit must
+    /// be rejected. Regression guard for the original review finding that
+    /// the previous payload-only measurement let attackers smuggle frames
+    /// ~10% larger than the stated cap by inflating non-payload fields.
+    #[test]
+    fn full_envelope_size_check_catches_payload_at_exact_limit() {
+        let mut router = Router::new(100, 10);
+        let (_, ha) = make_session("alice");
+        let (_, hb) = make_session("bob");
+        router.register(ha).unwrap();
+        router.register(hb).unwrap();
+        grant_relay(&mut router, "alice");
+        grant_relay(&mut router, "bob");
+
+        // Build a payload that is itself exactly MAX_MESSAGE_BYTES when
+        // serialized as a bare JSON string (quotes included). The wrapping
+        // ClientMessage::Send envelope adds `from`, `to`, `sig`, `nonce`,
+        // and JSON structure overhead — definitely > MAX_MESSAGE_BYTES once
+        // wrapped — so the full-envelope check must reject it.
+        let inner = "x".repeat(MAX_MESSAGE_BYTES - 2); // `"..."` adds 2 bytes
+        let envelope = Envelope {
+            from: PeerId("alice".into()),
+            to: PeerId("bob".into()),
+            payload: serde_json::json!(inner),
+            sig: "sig".into(),
+            nonce: Uuid::new_v4(),
+        };
+        let reply = router.route(&PeerId("alice".into()), ClientMessage::Send(envelope));
+        assert!(
+            matches!(reply, RelayMessage::MessageTooLarge { .. }),
+            "full-envelope size check must reject a payload-at-limit + wrapper, got {reply:?}"
+        );
+    }
+
     /// A payload that serializes to more than MAX_MESSAGE_BYTES must be
     /// rejected with `MessageTooLarge`. The connection is then closed by
     /// server.rs with WS 1009; the router itself just returns the variant.
@@ -1147,7 +1203,42 @@ mod tests {
         );
     }
 
+    /// On disconnect, the sliding window must be dropped — it is fresh per
+    /// connection and a stale entry would just leak a HashMap slot per
+    /// disconnect. The rate bucket is intentionally kept (prevents
+    /// reconnect-burst abuse) but the sliding window is not.
+    #[test]
+    fn unregister_removes_sliding_window_but_keeps_rate_bucket() {
+        let mut router = Router::new(100, 10);
+        let (_, ha) = make_session("alice");
+        router.register(ha).unwrap();
+        // Both maps should have an entry for alice after register.
+        assert!(router.sliding_windows.contains_key(&PeerId("alice".into())));
+        assert!(router.rate_buckets.contains_key(&PeerId("alice".into())));
+
+        router.unregister(&PeerId("alice".into()));
+
+        assert!(
+            !router.sliding_windows.contains_key(&PeerId("alice".into())),
+            "unregister must drop the sliding window so it does not leak per disconnect"
+        );
+        assert!(
+            router.rate_buckets.contains_key(&PeerId("alice".into())),
+            "unregister must keep the rate bucket to deter reconnect-burst abuse"
+        );
+    }
+
     // ── Connection-limit tests ────────────────────────────────────────────────
+
+    /// `Router::max_peers()` must return the value passed to `Router::new`,
+    /// not a hardcoded constant. server.rs reads this for the WS 1013
+    /// early-exit path so the cap stays consistent with what `register`
+    /// enforces.
+    #[test]
+    fn max_peers_getter_reflects_constructor_argument() {
+        let r = Router::new(100, 42);
+        assert_eq!(r.max_peers(), 42);
+    }
 
     /// When the session count equals max_peers, `register` must fail.
     /// server.rs interprets this as a 1013 close.
