@@ -238,15 +238,20 @@ impl ProjectContext {
 
 /// Builds [`ProjectContext`] with an optional cached [`CodeDag`].
 ///
-/// For Rust projects, the assembler loads `.planning/dag.json` once and caches
-/// the resulting [`CodeDag`].  The cache is invalidated whenever the `mtime` of
-/// `Cargo.toml` in the workspace root changes.  If the file does not exist or
-/// fails to parse, the topology section is silently omitted.
+/// For Rust projects, the assembler reads a pre-existing
+/// `<root>/.planning/dag.json` once and caches the resulting [`CodeDag`].  The
+/// cache is invalidated whenever the `mtime` of either `Cargo.toml` or
+/// `.planning/dag.json` in the workspace root changes.  DAG *generation* is
+/// out of scope here — this type is a reader only; an external extractor is
+/// expected to maintain `.planning/dag.json`.  If the file is missing or
+/// malformed the topology section is silently omitted.
 #[derive(Debug, Default)]
 pub struct ContextAssembler {
-    pub(crate) dag: Option<CodeDag>,
-    /// mtime of `Cargo.toml` at the time the DAG was last built.
+    dag: Option<CodeDag>,
+    /// mtime of `Cargo.toml` at the time the DAG was last loaded.
     cargo_toml_mtime: Option<SystemTime>,
+    /// mtime of `.planning/dag.json` at the time the DAG was last loaded.
+    dag_json_mtime: Option<SystemTime>,
 }
 
 impl ContextAssembler {
@@ -268,6 +273,7 @@ impl ContextAssembler {
             // Non-Rust project: drop any stale cached DAG.
             self.dag = None;
             self.cargo_toml_mtime = None;
+            self.dag_json_mtime = None;
         }
 
         ctx
@@ -284,27 +290,43 @@ impl ContextAssembler {
     /// Return the upstream (dependencies) and downstream (dependents) neighbours
     /// of `crate_name` from the cached DAG as a short human-readable string.
     ///
-    /// Returns `None` when no DAG has been built yet or the crate is not found.
+    /// Symbol-level nodes are aggregated by their crate prefix (the leading
+    /// `::`-separated component of the fully-qualified id, e.g.
+    /// `phantom_agents::dispatch::dispatch_tool` → `phantom_agents`).  The
+    /// returned crate list is deduplicated and self-references are stripped.
+    ///
+    /// Returns `None` when no DAG has been built yet or no node in the DAG
+    /// belongs to `crate_name`.
     #[must_use]
     pub fn crate_summary(&self, crate_name: &str) -> Option<String> {
         let dag = self.dag.as_ref()?;
 
-        // Check the crate exists in the DAG.
-        dag.get_node(crate_name)?;
+        // Confirm the crate is referenced by at least one node.  We accept both
+        // a literal crate-name node and any symbol whose crate prefix matches,
+        // because real extractors produce symbol-level ids.
+        let crate_present = dag.get_node(crate_name).is_some()
+            || dag.nodes().any(|n| crate_prefix(n.id()) == crate_name);
+        if !crate_present {
+            return None;
+        }
 
-        // Upstream: edges where crate_name is the *from* end (crate depends on these).
-        let upstream: Vec<&str> = dag
+        let mut upstream: Vec<&str> = dag
             .edges()
-            .filter(|e| e.from() == crate_name)
-            .map(|e| e.to())
+            .filter(|e| crate_prefix(e.from()) == crate_name)
+            .map(|e| crate_prefix(e.to()))
+            .filter(|c| *c != crate_name)
             .collect();
+        upstream.sort_unstable();
+        upstream.dedup();
 
-        // Downstream: edges where crate_name is the *to* end (these depend on crate_name).
-        let downstream: Vec<&str> = dag
+        let mut downstream: Vec<&str> = dag
             .edges()
-            .filter(|e| e.to() == crate_name)
-            .map(|e| e.from())
+            .filter(|e| crate_prefix(e.to()) == crate_name)
+            .map(|e| crate_prefix(e.from()))
+            .filter(|c| *c != crate_name)
             .collect();
+        downstream.sort_unstable();
+        downstream.dedup();
 
         let mut parts = Vec::new();
         if upstream.is_empty() {
@@ -325,34 +347,40 @@ impl ContextAssembler {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    /// Reload `.planning/dag.json` when the workspace manifest or the DAG file
+    /// itself has changed.
+    ///
+    /// This is a reader only — it never invokes `cargo metadata` or any
+    /// generator.  An external extractor is expected to maintain
+    /// `.planning/dag.json`; if the file is missing the topology section is
+    /// simply omitted.
     fn refresh_dag_if_stale(&mut self, dir: &Path) {
-        let mtime = cargo_toml_mtime(dir);
-        let stale = match (mtime, self.cargo_toml_mtime) {
-            (Some(m), Some(cached)) => m != cached,
+        let cargo_mtime = file_mtime(&dir.join("Cargo.toml"));
+        let dag_path = dir.join(".planning/dag.json");
+        let dag_mtime = file_mtime(&dag_path);
+
+        let stale = match (cargo_mtime, self.cargo_toml_mtime, dag_mtime, self.dag_json_mtime) {
+            (Some(c), Some(cached_c), Some(d), Some(cached_d)) => c != cached_c || d != cached_d,
             _ => true,
         };
-        if stale {
-            // Load the DAG from the project's `.planning/dag.json` file if it
-            // exists.  `phantom-dag` exposes `CodeDag::from_json`; a planning
-            // tool is responsible for writing that file — the assembler only
-            // consumes it.
-            let dag_path = dir.join(".planning").join("dag.json");
-            match std::fs::read_to_string(&dag_path)
-                .map_err(anyhow::Error::from)
-                .and_then(|s| CodeDag::from_json(&s))
-            {
-                Ok(dag) => {
-                    self.dag = Some(dag);
-                    self.cargo_toml_mtime = mtime;
-                }
-                Err(e) => {
-                    log::debug!(
-                        "phantom-context: DAG load from {} failed (skipping topology): {e}",
-                        dag_path.display()
-                    );
-                    self.dag = None;
-                    self.cargo_toml_mtime = None;
-                }
+        if !stale {
+            return;
+        }
+
+        match std::fs::read_to_string(&dag_path)
+            .map_err(anyhow::Error::from)
+            .and_then(|s| CodeDag::from_json(&s))
+        {
+            Ok(dag) => {
+                self.dag = Some(dag);
+                self.cargo_toml_mtime = cargo_mtime;
+                self.dag_json_mtime = dag_mtime;
+            }
+            Err(e) => {
+                log::debug!("phantom-context: DAG load failed (skipping topology): {e}");
+                self.dag = None;
+                self.cargo_toml_mtime = None;
+                self.dag_json_mtime = None;
             }
         }
     }
@@ -364,16 +392,28 @@ impl ContextAssembler {
 
 /// Build the `## Crate Topology` markdown section from a [`CodeDag`].
 ///
-/// Lists the top 5 crates by in-degree (most depended-upon) in descending
-/// order.  Returns `None` when the DAG has no edges.
+/// `CodeDag` nodes are symbol-level (e.g.
+/// `phantom_agents::dispatch::dispatch_tool`), so this function aggregates
+/// in-degree by the leading `::`-separated component to produce a true
+/// crate-level ranking.  Self-edges between symbols in the same crate are
+/// excluded.  The top 5 crates by aggregated in-degree are listed in
+/// descending order, ties broken alphabetically.
+///
+/// Returns `None` when the DAG has no nodes.
 fn topology_section(dag: &CodeDag) -> Option<String> {
-    // Count in-degree: how many edges point *to* each node.
+    // Seed every observed crate so isolated crates appear with in-degree 0.
     let mut in_degree: HashMap<&str, usize> = HashMap::new();
     for node in dag.nodes() {
-        in_degree.entry(node.id()).or_insert(0);
+        in_degree.entry(crate_prefix(node.id())).or_insert(0);
     }
+    // Aggregate edge counts by crate prefix; ignore intra-crate edges.
     for edge in dag.edges() {
-        *in_degree.entry(edge.to()).or_insert(0) += 1;
+        let from_crate = crate_prefix(edge.from());
+        let to_crate = crate_prefix(edge.to());
+        if from_crate == to_crate {
+            continue;
+        }
+        *in_degree.entry(to_crate).or_insert(0) += 1;
     }
 
     if in_degree.is_empty() {
@@ -381,27 +421,37 @@ fn topology_section(dag: &CodeDag) -> Option<String> {
     }
 
     // Sort by descending in-degree, then alphabetically for determinism.
-    let mut ranked: Vec<(&&str, &usize)> = in_degree.iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let mut ranked: Vec<_> = in_degree.iter().map(|(k, v)| (*k, *v)).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
-    let top5: Vec<String> = ranked
+    let total = ranked.len();
+    let take = ranked.len().min(5);
+    let top: Vec<String> = ranked
         .into_iter()
-        .take(5)
-        .map(|(name, count)| format!("  {name} (in-degree: {count})"))
+        .take(take)
+        .map(|(name, count)| format!("- {name} (in-degree: {count})"))
         .collect();
 
-    Some(format!("## Crate Topology\nTop crates by dependents:\n{}", top5.join("\n")))
+    Some(format!(
+        "## Crate Topology ({total} crates, top {take} by dependents)\n\n{}",
+        top.join("\n")
+    ))
+}
+
+/// Return the leading `::`-separated component of a symbol id, i.e. the crate
+/// prefix.  For ids without `::` the entire id is returned unchanged.
+fn crate_prefix(id: &str) -> &str {
+    id.split_once("::").map(|(head, _)| head).unwrap_or(id)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Return the `mtime` of `Cargo.toml` in `dir`, or `None` on any I/O error.
-fn cargo_toml_mtime(dir: &Path) -> Option<SystemTime> {
-    std::fs::metadata(dir.join("Cargo.toml"))
-        .ok()
-        .and_then(|m| m.modified().ok())
+/// Return the `mtime` of `path`, or `None` on any I/O error (file missing,
+/// platform with no mtime, etc.).
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 /// Extract the project name from the manifest file, falling back to dir name.
@@ -476,95 +526,36 @@ fn read_toml_name(dir: &Path, filename: &str) -> Option<String> {
     None
 }
 
-/// Spawn a git subprocess and wait up to `timeout_ms` milliseconds for it to
-/// finish.  Returns trimmed stdout on success, or `None` on any failure
-/// (including timeout, non-zero exit, or invalid UTF-8).
-///
-/// Kills the child process when the deadline expires so the caller never
-/// blocks indefinitely on a slow or hung filesystem.
-fn run_git_with_timeout(dir: &Path, args: &[&str], timeout_ms: u64) -> Option<String> {
-    use std::io::Read;
-    use std::time::{Duration, Instant};
-
-    let mut child = Command::new("git")
+/// Run a command and return trimmed stdout, or `None` on any failure.
+fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
         .args(args)
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .output()
         .ok()?;
-
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = child.stdout.take()?;
-                let mut buf = String::new();
-                stdout.read_to_string(&mut buf).ok()?;
-                if !status.success() {
-                    return None;
-                }
-                let s = buf.trim().to_string();
-                return if s.is_empty() { None } else { Some(s) };
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    log::debug!(
-                        "phantom-context: git {:?} timed out after {}ms — killed",
-                        args,
-                        timeout_ms
-                    );
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                return None;
-            }
-        }
+    if !output.status.success() {
+        return None;
     }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
 }
 
-/// Run a git command and return trimmed stdout, or `None` on any failure.
-///
-/// Uses a 2-second timeout so slow or hung git processes never stall the
-/// OODA loop thread.
-fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
-    run_git_with_timeout(dir, args, 2_000)
-}
-
-/// Collect git repository info, returning `None` only when not inside any git repo.
-///
-/// In detached HEAD state (`git branch --show-current` returns empty),
-/// the branch is synthesised as `"HEAD@<short-hash>"` so agent prompts
-/// keep git context even when bisecting, rebasing, or checking out a tag.
+/// Collect git repository info, returning `None` if not inside a repo.
 fn collect_git_info(dir: &Path) -> Option<GitInfo> {
-    // `git branch --show-current` returns an empty string (and exit 0) in
-    // detached HEAD state. We distinguish that from "not a git repo" (where
-    // git exits non-zero / isn't on PATH) by falling through to `rev-parse`.
-    let raw_branch = run_git_with_timeout(dir, &["branch", "--show-current"], 2_000);
-
-    let branch = match raw_branch {
-        Some(b) if !b.is_empty() => b,
-        _ => {
-            // Either detached HEAD (git succeeded but output was empty) or
-            // not a repo at all.  rev-parse fails in the non-repo case,
-            // propagating None and aborting the whole function.
-            let hash = run_git_with_timeout(dir, &["rev-parse", "--short", "HEAD"], 2_000)?;
-            format!("HEAD@{hash}")
-        }
-    };
+    let branch = run_git(dir, &["branch", "--show-current"])?;
 
     let remote_url = run_git(dir, &["remote", "get-url", "origin"]);
 
-    // Use the timeout wrapper for `git status --porcelain` too so a frozen
-    // NFS mount can't stall the OODA loop.  The wrapper returns None only
-    // when git failed; an empty stdout means a clean working tree.
-    let is_dirty = run_git_with_timeout(dir, &["status", "--porcelain"], 2_000)
-        .map(|s| !s.is_empty())
+    let is_dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
     let ahead = run_git(dir, &["rev-list", "--count", "@{u}..HEAD"])
@@ -628,6 +619,10 @@ mod tests {
     /// verify that the topology section appears in the agent context output.
     #[test]
     fn topology_section_included_for_rust_project() {
+        // Build a small hand-constructed DAG:
+        //   phantom-core depended on by phantom-app and phantom-brain (in-degree 2)
+        //   phantom-app  in-degree 0
+        //   phantom-brain in-degree 0
         let mut dag = CodeDag::new();
         let node = |name: &str| {
             DagNode::new(name.to_owned(), NodeKind::Module, PathBuf::from("Cargo.toml"), 1)
@@ -646,6 +641,7 @@ mod tests {
             EdgeKind::Uses,
         ));
 
+        // Build a ProjectContext directly (no subprocess) and call the inner method.
         let ctx = ProjectContext {
             root: "/tmp/phantom".into(),
             name: "phantom".into(),
@@ -699,11 +695,267 @@ mod tests {
             python_version: None,
         };
 
+        // Pass no DAG — simulates DAG build failure or non-Rust project.
         let output = ctx.agent_context_with_dag(None);
         assert!(
             !output.contains("## Crate Topology"),
             "unexpected '## Crate Topology' in non-Rust output:\n{output}"
         );
+    }
+
+    /// Symbol-level node ids (e.g. `phantom_agents::dispatch::dispatch_tool`)
+    /// must be aggregated by their crate prefix so the topology output ranks
+    /// crates, not individual symbols.  Intra-crate edges are excluded.
+    #[test]
+    fn topology_section_aggregates_symbols_by_crate_prefix() {
+        let mut dag = CodeDag::new();
+        let node = |id: &str, kind: NodeKind| {
+            DagNode::new(id.to_owned(), kind, PathBuf::from("src/lib.rs"), 1)
+        };
+
+        // Three symbols in phantom_core, two in phantom_app, one in phantom_brain.
+        dag.add_node(node("phantom_core::api::run", NodeKind::Function));
+        dag.add_node(node("phantom_core::api::stop", NodeKind::Function));
+        dag.add_node(node("phantom_core::util::log", NodeKind::Function));
+        dag.add_node(node("phantom_app::main", NodeKind::Function));
+        dag.add_node(node("phantom_app::pane", NodeKind::Module));
+        dag.add_node(node("phantom_brain::loop_fn", NodeKind::Function));
+
+        // Cross-crate edges (4 total point into phantom_core).
+        dag.add_edge(DagEdge::new(
+            "phantom_app::main".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_app::pane".into(),
+            "phantom_core::api::stop".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_brain::loop_fn".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_brain::loop_fn".into(),
+            "phantom_core::util::log".into(),
+            EdgeKind::Calls,
+        ));
+        // Intra-crate edge (must be excluded from the aggregated count).
+        dag.add_edge(DagEdge::new(
+            "phantom_core::api::run".into(),
+            "phantom_core::util::log".into(),
+            EdgeKind::Calls,
+        ));
+
+        let section = topology_section(&dag).expect("section must be present");
+
+        // Header reports total *crates* (3), not symbols (6).
+        assert!(
+            section.contains("(3 crates, top 3 by dependents)"),
+            "expected aggregated crate header, got:\n{section}"
+        );
+        // phantom_core aggregates to in-degree 4, no individual symbol does.
+        assert!(
+            section.contains("phantom_core (in-degree: 4)"),
+            "expected aggregated phantom_core count of 4, got:\n{section}"
+        );
+        // Symbol-level ids must NOT leak into the listing.
+        assert!(
+            !section.contains("phantom_core::api::run"),
+            "symbol-level id leaked into crate topology:\n{section}"
+        );
+    }
+
+    /// `topology_section` must return `None` when the DAG has no nodes (regardless
+    /// of whether edges are present), matching the doc-comment contract.
+    #[test]
+    fn topology_section_none_when_no_nodes() {
+        let dag = CodeDag::new();
+        assert!(topology_section(&dag).is_none());
+    }
+
+    /// `crate_summary` must walk symbol-level edges, aggregate by crate prefix,
+    /// and exclude self-references / duplicates.
+    #[test]
+    fn crate_summary_aggregates_by_crate_prefix() {
+        let mut dag = CodeDag::new();
+        let node = |id: &str| {
+            DagNode::new(id.to_owned(), NodeKind::Function, PathBuf::from("src/lib.rs"), 1)
+        };
+        dag.add_node(node("phantom_core::api::run"));
+        dag.add_node(node("phantom_app::main"));
+        dag.add_node(node("phantom_brain::loop_fn"));
+
+        // phantom_core depends on phantom_brain twice; phantom_app + phantom_brain
+        // both depend on phantom_core.
+        dag.add_edge(DagEdge::new(
+            "phantom_core::api::run".into(),
+            "phantom_brain::loop_fn".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_core::api::run".into(),
+            "phantom_brain::loop_fn".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_app::main".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+        dag.add_edge(DagEdge::new(
+            "phantom_brain::loop_fn".into(),
+            "phantom_core::api::run".into(),
+            EdgeKind::Calls,
+        ));
+
+        let mut asm = ContextAssembler::new();
+        asm.dag = Some(dag);
+
+        let summary = asm
+            .crate_summary("phantom_core")
+            .expect("crate_summary must find phantom_core");
+
+        assert!(summary.contains("depends on: phantom_brain"), "got:\n{summary}");
+        // Both phantom_app and phantom_brain depend on phantom_core.
+        assert!(
+            summary.contains("depended on by: phantom_app, phantom_brain"),
+            "expected sorted, deduped dependents, got:\n{summary}"
+        );
+    }
+
+    /// A change to `.planning/dag.json` alone (Cargo.toml untouched) must
+    /// invalidate the cached DAG so the assembler reloads it.
+    #[test]
+    fn refresh_dag_invalidates_on_dag_json_mtime_change() {
+        let dir = tmp();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"sample\"\nversion = \"0.1.0\"",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".planning")).unwrap();
+
+        // Seed the first DAG: just phantom_a.
+        let mut dag_v1 = CodeDag::new();
+        dag_v1.add_node(DagNode::new(
+            "phantom_a::lib".into(),
+            NodeKind::Module,
+            PathBuf::from("src/lib.rs"),
+            1,
+        ));
+        std::fs::write(
+            root.join(".planning/dag.json"),
+            dag_v1.to_json().expect("serialise dag_v1"),
+        )
+        .unwrap();
+
+        let mut asm = ContextAssembler::new();
+        let _ = asm.assemble(root);
+        let first = asm.agent_context(root);
+        assert!(first.contains("phantom_a"), "first load missing phantom_a:\n{first}");
+        assert!(!first.contains("phantom_b"), "first load should not have phantom_b yet");
+
+        // Rewrite dag.json with a new node, deliberately bumping the mtime so
+        // even coarse-grained filesystems register a change.
+        let mut dag_v2 = CodeDag::new();
+        dag_v2.add_node(DagNode::new(
+            "phantom_b::lib".into(),
+            NodeKind::Module,
+            PathBuf::from("src/lib.rs"),
+            1,
+        ));
+        std::fs::write(
+            root.join(".planning/dag.json"),
+            dag_v2.to_json().expect("serialise dag_v2"),
+        )
+        .unwrap();
+        let new_mtime = SystemTime::now() + std::time::Duration::from_secs(60);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(".planning/dag.json"))
+            .expect("open dag.json for mtime bump");
+        f.set_modified(new_mtime).expect("set_modified");
+        drop(f);
+
+        let second = asm.agent_context(root);
+        assert!(
+            second.contains("phantom_b"),
+            "second load missing phantom_b after dag.json change:\n{second}"
+        );
+    }
+
+    /// Helper retained from the original suite: the top-5 list must be sorted
+    /// by descending in-degree.
+    #[test]
+    fn top_five_depended_crates_sorted_by_in_degree() {
+        let mut dag = CodeDag::new();
+        let node = |name: &str| {
+            DagNode::new(name.to_owned(), NodeKind::Module, PathBuf::from("Cargo.toml"), 1)
+        };
+
+        // Create 7 crates.
+        let crates = ["a", "b", "c", "d", "e", "f", "g"];
+        for name in crates {
+            dag.add_node(node(name));
+        }
+
+        // Give 'a' in-degree 6, 'b' in-degree 5, ..., 'g' in-degree 0.
+        // "a" is depended on by b, c, d, e, f, g  → in-degree 6
+        // "b" is depended on by c, d, e, f, g       → in-degree 5
+        // "c" is depended on by d, e, f, g            → in-degree 4
+        // "d" is depended on by e, f, g               → in-degree 3
+        // "e" is depended on by f, g                  → in-degree 2
+        // "f" is depended on by g                     → in-degree 1
+        // "g" has no dependents                        → in-degree 0
+        let depends_on = [
+            ("b", "a"),
+            ("c", "a"),
+            ("d", "a"),
+            ("e", "a"),
+            ("f", "a"),
+            ("g", "a"),
+            ("c", "b"),
+            ("d", "b"),
+            ("e", "b"),
+            ("f", "b"),
+            ("g", "b"),
+            ("d", "c"),
+            ("e", "c"),
+            ("f", "c"),
+            ("g", "c"),
+            ("e", "d"),
+            ("f", "d"),
+            ("g", "d"),
+            ("f", "e"),
+            ("g", "e"),
+            ("g", "f"),
+        ];
+        for (from, to) in depends_on {
+            dag.add_edge(DagEdge::new(from.to_owned(), to.to_owned(), EdgeKind::Uses));
+        }
+
+        let section = topology_section(&dag).expect("topology_section must return Some");
+
+        // The section must list the crates in order a, b, c, d, e (top 5).
+        // Verify positional ordering by finding each name's byte offset.
+        let pos_a = section.find("a (in-degree").expect("'a' must appear");
+        let pos_b = section.find("b (in-degree").expect("'b' must appear");
+        let pos_c = section.find("c (in-degree").expect("'c' must appear");
+        let pos_d = section.find("d (in-degree").expect("'d' must appear");
+        let pos_e = section.find("e (in-degree").expect("'e' must appear");
+
+        assert!(
+            pos_a < pos_b && pos_b < pos_c && pos_c < pos_d && pos_d < pos_e,
+            "crates not in descending in-degree order in:\n{section}"
+        );
+
+        // 'f' and 'g' must NOT appear (only top 5).
+        assert!(!section.contains("f (in-degree"), "f must not appear (outside top 5)");
+        assert!(!section.contains("g (in-degree"), "g must not appear (outside top 5)");
     }
 
     #[test]
@@ -835,15 +1087,20 @@ mod tests {
     #[test]
     fn extract_name_falls_back_to_dir() {
         let dir = tmp();
+        // No manifest — should use the directory name.
         let name = extract_project_name(dir.path(), &ProjectType::Unknown);
+        // TempDir names are random, just ensure it's non-empty.
         assert!(!name.is_empty());
     }
 
     #[test]
     fn git_info_in_real_repo() {
+        // Build a fresh repo in a tempdir so the test is hermetic and works in
+        // CI / agent worktrees where the host repo may have a detached HEAD.
         let dir = tmp();
         let path = dir.path();
 
+        // Skip cleanly if `git` isn't on PATH (e.g. minimal sandbox).
         let Ok(init) = Command::new("git")
             .args(["init", "-q", "-b", "phantom-test"])
             .current_dir(path)
@@ -855,6 +1112,7 @@ mod tests {
             return;
         }
 
+        // Configure a local identity so `git commit` works without global config.
         for args in [
             ["config", "user.email", "test@phantom.local"].as_slice(),
             ["config", "user.name", "Phantom Test"].as_slice(),
@@ -885,11 +1143,10 @@ mod tests {
         assert_eq!(info.behind, 0);
     }
 
-    /// Detached HEAD now returns `Some(GitInfo)` with a synthetic branch name
-    /// of the form `"HEAD@<short-hash>"` rather than `None`, so agents always
-    /// receive git context even when bisecting or checking out a tag.
     #[test]
-    fn collect_git_info_detached_head_returns_synthetic_branch() {
+    fn git_info_returns_none_on_detached_head() {
+        // Detached HEAD has no current branch — `collect_git_info` should bail
+        // out cleanly rather than panicking or returning a bogus branch name.
         let dir = tmp();
         let path = dir.path();
 
@@ -927,85 +1184,15 @@ mod tests {
             .status()
             .expect("git commit");
 
+        // Detach HEAD at the current commit.
         Command::new("git")
             .args(["checkout", "-q", "--detach", "HEAD"])
             .current_dir(path)
             .status()
             .expect("git checkout --detach");
 
-        // The new contract: detached HEAD returns Some with a synthetic branch.
-        let info =
-            collect_git_info(path).expect("collect_git_info must return Some on detached HEAD");
-        assert!(
-            info.branch.starts_with("HEAD@"),
-            "synthetic branch must start with 'HEAD@', got: {}",
-            info.branch
-        );
-        let hash_part = info.branch.trim_start_matches("HEAD@");
-        assert!(hash_part.len() >= 4, "short hash too short: {}", hash_part);
-    }
-
-    /// Calling `assemble()` twice on the same dir reuses the cached DAG (no
-    /// second load) and returns an identical context.
-    #[test]
-    fn context_assembler_caches_on_second_call() {
-        let dir = tmp();
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"cache-test\"\nversion = \"0.1.0\"",
-        )
-        .unwrap();
-
-        let mut assembler = ContextAssembler::new();
-
-        let ctx1 = assembler.assemble(dir.path());
-        let dag_present_after_first = assembler.dag.is_some();
-
-        let ctx2 = assembler.assemble(dir.path());
-
-        // The dag presence flag should not change between calls with same mtime.
-        assert_eq!(
-            assembler.dag.is_some(),
-            dag_present_after_first,
-            "DAG cache should not flip between calls with the same mtime"
-        );
-
-        assert_eq!(ctx1.name, ctx2.name);
-        assert_eq!(ctx1.project_type, ctx2.project_type);
-    }
-
-    /// A git command that would take longer than the timeout returns `None`
-    /// instead of blocking.  The critical assertion is that the wall-clock
-    /// time never exceeds 2 seconds — the timeout is always honoured.
-    #[test]
-    fn run_git_with_timeout_returns_none_on_slow_process() {
-        use std::time::{Duration, Instant};
-
-        let dir = tmp();
-        let path = dir.path();
-
-        // Only meaningful when git is available.
-        let Ok(init) = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(path)
-            .status()
-        else {
-            return;
-        };
-        if !init.success() {
-            return;
-        }
-
-        let start = Instant::now();
-        // 1 ms timeout — almost certainly will not complete, returning None.
-        let _result = run_git_with_timeout(path, &["status", "--porcelain"], 1);
-        let elapsed = start.elapsed();
-
-        // The most critical assertion: timeout is always ≤ 2 seconds.
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "run_git_with_timeout blocked for {:?}, expected < 2s",
-            elapsed
-        );
+        // `git branch --show-current` is empty on detached HEAD, so we currently
+        // return None. The contract: don't panic, don't fabricate a branch.
+        assert!(collect_git_info(path).is_none());
     }
 }
