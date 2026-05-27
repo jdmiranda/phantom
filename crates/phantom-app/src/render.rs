@@ -741,6 +741,25 @@ impl App {
         // -- Monitor panels: hstack (sysmon left, appmon right) --
         self.render_monitor_hstack(screen_size, quads, glyphs);
 
+        // -- App launcher bar (above the tab strip) --
+        // Surfaces every chrome pane as a clickable boxy chip so users can
+        // discover the panes without memorising the keybind grid.
+        if let Ok(launcher_rect) = self.layout.get_launcher_bar_rect() {
+            use phantom_ui::widgets::Widget;
+            let ctx = phantom_ui::RenderCtx::new(self.cell_size, 1.0);
+            let tokens =
+                phantom_ui::tokens::Tokens::for_theme_name(&self.theme.name.to_lowercase(), ctx)
+                    .unwrap_or_else(|| phantom_ui::tokens::Tokens::phosphor(ctx));
+            // Stateless per-frame: rebuild the launcher with the live tokens
+            // snapshot so theme switches recolor it instantly.
+            let bar = self.app_launcher.clone().with_ctx(ctx).with_tokens(tokens);
+
+            let launcher_quads = bar.render_quads(&launcher_rect);
+            quads.extend(launcher_quads);
+            let launcher_texts = bar.render_text(&launcher_rect);
+            self.render_text_segments(&launcher_texts, glyphs);
+        }
+
         // -- Tab bar --
         if let Ok(tab_rect) = self.layout.get_tab_bar_rect() {
             let tab_quads = self.tab_bar.render_quads(&tab_rect);

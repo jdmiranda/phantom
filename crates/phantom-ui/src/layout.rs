@@ -4,6 +4,14 @@
 use anyhow::{Context, Result};
 use taffy::prelude::*;
 
+/// Logical height of the launcher bar in points (before DPI scaling).
+///
+/// Mirrors `phantom_ui::widgets::APP_LAUNCHER_BAR_HEIGHT`. Duplicated here
+/// to keep `layout` from depending on `widgets` (mutual import would create
+/// a cycle in the `phantom-ui` crate root); the widget module's constant is
+/// the source of truth and any future change should bump both.
+const APP_LAUNCHER_BAR_HEIGHT_LOGICAL: f32 = 48.0;
+
 /// Logical height of the tab bar in points (before DPI scaling).
 const TAB_BAR_HEIGHT_LOGICAL: f32 = 30.0;
 
@@ -78,6 +86,8 @@ impl PaneId {
 /// The vertical structure is:
 /// ```text
 /// +---------------------------+
+/// |   App Launcher (48px)     |
+/// +---------------------------+
 /// |        Tab Bar (30px)     |
 /// +---------------------------+
 /// |                           |
@@ -91,6 +101,7 @@ impl PaneId {
 pub struct LayoutEngine {
     tree: TaffyTree,
     root: NodeId,
+    launcher_bar: NodeId,
     tab_bar: NodeId,
     content: NodeId,
     status_bar: NodeId,
@@ -108,10 +119,22 @@ impl LayoutEngine {
 
     /// Create a new layout engine with DPI scale factor applied to chrome heights.
     pub fn with_scale(scale: f32) -> Result<Self> {
+        let launcher_h = APP_LAUNCHER_BAR_HEIGHT_LOGICAL * scale;
         let tab_h = TAB_BAR_HEIGHT_LOGICAL * scale;
         let status_h = STATUS_BAR_HEIGHT_LOGICAL * scale;
 
         let mut tree = TaffyTree::new();
+
+        let launcher_bar = tree
+            .new_leaf(Style {
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Length(launcher_h),
+                },
+                flex_shrink: 0.0,
+                ..Style::default()
+            })
+            .context("failed to create launcher_bar node")?;
 
         let tab_bar = tree
             .new_leaf(Style {
@@ -166,13 +189,14 @@ impl LayoutEngine {
                     },
                     ..Style::default()
                 },
-                &[tab_bar, content, status_bar],
+                &[launcher_bar, tab_bar, content, status_bar],
             )
             .context("failed to create root node")?;
 
         Ok(Self {
             tree,
             root,
+            launcher_bar,
             tab_bar,
             content,
             status_bar,
@@ -280,6 +304,11 @@ impl LayoutEngine {
     /// Get the computed pixel rectangle for a pane.
     pub fn get_pane_rect(&self, id: PaneId) -> Result<Rect> {
         self.absolute_rect(id.0)
+    }
+
+    /// Get the computed pixel rectangle for the app launcher bar (above tabs).
+    pub fn get_launcher_bar_rect(&self) -> Result<Rect> {
+        self.absolute_rect(self.launcher_bar)
     }
 
     /// Get the computed pixel rectangle for the tab bar.
@@ -482,7 +511,13 @@ impl LayoutEngine {
     /// Chrome nodes (root, tab_bar, content, status_bar) are never pruned —
     /// they must remain even when empty to preserve the chrome structure.
     fn prune_empty_containers(&mut self, start: Option<NodeId>) -> Result<()> {
-        let chrome = [self.root, self.tab_bar, self.content, self.status_bar];
+        let chrome = [
+            self.root,
+            self.launcher_bar,
+            self.tab_bar,
+            self.content,
+            self.status_bar,
+        ];
         let mut cursor = start;
         while let Some(node) = cursor {
             // Never prune fixed chrome nodes.
@@ -553,12 +588,26 @@ mod tests {
         let mut engine = LayoutEngine::new().unwrap();
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
+        let launcher = engine.get_launcher_bar_rect().unwrap();
         let tab = engine.get_tab_bar_rect().unwrap();
         let status = engine.get_status_bar_rect().unwrap();
 
+        // Launcher pinned to the very top.
         assert!(
-            approx_eq(tab.y, 0.0),
-            "tab bar should start at top: got {}",
+            approx_eq(launcher.y, 0.0),
+            "launcher bar should start at top: got {}",
+            launcher.y
+        );
+        assert!(
+            approx_eq(launcher.height, APP_LAUNCHER_BAR_HEIGHT_LOGICAL),
+            "launcher bar height: got {}",
+            launcher.height
+        );
+
+        // Tab strip sits directly beneath the launcher.
+        assert!(
+            approx_eq(tab.y, APP_LAUNCHER_BAR_HEIGHT_LOGICAL),
+            "tab bar should sit beneath launcher: got y={}",
             tab.y
         );
         assert!(
@@ -592,11 +641,18 @@ mod tests {
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
         let rect = engine.get_pane_rect(pane).unwrap();
-        let expected_height =
-            WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
+        let expected_height = WINDOW_H
+            - APP_LAUNCHER_BAR_HEIGHT_LOGICAL
+            - TAB_BAR_HEIGHT_LOGICAL
+            - STATUS_BAR_HEIGHT_LOGICAL
+            - BOTTOM_PAD;
 
+        // Pane must clear the launcher and tab bar.
         assert!(
-            approx_eq(rect.y, TAB_BAR_HEIGHT_LOGICAL),
+            approx_eq(
+                rect.y,
+                APP_LAUNCHER_BAR_HEIGHT_LOGICAL + TAB_BAR_HEIGHT_LOGICAL
+            ),
             "pane y: got {}",
             rect.y
         );
@@ -711,7 +767,7 @@ mod tests {
         let mut engine = LayoutEngine::new().unwrap();
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
-        // Baseline: chrome nodes only (root + tab_bar + content + status_bar = 4).
+        // Baseline: chrome nodes only (root + launcher_bar + tab_bar + content + status_bar = 5).
         let chrome_baseline = engine.total_node_count();
 
         let pane = engine.add_pane().unwrap();
@@ -743,7 +799,7 @@ mod tests {
         let _pane = engine.add_pane().unwrap();
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
-        // Baseline: chrome (4) + 1 pane = 5.
+        // Baseline: chrome (5) + 1 pane = 6.
         let baseline = engine.total_node_count();
 
         for cycle in 0..1_000 {
@@ -783,7 +839,7 @@ mod tests {
         let mut engine = LayoutEngine::new().unwrap();
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
-        // Baseline: chrome nodes only (root + tab_bar + content + status_bar = 4).
+        // Baseline: chrome nodes only (root + launcher_bar + tab_bar + content + status_bar = 5).
         let chrome_baseline = engine.total_node_count();
 
         // Step 1: single leaf A added to the content area.
@@ -877,8 +933,11 @@ mod tests {
         // After clearing, the pane should fill the available space again.
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
         let rect = engine.get_pane_rect(pane).unwrap();
-        let expected_height =
-            WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
+        let expected_height = WINDOW_H
+            - APP_LAUNCHER_BAR_HEIGHT_LOGICAL
+            - TAB_BAR_HEIGHT_LOGICAL
+            - STATUS_BAR_HEIGHT_LOGICAL
+            - BOTTOM_PAD;
 
         assert!(
             approx_eq(rect.width, WINDOW_W),

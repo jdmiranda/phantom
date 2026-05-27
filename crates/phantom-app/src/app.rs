@@ -27,7 +27,7 @@ use phantom_terminal::terminal::PhantomTerminal;
 use phantom_ui::keybinds::KeybindRegistry;
 use phantom_ui::layout::LayoutEngine;
 use phantom_ui::themes::Theme;
-use phantom_ui::widgets::{KeybindHelp, SearchBar, StatusBar, TabBar};
+use phantom_ui::widgets::{AppLauncherBar, KeybindHelp, SearchBar, StatusBar, TabBar};
 
 use phantom_adapter::{DataType, EventBus, TopicId};
 use phantom_brain::brain::{BrainConfig, BrainHandle, spawn_brain};
@@ -126,6 +126,16 @@ pub struct App {
     pub(crate) theme: Theme,
     pub(crate) status_bar: StatusBar,
     pub(crate) tab_bar: TabBar,
+    /// Top-of-window discoverable launcher for every chrome pane.
+    /// Clicks route through `App::handle_launcher_action` to the existing
+    /// `toggle_*_pane` helpers in `spawn_chrome`.
+    pub(crate) app_launcher: AppLauncherBar,
+    /// Auto-screenshot hatch: counts post-Terminal frames so the first
+    /// capture isn't taken before the chrome is fully laid out.
+    pub(crate) auto_screenshot_warmup: u32,
+    /// Latch ensuring the auto-screenshot path runs at most once per
+    /// process lifetime even if the file write fails.
+    pub(crate) auto_screenshot_taken: bool,
     /// Full-screen keybind help overlay (F1 / ?).
     pub(crate) keybind_help: KeybindHelp,
 
@@ -1532,6 +1542,9 @@ impl App {
             theme,
             status_bar,
             tab_bar,
+            app_launcher: AppLauncherBar::new(),
+            auto_screenshot_warmup: 0,
+            auto_screenshot_taken: false,
             keybind_help: KeybindHelp::new(),
             search_bar: SearchBar::new(),
             boot,

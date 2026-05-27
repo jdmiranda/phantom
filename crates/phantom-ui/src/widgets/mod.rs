@@ -70,6 +70,13 @@ pub use keybind_help::KeybindHelp;
 pub mod search_bar;
 pub use search_bar::{SEARCH_BAR_HEIGHT, SearchBar, SearchBarAction, SearchKey};
 
+// Top-of-window app launcher — clickable buttons for every chrome pane so
+// the user can discover the spawnable panes without memorising keybinds.
+pub mod app_launcher_bar;
+pub use app_launcher_bar::{
+    APP_LAUNCHER_BAR_HEIGHT, AppLauncherBar, LauncherAction, LauncherItem, LauncherPaneKind,
+};
+
 // -----------------------------------------------------------------------
 // Color palette
 // -----------------------------------------------------------------------
