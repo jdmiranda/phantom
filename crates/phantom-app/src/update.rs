@@ -114,6 +114,16 @@ impl App {
             }
         }
 
+        // Boot pane lifecycle (chrome adapter wiring).
+        //
+        // When the boot cinematic is opted in (`--boot` / `skip_boot=false`),
+        // the App constructor spawns a `BootAdapter` pane via
+        // `auto_open_boot_pane`. We despawn it the moment we land in
+        // `AppState::Terminal` so the SetupAdapter / agent takes over.
+        if self.state == AppState::Terminal && self.find_first_adapter_by_type("boot").is_some() {
+            let _ = self.despawn_boot_pane();
+        }
+
         // Session resume prompt: fire exactly once on the first Terminal tick
         // when previous-session sidecar files contained live agents or goals.
         // We drain `restored_session` via `.take()` so this block runs at most
@@ -182,6 +192,12 @@ impl App {
                     or explore. What would you like to work on?"
                     .to_owned(),
             });
+
+            // Default mockup-row-1 layout: Agent + Terminal two-up split.
+            // The agent now owns the full window; split it horizontally
+            // and place a fresh TerminalAdapter on the right so the user
+            // lands on the canonical two-pane layout from `docs/mockups/apps.html`.
+            let _ = self.ensure_first_layout();
         }
 
         // Live SetupAdapter→Agent upgrade. When the user provisions an API
@@ -200,6 +216,10 @@ impl App {
                     to work on first?"
                     .to_owned(),
             });
+            // Mid-session key provision: try to establish the default
+            // two-up layout the same way we do on cold-launch. This is a
+            // no-op when first_layout_done is already true.
+            let _ = self.ensure_first_layout();
         }
 
         // Supervisor command polling (drain all pending; heartbeats are on a dedicated thread).
@@ -596,6 +616,10 @@ impl App {
 
         // Poll system monitor.
         self.sysmon.poll();
+
+        // Forward the latest sysmon stats to the visible monitor pane (if
+        // any). Cheap when no monitor pane is open.
+        self.refresh_monitor_pane();
 
         // Advance keystroke glitch animations.
         self.keystroke_fx.tick();
@@ -1305,6 +1329,71 @@ impl App {
     // -----------------------------------------------------------------------
     // Issue #323 — alt-screen split-pane lifecycle
     // -----------------------------------------------------------------------
+
+    /// Forward the App's latest sysmon stats to a visible monitor pane.
+    ///
+    /// Cheap no-op when no monitor pane is open. Otherwise:
+    /// - Activates the App's sysmon thread if it's idle (so stats start flowing).
+    /// - Once per second (throttled by `monitor_refresh_last`), builds a
+    ///   JSON payload from `self.sysmon.latest` and pushes it via the
+    ///   adapter's `set_metrics` command. The adapter copies the payload
+    ///   into its own render cache and the pane reflects the new values on
+    ///   the next frame.
+    ///
+    /// We use the existing background sysmon thread rather than spinning up
+    /// a fresh `sysinfo::System` poll on the render thread: the sysmon
+    /// thread already collects equivalent data and is cancellation-aware,
+    /// so taking a second copy would just duplicate cost.
+    pub(crate) fn refresh_monitor_pane(&mut self) {
+        let Some(monitor_app_id) = self.find_first_adapter_by_type("monitor") else {
+            return;
+        };
+
+        // Activate the App-level sysmon thread on the first call so stats
+        // start arriving for the panel.
+        if !self.sysmon_visible {
+            self.sysmon.set_active(true);
+            self.sysmon_visible = true;
+        }
+
+        // 1 Hz throttle. The sysmon thread itself ticks every 2 s, so this
+        // matches the visible cadence without bothering the adapter on
+        // every render frame.
+        let now = Instant::now();
+        if now.duration_since(self.monitor_refresh_last).as_secs_f32() < 1.0 {
+            return;
+        }
+        self.monitor_refresh_last = now;
+
+        let Some(ref stats) = self.sysmon.latest else {
+            return;
+        };
+
+        let payload = serde_json::json!({
+            "cpu_usage": stats.cpu_usage,
+            "load_avg_1m": stats.load_avg_1m,
+            "mem_usage": stats.mem_usage,
+            "mem_used_mb": stats.mem_used_mb,
+            "mem_total_mb": stats.mem_total_mb,
+            "disk_usage": stats.disk_usage,
+            "disk_used_gb": stats.disk_used_gb,
+            "disk_total_gb": stats.disk_total_gb,
+            "disk_read_kbs": stats.disk_read_kbs,
+            "disk_write_kbs": stats.disk_write_kbs,
+            "net_rx_kbs": stats.net_rx_kbs,
+            "net_tx_kbs": stats.net_tx_kbs,
+            "battery_pct": stats.battery_pct,
+            "battery_charging": stats.battery_charging,
+            "cpu_temp_c": stats.cpu_temp_c,
+            "gpu_temp_c": stats.gpu_temp_c,
+            "gpu_usage": stats.gpu_usage,
+            "net_connections": stats.net_connections,
+        });
+
+        if let Err(e) = self.coordinator.send_command(monitor_app_id, "set_metrics", &payload) {
+            log::debug!("refresh_monitor_pane: set_metrics failed: {e}");
+        }
+    }
 
     /// Poll all terminal adapters for alt-screen transitions.
     ///

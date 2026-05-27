@@ -617,6 +617,45 @@ impl App {
             return;
         }
 
+        // Cmd+Shift+M: toggle the system-resource monitor pane.
+        if modifiers.state().super_key()
+            && modifiers.state().shift_key()
+            && matches!(&event.logical_key, Key::Character(s) if s == "m" || s == "M")
+        {
+            if self.toggle_monitor_pane() {
+                self.console.system("Monitor pane toggled.");
+            } else {
+                debug!("Cmd+Shift+M: monitor pane toggle failed");
+            }
+            return;
+        }
+
+        // Cmd+Shift+W: toggle the video (watch) pane.
+        if modifiers.state().super_key()
+            && modifiers.state().shift_key()
+            && matches!(&event.logical_key, Key::Character(s) if s == "w" || s == "W")
+        {
+            if self.toggle_video_pane() {
+                self.console.system("Video pane toggled.");
+            } else {
+                debug!("Cmd+Shift+W: video pane toggle failed");
+            }
+            return;
+        }
+
+        // Cmd+Shift+A: toggle the DAG (architecture) viewer pane.
+        if modifiers.state().super_key()
+            && modifiers.state().shift_key()
+            && matches!(&event.logical_key, Key::Character(s) if s == "a" || s == "A")
+        {
+            if self.toggle_dag_viewer_pane() {
+                self.console.system("DAG viewer pane toggled.");
+            } else {
+                debug!("Cmd+Shift+A: DAG viewer pane toggle failed");
+            }
+            return;
+        }
+
         if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers)
             && let Some(action) = self.keybinds.lookup(&combo)
         {

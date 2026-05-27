@@ -134,7 +134,12 @@ impl Default for PhantomConfig {
             font_size: 14.0,
             font_family: None,
             shader_overrides: ShaderOverrides::default(),
-            skip_boot: false,
+            // Boot cinematic is opt-in (--boot). Default skip keeps fast
+            // iteration the common case; preserve the user's
+            // `feedback_phantom_boot` preference (dismiss boot for speed).
+            // The `--boot` CLI flag and `skip_boot = false` in TOML both
+            // override this to opt the cinematic back in.
+            skip_boot: true,
             demo_mode: false,
             nlp_llm_enabled: true,
             privacy_mode: false,
@@ -497,9 +502,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_skip_boot_is_false() {
+    fn default_skip_boot_is_true() {
+        // Boot cinematic is now opt-in via `--boot` / `skip_boot = false`.
         let config = PhantomConfig::default();
-        assert!(!config.skip_boot, "cold-launch default must not skip boot");
+        assert!(
+            config.skip_boot,
+            "cold-launch default must skip the boot cinematic (opt-in via --boot)"
+        );
     }
 
     #[test]
@@ -523,7 +532,7 @@ mod tests {
     #[test]
     fn parse_empty_config_yields_defaults() {
         let config = PhantomConfig::parse("").unwrap();
-        assert!(!config.skip_boot);
+        assert!(config.skip_boot, "default skip_boot must be true (opt-in via --boot)");
         assert!(!config.demo_mode);
         assert_eq!(config.theme_name, "phosphor");
     }

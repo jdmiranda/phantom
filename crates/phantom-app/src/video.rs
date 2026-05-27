@@ -79,6 +79,29 @@ pub(crate) struct VideoPlayback {
 }
 
 impl VideoPlayback {
+    /// Build a stopped placeholder VideoPlayback with no decoder thread.
+    ///
+    /// Used by `toggle_video_pane` (`Cmd+Shift+W`) to spawn a pane shell
+    /// before a file has been chosen. The pane sits idle and renders an
+    /// empty frame buffer until `start_video` replaces it with a real
+    /// decoder, or the user dismisses the pane with the same keybind.
+    pub fn placeholder() -> Self {
+        Self {
+            latest_frame: Arc::new(Mutex::new(None)),
+            alive: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            audio_process: None,
+            width: 0,
+            height: 0,
+            fps: 30.0,
+            // `finished = true` would make the adapter mark itself dead on
+            // first update and get reaped. Keep it `false` so the placeholder
+            // pane survives until the user toggles it off.
+            finished: false,
+            last_frame_time: std::time::Instant::now(),
+        }
+    }
+
     /// Start decoding a video file. Returns None if ffmpeg isn't available
     /// or the file doesn't exist.
     pub fn start(path: &Path, max_width: u32, max_height: u32) -> Option<Self> {

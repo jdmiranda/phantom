@@ -361,7 +361,8 @@ GUI / RUN OPTIONS:
     --curvature <0.0-1.0>   CRT barrel distortion
     --vignette <0.0-1.0>    Vignette intensity
     --noise <0.0-1.0>       Film grain intensity
-    --no-boot               Skip the boot sequence
+    --boot                   Show the boot cinematic (default: skip for fast iteration)
+    --no-boot                (kept for back-compat; the cinematic is skipped by default)
     --fullscreen             Start in borderless fullscreen mode (toggle with F11 / Cmd+Enter)
     --init-config            Write default config to ~/.config/phantom/config.toml
     --help                   Print this help message
@@ -916,7 +917,14 @@ fn main() -> Result<()> {
                 }
             }
             "--no-boot" => {
+                // Kept for backwards compat with scripts. The boot
+                // cinematic is now skipped by default; `--no-boot` is a
+                // no-op restated for clarity in logs.
                 config.skip_boot = true;
+            }
+            "--boot" => {
+                // Opt back into the boot cinematic. Default is skip.
+                config.skip_boot = false;
             }
             "--fullscreen" => {
                 config.fullscreen = true;

@@ -146,6 +146,16 @@ pub struct App {
     /// at a raw terminal.
     pub(crate) post_boot_agent_spawned: bool,
 
+    /// Set to `true` the first time `ensure_first_layout` runs. Gates the
+    /// mockup-row-1 "Agent + Terminal" two-up split so it fires exactly
+    /// once on the first `AppState::Terminal` transition.
+    pub(crate) first_layout_done: bool,
+
+    /// Timestamp of the last `refresh_monitor_pane` push. Throttles the
+    /// `set_metrics` command to once per second so we don't churn the
+    /// adapter every render frame (60–120 Hz).
+    pub(crate) monitor_refresh_last: Instant,
+
     /// Shared flag between the live `SetupAdapter` (when present) and the
     /// App's update loop. `SetupAdapter::update` flips this to `true` on a
     /// `NONE → SOME` `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` transition.
@@ -1624,6 +1634,20 @@ impl App {
             ooda_git_changed: false,
             mcp_registry,
             _mcp_discovery_task: mcp_discovery_task,
+            first_layout_done: false,
+            monitor_refresh_last: now,
+        })
+        .map(|mut app: Self| {
+            // Post-construction wiring for chrome adapters that need the
+            // App to exist before they can be registered.
+            //
+            // Boot cinematic: opt-in via `--boot` / `skip_boot=false`.
+            // When set, auto-open a `BootAdapter` pane that is despawned
+            // in `update.rs` on `AppState::Terminal` entry.
+            if app.state == AppState::Boot {
+                let _ = app.auto_open_boot_pane();
+            }
+            app
         })
     }
 

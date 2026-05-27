@@ -24,7 +24,7 @@ pub use agent::AgentAdapter;
 pub use alt_screen_view::AltScreenViewAdapter;
 pub use boot::BootAdapter;
 pub use console::ConsoleAdapter;
-pub use dag_viewer::DagViewerState;
+pub use dag_viewer::{DagViewerAdapter, DagViewerState};
 pub use database::DatabaseAdapter;
 pub use diff::DiffAdapter;
 pub use files_watch::FilesWatchAdapter;

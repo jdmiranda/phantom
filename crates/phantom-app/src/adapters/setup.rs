@@ -399,4 +399,96 @@ mod tests {
         assert!(!a.accepts_input());
         assert!(!a.handle_input("a"));
     }
+
+    /// Regression for the "user sets key mid-session" despawn flow.
+    ///
+    /// The App spawns an agent on the flag-flip and the
+    /// `adapter_count() == 1` replace-focused path in
+    /// `spawn_agent_pane_with_opts` removes the SetupAdapter. We can't
+    /// drive the GPU-backed App here, but we can verify the SetupAdapter
+    /// side of the contract:
+    ///
+    /// 1. Flag flips to `true` on the NONE→SOME edge.
+    /// 2. After the App consumes the flag (sets it back to `false`),
+    ///    subsequent ticks with the key still present do NOT re-flip.
+    /// 3. `update` is idempotent and crash-free even when the adapter has
+    ///    no `app_id` set yet (mid-spawn).
+    /// 4. The `probe` Commandable path also marks the flag and is callable
+    ///    multiple times.
+    #[test]
+    fn despawn_after_mid_session_key_provision_is_clean() {
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut a = SetupAdapter::new(Arc::clone(&flag));
+        // Burn through the initial probe.
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(!flag.load(Ordering::Acquire));
+
+        // User pastes a key — flag flips.
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-test"); }
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(flag.load(Ordering::Acquire));
+
+        // App consumes the flag (e.g. by spawning the agent). At this
+        // point in the real flow, this adapter is being removed; but
+        // until removal completes, additional update() calls must NOT
+        // re-flip the flag or mutate other state.
+        flag.store(false, Ordering::Release);
+        for _ in 0..10 {
+            a.update(POLL_INTERVAL + 0.1);
+        }
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "consumed flag must not re-flip while adapter survives the despawn window"
+        );
+
+        // Verify `probe` is idempotent during the same window.
+        let result = a.accept_command("probe", &json!({})).unwrap();
+        assert!(result.contains("\"key_present\":true"));
+
+        // get_state must continue to render-safe without an app_id.
+        let state = a.get_state();
+        assert_eq!(state["key_present"], true);
+
+        unsafe { std::env::remove_var("OPENAI_API_KEY"); }
+    }
+
+    /// Pulling the key back out (rare but possible — e.g. user clears
+    /// their shell env and reloads) must not lock the adapter into an
+    /// inconsistent state. A subsequent NONE→SOME transition must
+    /// re-arm the upgrade signal.
+    #[test]
+    fn flag_re_arms_after_key_is_removed_and_reset() {
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut a = SetupAdapter::new(Arc::clone(&flag));
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(!flag.load(Ordering::Acquire));
+
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-test-1"); }
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(flag.load(Ordering::Acquire));
+        flag.store(false, Ordering::Release);
+
+        // Remove the key.
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(!flag.load(Ordering::Acquire));
+
+        // Set it again — flag must re-flip.
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-test-2"); }
+        a.update(POLL_INTERVAL + 0.1);
+        assert!(
+            flag.load(Ordering::Acquire),
+            "upgrade flag must re-arm on each NONE->SOME edge"
+        );
+
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+    }
 }
