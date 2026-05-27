@@ -374,6 +374,31 @@ impl App {
             return;
         }
 
+        // Left-click on the app launcher bar: toggle the clicked pane via
+        // the existing `spawn_chrome::toggle_*_pane` helpers. The launcher
+        // sits above the tab strip so we check it before everything else
+        // chrome-layout-related.
+        if button == MouseButton::Left
+            && let Ok(launcher_rect) = self.layout.get_launcher_bar_rect()
+        {
+            use phantom_ui::widgets::LauncherAction;
+            let action = self.app_launcher.hit_test(&launcher_rect, mx, my);
+            if let LauncherAction::OpenPane(kind) = action {
+                self.handle_launcher_action(kind);
+                return;
+            }
+            // If the click landed inside the launcher rect but on padding
+            // between chips, swallow it so it doesn't fall through to pane
+            // focus / hyperlink handling underneath.
+            if mx >= launcher_rect.x
+                && mx <= launcher_rect.x + launcher_rect.width
+                && my >= launcher_rect.y
+                && my <= launcher_rect.y + launcher_rect.height
+            {
+                return;
+            }
+        }
+
         // Click-to-focus for floating panes (check first, highest z).
         if button == MouseButton::Left {
             let (fmx, fmy) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
@@ -717,6 +742,34 @@ impl App {
             MenuAction::Close => {
                 self.close_focused_pane();
             }
+        }
+    }
+
+    /// Route a click on the app-launcher bar to the matching chrome-pane
+    /// spawner. Mirrors the keybind handler in `input.rs` — clicking a chip
+    /// is equivalent to pressing the chip's keybind.
+    pub(crate) fn handle_launcher_action(&mut self, kind: phantom_ui::widgets::LauncherPaneKind) {
+        use phantom_ui::widgets::LauncherPaneKind as K;
+        match kind {
+            K::Inspector => {
+                // Inspector still uses the legacy `spawn_inspector_pane` rather
+                // than a `toggle_*` helper. We mirror the Cmd+I path here.
+                if self.spawn_inspector_pane() {
+                    self.console.system("Inspector pane opened.");
+                }
+            }
+            K::Memory => crate::spawn_chrome::toggle_memory_pane(self),
+            K::Settings => crate::spawn_chrome::toggle_settings_pane(self),
+            K::Logs => crate::spawn_chrome::toggle_logs_pane(self),
+            K::Notifications => crate::spawn_chrome::toggle_notifications_pane(self),
+            K::FilesWatch => crate::spawn_chrome::toggle_files_watch_pane(self),
+            K::Diff => crate::spawn_chrome::toggle_diff_pane(self),
+            K::Fleet => crate::spawn_chrome::toggle_fleet_pane(self),
+            K::Plugins => crate::spawn_chrome::toggle_plugins_pane(self),
+            K::Database => crate::spawn_chrome::toggle_database_pane(self),
+            K::VoiceStt => crate::spawn_chrome::toggle_voice_stt_pane(self),
+            K::KeybindsHelp => crate::spawn_chrome::toggle_keybinds_help_pane(self),
+            K::Console => crate::spawn_chrome::toggle_console_pane(self),
         }
     }
 }

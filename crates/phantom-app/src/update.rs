@@ -748,6 +748,54 @@ impl App {
 
             self.watchdog_last = now;
         }
+
+        // Auto-screenshot hatch — used by CI / agents to verify visual
+        // output without driving the GUI. When `PHANTOM_AUTO_SCREENSHOT_PATH`
+        // is set, after a short warmup we capture one screenshot to the
+        // target path and request a clean quit. Pure no-op when the env
+        // var is unset.
+        self.maybe_auto_screenshot();
+    }
+
+    /// Capture a screenshot to `PHANTOM_AUTO_SCREENSHOT_PATH` once the GUI
+    /// has had enough warmup frames to render the chrome (~30 frames at
+    /// 60fps ≈ 500ms), then request quit. No-op when the env var is unset
+    /// or the screenshot has already been taken.
+    fn maybe_auto_screenshot(&mut self) {
+        // Hold the latch on `self` so the check happens at most once per
+        // process lifetime even if the file write fails.
+        if self.auto_screenshot_taken {
+            return;
+        }
+        let Ok(path) = std::env::var("PHANTOM_AUTO_SCREENSHOT_PATH") else {
+            return;
+        };
+        // Force a continuous redraw cycle so the warmup actually advances —
+        // without this the App goes idle as soon as the scene is clean and
+        // the warmup counter never gets to 30.
+        self.force_redraw = true;
+        // Wait until we're past the boot sequence so the launcher / panes
+        // actually exist on screen.
+        if self.state != AppState::Terminal {
+            return;
+        }
+        // Give the renderer ~30 frames to warm up so the first capture is
+        // not blank.
+        self.auto_screenshot_warmup += 1;
+        if self.auto_screenshot_warmup < 30 {
+            return;
+        }
+        let target = std::path::PathBuf::from(&path);
+        match self.mcp_capture_screenshot(&target) {
+            Ok(_) => {
+                info!("PHANTOM_AUTO_SCREENSHOT_PATH: wrote {}", target.display());
+            }
+            Err(e) => {
+                warn!("PHANTOM_AUTO_SCREENSHOT_PATH: capture failed: {e}");
+            }
+        }
+        self.auto_screenshot_taken = true;
+        self.quit_requested = true;
     }
 
     // -----------------------------------------------------------------------
