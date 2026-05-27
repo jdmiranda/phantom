@@ -12,6 +12,9 @@ use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
+use phantom_ui::render_ctx::RenderCtx;
+use phantom_ui::tokens::Tokens;
+use phantom_ui::widgets::app_head::AppHead;
 
 use crate::video::VideoPlayback;
 
@@ -24,6 +27,9 @@ pub struct VideoAdapter {
     app_id: u32,
     outbox: Vec<phantom_adapter::BusMessage>,
     finished: bool,
+    /// Live design tokens. The host App refreshes via [`set_tokens`] on
+    /// theme switches.
+    tokens: Tokens,
 }
 
 // ---------------------------------------------------------------------------
@@ -39,7 +45,14 @@ impl VideoAdapter {
             app_id: 0,
             outbox: Vec::new(),
             finished: false,
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
         }
+    }
+
+    /// Update the live design tokens. The host App calls this on theme switch.
+    #[allow(dead_code)]
+    pub(crate) fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 
     /// Immutable access to the inner playback state.
@@ -98,11 +111,38 @@ impl AppCore for VideoAdapter {
 }
 
 impl Renderable for VideoAdapter {
-    fn render(&self, _rect: &Rect) -> RenderOutput {
+    fn render(&self, rect: &Rect) -> RenderOutput {
         // Actual GPU frame upload is handled in update.rs where
-        // VideoRenderer + GpuContext are available. The adapter is
-        // visual only to hold a layout pane slot.
-        RenderOutput::default()
+        // VideoRenderer + GpuContext are available. We still emit the
+        // mockup's AppHead chrome strip so the user sees `▶ VIDEO · WxH ·
+        // fps` instead of a chromeless slab while the frame uploader
+        // populates the body.
+        let t = self.tokens;
+        let ctx = if rect.cell_size.0 > 0.0 && rect.cell_size.1 > 0.0 {
+            RenderCtx::new(rect.cell_size, 1.0)
+        } else {
+            RenderCtx::fallback()
+        };
+        let title = if self.finished {
+            "playback finished".to_string()
+        } else {
+            format!("{}×{} · {:.0} fps", self.playback.width, self.playback.height, self.playback.fps)
+        };
+        let mut quads = Vec::new();
+        let mut text_segments = Vec::new();
+        let head = AppHead::new("VIDEO", title)
+            .with_icon("▶")
+            .with_ctx(ctx)
+            .with_tokens(t)
+            .focused(rect.focused);
+        head.render_into_adapter(rect, &mut quads, &mut text_segments);
+        RenderOutput {
+            quads,
+            text_segments,
+            grid: None,
+            scroll: None,
+            selection: None,
+        }
     }
 
     fn is_visual(&self) -> bool {
