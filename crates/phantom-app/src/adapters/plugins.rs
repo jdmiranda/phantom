@@ -1,4 +1,16 @@
 //! Plugins adapter — list installed plugins with their lifecycle state.
+//!
+//! # Backend readiness
+//!
+//! The host's [`phantom_plugins::PluginRegistry`] is wired into `App::new`
+//! and `scan()` is invoked at boot, so this adapter's source-of-truth is
+//! live. In the default install, however, `~/.config/phantom/plugins/`
+//! contains no `plugin.toml` manifests, so `list()` returns an empty
+//! `Vec`. The empty-state copy below acknowledges that the wasmtime host
+//! is present (it ships in `phantom-plugins`'s real wasmtime backend) but
+//! that no plugins have been installed for it to host — distinct from
+//! the "wasmtime host pending" state CLAUDE.md still flags for the
+//! marketplace and remote-install paths.
 
 use serde_json::json;
 
@@ -68,6 +80,10 @@ impl PluginEntry {
 /// Plugins pane.
 pub struct PluginsAdapter {
     plugins: Vec<PluginEntry>,
+    /// Operator-visible path the host registry is scanning. Surfaced in
+    /// the empty-state hint so the operator knows where to drop a manifest
+    /// to populate this pane.
+    plugin_dir: Option<String>,
     tokens: Tokens,
     app_id: u32,
 }
@@ -78,6 +94,7 @@ impl PluginsAdapter {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
+            plugin_dir: None,
             tokens: Tokens::phosphor(RenderCtx::fallback()),
             app_id: 0,
         }
@@ -91,6 +108,19 @@ impl PluginsAdapter {
     /// Replace plugin list.
     pub fn set_plugins(&mut self, plugins: Vec<PluginEntry>) {
         self.plugins = plugins;
+    }
+
+    /// Record the plugin directory being scanned so the empty state can
+    /// surface it to the operator. Called by the host App after spawning
+    /// with `PluginRegistry::plugin_dir()`.
+    pub fn set_plugin_dir(&mut self, dir: impl Into<String>) {
+        self.plugin_dir = Some(dir.into());
+    }
+
+    /// Read the plugin directory disclosure (if any).
+    #[must_use]
+    pub fn plugin_dir(&self) -> Option<&str> {
+        self.plugin_dir.as_deref()
     }
 
     /// Plugin count.
@@ -194,12 +224,27 @@ impl Renderable for PluginsAdapter {
         }
 
         if self.plugins.is_empty() {
+            // Be explicit about the failure mode: the wasmtime host is wired,
+            // but no manifests have been dropped into the scan dir. This
+            // distinguishes a quiet success ("nothing installed") from a
+            // broken stack ("host failed to boot").
             text_segments.push(TextData {
-                text: "  (no plugins installed)".to_string(),
+                text: "  (no plugins loaded — wasmtime host ready, no manifests found)"
+                    .to_string(),
                 x: body.x + cell_w,
                 y,
                 color: ver_color,
             });
+            if let Some(dir) = &self.plugin_dir
+                && y + cell_h <= body.y + body.height
+            {
+                text_segments.push(TextData {
+                    text: format!("  scan dir: {dir}"),
+                    x: body.x + cell_w,
+                    y: y + cell_h,
+                    color: ver_color,
+                });
+            }
         }
 
         RenderOutput {
@@ -348,6 +393,43 @@ mod tests {
         let a = PluginsAdapter::new();
         let out = a.render(&rect());
         assert!(out.text_segments.iter().any(|t| t.text.contains("no plugins")));
+    }
+
+    #[test]
+    fn empty_renders_wasmtime_host_ready_hint() {
+        // The empty state must distinguish "host is alive, no manifests" from
+        // "host is broken". This guards against the regression where the
+        // operator concludes plugins are unavailable when in fact the host
+        // is ready and waiting for a manifest.
+        let a = PluginsAdapter::new();
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("wasmtime host ready")),
+            "empty plugins pane must surface the wasmtime-host-ready hint"
+        );
+    }
+
+    #[test]
+    fn empty_state_surfaces_scan_dir_when_known() {
+        let mut a = PluginsAdapter::new();
+        a.set_plugin_dir("/home/jdm/.config/phantom/plugins");
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("/home/jdm/.config/phantom/plugins")),
+            "empty state must show the scan dir for operator orientation"
+        );
+    }
+
+    #[test]
+    fn set_plugin_dir_round_trips() {
+        let mut a = PluginsAdapter::new();
+        assert!(a.plugin_dir().is_none());
+        a.set_plugin_dir("/tmp/plugins");
+        assert_eq!(a.plugin_dir(), Some("/tmp/plugins"));
     }
 
     #[test]

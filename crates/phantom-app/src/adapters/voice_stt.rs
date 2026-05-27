@@ -3,6 +3,16 @@
 //! The adapter is "view-only" — it accepts level samples and transcript
 //! deltas via commands. A real STT backend (phantom-stt, currently 🔧)
 //! drives those commands when streaming Whisper or Deepgram lands.
+//!
+//! # Backend readiness
+//!
+//! `phantom_app::stt::SttPipeline` is built at `App::new` when
+//! `OPENAI_API_KEY` is present, so the backend tasks are alive — but
+//! mic capture is **not** wired (see `SttPipeline::push_chunk`'s
+//! `#[allow(dead_code)]` and issues #56 / #68). Until that lands, this
+//! adapter does NOT synthesise fake level bars: it shows the mic
+//! armed/disarmed indicator and the empty visualiser strip honestly,
+//! so the operator can see at a glance that nothing is listening.
 
 use std::collections::VecDeque;
 
@@ -26,6 +36,12 @@ pub struct VoiceSttAdapter {
     transcript_committed: String,
     transcript_partial: String,
     listening: bool,
+    /// Whether the operator has armed the mic in the OS-level sense
+    /// (e.g. the `SttPipeline` exists and is accepting audio). Distinct
+    /// from `listening`, which tracks the active recording state. When
+    /// `mic_armed = false`, level bars are suppressed so the pane never
+    /// shows synthetic activity while the mic is genuinely off.
+    mic_armed: bool,
     backend: String,
     tokens: Tokens,
     app_id: u32,
@@ -40,6 +56,7 @@ impl VoiceSttAdapter {
             transcript_committed: String::new(),
             transcript_partial: String::new(),
             listening: false,
+            mic_armed: false,
             backend: "mock".into(),
             tokens: Tokens::phosphor(RenderCtx::fallback()),
             app_id: 0,
@@ -82,6 +99,34 @@ impl VoiceSttAdapter {
         self.listening
     }
 
+    /// True when the mic-armed flag is set. Used by the host App to
+    /// reflect `SttPipeline::is_some()` honestly to the operator.
+    #[must_use]
+    pub fn is_mic_armed(&self) -> bool {
+        self.mic_armed
+    }
+
+    /// Reflect whether the upstream `SttPipeline` is built and ready
+    /// to receive audio. The host App passes
+    /// `app.stt.is_some()` here at adapter spawn (and whenever the
+    /// pipeline is recycled) so the pane's head meta and visualiser
+    /// suppression are tied to the live backend instead of a guess.
+    pub fn set_mic_armed(&mut self, armed: bool) {
+        self.mic_armed = armed;
+        if !armed {
+            // Clear stale levels so the empty visualiser doesn't show
+            // residual energy from a previous armed session.
+            self.levels.clear();
+        }
+    }
+
+    /// Override the backend label shown in the head subtitle. The host App
+    /// passes a label like `"openai"` or `"mock"` based on whether
+    /// `SttPipeline::build()` succeeded.
+    pub fn set_backend(&mut self, backend: impl Into<String>) {
+        self.backend = backend.into();
+    }
+
     /// True when no audio frames or transcript text are present.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -112,6 +157,7 @@ impl AppCore for VoiceSttAdapter {
         json!({
             "type": "voice-stt",
             "listening": self.listening,
+            "mic_armed": self.mic_armed,
             "backend": self.backend,
             "committed_chars": self.transcript_committed.len(),
             "partial_chars": self.transcript_partial.len(),
@@ -129,8 +175,17 @@ impl Renderable for VoiceSttAdapter {
         let mut text_segments: Vec<TextData> = Vec::new();
         let t = self.tokens;
 
-        let meta = if self.listening { "listening".to_string() } else { "idle".to_string() };
-        let dot = if self.listening { AppHeadDot::Live } else { AppHeadDot::Info };
+        // Head meta surfaces three honest states:
+        //   * actively listening
+        //   * mic armed (pipeline up, no audio yet)
+        //   * mic disarmed (no `SttPipeline` — e.g. no API key)
+        let (meta, dot) = if self.listening {
+            ("listening".to_string(), AppHeadDot::Live)
+        } else if self.mic_armed {
+            ("armed".to_string(), AppHeadDot::Info)
+        } else {
+            ("disarmed".to_string(), AppHeadDot::Info)
+        };
         let head = AppHead::new("VOICE", format!("stt · {}", self.backend))
             .with_icon("◉")
             .with_meta(meta)
@@ -196,8 +251,17 @@ impl Renderable for VoiceSttAdapter {
         }
 
         if self.is_empty() && !self.listening {
+            // Honest empty-state copy: which of the three "nothing happening"
+            // modes are we in? Each gets its own hint so the operator never
+            // sees a generic "press to dictate" when the mic literally cannot
+            // capture audio yet.
+            let hint = if !self.mic_armed {
+                "  (mic disarmed — stt backend pending mic capture)".to_string()
+            } else {
+                "  (mic armed — no audio yet)".to_string()
+            };
             text_segments.push(TextData {
-                text: "  press to dictate".to_string(),
+                text: hint,
                 x: body.x + cell_w,
                 y: transcript_y,
                 color: partial_color,
@@ -286,6 +350,14 @@ impl Commandable for VoiceSttAdapter {
                 self.backend = name.to_string();
                 Ok(json!({ "status": "ok" }).to_string())
             }
+            "set_mic_armed" => {
+                let v = args
+                    .get("armed")
+                    .and_then(|v| v.as_bool())
+                    .ok_or_else(|| anyhow::anyhow!("missing field: armed"))?;
+                self.set_mic_armed(v);
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "clear" => {
                 self.levels.clear();
                 self.transcript_committed.clear();
@@ -357,10 +429,81 @@ mod tests {
     }
 
     #[test]
-    fn empty_renders_press_to_dictate_hint() {
+    fn empty_renders_mic_disarmed_hint() {
+        // Fresh adapter has no SttPipeline arm yet — surface the disarmed
+        // honest state, not synthetic activity.
         let a = VoiceSttAdapter::new();
         let out = a.render(&rect());
-        assert!(out.text_segments.iter().any(|t| t.text.contains("press to dictate")));
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("mic disarmed")),
+            "fresh empty state must surface mic-disarmed hint"
+        );
+    }
+
+    #[test]
+    fn empty_armed_renders_no_audio_yet_hint() {
+        // Armed but no levels yet: pipeline exists, mic capture isn't
+        // delivering audio. Distinct from disarmed.
+        let mut a = VoiceSttAdapter::new();
+        a.set_mic_armed(true);
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("no audio yet")),
+            "armed empty state must surface the no-audio-yet hint"
+        );
+    }
+
+    #[test]
+    fn set_mic_armed_round_trips() {
+        let mut a = VoiceSttAdapter::new();
+        assert!(!a.is_mic_armed());
+        a.set_mic_armed(true);
+        assert!(a.is_mic_armed());
+        a.set_mic_armed(false);
+        assert!(!a.is_mic_armed());
+    }
+
+    #[test]
+    fn disarming_clears_stale_levels() {
+        // Drop levels when the mic is disarmed so the empty visualiser
+        // never carries residual energy from a previous armed session.
+        let mut a = VoiceSttAdapter::new();
+        a.set_mic_armed(true);
+        a.push_level(0.5);
+        a.push_level(0.6);
+        assert!(!a.levels.is_empty());
+        a.set_mic_armed(false);
+        assert!(a.levels.is_empty(), "disarming must clear stale levels");
+    }
+
+    #[test]
+    fn head_meta_reflects_armed_disarmed_listening() {
+        // Each of the three honest states must produce its own head meta
+        // text so the operator can read the mic state at a glance.
+        let mut a = VoiceSttAdapter::new();
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments.iter().any(|t| t.text == "disarmed"),
+            "disarmed mic must show 'disarmed' in head meta"
+        );
+
+        a.set_mic_armed(true);
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments.iter().any(|t| t.text == "armed"),
+            "armed mic must show 'armed' in head meta"
+        );
+
+        a.accept_command("start", &json!({})).unwrap();
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments.iter().any(|t| t.text == "listening"),
+            "listening mic must show 'listening' in head meta"
+        );
     }
 
     #[test]
@@ -369,6 +512,19 @@ mod tests {
         a.accept_command("start", &json!({})).unwrap();
         let out = a.render(&rect());
         assert!(out.text_segments.iter().any(|t| t.text == "listening"));
+    }
+
+    #[test]
+    fn set_backend_updates_label() {
+        let mut a = VoiceSttAdapter::new();
+        a.set_backend("openai");
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("openai")),
+            "backend label override must appear in render"
+        );
     }
 
     #[test]

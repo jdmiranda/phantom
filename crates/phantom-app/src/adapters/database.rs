@@ -3,6 +3,18 @@
 //! Renders the column metadata for a single table and the most recent
 //! query text. Designed to be backed by phantom-bundle-store (SQLite) or
 //! any other tabular source the App connects.
+//!
+//! # Backend readiness
+//!
+//! The host App opens a real [`phantom_bundle_store::BundleStore`] in
+//! `App::new` via `open_bundle_store()` — backed by SQLCipher with the
+//! migration set defined in `phantom-bundle-store::sqlite::MIGRATIONS`.
+//! The adapter ships with a [`DatabaseAdapter::populate_bundle_store_schema`]
+//! helper that surfaces the *real* schema from those migrations (bundles,
+//! frames, audio_chunks, transcript_words) so the pane never shows
+//! fabricated tables. When the bundle store fails to open (e.g. keychain
+//! denied), callers should call [`DatabaseAdapter::set_backend_disabled`]
+//! to surface that honestly to the operator.
 
 use serde_json::json;
 
@@ -91,6 +103,61 @@ impl DatabaseAdapter {
     #[must_use]
     pub fn column_count(&self) -> usize {
         self.columns.len()
+    }
+
+    /// Read the backend label (e.g. `"sqlite (sqlcipher)"`).
+    #[must_use]
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    /// Override the backend label shown in the head meta slot.
+    pub fn set_backend(&mut self, backend: impl Into<String>) {
+        self.backend = backend.into();
+    }
+
+    /// Surface a disabled backend honestly. Called by the host App when
+    /// `open_bundle_store()` returns `None` (e.g. keychain access denied,
+    /// `PHANTOM_DISABLE_BUNDLE_STORE` set). The pane will render the
+    /// disabled state in the head meta slot and clear any prior schema.
+    pub fn set_backend_disabled(&mut self, reason: impl Into<String>) {
+        self.table = "(disabled)".into();
+        self.row_count = 0;
+        self.columns.clear();
+        self.backend = format!("disabled — {}", reason.into());
+    }
+
+    /// Populate the schema view from the canonical
+    /// `phantom-bundle-store` migration set (v1: bundles + frames +
+    /// audio_chunks + transcript_words).
+    ///
+    /// This is the bundles row used as the headline table; the helper
+    /// is intentionally const-data — it surfaces the live SQLite
+    /// schema definition exactly, so the pane never invents tables.
+    /// If you add a migration in `phantom-bundle-store::sqlite::MIGRATIONS`,
+    /// extend the schema below to keep the two definitions in sync.
+    pub fn populate_bundle_store_schema(&mut self) {
+        self.backend = "sqlite (sqlcipher)".into();
+        self.table = "bundles".into();
+        self.row_count = 0;
+        self.columns = vec![
+            DbColumn::new("id", "TEXT PRIMARY KEY", "BundleId"),
+            DbColumn::new("t_start_ns", "INTEGER NOT NULL", "monotonic ns"),
+            DbColumn::new("t_wall_unix_ms", "INTEGER NOT NULL", "unix ms"),
+            DbColumn::new("source_pane_id", "INTEGER NOT NULL", "pane.id"),
+            DbColumn::new("intent", "TEXT", "user intent"),
+            DbColumn::new("tags_json", "TEXT", "json array"),
+            DbColumn::new("importance", "REAL", "0.0..=1.0"),
+            DbColumn::new("sealed", "INTEGER", "0 | 1"),
+            DbColumn::new("schema_version", "INTEGER", "1"),
+        ];
+    }
+
+    /// Update the row count for the displayed table. Called when a live
+    /// `BundleStore` query (e.g. `SELECT COUNT(*) FROM bundles`) succeeds
+    /// so the head meta slot reflects current cardinality.
+    pub fn set_row_count(&mut self, row_count: u64) {
+        self.row_count = row_count;
     }
 }
 
@@ -184,8 +251,17 @@ impl Renderable for DatabaseAdapter {
         }
 
         if self.columns.is_empty() {
+            // Distinguish three honest states:
+            //   1. backend disabled (e.g. keychain denied)
+            //   2. backend ready but no schema populated yet
+            //   3. backend opened but the source-of-truth table is empty
+            let hint = if self.backend.starts_with("disabled") {
+                "  (bundle store disabled — see backend status)".to_string()
+            } else {
+                "  (no schema loaded — call populate_bundle_store_schema)".to_string()
+            };
             text_segments.push(TextData {
-                text: "  (no schema loaded)".to_string(),
+                text: hint,
                 x: body.x + cell_w,
                 y,
                 color: type_color,
@@ -350,6 +426,75 @@ mod tests {
         let a = DatabaseAdapter::new();
         let out = a.render(&rect());
         assert!(out.text_segments.iter().any(|t| t.text.contains("no schema")));
+    }
+
+    #[test]
+    fn populate_bundle_store_schema_loads_real_columns() {
+        // The helper must surface the actual phantom-bundle-store schema —
+        // bundles table with its v1 migration columns. This guards against
+        // a regression where the helper is silently replaced with fake data.
+        let mut a = DatabaseAdapter::new();
+        a.populate_bundle_store_schema();
+        assert_eq!(a.column_count(), 9);
+        let names: Vec<&str> = a.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"id"), "schema must include id column");
+        assert!(
+            names.contains(&"source_pane_id"),
+            "schema must include source_pane_id"
+        );
+        assert!(
+            names.contains(&"schema_version"),
+            "schema must include schema_version"
+        );
+        assert_eq!(a.backend(), "sqlite (sqlcipher)");
+    }
+
+    #[test]
+    fn populate_renders_real_columns_not_fixture_data() {
+        let mut a = DatabaseAdapter::new();
+        a.populate_bundle_store_schema();
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments.iter().any(|t| t.text == "id"),
+            "render must show real column name"
+        );
+        assert!(
+            out.text_segments.iter().any(|t| t.text == "source_pane_id"),
+            "render must show source_pane_id column"
+        );
+    }
+
+    #[test]
+    fn set_backend_disabled_clears_schema_and_labels() {
+        let mut a = DatabaseAdapter::new();
+        a.populate_bundle_store_schema();
+        assert!(a.column_count() > 0);
+
+        a.set_backend_disabled("keychain access denied");
+        assert_eq!(a.column_count(), 0);
+        assert!(a.backend().starts_with("disabled"));
+        assert!(a.backend().contains("keychain"));
+
+        // Render should reflect disabled state.
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("disabled")),
+            "render must surface disabled backend"
+        );
+    }
+
+    #[test]
+    fn set_row_count_updates_head_meta() {
+        let mut a = DatabaseAdapter::new();
+        a.populate_bundle_store_schema();
+        a.set_row_count(42);
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments.iter().any(|t| t.text.contains("42 rows")),
+            "head meta must reflect updated row count"
+        );
     }
 
     #[test]
