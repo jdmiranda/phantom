@@ -278,9 +278,70 @@ impl App {
                 debug!("PrevTab redirected to FocusPrev (panes-first model)");
                 self.dispatch_action(Action::FocusPrev);
             }
+            Action::CycleTheme => {
+                self.cycle_theme();
+            }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
             }
+        }
+    }
+
+    /// Cycle to the next built-in theme and broadcast the new tokens to
+    /// every spawned chrome adapter so headers and bodies recolor in
+    /// place. Persists via the settings.toml live-reload path so the
+    /// new theme survives across restarts.
+    pub(crate) fn cycle_theme(&mut self) {
+        use phantom_ui::themes::BUILTIN_NAMES;
+        let current = self.theme.name.clone();
+        let idx = BUILTIN_NAMES
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(&current))
+            .unwrap_or(0);
+        let next = BUILTIN_NAMES[(idx + 1) % BUILTIN_NAMES.len()];
+
+        // Persist and reload via the existing settings path.
+        let mut settings = crate::settings::PhantomSettings::load();
+        settings.theme = next.to_string();
+        if let Err(e) = settings.save() {
+            log::warn!("CycleTheme: settings.save failed: {e}");
+        }
+        self.apply_config_reload(&settings);
+
+        // Broadcast a fresh Tokens snapshot to every chrome adapter we
+        // know about so the next render reflects the new palette.
+        self.broadcast_theme_to_chrome_panes();
+        info!("Theme cycled: {} → {}", current, next);
+    }
+
+    /// Push a fresh Tokens snapshot into every currently-spawned chrome
+    /// adapter via `accept_command "set_tokens"`. Concrete `set_tokens`
+    /// methods on each adapter take `Tokens` directly; since we can't pass
+    /// non-JSON values through the coordinator, we encode the active
+    /// theme name and let each adapter rebuild its snapshot inside its
+    /// command handler.
+    pub(crate) fn broadcast_theme_to_chrome_panes(&mut self) {
+        let panes = [
+            self.settings_pane_id,
+            self.notifications_pane_id,
+            self.console_pane_id,
+            self.keybinds_help_pane_id,
+            self.logs_pane_id,
+            self.files_watch_pane_id,
+            self.diff_pane_id,
+            self.memory_pane_id,
+            self.fleet_pane_id,
+            self.plugins_pane_id,
+            self.database_pane_id,
+            self.voice_stt_pane_id,
+        ];
+        let theme_name = self.theme.name.to_lowercase();
+        for pane in panes.into_iter().flatten() {
+            let _ = self.coordinator.send_command(
+                pane,
+                "set_theme_name",
+                &serde_json::json!({ "name": &theme_name }),
+            );
         }
     }
 
@@ -399,9 +460,8 @@ impl App {
             return;
         }
 
-        // F1 or bare `?` toggles the keybind help overlay.
-        // Handled before console/suggestion routing so the overlay is always
-        // reachable regardless of which sub-mode is active.
+        // F1 or bare `?` toggles the KeybindsHelp pane. Replaces the legacy
+        // overlay with the mockup's `KeybindsHelpAdapter` pane.
         if !modifiers.state().control_key()
             && !modifiers.state().alt_key()
             && !modifiers.state().super_key()
@@ -409,8 +469,7 @@ impl App {
             let is_f1 = matches!(&event.logical_key, Key::Named(NamedKey::F1));
             let is_question = matches!(&event.logical_key, Key::Character(s) if s.as_str() == "?");
             if is_f1 || is_question {
-                self.keybind_help.toggle();
-                debug!("Keybind help overlay toggled: {}", self.keybind_help.visible());
+                crate::spawn_chrome::toggle_keybinds_help_pane(self);
                 return;
             }
         }
@@ -615,6 +674,78 @@ impl App {
                 debug!("Cmd+I: inspector pane spawn failed (no focused pane)");
             }
             return;
+        }
+
+        // ── Mockup chrome pane keybinds ────────────────────────────────────
+        // Each toggles its adapter pane: spawn if closed, despawn if open.
+        // Tracked via `App::<adapter>_pane_id: Option<u32>`.
+        {
+            let mods = modifiers.state();
+            let super_only = mods.super_key() && !mods.shift_key() && !mods.alt_key() && !mods.control_key();
+            let super_shift = mods.super_key() && mods.shift_key() && !mods.alt_key() && !mods.control_key();
+            let key = &event.logical_key;
+            let is_ch = |c: &str| matches!(key, Key::Character(s) if s.eq_ignore_ascii_case(c));
+
+            // Cmd+, — Settings
+            if super_only && is_ch(",") {
+                crate::spawn_chrome::toggle_settings_pane(self);
+                return;
+            }
+            // Cmd+M — Memory inspector
+            if super_only && is_ch("m") {
+                crate::spawn_chrome::toggle_memory_pane(self);
+                return;
+            }
+            // Cmd+L — Logs
+            if super_only && is_ch("l") {
+                crate::spawn_chrome::toggle_logs_pane(self);
+                return;
+            }
+            // Cmd+Shift+N — Notifications
+            if super_shift && is_ch("n") {
+                crate::spawn_chrome::toggle_notifications_pane(self);
+                return;
+            }
+            // Cmd+Shift+F — File watch
+            if super_shift && is_ch("f") {
+                crate::spawn_chrome::toggle_files_watch_pane(self);
+                return;
+            }
+            // Cmd+Shift+G — Diff (git)
+            if super_shift && is_ch("g") {
+                crate::spawn_chrome::toggle_diff_pane(self);
+                return;
+            }
+            // Cmd+Shift+L — Fleet (nodes)
+            if super_shift && is_ch("l") {
+                crate::spawn_chrome::toggle_fleet_pane(self);
+                return;
+            }
+            // Cmd+Shift+P — Plugins
+            if super_shift && is_ch("p") {
+                crate::spawn_chrome::toggle_plugins_pane(self);
+                return;
+            }
+            // Cmd+Shift+B — Database (bundle store)
+            if super_shift && is_ch("b") {
+                crate::spawn_chrome::toggle_database_pane(self);
+                return;
+            }
+            // Cmd+Shift+V — Voice / STT
+            if super_shift && is_ch("v") {
+                crate::spawn_chrome::toggle_voice_stt_pane(self);
+                return;
+            }
+            // Cmd+Shift+K — KeybindsHelp pane (in addition to F1 overlay)
+            if super_shift && is_ch("k") {
+                crate::spawn_chrome::toggle_keybinds_help_pane(self);
+                return;
+            }
+            // Cmd+Shift+C — Console pane (the in-pane REPL adapter)
+            if super_shift && is_ch("c") {
+                crate::spawn_chrome::toggle_console_pane(self);
+                return;
+            }
         }
 
         if let Some(combo) = winit_key_to_combo_with_mods(&event, modifiers)

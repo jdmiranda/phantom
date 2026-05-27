@@ -241,6 +241,13 @@ impl InputHandler for DatabaseAdapter {
 impl Commandable for DatabaseAdapter {
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "load_schema" => {
                 let table = args
                     .get("table")

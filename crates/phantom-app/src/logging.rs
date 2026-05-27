@@ -81,6 +81,34 @@ pub const VERBOSITY_INFO: u8 = 2;
 pub const VERBOSITY_DEBUG: u8 = 3;
 pub const VERBOSITY_TRACE: u8 = 4;
 
+/// In-memory ring buffer of the most recent log lines. Sized to a constant
+/// 500 entries — enough for the LogsAdapter pane to show useful history
+/// while bounding the per-process memory footprint.
+pub const LOG_RING_CAPACITY: usize = 500;
+
+/// One log row captured in the in-memory ring buffer.
+#[derive(Debug, Clone)]
+pub struct LogRingEntry {
+    pub level: log::Level,
+    pub target: String,
+    pub message: String,
+}
+
+static LOG_RING: std::sync::OnceLock<
+    std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<LogRingEntry>>>,
+> = std::sync::OnceLock::new();
+
+/// Access the global log ring buffer. Lazily initialized.
+pub fn log_ring() -> std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<LogRingEntry>>> {
+    LOG_RING
+        .get_or_init(|| {
+            std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::with_capacity(LOG_RING_CAPACITY),
+            ))
+        })
+        .clone()
+}
+
 /// The Phantom logger.
 pub struct PhantomLogger {
     active_channels: AtomicU32,
@@ -206,6 +234,20 @@ impl log::Log for PhantomLogger {
         // Write to stderr if enabled
         if self.stderr {
             eprintln!("{msg}");
+        }
+
+        // Push into the in-memory ring buffer so the LogsAdapter pane can
+        // tail recent activity without re-parsing the log file.
+        let ring = log_ring();
+        if let Ok(mut buf) = ring.lock() {
+            if buf.len() >= LOG_RING_CAPACITY {
+                buf.pop_front();
+            }
+            buf.push_back(LogRingEntry {
+                level: record.level(),
+                target: record.target().to_string(),
+                message: record.args().to_string(),
+            });
         }
     }
 

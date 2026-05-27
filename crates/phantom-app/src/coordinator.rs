@@ -251,6 +251,25 @@ impl AppCoordinator {
 
         self.registry.ready(id);
 
+        // Wire the adapter's declared bus subscriptions. Adapters that
+        // implement `BusParticipant::subscribes_to()` get their topics
+        // resolved against the registered topic table; unknown topic
+        // names are logged and skipped so a typo can't take down the
+        // adapter.
+        let topics: Vec<String> = self
+            .registry
+            .get_adapter(id)
+            .map(|a| a.subscribes_to())
+            .unwrap_or_default();
+        for topic_name in topics {
+            match self.bus.topic_id_by_name(&topic_name) {
+                Some(tid) => self.bus.subscribe(id, tid),
+                None => log::warn!(
+                    "Adapter {id} subscribed to unregistered topic '{topic_name}' — skipped"
+                ),
+            }
+        }
+
         // Use the provided PaneId (already in the layout).
         self.pane_map.insert(pane_id, id);
         self.app_pane_map.insert(id, pane_id);

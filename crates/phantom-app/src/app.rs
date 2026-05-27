@@ -366,6 +366,44 @@ pub struct App {
     pub(crate) inspector_tokens:
         Option<std::sync::Arc<std::sync::RwLock<phantom_ui::tokens::Tokens>>>,
 
+    // -- Per-pane handles for the mockup's chrome adapters
+    //    (Settings / Notifications / Console / KeybindsHelp / Logs /
+    //    FilesWatch / Diff / Memory / Fleet / Plugins / Database / VoiceStt).
+    //
+    //    `Some(app_id)` while the pane is open, `None` after despawn. The
+    //    keybind handler toggles: spawn if `None`, despawn if `Some`.
+    pub(crate) settings_pane_id: Option<u32>,
+    pub(crate) notifications_pane_id: Option<u32>,
+    pub(crate) console_pane_id: Option<u32>,
+    pub(crate) keybinds_help_pane_id: Option<u32>,
+    pub(crate) logs_pane_id: Option<u32>,
+    pub(crate) files_watch_pane_id: Option<u32>,
+    pub(crate) diff_pane_id: Option<u32>,
+    pub(crate) memory_pane_id: Option<u32>,
+    pub(crate) fleet_pane_id: Option<u32>,
+    pub(crate) plugins_pane_id: Option<u32>,
+    pub(crate) database_pane_id: Option<u32>,
+    pub(crate) voice_stt_pane_id: Option<u32>,
+
+    /// Background filesystem watcher kept alive while the FilesWatch pane
+    /// is open. Dropped on despawn to stop the OS watch.
+    pub(crate) files_watcher: Option<crate::files_watcher::FilesWatcher>,
+
+    /// Last log-ring offset pushed into the Logs pane. Advances each frame
+    /// so the adapter only sees new entries; reset on pane spawn.
+    pub(crate) logs_watermark: usize,
+
+    /// Last observed revision of the Settings pane. When the pane mutates
+    /// any value its revision bumps; the App detects the change each
+    /// frame, persists to ~/.config/phantom/settings.toml, and triggers
+    /// a live reload.
+    pub(crate) settings_pane_revision: u64,
+
+    /// CRT post-fx master switch. When `false` the renderer scales every
+    /// shader intensity by zero regardless of theme/per-slider values.
+    /// Mutated by `SettingsAdapter::set_crt_enabled`.
+    pub(crate) crt_enabled: bool,
+
     // -- Lars fix-thread sink: shared queue of `EventKind::AgentBlocked`
     //    substrate events emitted by agent panes when their consecutive
     //    tool-call failure streak crosses the threshold. Each spawned
@@ -1554,6 +1592,22 @@ impl App {
             fullscreen_pane: None,
             inspector_snapshot: None,
             inspector_tokens: None,
+            settings_pane_id: None,
+            notifications_pane_id: None,
+            console_pane_id: None,
+            keybinds_help_pane_id: None,
+            logs_pane_id: None,
+            files_watch_pane_id: None,
+            diff_pane_id: None,
+            memory_pane_id: None,
+            fleet_pane_id: None,
+            plugins_pane_id: None,
+            database_pane_id: None,
+            voice_stt_pane_id: None,
+            files_watcher: None,
+            logs_watermark: 0,
+            settings_pane_revision: 0,
+            crt_enabled: true,
             blocked_event_sink: crate::agent_pane::new_blocked_event_sink(),
             denied_event_sink: crate::agent_pane::new_denied_event_sink(),
             quarantine_registry: std::sync::Arc::new(std::sync::Mutex::new(

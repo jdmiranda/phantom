@@ -84,12 +84,67 @@ impl Tokens {
         Self { colors, ctx }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn phosphor(ctx: RenderCtx) -> Self {
         Self {
             colors: ColorRoles::phosphor(),
             ctx,
         }
+    }
+
+    /// Build a `Tokens` snapshot derived from a [`crate::themes::Theme`].
+    ///
+    /// The phosphor `ColorRoles` are the canonical structure; this fn
+    /// overlays the theme's terminal palette onto the role table so a
+    /// theme switch visibly recolors token-driven chrome (AppHead etc).
+    /// Mappings:
+    /// - `surface_base`/`surface_recessed` ← theme background (darker
+    ///   variant for recessed)
+    /// - `text_primary`/`text_secondary`/`text_dim` ← theme foreground at
+    ///   descending alphas
+    /// - `text_accent` ← theme cursor color (typically the theme's most
+    ///   saturated highlight)
+    /// - `chrome_divider`/`chrome_frame_dim` ← theme ui_colors.border
+    /// - `status_ok`/`status_warn`/`status_danger`/`status_info` keep
+    ///   their phosphor defaults so danger always reads as red etc.
+    #[must_use]
+    pub fn for_theme(theme: &crate::themes::Theme, ctx: RenderCtx) -> Self {
+        let mut roles = ColorRoles::phosphor();
+        let bg = theme.colors.background;
+        roles.surface_base = bg;
+        // surface_recessed: subtly darker tint of bg.
+        roles.surface_recessed = [bg[0] * 1.3, bg[1] * 1.3, bg[2] * 1.3, 1.0];
+        // surface_raised: lighter than recessed.
+        roles.surface_raised = [bg[0] * 1.8, bg[1] * 1.8, bg[2] * 1.8, 1.0];
+
+        let fg = theme.colors.foreground;
+        roles.text_primary = fg;
+        roles.text_secondary = [fg[0], fg[1], fg[2], 0.78];
+        roles.text_dim = [fg[0], fg[1], fg[2], 0.55];
+        roles.text_accent = theme.colors.cursor;
+
+        let border = theme.ui_colors.border;
+        roles.chrome_divider = border;
+        roles.chrome_frame_dim = border;
+        roles.chrome_frame = border;
+        roles.chrome_frame_active = theme.colors.cursor;
+
+        roles.selection_bg = theme.colors.selection;
+        roles.accent_focus = theme.colors.cursor;
+
+        Self::new(roles, ctx)
+    }
+
+    /// Look up a built-in theme by name (case-insensitive) and build the
+    /// corresponding `Tokens` snapshot. Returns `None` when the name does
+    /// not match any registered theme.
+    ///
+    /// Adapters call this from their `accept_command "set_theme_name"`
+    /// handler to refresh their token palette without holding a shared
+    /// `Arc<RwLock<Tokens>>`.
+    #[must_use]
+    pub fn for_theme_name(name: &str, ctx: RenderCtx) -> Option<Self> {
+        crate::themes::builtin_by_name(name).map(|theme| Self::for_theme(&theme, ctx))
     }
 
     // -- Spacing scale (4px-base, scales with the cell on dense fonts) --
