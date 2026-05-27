@@ -568,7 +568,9 @@ impl App {
             }
 
             // -- Container chrome for this adapter --
-            // Skip chrome when only 1 tiled pane (no need for borders/title).
+            // Border + drop shadow + focus tint paint on every pane now, not
+            // only when tiled — without it a single pane gets a flat slab and
+            // the user has no visual cue that "this is the focused app".
             let tiled_count = coordinator_outputs.len();
             let is_focused = focused_app == Some(*app_id);
             let pane_id = self.coordinator.pane_id_for(*app_id);
@@ -703,6 +705,8 @@ impl App {
                 // solid var(--frame-dim) }`; `.app.focused { border-color:
                 // var(--frame-active); box-shadow: var(--glow) }`. We use
                 // the theme tokens so theme switches recolor the border.
+                // Painting in both single and multi-pane modes so the user
+                // always sees which adapter has keyboard focus.
                 let border_color = if is_focused {
                     [0.2, 1.0, 0.5, 0.85]
                 } else {
@@ -740,35 +744,36 @@ impl App {
 
                 // -- Scrollbar (overlay pass — crisp, post-CRT) --
                 if let Some(ref scroll) = ro.scroll
-                    && scroll.history_size > 0 {
-                        let track = scrollbar_track_rect(inner_rect);
-                        // Track background.
+                    && scroll.history_size > 0
+                {
+                    let track = scrollbar_track_rect(inner_rect);
+                    // Track background.
+                    chrome_quads.push(QI {
+                        pos: [track.x, track.y],
+                        size: [track.width, track.height],
+                        color: [0.2, 0.2, 0.2, 0.3],
+                        border_radius: 3.0,
+                    });
+                    // Thumb.
+                    if let Some(thumb) = scrollbar_thumb_rect(
+                        track,
+                        scroll.display_offset,
+                        scroll.history_size,
+                        scroll.visible_rows,
+                    ) {
+                        let thumb_color = if is_focused {
+                            [0.2, 1.0, 0.5, 0.4]
+                        } else {
+                            [0.5, 0.5, 0.5, 0.5]
+                        };
                         chrome_quads.push(QI {
-                            pos: [track.x, track.y],
-                            size: [track.width, track.height],
-                            color: [0.2, 0.2, 0.2, 0.3],
+                            pos: [thumb.x, thumb.y],
+                            size: [thumb.width, thumb.height],
+                            color: thumb_color,
                             border_radius: 3.0,
                         });
-                        // Thumb.
-                        if let Some(thumb) = scrollbar_thumb_rect(
-                            track,
-                            scroll.display_offset,
-                            scroll.history_size,
-                            scroll.visible_rows,
-                        ) {
-                            let thumb_color = if is_focused {
-                                [0.2, 1.0, 0.5, 0.4]
-                            } else {
-                                [0.5, 0.5, 0.5, 0.5]
-                            };
-                            chrome_quads.push(QI {
-                                pos: [thumb.x, thumb.y],
-                                size: [thumb.width, thumb.height],
-                                color: thumb_color,
-                                border_radius: 3.0,
-                            });
-                        }
                     }
+                }
             }
 
             // Render terminal grid data (the critical path for terminal adapters).
@@ -836,6 +841,30 @@ impl App {
         // -- Coordinator adapter title text (overlay pass — crisp, readable) --
         for (label, x, y, color) in &coord_titles {
             self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
+        }
+
+        // -- Focus ring overlay --
+        // Sync the ring's animated state to the coordinator's focused app
+        // and emit an outlined accent ring around the focused pane's outer
+        // container rect. The ring renders in the overlay pass (post-CRT)
+        // so the focus accent stays crisp regardless of shader settings.
+        let focused = focused_app;
+        self.focus_ring.set_focused(focused);
+        // Advance the fade animation by a nominal 16 ms per frame — the
+        // ring widget linearly steps toward its target opacity, so this
+        // produces a clean ~6-frame fade-in / fade-out at 60 Hz.
+        self.focus_ring.tick(16.0);
+        if let Some(app_id) = focused
+            && let Some(pane_id) = self.coordinator.pane_id_for(app_id)
+            && let Ok(layout_rect) = self.layout.get_pane_rect(pane_id)
+        {
+            let ring_rect = phantom_ui::layout::Rect {
+                x: layout_rect.x,
+                y: layout_rect.y,
+                width: layout_rect.width,
+                height: layout_rect.height,
+            };
+            chrome_quads.extend(self.focus_ring.render_quads(&ring_rect));
         }
 
         // -- Monitor panels: hstack (sysmon left, appmon right) --

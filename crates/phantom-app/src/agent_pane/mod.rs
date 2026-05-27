@@ -995,6 +995,14 @@ impl AgentPane {
         self.status
     }
 
+    /// Human-readable role name suitable for chrome title strips.
+    ///
+    /// Matches `AgentRole::label()` and is lowercased so the AppHead title
+    /// reads `claude-opus-4-7 · conversational` to mirror the mockup.
+    pub(crate) fn role_label(&self) -> String {
+        self.role.label().to_ascii_lowercase()
+    }
+
     /// Return the length of the accumulated output in bytes.
     pub(crate) fn output_len(&self) -> usize {
         self.output.len()

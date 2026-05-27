@@ -18,6 +18,8 @@ use phantom_adapter::{
 use phantom_agents::agent::AgentMessage;
 use phantom_agents::quarantine::{QuarantineRegistry, QuarantineState};
 use phantom_ui::render_ctx::RenderCtx;
+use phantom_ui::tokens::Tokens;
+use phantom_ui::widgets::app_head::{AppHead, AppHeadDot};
 use phantom_ui::widgets::message_block::{MessageBlock, MessageRole};
 use phantom_ui::widgets::Widget;
 
@@ -25,9 +27,6 @@ use crate::agent_pane::{AgentPane, AgentPaneStatus};
 
 /// Line height in logical pixels used to stack text lines in render output.
 const LINE_HEIGHT: f32 = 18.0;
-
-/// Agent response text: phosphor green, slightly dimmer than terminal.
-const TEXT_COLOR: [f32; 4] = [0.4, 0.8, 0.45, 0.95];
 
 /// An agent pane wrapped in the `AppAdapter` interface.
 ///
@@ -80,6 +79,10 @@ pub struct AgentAdapter {
     /// `with_spawn_tag` path) while the typed mutator and the registry
     /// wiring land together.
     quarantine: Option<Arc<Mutex<QuarantineRegistry>>>,
+    /// Live color palette snapshot. Defaults to phosphor; the host App
+    /// refreshes via [`set_tokens`] on theme switches so AppHead and body
+    /// chrome recolour without rebuilding the adapter.
+    tokens: Tokens,
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +105,14 @@ impl AgentAdapter {
             // Default to 20 until the first render() call provides the real value.
             cached_output_max_lines: Cell::new(20),
             quarantine: None,
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
         }
+    }
+
+    /// Update the live design tokens. The host App calls this on theme switch.
+    #[allow(dead_code)]
+    pub(crate) fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 
     /// Wrap a pane and record the reconciler spawn tag so it is echoed back
@@ -288,12 +298,6 @@ impl AppCore for AgentAdapter {
 
 /// Height of the input bar at the bottom of the agent pane.
 const INPUT_BAR_HEIGHT: f32 = 28.0;
-/// Input bar background: slightly lighter than output so it's distinct.
-const INPUT_BAR_BG: [f32; 4] = [0.08, 0.10, 0.12, 1.0];
-/// Input bar separator: bright phosphor green line.
-const INPUT_BAR_SEP: [f32; 4] = [0.2, 0.8, 0.3, 0.6];
-/// User input text: bright phosphor green (Pip-Boy style).
-const INPUT_COLOR: [f32; 4] = [0.2, 1.0, 0.4, 1.0];
 /// Output area background: near-transparent so it doesn't fight the theme.
 const OUTPUT_BG: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
@@ -304,22 +308,6 @@ impl Renderable for AgentAdapter {
 
         let pad = 6.0;
 
-        // --- Output area: top of rect to (bottom - INPUT_BAR_HEIGHT) ---
-        let output_height = (rect.height - INPUT_BAR_HEIGHT - pad).max(LINE_HEIGHT);
-        let output_max_lines = (output_height / LINE_HEIGHT).floor().max(1.0) as usize;
-        // Cache for command handlers (scroll / scroll_to_offset / get_state) so
-        // they use the same visible-row count that ScrollState was built with.
-        self.cached_output_max_lines.set(output_max_lines);
-
-        // Output background.
-        quads.push(QuadData {
-            x: rect.x,
-            y: rect.y,
-            w: rect.width,
-            h: output_height + pad,
-            color: OUTPUT_BG,
-        });
-
         // Build a fallback render context from the adapter Rect's cell metrics.
         // `cell_size` carries the live font metrics set by App::with_config_scaled;
         // when zero (test / degenerate), RenderCtx::fallback() is used so wrap
@@ -329,6 +317,50 @@ impl Renderable for AgentAdapter {
         } else {
             RenderCtx::fallback()
         };
+
+        // Snapshot tokens once for this frame so subsequent reads stay
+        // consistent even if a theme switch lands mid-render.
+        let t = self.tokens;
+
+        // --- AppHead: matches the mockup's
+        //     `◆ AGENT · <model> · <role>    ● live` strip ---
+        let model_name = "claude-opus-4-7";
+        let role_name = self.pane.role_label();
+        let dot = match self.pane.status() {
+            AgentPaneStatus::Working => AppHeadDot::Live,
+            AgentPaneStatus::Done => AppHeadDot::Ok,
+            AgentPaneStatus::Failed => AppHeadDot::Danger,
+        };
+        let meta = match self.pane.status() {
+            AgentPaneStatus::Working => "live",
+            AgentPaneStatus::Done => "done",
+            AgentPaneStatus::Failed => "failed",
+        };
+        let head = AppHead::new("AGENT", format!("{model_name} · {role_name}"))
+            .with_icon("◆")
+            .with_meta(meta)
+            .with_dot(dot)
+            .with_ctx(ctx)
+            .with_tokens(t)
+            .focused(rect.focused);
+        head.render_into_adapter(rect, &mut quads, &mut text_segments);
+        let body = head.body_rect_adapter(rect);
+
+        // --- Output area: from head bottom down to (rect bottom - INPUT_BAR_HEIGHT) ---
+        let output_height = (body.height - INPUT_BAR_HEIGHT - pad).max(LINE_HEIGHT);
+        let output_max_lines = (output_height / LINE_HEIGHT).floor().max(1.0) as usize;
+        // Cache for command handlers (scroll / scroll_to_offset / get_state) so
+        // they use the same visible-row count that ScrollState was built with.
+        self.cached_output_max_lines.set(output_max_lines);
+
+        // Output background.
+        quads.push(QuadData {
+            x: body.x,
+            y: body.y,
+            w: body.width,
+            h: output_height + pad,
+            color: OUTPUT_BG,
+        });
 
         // --- MessageBlock render path ---
         // Use the agent's typed message history when messages are available.
@@ -351,15 +383,15 @@ impl Renderable for AgentAdapter {
             // viewport without rendering off-screen blocks.
             let block_heights: Vec<f32> = blocks
                 .iter()
-                .map(|b| b.compute_height(rect.width))
+                .map(|b| b.compute_height(body.width))
                 .collect();
             let total_content_h: f32 = block_heights.iter().sum();
 
             // Output viewport bounds — text and quads emitted by a block
             // are clipped against this rectangle so a message taller than
             // the visible area cannot leak past the input bar (Bug 2).
-            let viewport_top = rect.y;
-            let viewport_bottom = rect.y + output_height;
+            let viewport_top = body.y;
+            let viewport_bottom = body.y + output_height;
 
             // Maximum scroll offset in pixels: how much of the content
             // history is *above* the viewport when fully scrolled up.
@@ -398,7 +430,7 @@ impl Renderable for AgentAdapter {
             // Render each block that intersects the visible viewport.
             // `cursor_y` starts above the viewport when content is taller
             // than the output area (live tail anchored to bottom).
-            let mut cursor_y = rect.y + pad - offset_px;
+            let mut cursor_y = body.y + pad - offset_px;
             for (block, block_h) in blocks.iter_mut().zip(block_heights.iter()) {
                 let block_bottom = cursor_y + block_h;
                 // Skip blocks entirely above the viewport.
@@ -412,9 +444,9 @@ impl Renderable for AgentAdapter {
                 }
 
                 let ui_rect = phantom_ui::layout::Rect {
-                    x: rect.x + pad,
+                    x: body.x + pad,
                     y: cursor_y,
-                    width: rect.width - pad * 2.0,
+                    width: body.width - pad * 2.0,
                     height: *block_h,
                 };
 
@@ -476,9 +508,9 @@ impl Renderable for AgentAdapter {
             for (i, line) in visible.iter().enumerate() {
                 text_segments.push(TextData {
                     text: line.clone(),
-                    x: rect.x + pad,
-                    y: rect.y + pad + (i as f32) * LINE_HEIGHT,
-                    color: TEXT_COLOR,
+                    x: body.x + pad,
+                    y: body.y + pad + (i as f32) * LINE_HEIGHT,
+                    color: t.colors.text_primary,
                 });
             }
 
@@ -496,45 +528,47 @@ impl Renderable for AgentAdapter {
         // Working indicator: a dim "▶ working..." line below the last visible
         // output line, only shown while the agent is still streaming.
         if self.pane.status() == AgentPaneStatus::Working {
-            let indicator_y = rect.y + pad + (visible_count as f32) * LINE_HEIGHT;
-            if indicator_y + LINE_HEIGHT <= rect.y + output_height + pad {
+            let indicator_y = body.y + pad + (visible_count as f32) * LINE_HEIGHT;
+            if indicator_y + LINE_HEIGHT <= body.y + output_height + pad {
                 text_segments.push(TextData {
                     text: "▶ working...".to_string(),
-                    x: rect.x + pad,
+                    x: body.x + pad,
                     y: indicator_y,
-                    color: [0.2, 0.7, 0.3, 0.6],
+                    color: t.colors.text_dim,
                 });
             }
         }
 
-        // --- Input bar: fixed at the bottom ---
+        // --- Input bar: fixed at the bottom of the rect (below the body) ---
         let input_y = rect.y + rect.height - INPUT_BAR_HEIGHT;
 
-        // Separator line.
+        // Separator line — uses `chrome_frame_dim` so it carries the theme.
         quads.push(QuadData {
             x: rect.x,
             y: input_y,
             w: rect.width,
             h: 1.0,
-            color: INPUT_BAR_SEP,
+            color: t.colors.chrome_frame_dim,
         });
 
-        // Input background.
+        // Input background — `surface_raised` is the closest analogue to the
+        // mockup's "floating" input strip; readable against the body bg.
         quads.push(QuadData {
             x: rect.x,
             y: input_y + 1.0,
             w: rect.width,
             h: INPUT_BAR_HEIGHT - 1.0,
-            color: INPUT_BAR_BG,
+            color: t.colors.surface_raised,
         });
 
-        // Input prompt + text.
+        // Input prompt + text. Use `text_primary` so the cursor reads as live
+        // foreground rather than the dimmer secondary colour.
         let prompt = format!("> {}_", self.input_buffer);
         text_segments.push(TextData {
             text: prompt,
             x: rect.x + pad,
             y: input_y + 6.0,
-            color: INPUT_COLOR,
+            color: t.colors.text_primary,
         });
 
         RenderOutput {

@@ -18,6 +18,9 @@ use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
+use phantom_ui::render_ctx::RenderCtx;
+use phantom_ui::tokens::Tokens;
+use phantom_ui::widgets::app_head::AppHead;
 use serde_json::json;
 
 /// A shared render-snapshot handle passed between the primary terminal adapter
@@ -39,6 +42,8 @@ pub struct AltScreenViewAdapter {
     app_id: u32,
     /// Human-readable label of the foreground program (e.g. "vim", "htop").
     label: String,
+    /// Live design tokens for the AppHead chrome strip.
+    tokens: Tokens,
 }
 
 impl AltScreenViewAdapter {
@@ -48,13 +53,20 @@ impl AltScreenViewAdapter {
             snapshot,
             app_id: 0,
             label,
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
         }
     }
 
     /// The shared snapshot handle (hand this to the primary adapter).
-    #[must_use] 
+    #[must_use]
     pub fn snapshot_arc(&self) -> AltScreenSnapshot {
         Arc::clone(&self.snapshot)
+    }
+
+    /// Update the live design tokens. The host App calls this on theme switch.
+    #[allow(dead_code)]
+    pub fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 }
 
@@ -87,18 +99,50 @@ impl AppCore for AltScreenViewAdapter {
 
 impl Renderable for AltScreenViewAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
+        // Render the AppHead chrome strip up top so the user sees
+        //   `▣ ALT-SCREEN · <program name>`
+        // matching the mockup's secondary-view treatment.
+        let t = self.tokens;
+        let ctx = if rect.cell_size.0 > 0.0 && rect.cell_size.1 > 0.0 {
+            RenderCtx::new(rect.cell_size, 1.0)
+        } else {
+            RenderCtx::fallback()
+        };
+        let mut quads = Vec::new();
+        let mut text_segments = Vec::new();
+        let head = AppHead::new("ALT-SCREEN", self.label.clone())
+            .with_icon("▣")
+            .with_meta("mirror")
+            .with_ctx(ctx)
+            .with_tokens(t)
+            .focused(rect.focused);
+        head.render_into_adapter(rect, &mut quads, &mut text_segments);
+        let body = head.body_rect_adapter(rect);
+
         // Attempt to read the latest snapshot pushed by the primary terminal.
         if let Ok(guard) = self.snapshot.lock()
-            && let Some(mut output) = guard.clone() {
-                // Re-anchor the grid origin to this adapter's rect, since the
-                // primary may have been positioned differently.
-                if let Some(ref mut grid) = output.grid {
-                    grid.origin = (rect.x, rect.y);
-                }
-                return output;
+            && let Some(mut output) = guard.clone()
+        {
+            // Re-anchor the grid origin to this adapter's body rect (below
+            // the head strip) since the primary may have been positioned
+            // differently.
+            if let Some(ref mut grid) = output.grid {
+                grid.origin = (body.x, body.y);
             }
-        // No snapshot yet — return empty output.
-        RenderOutput::default()
+            // Merge AppHead chrome into the snapshot so the title strip
+            // paints alongside the mirrored grid.
+            output.quads.extend(quads);
+            output.text_segments.extend(text_segments);
+            return output;
+        }
+        // No snapshot yet — still emit the chrome so the pane is not blank.
+        RenderOutput {
+            quads,
+            text_segments,
+            grid: None,
+            scroll: None,
+            selection: None,
+        }
     }
 
     fn is_visual(&self) -> bool {
@@ -206,8 +250,10 @@ mod tests {
             ..Default::default()
         };
         let output = adapter.render(&rect);
+        // No grid before the primary pushes a snapshot — but the AppHead
+        // chrome strip always paints so the user never sees a chromeless
+        // pane.
         assert!(output.grid.is_none());
-        assert!(output.quads.is_empty());
     }
 
     #[test]
@@ -249,9 +295,12 @@ mod tests {
         };
         let output = adapter.render(&rect);
         let grid_out = output.grid.unwrap();
-        // Origin should be re-anchored to the adapter's rect.
+        // Origin must be re-anchored to the adapter's body rect (below the
+        // AppHead strip), which sits at `rect.x` horizontally and at least
+        // `rect.y` vertically.
         assert!((grid_out.origin.0 - 400.0).abs() < 0.01);
-        assert!((grid_out.origin.1 - 100.0).abs() < 0.01);
+        assert!(grid_out.origin.1 >= 100.0);
+        assert!(grid_out.origin.1 < 400.0);
     }
 
     #[test]

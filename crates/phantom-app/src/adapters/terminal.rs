@@ -23,6 +23,9 @@ use phantom_terminal::output::{
 };
 use phantom_terminal::takeover::TakeoverDetector;
 use phantom_terminal::terminal::PhantomTerminal;
+use phantom_ui::render_ctx::RenderCtx;
+use phantom_ui::tokens::Tokens;
+use phantom_ui::widgets::app_head::AppHead;
 
 /// Maximum bytes retained in the output buffer before the front is drained.
 const OUTPUT_BUF_CAP: usize = 8192;
@@ -78,6 +81,9 @@ pub struct TerminalAdapter {
     /// Set during `update()` when the terminal emits `Event::Title`; consumed
     /// (and cleared) by `take_pending_title()`.
     pending_title: Option<String>,
+    /// Live design tokens for the AppHead chrome. Refreshed by the host App
+    /// via `set_tokens` on theme switches.
+    tokens: Tokens,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +98,7 @@ impl TerminalAdapter {
     }
 
     /// Wrap a terminal with specific theme colors for grid rendering.
-    #[must_use] 
+    #[must_use]
     pub fn with_theme(terminal: PhantomTerminal, theme_colors: TerminalThemeColors) -> Self {
         Self {
             terminal,
@@ -109,12 +115,19 @@ impl TerminalAdapter {
             alt_screen_snapshot: None,
             takeover_detector: TakeoverDetector::default(),
             pending_title: None,
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
         }
     }
 
     /// Update the theme colors used for grid extraction.
     pub fn set_theme_colors(&mut self, colors: TerminalThemeColors) {
         self.theme_colors = colors;
+    }
+
+    /// Update the live design tokens. The host App calls this on theme switch.
+    #[allow(dead_code)]
+    pub fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 
     /// Immutable access to the inner terminal.
@@ -425,6 +438,33 @@ impl AppCore for TerminalAdapter {
 
 impl Renderable for TerminalAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
+        // Build the AppHead chrome strip. The mockup layout is
+        //   `▶ TERMINAL · zsh · ~/path    cols×rows`
+        // The grid origin shifts down by the head height so the running
+        // shell never paints over the title strip.
+        let mut quads: Vec<phantom_adapter::adapter::QuadData> = Vec::new();
+        let mut text_segments: Vec<phantom_adapter::adapter::TextData> = Vec::new();
+
+        let t = self.tokens;
+        let ctx = if rect.cell_size.0 > 0.0 && rect.cell_size.1 > 0.0 {
+            RenderCtx::new(rect.cell_size, 1.0)
+        } else {
+            RenderCtx::fallback()
+        };
+
+        let size = self.terminal.size();
+        let cwd_short = short_cwd();
+        let title = format!("zsh · {cwd_short}");
+        let meta = format!("{}×{}", size.cols, size.rows);
+        let head = AppHead::new("TERMINAL", title)
+            .with_icon("▶")
+            .with_meta(meta)
+            .with_ctx(ctx)
+            .with_tokens(t)
+            .focused(rect.focused);
+        head.render_into_adapter(rect, &mut quads, &mut text_segments);
+        let body = head.body_rect_adapter(rect);
+
         // Extract the terminal grid with theme-aware colors.
         let (render_cells, cols, rows, cursor_state) =
             output::extract_grid_themed(self.terminal.term(), &self.theme_colors);
@@ -451,7 +491,7 @@ impl Renderable for TerminalAdapter {
             cells,
             cols,
             rows,
-            origin: (rect.x, rect.y),
+            origin: (body.x, body.y),
             cursor,
         };
 
@@ -472,8 +512,8 @@ impl Renderable for TerminalAdapter {
             });
 
         RenderOutput {
-            quads: vec![],
-            text_segments: vec![],
+            quads,
+            text_segments,
             grid: Some(grid),
             scroll,
             selection,
@@ -717,6 +757,25 @@ impl Permissioned for TerminalAdapter {
 // ---------------------------------------------------------------------------
 // Key translation (mirrors pane::key_name_to_bytes)
 // ---------------------------------------------------------------------------
+
+/// Return a short, ~/-prefixed string representation of the current working
+/// directory, suitable for the AppHead title. Falls back to `~` when the cwd
+/// is unavailable.
+fn short_cwd() -> String {
+    let Ok(cwd) = std::env::current_dir() else {
+        return "~".to_string();
+    };
+    if let Ok(home) = std::env::var("HOME")
+        && let Ok(stripped) = cwd.strip_prefix(&home)
+    {
+        let tail = stripped.display().to_string();
+        if tail.is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{tail}");
+    }
+    cwd.display().to_string()
+}
 
 /// Translate an MCP / input key name into terminal ANSI bytes.
 fn key_name_to_bytes(key: &str) -> Vec<u8> {
