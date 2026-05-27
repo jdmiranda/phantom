@@ -128,6 +128,10 @@ pub struct LayoutEngine {
     /// gets a fixed `width = 100/cols%`, `height = 100/rows%` so panes tile
     /// into an N×M grid instead of stretching across a single row.
     grid_mode: Option<(u32, u32)>,
+    /// Cached root size from the last `resize()` call, used by
+    /// [`recompute`](Self::recompute) to re-run Taffy when pane constraints
+    /// change without a window resize. `None` until the first resize.
+    last_size: Option<(f32, f32)>,
 }
 
 impl LayoutEngine {
@@ -237,6 +241,7 @@ impl LayoutEngine {
             content,
             status_bar,
             grid_mode: None,
+            last_size: None,
         })
     }
 
@@ -293,6 +298,11 @@ impl LayoutEngine {
     }
 
     /// Update the root dimensions and recompute the entire layout.
+    ///
+    /// Caches the dimensions on `self.last_size` so [`recompute`](Self::recompute)
+    /// can re-run Taffy after a pane-constraint change (e.g. when an adapter
+    /// is swapped in at an existing pane slot) without needing the caller to
+    /// re-thread the window size.
     pub fn resize(&mut self, width: f32, height: f32) -> Result<()> {
         self.tree
             .compute_layout(
@@ -303,6 +313,33 @@ impl LayoutEngine {
                 },
             )
             .map_err(|e| anyhow::anyhow!("layout computation failed: {e}"))?;
+        self.last_size = Some((width, height));
+        Ok(())
+    }
+
+    /// Re-run Taffy with the most recent root size.
+    ///
+    /// Use this after mutating pane styles (constraints, grid mode) when the
+    /// window has **not** resized — Taffy only recomputes when
+    /// `compute_layout` is called, so a pane swap that adjusts min/max
+    /// constraints leaves the Taffy rects stale until the next window
+    /// resize. Calling `recompute()` resolves this immediately.
+    ///
+    /// Returns `Ok(())` without recomputing if [`resize`](Self::resize) has
+    /// never been called (the caller is responsible for the initial size).
+    pub fn recompute(&mut self) -> Result<()> {
+        let Some((w, h)) = self.last_size else {
+            return Ok(());
+        };
+        self.tree
+            .compute_layout(
+                self.root,
+                Size {
+                    width: AvailableSpace::Definite(w),
+                    height: AvailableSpace::Definite(h),
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("layout recompute failed: {e}"))?;
         Ok(())
     }
 

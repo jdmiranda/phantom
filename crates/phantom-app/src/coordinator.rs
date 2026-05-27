@@ -177,6 +177,18 @@ impl AppCoordinator {
                 log::warn!("Failed to apply arbiter constraints for adapter {id}: {e}");
             }
         }
+
+        // Taffy only recomputes layout when `compute_layout` is called — so
+        // changing pane min/max constraints above leaves the cached Taffy
+        // rects stale until the next window resize. When an adapter is
+        // swapped in at an existing PaneId (e.g. Setup -> Agent at the same
+        // slot) the new constraints would otherwise sit unapplied and the
+        // pane would render at the previous adapter's allocation, leaving
+        // ~450 px of empty space below the Agent. Recompute now so the new
+        // constraints take effect immediately.
+        if let Err(e) = layout.recompute() {
+            log::warn!("Layout recompute after arbiter negotiation failed: {e}");
+        }
     }
 
     /// Register an adapter, wire it into layout and scene, and transition
