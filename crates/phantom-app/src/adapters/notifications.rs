@@ -473,6 +473,30 @@ mod tests {
     }
 
     #[test]
+    fn on_message_handles_agent_denied_custom_event() {
+        // Mirrors the publish path in `App::update` so a denied capability
+        // surfaces as a Danger notification row.  Without this wiring the
+        // Notifications pane would silently miss every denial.
+        let mut a = NotificationsAdapter::new();
+        let msg = BusMessage {
+            topic_id: 1,
+            sender: 0,
+            event: Event::Custom {
+                kind: "agent.denied".into(),
+                data: r#"{"agent_id":42,"role":"Watcher","attempted_class":"Act","attempted_tool":"run_command"}"#.into(),
+            },
+            frame: 0,
+            timestamp: 0,
+        };
+        a.on_message(&msg);
+        assert_eq!(a.len(), 1);
+        let n = a.iter_newest_first().next().unwrap();
+        assert_eq!(n.severity, Severity::Danger);
+        assert_eq!(n.source, "agent.denied");
+        assert!(n.message.contains("Act"));
+    }
+
+    #[test]
     fn theme_swap_propagates_to_accent_bar() {
         use phantom_ui::tokens::ColorRoles;
         let mut a = NotificationsAdapter::new();

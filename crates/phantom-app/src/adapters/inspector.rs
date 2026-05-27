@@ -56,11 +56,16 @@ const VISIBLE_DENIAL_ROWS: usize = 20;
 // ---------------------------------------------------------------------------
 
 /// Which inspector tab is currently visible.
+///
+/// The three tabs mirror the mockup at `docs/mockups/apps.html` row 411:
+/// EVENTS · AGENTS · DAG. Press `Tab` to cycle forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InspectorTab {
-    /// Agents / events / denials overview (default).
+    /// Recent events tail + denials (default).
     #[default]
-    Overview,
+    Events,
+    /// One row per live agent, plus peers/hot-swaps.
+    Agents,
     /// Live crate dependency graph with ticket-instability colours.
     Dag,
 }
@@ -69,16 +74,17 @@ impl InspectorTab {
     /// Cycle to the next tab in declaration order.
     fn next(self) -> Self {
         match self {
-            Self::Overview => Self::Dag,
-            Self::Dag => Self::Overview,
+            Self::Events => Self::Agents,
+            Self::Agents => Self::Dag,
+            Self::Dag => Self::Events,
         }
     }
 
-    /// Human-readable tab name for future tab-bar rendering.
-    #[allow(dead_code)]
+    /// Human-readable tab name for the tab-bar.
     fn label(self) -> &'static str {
         match self {
-            Self::Overview => "Overview",
+            Self::Events => "EVENTS",
+            Self::Agents => "AGENTS",
             Self::Dag => "DAG",
         }
     }
@@ -128,7 +134,7 @@ impl InspectorAdapter {
             snapshot,
             tokens,
             app_id: 0,
-            active_tab: InspectorTab::Overview,
+            active_tab: InspectorTab::Events,
             dag_viewer: DagViewerState::new(),
             dag_highlight: DagHighlightState::new(),
             dag: None,
@@ -158,14 +164,18 @@ impl InspectorAdapter {
     }
 
     // -----------------------------------------------------------------------
-    // DAG tab rendering
+    // DAG tab body rendering
     // -----------------------------------------------------------------------
 
-    /// Render the DAG tab into `quads` and `text_segments` vectors.
+    /// Render the DAG tab body into `quads` and `text_segments`.
     ///
-    /// When no DAG has been loaded, renders a centered "No DAG loaded" hint
-    /// rather than panicking.
-    fn render_dag_tab(
+    /// The shared tab bar is already drawn by `Renderable::render`; this
+    /// function fills the body region only. `rect` here is the body rect,
+    /// not the full pane rect.
+    ///
+    /// When no DAG has been loaded, renders a "No DAG loaded" hint instead
+    /// of panicking.
+    fn render_dag_body(
         &self,
         rect: &Rect,
         quads: &mut Vec<QuadData>,
@@ -175,25 +185,6 @@ impl InspectorAdapter {
         let cell_w = if rect.cell_size.0 > 0.0 { rect.cell_size.0 } else { 8.0 };
         let cell_h = if rect.cell_size.1 > 0.0 { rect.cell_size.1 } else { 16.0 };
         let pad_x = cell_w;
-        let pad_y = cell_h * 0.4;
-
-        // Header bar.
-        let header_h = cell_h * 1.6;
-        quads.push(QuadData {
-            x: rect.x,
-            y: rect.y,
-            w: rect.width,
-            h: header_h,
-            color: colors.surface_recessed,
-        });
-        text_segments.push(TextData {
-            text: "INSPECTOR — DAG  [Tab] switch tab".to_string(),
-            x: rect.x + pad_x,
-            y: rect.y + pad_y,
-            color: colors.text_accent,
-        });
-
-        let content_y = rect.y + header_h + pad_y;
 
         match &self.dag {
             None => {
@@ -201,35 +192,29 @@ impl InspectorAdapter {
                 text_segments.push(TextData {
                     text: "No DAG loaded".to_string(),
                     x: rect.x + pad_x,
-                    y: content_y,
+                    y: rect.y,
                     color: colors.text_secondary,
                 });
                 text_segments.push(TextData {
                     text: "Load a CodeDag via InspectorAdapter::load_dag()".to_string(),
                     x: rect.x + pad_x,
-                    y: content_y + cell_h,
+                    y: rect.y + cell_h,
                     color: colors.text_dim,
                 });
             }
             Some(dag) => {
-                // Render node/edge quads from the force-directed layout.
                 // The layout uses world-space coordinates; offset them by
-                // the pane origin so they land inside the pane rectangle.
-                //
-                // We translate world positions by (rect.x, content_y) so
-                // the DAG renders within the pane bounds.
+                // the body origin so they land inside the pane rectangle.
                 let origin_x = rect.x + rect.width * 0.5;
-                let origin_y = content_y + (rect.height - header_h) * 0.5;
+                let origin_y = rect.y + rect.height * 0.5;
 
                 for mut qi in self.dag_viewer.render_quads(dag) {
-                    // Centre the DAG within the pane.
                     qi.pos[0] += origin_x;
                     qi.pos[1] += origin_y;
 
-                    // Skip quads that fall entirely outside the pane.
                     if qi.pos[0] + qi.size[0] < rect.x
                         || qi.pos[0] > rect.x + rect.width
-                        || qi.pos[1] + qi.size[1] < content_y
+                        || qi.pos[1] + qi.size[1] < rect.y
                         || qi.pos[1] > rect.y + rect.height
                     {
                         continue;
@@ -244,7 +229,6 @@ impl InspectorAdapter {
                     });
                 }
 
-                // Node label overlays.
                 for node in dag.nodes() {
                     let Some(&[wx, wy]) = self.dag_viewer.positions.get(node.id()) else { continue };
 
@@ -256,12 +240,11 @@ impl InspectorAdapter {
                         + origin_y;
 
                     if sx < rect.x || sx > rect.x + rect.width
-                        || sy < content_y || sy > rect.y + rect.height
+                        || sy < rect.y || sy > rect.y + rect.height
                     {
                         continue;
                     }
 
-                    // Shorten the label to the crate/module leaf.
                     let label = node.id().split("::").last().unwrap_or(node.id());
                     text_segments.push(TextData {
                         text: label.to_string(),
@@ -282,6 +265,143 @@ impl InspectorAdapter {
                     y: rect.y + rect.height - cell_h * 1.5,
                     color: colors.text_dim,
                 });
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Events tab body rendering
+    // -----------------------------------------------------------------------
+
+    /// Render the Events tab body: RECENT EVENTS list + DENIALS list.
+    ///
+    /// The tab bar is already drawn by `Renderable::render`; this writes
+    /// into the body region only. `body_origin_y` is the top of the body
+    /// (below the shared header).
+    #[allow(clippy::too_many_arguments)]
+    fn render_events_tab(
+        &self,
+        rect: &Rect,
+        body_origin_y: f32,
+        cell_w: f32,
+        cell_h: f32,
+        pad_x: f32,
+        quads: &mut Vec<QuadData>,
+        text_segments: &mut Vec<TextData>,
+        colors: phantom_ui::tokens::ColorRoles,
+    ) {
+        let section_color = colors.text_primary;
+        let event_color = colors.text_secondary;
+        let denial_header = colors.status_danger;
+        let denial_row = {
+            let [r, g, b, _] = colors.status_danger;
+            [r * 0.95, g * 1.5_f32.min(1.0), b * 1.6_f32.min(1.0), 0.95]
+        };
+        let denial_chain = {
+            let [r, g, b, _] = colors.status_danger;
+            let [dr, dg, db, _] = colors.text_dim;
+            [(r + dr) * 0.5, (g + dg) * 0.5, (b + db) * 0.5, 0.80]
+        };
+        // Suppress unused warnings for callers that pass quads but Events tab
+        // doesn't draw row backgrounds — keep the param shape uniform with
+        // the DAG body renderer so future row-highlight work can land here.
+        let _ = quads;
+
+        let view = self.snapshot.read().expect("inspector snapshot lock");
+        let mut cursor_y = body_origin_y;
+
+        // RECENT EVENTS section.
+        text_segments.push(TextData {
+            text: "RECENT EVENTS".to_string(),
+            x: rect.x + pad_x,
+            y: cursor_y,
+            color: section_color,
+        });
+        cursor_y += cell_h * 1.2;
+
+        let total = view.recent_events.len();
+        let take = total.min(VISIBLE_EVENT_ROWS);
+        for ev in view.recent_events.iter().rev().take(take) {
+            let max_chars = ((rect.width / cell_w).floor() as usize).saturating_sub(4);
+            let summary = if ev.summary.chars().count() > max_chars {
+                let cut: String = ev
+                    .summary
+                    .chars()
+                    .take(max_chars.saturating_sub(1))
+                    .collect();
+                format!("{cut}…")
+            } else {
+                ev.summary.clone()
+            };
+            text_segments.push(TextData {
+                text: summary,
+                x: rect.x + pad_x * 2.0,
+                y: cursor_y,
+                color: event_color,
+            });
+            cursor_y += cell_h;
+            if cursor_y > rect.y + rect.height - cell_h * 4.0 {
+                break;
+            }
+        }
+
+        if view.recent_events.is_empty() {
+            text_segments.push(TextData {
+                text: "  (no recent events)".to_string(),
+                x: rect.x + pad_x * 2.0,
+                y: cursor_y,
+                color: event_color,
+            });
+            cursor_y += cell_h;
+        }
+
+        // DENIALS section.
+        cursor_y += cell_h * 0.5;
+        text_segments.push(TextData {
+            text: "DENIALS".to_string(),
+            x: rect.x + pad_x,
+            y: cursor_y,
+            color: denial_header,
+        });
+        cursor_y += cell_h * 1.2;
+
+        if view.denials.is_empty() {
+            text_segments.push(TextData {
+                text: "  (no denials)".to_string(),
+                x: rect.x + pad_x * 2.0,
+                y: cursor_y,
+                color: event_color,
+            });
+        } else {
+            let total = view.denials.len();
+            let take = total.min(VISIBLE_DENIAL_ROWS);
+            for entry in view.denials.iter().rev().take(take) {
+                if cursor_y > rect.y + rect.height - cell_h * 2.0 {
+                    break;
+                }
+
+                let primary = format!(
+                    "{role} \u{2192} {tool} ({class})",
+                    role = entry.role,
+                    tool = entry.attempted_tool,
+                    class = entry.attempted_class,
+                );
+                text_segments.push(TextData {
+                    text: primary,
+                    x: rect.x + pad_x * 2.0,
+                    y: cursor_y,
+                    color: denial_row,
+                });
+                cursor_y += cell_h;
+
+                let chain_text = format_source_chain(&entry.source_chain);
+                text_segments.push(TextData {
+                    text: chain_text,
+                    x: rect.x + pad_x * 3.0,
+                    y: cursor_y,
+                    color: denial_chain,
+                });
+                cursor_y += cell_h;
             }
         }
     }
@@ -333,114 +453,133 @@ impl Renderable for InspectorAdapter {
             tok.colors
         };
 
-        // ── Dispatch to active tab ─────────────────────────────────────
-        if self.active_tab == InspectorTab::Dag {
-            // Pane background.
-            quads.push(QuadData {
-                x: rect.x,
-                y: rect.y,
-                w: rect.width,
-                h: rect.height,
-                color: [0.0_f32, 0.0, 0.0, 0.0],
-            });
-            self.render_dag_tab(rect, &mut quads, &mut text_segments, colors);
-            return RenderOutput {
-                quads,
-                text_segments,
-                grid: None,
-                scroll: None,
-                selection: None,
-            };
-        }
+        // Pull live cell metrics from the rect (fallback 8/16 px).
+        let cell_w = if rect.cell_size.0 > 0.0 { rect.cell_size.0 } else { 8.0 };
+        let cell_h = if rect.cell_size.1 > 0.0 { rect.cell_size.1 } else { 16.0 };
+        let pad_x = cell_w;
+        let pad_y = cell_h * 0.4;
 
-        // Derive role-specific colors from the live token palette.
-        let header_bg = colors.surface_recessed;
-        let header_color = colors.text_accent;
-        let section_color = colors.text_primary;
-        let agent_color = colors.text_primary;
-        let event_color = colors.text_secondary;
-        let stamp_color = colors.text_dim;
-        let pane_bg = [0.0_f32, 0.0, 0.0, 0.0];
-        // Denial colors are drawn from the `status_danger` token so that
-        // theme changes (e.g. amber → blood) propagate to the security UI.
-        let denial_header = colors.status_danger;
-        // Row body: same hue but slightly softened — reduce alpha slightly.
-        let denial_row = {
-            let [r, g, b, _] = colors.status_danger;
-            [r * 0.95, g * 1.5_f32.min(1.0), b * 1.6_f32.min(1.0), 0.95]
-        };
-        // Chain sub-row: mix toward text_dim to push it into the background.
-        let denial_chain = {
-            let [r, g, b, _] = colors.status_danger;
-            let [dr, dg, db, _] = colors.text_dim;
-            [(r + dr) * 0.5, (g + dg) * 0.5, (b + db) * 0.5, 0.80]
-        };
-
-        // Pull live cell metrics from the rect rather than baking constants;
-        // doubling the font size doubles every spacing/positioning value.
-        // `Rect::default()` carries `(0.0, 0.0)` as a "not provided" sentinel
-        // so we fall back to legacy 8.0 / 16.0 for callers that don't pass
-        // cell metrics through.
-        let cell_w = if rect.cell_size.0 > 0.0 {
-            rect.cell_size.0
-        } else {
-            8.0
-        };
-        let cell_h = if rect.cell_size.1 > 0.0 {
-            rect.cell_size.1
-        } else {
-            16.0
-        };
-        let pad_x = cell_w; // 1 cell of left padding.
-        let pad_y = cell_h * 0.4; // ~half a line of top padding.
-
-        // ── Pane background ────────────────────────────────────────────
+        // Pane background.
         quads.push(QuadData {
             x: rect.x,
             y: rect.y,
             w: rect.width,
             h: rect.height,
-            color: pane_bg,
+            color: [0.0_f32, 0.0, 0.0, 0.0],
         });
 
-        let view = self.snapshot.read().expect("inspector snapshot lock");
-
-        // ── Header bar ─────────────────────────────────────────────────
+        // Common header bar shared across all tabs.
         let header_h = cell_h * 1.6;
         quads.push(QuadData {
             x: rect.x,
             y: rect.y,
             w: rect.width,
             h: header_h,
-            color: header_bg,
+            color: colors.surface_recessed,
         });
 
-        let header_text = format!(
-            "INSPECTOR — {} agents running ({} total)",
-            view.running_count, view.spawned_total,
-        );
-        text_segments.push(TextData {
-            text: header_text,
-            x: rect.x + pad_x,
-            y: rect.y + pad_y,
-            color: header_color,
-        });
+        // ── Tab bar (mockup row 411: EVENTS · AGENTS · DAG) ─────────────
+        // Draw tab labels left-to-right inside the header. The active tab is
+        // accent-colored; the others are dim. A short hint at the right edge
+        // reminds the user that Tab cycles.
+        let tab_y = rect.y + pad_y;
+        let mut tab_x = rect.x + pad_x;
+        for tab in [InspectorTab::Events, InspectorTab::Agents, InspectorTab::Dag] {
+            let active = tab == self.active_tab;
+            let label = tab.label();
+            let color = if active {
+                colors.text_accent
+            } else {
+                colors.text_dim
+            };
+            text_segments.push(TextData {
+                text: label.to_string(),
+                x: tab_x,
+                y: tab_y,
+                color,
+            });
+            // Underline the active tab with a 2-pixel accent bar so the active
+            // selection is visually unambiguous even when colors are close.
+            if active {
+                let width_chars = label.chars().count() as f32;
+                quads.push(QuadData {
+                    x: tab_x,
+                    y: rect.y + header_h - 2.0,
+                    w: width_chars * cell_w,
+                    h: 2.0,
+                    color: colors.text_accent,
+                });
+            }
+            // Advance by label width + 2 cells of gutter.
+            tab_x += (label.chars().count() as f32 + 2.0) * cell_w;
+        }
 
-        // Refresh stamp at the right edge of the header bar.
-        let stamp_text = format!("events: {}", view.recent_events.len());
-        // Right-align by columns (string length × cell width). Best-effort:
-        // very long stamps still draw inside the pane because pad_x bounds
-        // the left side.
+        // Refresh stamp at the right edge of the header bar — same on every tab.
+        let view_for_stamp = self.snapshot.read().expect("inspector snapshot lock");
+        let stamp_text = format!("events: {}", view_for_stamp.recent_events.len());
+        drop(view_for_stamp);
         let stamp_x = rect.x + rect.width - pad_x - (stamp_text.chars().count() as f32) * cell_w;
         text_segments.push(TextData {
             text: stamp_text,
             x: stamp_x.max(rect.x + pad_x),
-            y: rect.y + pad_y,
-            color: stamp_color,
+            y: tab_y,
+            color: colors.text_dim,
         });
 
-        // Cursor advances down the pane as we lay out sections.
-        let mut cursor_y = rect.y + header_h + pad_y;
+        // ── Dispatch to active tab body ─────────────────────────────────
+        let body_origin_y = rect.y + header_h + pad_y;
+        match self.active_tab {
+            InspectorTab::Dag => {
+                // DAG tab draws its own header internally; we already drew
+                // ours above, so call render_dag_tab with a body-only rect.
+                let body_rect = Rect {
+                    x: rect.x,
+                    y: body_origin_y,
+                    width: rect.width,
+                    height: (rect.y + rect.height - body_origin_y).max(0.0),
+                    cell_size: rect.cell_size,
+                };
+                self.render_dag_body(&body_rect, &mut quads, &mut text_segments, colors);
+                return RenderOutput {
+                    quads,
+                    text_segments,
+                    grid: None,
+                    scroll: None,
+                    selection: None,
+                };
+            }
+            InspectorTab::Events => {
+                self.render_events_tab(
+                    rect,
+                    body_origin_y,
+                    cell_w,
+                    cell_h,
+                    pad_x,
+                    &mut quads,
+                    &mut text_segments,
+                    colors,
+                );
+                return RenderOutput {
+                    quads,
+                    text_segments,
+                    grid: None,
+                    scroll: None,
+                    selection: None,
+                };
+            }
+            InspectorTab::Agents => {
+                // Falls through to the existing Agents body below.
+            }
+        }
+
+        // ── Agents tab body (legacy "Overview" minus events/denials) ────
+        // Derive role-specific colors from the live token palette.
+        let section_color = colors.text_primary;
+        let agent_color = colors.text_primary;
+        let event_color = colors.text_secondary;
+
+        let view = self.snapshot.read().expect("inspector snapshot lock");
+        let mut cursor_y = body_origin_y;
 
         // ── Agents section title ───────────────────────────────────────
         text_segments.push(TextData {
@@ -485,120 +624,6 @@ impl Renderable for InspectorAdapter {
                 color: event_color,
             });
             cursor_y += cell_h;
-        }
-
-        // ── Recent events section ──────────────────────────────────────
-        cursor_y += cell_h * 0.5;
-        text_segments.push(TextData {
-            text: "RECENT EVENTS".to_string(),
-            x: rect.x + pad_x,
-            y: cursor_y,
-            color: section_color,
-        });
-        cursor_y += cell_h * 1.2;
-
-        // Show the newest events first, capped at VISIBLE_EVENT_ROWS. The
-        // snapshot stores newest-last in `recent_events`, so iterate
-        // backwards and clamp.
-        let total = view.recent_events.len();
-        let take = total.min(VISIBLE_EVENT_ROWS);
-        for ev in view.recent_events.iter().rev().take(take) {
-            // Truncate very long summaries to roughly the pane width.
-            let max_chars = ((rect.width / cell_w).floor() as usize).saturating_sub(4);
-            let summary = if ev.summary.chars().count() > max_chars {
-                let cut: String = ev
-                    .summary
-                    .chars()
-                    .take(max_chars.saturating_sub(1))
-                    .collect();
-                format!("{cut}…")
-            } else {
-                ev.summary.clone()
-            };
-            text_segments.push(TextData {
-                text: summary,
-                x: rect.x + pad_x * 2.0,
-                y: cursor_y,
-                color: event_color,
-            });
-            cursor_y += cell_h;
-            if cursor_y > rect.y + rect.height - cell_h {
-                break;
-            }
-        }
-
-        if view.recent_events.is_empty() {
-            text_segments.push(TextData {
-                text: "  (no recent events)".to_string(),
-                x: rect.x + pad_x * 2.0,
-                y: cursor_y,
-                color: event_color,
-            });
-            cursor_y += cell_h;
-        }
-
-        // ── Denials section (Sec.3) ───────────────────────────────────
-        // Surface `EventKind::CapabilityDenied` events the runtime has
-        // recorded since the inspector pane was opened. This is the
-        // user-facing window into the substrate's security boundary:
-        // the rows show *which* agent tried *which* tool under *which*
-        // capability class, with the source chain underneath as
-        // provenance.
-        cursor_y += cell_h * 0.5;
-        text_segments.push(TextData {
-            text: "DENIALS".to_string(),
-            x: rect.x + pad_x,
-            y: cursor_y,
-            color: denial_header,
-        });
-        cursor_y += cell_h * 1.2;
-
-        if view.denials.is_empty() {
-            text_segments.push(TextData {
-                text: "  (no denials)".to_string(),
-                x: rect.x + pad_x * 2.0,
-                y: cursor_y,
-                color: event_color,
-            });
-        } else {
-            // Newest-on-top: snapshot pushes oldest-first, so iterate
-            // in reverse and clamp to VISIBLE_DENIAL_ROWS.
-            let total = view.denials.len();
-            let take = total.min(VISIBLE_DENIAL_ROWS);
-            for entry in view.denials.iter().rev().take(take) {
-                // Stop laying out denial rows when we run out of vertical
-                // pane room. Each entry consumes two cell-height rows
-                // (primary + chain), so reserve at least 2 cells.
-                if cursor_y > rect.y + rect.height - cell_h * 2.0 {
-                    break;
-                }
-
-                let primary = format!(
-                    "{role} \u{2192} {tool} ({class})",
-                    role = entry.role,
-                    tool = entry.attempted_tool,
-                    class = entry.attempted_class,
-                );
-                text_segments.push(TextData {
-                    text: primary,
-                    x: rect.x + pad_x * 2.0,
-                    y: cursor_y,
-                    color: denial_row,
-                });
-                cursor_y += cell_h;
-
-                // Source chain sub-row. When the chain is empty (Sec.2
-                // hasn't filled it yet), we still render the prefix so
-                // the user knows the chain field exists.
-                let chain_text = format_source_chain(&entry.source_chain);
-                text_segments.push(TextData {
-                    text: chain_text,
-                    x: rect.x + pad_x * 3.0, // double-indent under the primary row
-                    y: cursor_y,
-                    color: denial_chain,
-                });
-                cursor_y += cell_h;
-            }
         }
 
         // ── Hot swaps section (#385) ──────────────────────────────────────
@@ -897,31 +922,35 @@ mod tests {
         b.build()
     }
 
-    /// Header text must announce the running-agent count.
+    /// Tab bar must always announce the three tabs.
     #[test]
-    fn inspector_adapter_renders_header_with_agent_count() {
+    fn inspector_adapter_renders_tab_bar() {
         let view = build_view_with_agents(3);
         let adapter = InspectorAdapter::with_view(view);
         let output = adapter.render(&make_rect(8.0));
 
-        let header = output
-            .text_segments
-            .iter()
-            .find(|t| t.text.starts_with("INSPECTOR"))
-            .expect("header text must be present");
         assert!(
-            header.text.contains("3 agents"),
-            "header should mention running count of 3, got: {}",
-            header.text,
+            output.text_segments.iter().any(|t| t.text == "EVENTS"),
+            "EVENTS tab label must be rendered",
+        );
+        assert!(
+            output.text_segments.iter().any(|t| t.text == "AGENTS"),
+            "AGENTS tab label must be rendered",
+        );
+        assert!(
+            output.text_segments.iter().any(|t| t.text == "DAG"),
+            "DAG tab label must be rendered",
         );
     }
 
-    /// Each agent row must surface the agent's label as a distinct
-    /// rendered text segment.
+    /// Each agent row must surface the agent's label when the AGENTS tab is
+    /// active.
     #[test]
     fn inspector_adapter_renders_one_row_per_agent() {
         let view = build_view_with_agents(4);
-        let adapter = InspectorAdapter::with_view(view);
+        let mut adapter = InspectorAdapter::with_view(view);
+        // Default tab is Events; switch to Agents to see agent rows.
+        adapter.handle_input("Tab");
         let output = adapter.render(&make_rect(8.0));
 
         for i in 0..4 {
@@ -937,8 +966,11 @@ mod tests {
     #[test]
     fn inspector_adapter_uses_render_ctx_cell_metrics() {
         let view = build_view_with_agents(2);
-        let adapter_a = InspectorAdapter::with_view(view.clone());
-        let adapter_b = InspectorAdapter::with_view(view);
+        let mut adapter_a = InspectorAdapter::with_view(view.clone());
+        let mut adapter_b = InspectorAdapter::with_view(view);
+        // Switch both to the AGENTS tab where agent rows are rendered.
+        adapter_a.handle_input("Tab");
+        adapter_b.handle_input("Tab");
 
         let small = adapter_a.render(&make_rect(8.0));
         let big = adapter_b.render(&make_rect(16.0));
@@ -973,22 +1005,31 @@ mod tests {
         );
     }
 
-    /// Empty snapshot must still render without panic and surface a hint.
+    /// Empty snapshot must still render without panic and surface a hint —
+    /// "no agents" on the Agents tab, "no recent events" on the Events tab.
     #[test]
     fn inspector_adapter_handles_empty_view() {
+        // Events tab (default) renders the empty-events hint.
         let adapter = InspectorAdapter::with_view(InspectorView::empty());
         let output = adapter.render(&make_rect(8.0));
         assert!(
             output
                 .text_segments
                 .iter()
-                .any(|t| t.text.contains("no agents"))
+                .any(|t| t.text.contains("no recent events")),
+            "Events tab must surface 'no recent events' hint",
         );
+
+        // Switch to Agents tab and confirm "no agents" hint renders.
+        let mut adapter_agents = InspectorAdapter::with_view(InspectorView::empty());
+        adapter_agents.handle_input("Tab");
+        let output_agents = adapter_agents.render(&make_rect(8.0));
         assert!(
-            output
+            output_agents
                 .text_segments
                 .iter()
-                .any(|t| t.text.contains("no recent events"))
+                .any(|t| t.text.contains("no agents")),
+            "Agents tab must surface 'no agents' hint",
         );
     }
 
@@ -1025,11 +1066,13 @@ mod tests {
         let mut adapter = InspectorAdapter::with_view(InspectorView::empty());
         // Tab key is accepted and cycles between tabs.
         assert!(adapter.accepts_input());
-        assert_eq!(adapter.active_tab, InspectorTab::Overview);
+        assert_eq!(adapter.active_tab, InspectorTab::Events);
+        assert!(adapter.handle_input("Tab"));
+        assert_eq!(adapter.active_tab, InspectorTab::Agents);
         assert!(adapter.handle_input("Tab"));
         assert_eq!(adapter.active_tab, InspectorTab::Dag);
         assert!(adapter.handle_input("Tab"));
-        assert_eq!(adapter.active_tab, InspectorTab::Overview);
+        assert_eq!(adapter.active_tab, InspectorTab::Events);
         // Other keys are not consumed.
         assert!(!adapter.handle_input("q"));
         assert!(!adapter.handle_input("Enter"));
@@ -1345,25 +1388,27 @@ mod tests {
         let out_p = adapter_p.render(&make_rect(8.0));
         let out_a = adapter_a.render(&make_rect(8.0));
 
+        // The active tab label is rendered in text_accent. The default tab is
+        // Events; pick its label as the live-tokens witness.
         let hdr_p = out_p
             .text_segments
             .iter()
-            .find(|t| t.text.starts_with("INSPECTOR"))
-            .expect("phosphor: INSPECTOR header");
+            .find(|t| t.text == "EVENTS")
+            .expect("phosphor: EVENTS tab label");
         let hdr_a = out_a
             .text_segments
             .iter()
-            .find(|t| t.text.starts_with("INSPECTOR"))
-            .expect("alt: INSPECTOR header");
+            .find(|t| t.text == "EVENTS")
+            .expect("alt: EVENTS tab label");
 
         assert_ne!(
             hdr_p.color, hdr_a.color,
-            "INSPECTOR header color must change when text_accent changes",
+            "Active tab label color must change when text_accent changes",
         );
         // Alt palette has blue accent — blue channel must dominate.
         assert!(
             hdr_a.color[2] > 0.8,
-            "alt adapter: INSPECTOR header should be blue-dominant, got {:?}",
+            "alt adapter: active tab label should be blue-dominant, got {:?}",
             hdr_a.color,
         );
     }
@@ -1520,19 +1565,22 @@ mod tests {
     #[test]
     fn inspector_adapter_renders_hot_swaps_section_header() {
         let view = InspectorView::empty();
-        let adapter = InspectorAdapter::with_view(view);
+        let mut adapter = InspectorAdapter::with_view(view);
+        // Hot swaps live on the AGENTS tab now.
+        adapter.handle_input("Tab");
         let output = adapter.render(&make_rect(8.0));
-        // HOT SWAPS section header must always render.
+        // HOT SWAPS section header must always render on the Agents tab.
         assert!(
             output.text_segments.iter().any(|t| t.text.starts_with("HOT SWAPS:")),
-            "HOT SWAPS header must be present in Overview render",
+            "HOT SWAPS header must be present in Agents tab",
         );
     }
 
     #[test]
     fn inspector_adapter_renders_disabled_hint_when_no_swap_states() {
         let view = InspectorView::empty();
-        let adapter = InspectorAdapter::with_view(view);
+        let mut adapter = InspectorAdapter::with_view(view);
+        adapter.handle_input("Tab"); // Switch to AGENTS tab.
         let output = adapter.render(&make_rect(8.0));
         assert!(
             output.text_segments.iter().any(|t| t.text.contains("hot-modules disabled")),
@@ -1549,7 +1597,8 @@ mod tests {
                 status: SwapRowStatus::Draining { age_ms: 5_000, refcount: 3 },
             })
             .build();
-        let adapter = InspectorAdapter::with_view(view);
+        let mut adapter = InspectorAdapter::with_view(view);
+        adapter.handle_input("Tab"); // AGENTS tab.
         let output = adapter.render(&make_rect(8.0));
         let found = output
             .text_segments
@@ -1571,7 +1620,8 @@ mod tests {
                 status: SwapRowStatus::Forced { age_ms: 30_100 },
             })
             .build();
-        let adapter = InspectorAdapter::with_view_and_tokens(view, tokens);
+        let mut adapter = InspectorAdapter::with_view_and_tokens(view, tokens);
+        adapter.handle_input("Tab"); // AGENTS tab.
         let output = adapter.render(&make_rect(8.0));
 
         let forced_seg = output

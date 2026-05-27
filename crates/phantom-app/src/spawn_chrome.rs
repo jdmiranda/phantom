@@ -206,12 +206,37 @@ pub(crate) fn toggle_logs_pane(app: &mut App) {
     }
 }
 
+/// Ensure the background filesystem watcher is running on the current
+/// working directory.  Multiple panes (FilesWatch, Diff) share the single
+/// watcher.  Called from the toggle helpers of every pane that depends on
+/// file-write events.  Calling when the watcher is already up is a no-op.
+fn ensure_files_watcher(app: &mut App) {
+    if app.files_watcher.is_some() {
+        return;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        app.files_watcher = crate::files_watcher::FilesWatcher::new(&cwd);
+        if app.files_watcher.is_none() {
+            log::warn!("files_watcher setup failed; dependent panes will not auto-refresh");
+        }
+    }
+}
+
+/// Tear the background filesystem watcher down when no pane needs it.
+/// Called from the closing branch of every dependent pane.
+fn maybe_stop_files_watcher(app: &mut App) {
+    let still_needed = app.files_watch_pane_id.is_some() || app.diff_pane_id.is_some();
+    if !still_needed {
+        app.files_watcher = None;
+    }
+}
+
 pub(crate) fn toggle_files_watch_pane(app: &mut App) {
     if let Some(app_id) = app.files_watch_pane_id.take() {
         despawn_chrome_pane(app, app_id, "FilesWatch");
-        // Stop the background watcher so we don't burn cycles while the
-        // pane is closed.
-        app.files_watcher = None;
+        // Stop the background watcher only when no other dependent pane
+        // (today: Diff) needs it.
+        maybe_stop_files_watcher(app);
         return;
     }
     let tokens = current_tokens(app);
@@ -219,19 +244,16 @@ pub(crate) fn toggle_files_watch_pane(app: &mut App) {
     adapter.set_tokens(tokens);
     if let Some(new_id) = spawn_chrome_pane(app, Box::new(adapter), "FilesWatch") {
         app.files_watch_pane_id = Some(new_id);
-        // Spin up the watcher on the current working directory.
-        if let Ok(cwd) = std::env::current_dir() {
-            app.files_watcher = crate::files_watcher::FilesWatcher::new(&cwd);
-            if app.files_watcher.is_none() {
-                log::warn!("FilesWatch: notify watcher setup failed; pane will show no events");
-            }
-        }
+        ensure_files_watcher(app);
     }
 }
 
 pub(crate) fn toggle_diff_pane(app: &mut App) {
     if let Some(app_id) = app.diff_pane_id.take() {
         despawn_chrome_pane(app, app_id, "Diff");
+        // The Diff pane shares the FilesWatcher with FilesWatch; release
+        // the watcher only when neither pane is still open.
+        maybe_stop_files_watcher(app);
         return;
     }
     let tokens = current_tokens(app);
@@ -263,6 +285,10 @@ pub(crate) fn toggle_diff_pane(app: &mut App) {
 
     if let Some(new_id) = spawn_chrome_pane(app, Box::new(adapter), "Diff") {
         app.diff_pane_id = Some(new_id);
+        // Diff auto-refreshes from FilesWatcher events drained in
+        // `App::refresh_files_watch_pane`.  Start the watcher if it isn't
+        // already running for another pane.
+        ensure_files_watcher(app);
     }
 }
 
@@ -275,10 +301,12 @@ pub(crate) fn toggle_memory_pane(app: &mut App) {
     let mut adapter = MemoryInspectorAdapter::new();
     adapter.set_tokens(tokens);
 
-    // Load the per-project auto-memory directory if present. Each .md file
-    // has a YAML frontmatter with `name` and `description`; we surface those
-    // as key/value rows. MEMORY.md (the index) is skipped because its
-    // content is one-liners that double-up with the individual files.
+    let mut rows: Vec<crate::adapters::memory_inspector::MemoryEntry> = Vec::new();
+
+    // Source 1: Claude Code per-project auto-memory dir.
+    // Each .md file has a YAML frontmatter with `name` and `description`; we
+    // surface those as key/value rows. MEMORY.md (the index) is skipped
+    // because its content is one-liners that double-up with the individual files.
     let project_dir = std::env::current_dir().ok();
     let project_slug = project_dir.as_ref().and_then(|p| {
         p.to_str().map(|s| s.replace('/', "-"))
@@ -290,7 +318,6 @@ pub(crate) fn toggle_memory_pane(app: &mut App) {
         if let Some(dir) = memory_dir
             && let Ok(entries) = std::fs::read_dir(&dir)
         {
-            let mut rows = Vec::new();
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) != Some("md") {
@@ -305,15 +332,34 @@ pub(crate) fn toggle_memory_pane(app: &mut App) {
                 let description = parse_frontmatter_field(&body, "description").unwrap_or_else(|| "(no description)".to_string());
                 rows.push(crate::adapters::memory_inspector::MemoryEntry::new(name, description));
             }
-            rows.sort_by(|a, b| a.key.cmp(&b.key));
-            adapter.set_entries(rows);
         }
-        if let Some(name) = project_dir
-            .as_ref()
-            .and_then(|p| p.file_name().and_then(|s| s.to_str()))
-        {
-            adapter.set_project(name);
+    }
+
+    // Source 2: wolf session journals — operator-facing session notes
+    // captured by the `/journal` skill. Each .md file is a structured
+    // session report; we surface the filename stem (date + slug) and the
+    // first heading line as a key/value pair.
+    let journal_dir = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".wolf/sessions/journal"));
+    if let Some(dir) = journal_dir {
+        for entry in scan_wolf_journal(&dir, 30) {
+            rows.push(entry);
         }
+    }
+
+    // Sort project-memory rows alphabetically by key, but keep the journal
+    // rows (already newest-first) at the bottom of the list so the pane
+    // surfaces the auto-memory front-matter first.
+    let split_idx = rows.iter().position(|r| r.key.starts_with("journal · ")).unwrap_or(rows.len());
+    rows[..split_idx].sort_by(|a, b| a.key.cmp(&b.key));
+    adapter.set_entries(rows);
+
+    if let Some(name) = project_dir
+        .as_ref()
+        .and_then(|p| p.file_name().and_then(|s| s.to_str()))
+    {
+        adapter.set_project(name);
     }
 
     if let Some(new_id) = spawn_chrome_pane(app, Box::new(adapter), "Memory") {
@@ -346,6 +392,47 @@ fn parse_frontmatter_field(body: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Scan `dir` for `.md` files and return up to `cap` memory-inspector entries,
+/// newest-first by mtime, with key `"journal · <stem>"` and value set to the
+/// first non-empty heading line of the file.
+///
+/// Returns an empty `Vec` when `dir` does not exist or cannot be read so the
+/// caller never has to wrap this in extra option-handling.  Extracted into a
+/// free function so unit tests can target a temp directory.
+pub(crate) fn scan_wolf_journal(
+    dir: &std::path::Path,
+    cap: usize,
+) -> Vec<crate::adapters::memory_inspector::MemoryEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+
+    let mut journal_rows: Vec<(std::time::SystemTime, String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let stem = file_name.trim_end_matches(".md").to_string();
+        let Ok(body) = std::fs::read_to_string(&path) else { continue };
+        let first_line = body
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.trim_start_matches('#').trim().to_string())
+            .unwrap_or_else(|| "(empty)".to_string());
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        journal_rows.push((mtime, format!("journal · {stem}"), first_line));
+    }
+    journal_rows.sort_by(|a, b| b.0.cmp(&a.0));
+    journal_rows
+        .into_iter()
+        .take(cap)
+        .map(|(_, key, val)| crate::adapters::memory_inspector::MemoryEntry::new(key, val))
+        .collect()
 }
 
 pub(crate) fn toggle_fleet_pane(app: &mut App) {
@@ -466,4 +553,109 @@ pub(crate) fn spawn_boot_pane(app: &mut App) -> Option<u32> {
     let mut adapter = BootAdapter::new();
     adapter.set_tokens(tokens);
     spawn_chrome_pane(app, Box::new(adapter), "Boot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn parse_frontmatter_field_reads_quoted_value() {
+        let body = "---\nname: \"Stack\"\ndescription: 'rust 2024'\n---\nbody\n";
+        assert_eq!(parse_frontmatter_field(body, "name").as_deref(), Some("Stack"));
+        assert_eq!(
+            parse_frontmatter_field(body, "description").as_deref(),
+            Some("rust 2024")
+        );
+    }
+
+    #[test]
+    fn scan_wolf_journal_returns_entries_with_journal_prefix() {
+        // Build a temp dir mimicking the layout of ~/.wolf/sessions/journal.
+        let tmp = std::env::temp_dir().join(format!(
+            "phantom-journal-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("temp dir");
+
+        let alpha = tmp.join("2026-01-01-alpha.md");
+        let beta = tmp.join("2026-02-02-beta.md");
+        fs::write(&alpha, "# Session: alpha — first\nbody\n").unwrap();
+        fs::write(&beta, "# Session: beta — second\nbody\n").unwrap();
+
+        let rows = scan_wolf_journal(&tmp, 10);
+        assert_eq!(rows.len(), 2, "must surface two journal entries");
+
+        // Key carries the "journal · " prefix so the row is distinguishable
+        // from project-memory rows in the unified list.
+        assert!(rows.iter().all(|r| r.key.starts_with("journal · ")));
+        // Both entries surface their stem in the key and their heading in
+        // the value.
+        let keys: Vec<_> = rows.iter().map(|r| r.key.clone()).collect();
+        assert!(keys.iter().any(|k| k.contains("alpha")), "keys: {keys:?}");
+        assert!(keys.iter().any(|k| k.contains("beta")), "keys: {keys:?}");
+        let vals: Vec<_> = rows.iter().map(|r| r.value.clone()).collect();
+        assert!(vals.iter().any(|v| v.contains("alpha")), "vals: {vals:?}");
+        assert!(vals.iter().any(|v| v.contains("beta")), "vals: {vals:?}");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_wolf_journal_sorts_newest_first_when_mtime_differs() {
+        // Two files written with a sleep in between so the OS records
+        // distinct mtimes. The newer file must appear first.
+        let tmp = std::env::temp_dir().join(format!(
+            "phantom-journal-order-test-{}-{:?}",
+            std::process::id(),
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("temp dir");
+
+        fs::write(tmp.join("a.md"), "# A\n").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        fs::write(tmp.join("b.md"), "# B\n").unwrap();
+
+        let rows = scan_wolf_journal(&tmp, 10);
+        assert_eq!(rows.len(), 2);
+        // `b.md` was written second, so it must surface first.
+        assert!(
+            rows[0].key.contains(" b"),
+            "newer entry must be first; got {}",
+            rows[0].key
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_wolf_journal_caps_at_limit() {
+        let tmp = std::env::temp_dir().join(format!(
+            "phantom-journal-cap-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("temp dir");
+
+        for i in 0..50 {
+            let path = tmp.join(format!("entry-{i:02}.md"));
+            fs::write(&path, format!("# Session {i}\n")).unwrap();
+        }
+
+        let rows = scan_wolf_journal(&tmp, 7);
+        assert_eq!(rows.len(), 7, "cap must clamp the result");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_wolf_journal_returns_empty_when_dir_missing() {
+        let path = std::path::PathBuf::from("/nonexistent/phantom-no-such-dir");
+        let rows = scan_wolf_journal(&path, 10);
+        assert!(rows.is_empty());
+    }
 }

@@ -550,12 +550,49 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
+
+            // Resolve the chrome-pane topic id once per batch — `agent.denied`
+            // was registered at App boot in `app.rs`. The publish step is
+            // best-effort: an unregistered topic id (shouldn't happen, but
+            // could during tests) drops the event rather than panicking.
+            let agent_denied_topic =
+                self.coordinator.bus().topic_id_by_name("agent.denied");
+
             for event in denied {
                 if let phantom_agents::spawn_rules::EventKind::CapabilityDenied {
-                    agent_id, ..
+                    agent_id,
+                    ref role,
+                    ref attempted_class,
+                    ref attempted_tool,
+                    ref source_chain,
                 } = event.kind
                 {
                     self.notifications.record_denial(agent_id, now_ms);
+
+                    // Forward to the chrome bus so the NotificationsAdapter
+                    // pane (and any other subscriber) can surface a row.
+                    if let Some(tid) = agent_denied_topic {
+                        let data = serde_json::json!({
+                            "agent_id": agent_id,
+                            "role": format!("{:?}", role),
+                            "attempted_class": format!("{:?}", attempted_class),
+                            "attempted_tool": attempted_tool,
+                            "source_chain": source_chain,
+                            "ts_ms": now_ms,
+                        })
+                        .to_string();
+                        let msg = phantom_adapter::BusMessage {
+                            topic_id: tid,
+                            sender: 0,
+                            event: phantom_protocol::Event::Custom {
+                                kind: "agent.denied".into(),
+                                data,
+                            },
+                            frame: 0,
+                            timestamp: now_ms,
+                        };
+                        self.coordinator.bus_mut().emit(msg);
+                    }
                 }
                 self.runtime.push_event(event);
             }
@@ -1684,25 +1721,79 @@ impl App {
     /// Drain the FilesWatch background watcher's event queue and route each
     /// event into the FilesWatchAdapter via `accept_command "push"`. No-op
     /// when the pane is closed or the watcher isn't running.
+    ///
+    /// When the Diff pane is also open, any non-empty event batch triggers
+    /// a fresh `git diff HEAD` pull so the diff stays in sync with the file
+    /// tree.  This is the App's only `FilesWatcher` subscription site;
+    /// adding a second subscriber here keeps the watcher single-owner.
     pub(crate) fn refresh_files_watch_pane(&mut self) {
-        let Some(pane_id) = self.files_watch_pane_id else { return };
-        let Some(ref watcher) = self.files_watcher else { return };
-        let events = watcher.drain(32);
+        let watcher_present = self.files_watcher.is_some();
+        if !watcher_present {
+            return;
+        }
+        let events = self
+            .files_watcher
+            .as_ref()
+            .map(|w| w.drain(32))
+            .unwrap_or_default();
         if events.is_empty() {
             return;
         }
-        let stamp = crate::input::chrono_time_string();
-        for ev in events {
-            let _ = self.coordinator.send_command(
-                pane_id,
-                "push",
-                &serde_json::json!({
-                    "path": ev.path,
-                    "kind": ev.kind,
-                    "stamp": stamp,
-                }),
-            );
+
+        // Files-watch pane: push each event row.
+        if let Some(pane_id) = self.files_watch_pane_id {
+            let stamp = crate::input::chrono_time_string();
+            for ev in &events {
+                let _ = self.coordinator.send_command(
+                    pane_id,
+                    "push",
+                    &serde_json::json!({
+                        "path": ev.path,
+                        "kind": ev.kind,
+                        "stamp": stamp,
+                    }),
+                );
+            }
         }
+
+        // Diff pane: rerun `git diff HEAD` so the diff body stays in sync
+        // with the working tree.  Skip when the pane is closed (no work to
+        // do) or when git invocation fails (no repo / git binary missing).
+        // The full re-pull is fine for the common case — the working tree
+        // diff is bounded by uncommitted changes, which stays small in
+        // ordinary workflows.
+        self.refresh_diff_pane();
+    }
+
+    /// Re-pull `git diff HEAD` for the working tree and push the result into
+    /// the open DiffAdapter via `accept_command "load"`. No-op when the
+    /// pane is closed.
+    pub(crate) fn refresh_diff_pane(&mut self) {
+        let Some(pane_id) = self.diff_pane_id else { return };
+        let Ok(cwd) = std::env::current_dir() else { return };
+        let output = std::process::Command::new("git")
+            .arg("diff")
+            .arg("HEAD")
+            .current_dir(&cwd)
+            .output();
+        let Ok(output) = output else { return };
+        if !output.status.success() {
+            return;
+        }
+        let body = String::from_utf8_lossy(&output.stdout).into_owned();
+        let file_label = cwd
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{s} · git diff HEAD"))
+            .unwrap_or_else(|| "git diff HEAD".to_string());
+        let _ = self.coordinator.send_command(
+            pane_id,
+            "load",
+            &serde_json::json!({
+                "file": file_label,
+                "body": body,
+            }),
+        );
     }
 }
 
