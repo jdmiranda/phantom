@@ -1,4 +1,17 @@
 //! Fleet adapter — render the list of connected/known fleet nodes.
+//!
+//! # Backend readiness
+//!
+//! The mockup at `docs/mockups/apps.html` shows multiple peer nodes
+//! (`ci-runner-01`, `deploy-staging`, etc.) for a federated fleet. That UX
+//! is gated on **`phantom-net`**, currently marked 🔧 in CLAUDE.md (Phase 9,
+//! issue [#5](https://github.com/jdmiranda/phantom/issues/5)). Until phantom-net
+//! exposes a peer-discovery API surfacing remote nodes, this adapter renders
+//! only the local node and a copy line acknowledging the limitation.
+//!
+//! The sibling [`phantom_fleet::FleetRegistry`] is *not* a peer registry —
+//! it tracks headless apps spawned by the in-process fleet orchestrator, so
+//! it is not the right source for multi-node UI either.
 
 use serde_json::json;
 
@@ -104,6 +117,29 @@ impl FleetAdapter {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+
+    /// Seed the local-node entry from the running process's hostname and OS.
+    ///
+    /// This is the only node the adapter can populate honestly today —
+    /// peer discovery over `phantom-net` is Phase 9 / 🔧 per CLAUDE.md.
+    /// Callers (typically `App::spawn_fleet_pane`) invoke this at spawn
+    /// time so the pane is non-empty even when no remote nodes are
+    /// reachable. The supplied `meta` is shown in the right-aligned slot
+    /// (e.g. `"M3 Max"` or `"linux/aarch64"`).
+    pub fn populate_local_node(&mut self, name: impl Into<String>, meta: impl Into<String>) {
+        // Replace any existing self-node so repeated calls are idempotent.
+        let name = name.into();
+        let meta = meta.into();
+        self.nodes.retain(|n| !matches!(n.state, FleetNodeState::Self_));
+        self.nodes.insert(
+            0,
+            FleetNode {
+                name,
+                state: FleetNodeState::Self_,
+                meta,
+            },
+        );
+    }
 }
 
 impl Default for FleetAdapter {
@@ -200,6 +236,31 @@ impl Renderable for FleetAdapter {
                 y,
                 color: meta_color,
             });
+            // Honest readiness: even when the host's local-node seed has
+            // not run, the multi-peer fleet UX from the mockup needs the
+            // `phantom-net` peer layer, currently 🔧 per CLAUDE.md.
+            text_segments.push(TextData {
+                text: "  (net layer pending — phantom-net is skeletal)".to_string(),
+                x: body.x + cell_w,
+                y: y + cell_h,
+                color: meta_color,
+            });
+        } else {
+            // Adapters that only show the local node should still surface
+            // that remote-peer discovery isn't online yet, so the operator
+            // doesn't mistake a single-node list for a healthy quorum.
+            let has_remote = self
+                .nodes
+                .iter()
+                .any(|n| !matches!(n.state, FleetNodeState::Self_));
+            if !has_remote && y + cell_h <= body.y + body.height {
+                text_segments.push(TextData {
+                    text: "  (local node only — net layer pending)".to_string(),
+                    x: body.x + cell_w,
+                    y,
+                    color: meta_color,
+                });
+            }
         }
 
         RenderOutput {
@@ -345,6 +406,81 @@ mod tests {
         let a = FleetAdapter::new();
         let out = a.render(&rect());
         assert!(out.text_segments.iter().any(|t| t.text.contains("no nodes")));
+    }
+
+    #[test]
+    fn empty_renders_net_pending_hint() {
+        // The empty state should also disclose that the net layer is the
+        // reason there are no peers — not "the operator forgot to configure
+        // anything". This keeps the UI honest about readiness.
+        let a = FleetAdapter::new();
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("net layer pending")),
+            "empty fleet must surface the phantom-net pending hint"
+        );
+    }
+
+    #[test]
+    fn populate_local_node_seeds_self_entry() {
+        let mut a = FleetAdapter::new();
+        a.populate_local_node("max.local", "M3 Max");
+        assert_eq!(a.len(), 1);
+        let n = &a.nodes[0];
+        assert_eq!(n.name, "max.local");
+        assert_eq!(n.meta, "M3 Max");
+        assert!(matches!(n.state, FleetNodeState::Self_));
+    }
+
+    #[test]
+    fn populate_local_node_is_idempotent() {
+        // Calling populate_local_node twice should leave a single self entry,
+        // not two stacked rows.
+        let mut a = FleetAdapter::new();
+        a.populate_local_node("max.local", "M3 Max");
+        a.populate_local_node("max.local", "M3 Max");
+        let self_count = a
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.state, FleetNodeState::Self_))
+            .count();
+        assert_eq!(self_count, 1, "duplicate self entries must collapse");
+    }
+
+    #[test]
+    fn local_only_state_renders_pending_disclosure() {
+        // When the local node is the only entry, the operator should see
+        // the "local node only — net layer pending" disclosure so they don't
+        // misread the single row as a healthy quorum.
+        let mut a = FleetAdapter::new();
+        a.populate_local_node("max.local", "M3 Max");
+        let out = a.render(&rect());
+        assert!(
+            out.text_segments
+                .iter()
+                .any(|t| t.text.contains("local node only")),
+            "single-self list must surface the local-only disclosure"
+        );
+    }
+
+    #[test]
+    fn multi_node_state_omits_local_only_disclosure() {
+        // Once there's a real peer, the pending disclosure should disappear —
+        // the UX reflects working federation when nodes are connected.
+        let mut a = FleetAdapter::new();
+        a.set_nodes(vec![
+            FleetNode::new("max.local", FleetNodeState::Self_, "M3 Max"),
+            FleetNode::new("ci-runner-01", FleetNodeState::Live, "linux"),
+        ]);
+        let out = a.render(&rect());
+        assert!(
+            !out.text_segments
+                .iter()
+                .any(|t| t.text.contains("local node only")),
+            "multi-node list must drop the local-only disclosure"
+        );
     }
 
     #[test]
