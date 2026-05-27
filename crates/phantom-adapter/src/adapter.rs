@@ -335,6 +335,15 @@ pub struct TextData {
 /// cell-space rects (e.g. inspector lists, terminal grids) read it instead
 /// of guessing. `(0.0, 0.0)` is the default and signals "unknown / not
 /// computed" — adapters should fall back to a sensible constant.
+///
+/// `focused` is set by the coordinator each frame so adapters can tint their
+/// chrome (typically the [`phantom_ui::widgets::AppHead`]) when this pane has
+/// keyboard focus. Defaults to `false`.
+///
+/// `elapsed_secs` is the App's monotonic clock — adapters thread this into
+/// their `Tokens.ctx.elapsed_secs` so animated chrome elements (the live-dot
+/// pulse on `AppHead`, etc.) advance frame-to-frame even when the adapter
+/// itself never updates its data.
 #[derive(Debug, Clone, Default)]
 pub struct Rect {
     pub x: f32,
@@ -342,4 +351,11 @@ pub struct Rect {
     pub width: f32,
     pub height: f32,
     pub cell_size: (f32, f32),
+    /// Whether this adapter currently owns keyboard focus.
+    /// Adapters should plumb this into their [`AppHead::focused`](crate)
+    /// (or equivalent chrome widget) so the focus ring tints the active pane.
+    pub focused: bool,
+    /// Seconds since application start. Source of truth for chrome
+    /// animations (e.g. the `AppHead` live-dot pulse).
+    pub elapsed_secs: f32,
 }

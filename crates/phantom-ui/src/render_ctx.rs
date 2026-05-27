@@ -16,15 +16,34 @@ pub struct RenderCtx {
     pub cell_size: (f32, f32),
     /// Logical-to-physical pixel ratio (1.0 on standard, 2.0 on Retina).
     pub dpi_scale: f32,
+    /// Seconds since application start (clamped scene clock). Defaults to `0.0`.
+    /// Widgets that animate (e.g. the `AppHead` live-dot pulse) sample this to
+    /// avoid threading wall-clock instants through every render call.
+    pub elapsed_secs: f32,
 }
 
 impl RenderCtx {
     /// Construct a `RenderCtx` from cell metrics and DPI scale.
-    #[must_use] 
+    #[must_use]
     pub fn new(cell_size: (f32, f32), dpi_scale: f32) -> Self {
         Self {
             cell_size,
             dpi_scale,
+            elapsed_secs: 0.0,
+        }
+    }
+
+    /// Construct a `RenderCtx` from cell metrics, DPI scale, and elapsed time.
+    ///
+    /// Use this from the renderer when widgets need to animate (e.g. pulsing
+    /// dots). The `elapsed_secs` value should advance monotonically across
+    /// frames; sampling the scene clock once per frame is the standard path.
+    #[must_use]
+    pub fn with_elapsed(cell_size: (f32, f32), dpi_scale: f32, elapsed_secs: f32) -> Self {
+        Self {
+            cell_size,
+            dpi_scale,
+            elapsed_secs,
         }
     }
 
@@ -58,11 +77,12 @@ impl RenderCtx {
 
     /// A safe fallback for tests and code paths that don't yet thread metrics.
     /// Real values flow from the live renderer.
-    #[must_use] 
+    #[must_use]
     pub fn fallback() -> Self {
         Self {
             cell_size: (8.0, 16.0),
             dpi_scale: 1.0,
+            elapsed_secs: 0.0,
         }
     }
 }

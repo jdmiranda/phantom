@@ -149,15 +149,31 @@ impl AppHead {
     }
 
     /// Resolve the dot color from the active token palette.
+    ///
+    /// The alpha channel is modulated by `tokens.ctx.elapsed_secs` to produce
+    /// a slow pulse on the live indicator, matching the mockup's
+    /// `<span class="dot"></span>` animation. The pulse uses a sinusoid with
+    /// `PULSE_HZ` period and oscillates between `PULSE_FLOOR_ALPHA` and the
+    /// base alpha so the dot never disappears entirely.
     fn dot_color(&self) -> Option<[f32; 4]> {
-        match self.dot {
-            AppHeadDot::None => None,
-            AppHeadDot::Ok => Some(self.tokens.colors.status_ok),
-            AppHeadDot::Warn => Some(self.tokens.colors.status_warn),
-            AppHeadDot::Danger => Some(self.tokens.colors.status_danger),
-            AppHeadDot::Info => Some(self.tokens.colors.status_info),
-            AppHeadDot::Live => Some(self.tokens.colors.text_accent),
-        }
+        let base = match self.dot {
+            AppHeadDot::None => return None,
+            AppHeadDot::Ok => self.tokens.colors.status_ok,
+            AppHeadDot::Warn => self.tokens.colors.status_warn,
+            AppHeadDot::Danger => self.tokens.colors.status_danger,
+            AppHeadDot::Info => self.tokens.colors.status_info,
+            AppHeadDot::Live => self.tokens.colors.text_accent,
+        };
+        // Pulse modulates the dot's alpha around a midpoint. ~1 Hz pulse so it
+        // reads as a heartbeat rather than a strobe. The 0..=1 phase maps onto
+        // [floor, base_alpha] linearly.
+        const PULSE_HZ: f32 = 1.0;
+        const PULSE_FLOOR_ALPHA: f32 = 0.35;
+        let phase = (self.tokens.ctx.elapsed_secs * PULSE_HZ * std::f32::consts::TAU).sin();
+        // sin returns [-1, 1]; remap to [0, 1] so the dot brightens / dims.
+        let t = phase * 0.5 + 0.5;
+        let alpha = PULSE_FLOOR_ALPHA + (base[3] - PULSE_FLOOR_ALPHA).max(0.0) * t;
+        Some([base[0], base[1], base[2], alpha])
     }
 }
 
@@ -177,14 +193,26 @@ impl AppHead {
     ///
     /// Accepts the adapter-side `Rect` (with `cell_size` metadata), which
     /// is the shape every `Renderable::render` receives.
+    ///
+    /// Threads `rect.elapsed_secs` into the local tokens snapshot so the
+    /// live-dot pulse animates without each adapter having to manage clock
+    /// state. If the adapter's tokens already carry a non-zero
+    /// `elapsed_secs`, the rect wins so the App's monotonic clock is
+    /// authoritative.
     pub fn render_into_adapter(
         &self,
         rect: &phantom_adapter::adapter::Rect,
         quads: &mut Vec<phantom_adapter::adapter::QuadData>,
         text_segments: &mut Vec<phantom_adapter::adapter::TextData>,
     ) {
+        // Mirror the rect's clock into the tokens so chrome animations follow
+        // the App, not whatever stale ctx the adapter was built with.
+        let pulsed = AppHead {
+            tokens: self.tokens.with_elapsed(rect.elapsed_secs),
+            ..self.clone()
+        };
         let inner = adapter_rect_to_ui(rect);
-        for q in self.render_quads(&inner) {
+        for q in pulsed.render_quads(&inner) {
             quads.push(phantom_adapter::adapter::QuadData {
                 x: q.pos[0],
                 y: q.pos[1],
@@ -193,7 +221,7 @@ impl AppHead {
                 color: q.color,
             });
         }
-        for s in self.render_text(&inner) {
+        for s in pulsed.render_text(&inner) {
             text_segments.push(phantom_adapter::adapter::TextData {
                 text: s.text,
                 x: s.x,
@@ -218,6 +246,8 @@ impl AppHead {
             width: outer.width,
             height: (outer.height - h).max(0.0),
             cell_size: outer.cell_size,
+            focused: outer.focused,
+            elapsed_secs: outer.elapsed_secs,
         }
     }
 }
@@ -235,7 +265,7 @@ impl Widget for AppHead {
     fn render_quads(&self, rect: &Rect) -> Vec<QuadInstance> {
         let t = self.tokens;
         let h = self.height();
-        let mut quads = Vec::with_capacity(3);
+        let mut quads = Vec::with_capacity(4);
 
         // Header band background — slightly raised when focused, recessed otherwise.
         let bg = if self.focused {
@@ -250,12 +280,33 @@ impl Widget for AppHead {
             border_radius: 0.0,
         });
 
-        // Bottom divider hairline — separates header from body.
+        // Focus-ring accent — when focused, paint a 2px top border in
+        // `chrome_frame_active` (the mockup's `--frame-active` glow). This
+        // becomes the per-pane focus ring without modifying every adapter
+        // body, since every adapter renders AppHead at the top of its rect.
+        if self.focused {
+            let frame_h = t.frame().max(2.0);
+            quads.push(QuadInstance {
+                pos: [rect.x, rect.y],
+                size: [rect.width, frame_h],
+                color: t.colors.chrome_frame_active,
+                border_radius: 0.0,
+            });
+        }
+
+        // Bottom divider hairline — separates header from body. When focused,
+        // the divider also uses `chrome_frame_active` so the active pane is
+        // bracketed by accent on both edges (cheap glow effect).
         let hair_h = t.hair().max(1.0);
+        let divider_color = if self.focused {
+            t.colors.chrome_frame_active
+        } else {
+            t.colors.chrome_divider
+        };
         quads.push(QuadInstance {
             pos: [rect.x, rect.y + h - hair_h],
             size: [rect.width, hair_h],
-            color: t.colors.chrome_divider,
+            color: divider_color,
             border_radius: 0.0,
         });
 
@@ -471,6 +522,8 @@ mod tests {
     }
 
     /// Dot color must come from the active token palette.
+    /// Note: the dot's alpha is modulated by `elapsed_secs` for pulse, so we
+    /// only check the RGB channels — alpha varies frame-to-frame.
     #[test]
     fn dot_color_follows_status_token() {
         let mut roles = ColorRoles::phosphor();
@@ -482,6 +535,67 @@ mod tests {
             .with_tokens(tokens);
         let quads = head.render_quads(&rect());
         let dot = quads.last().expect("dot must be the last quad");
-        assert_eq!(dot.color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!([dot.color[0], dot.color[1], dot.color[2]], [1.0, 0.0, 0.0]);
+        // Pulse keeps alpha within [PULSE_FLOOR_ALPHA, base_alpha].
+        assert!(dot.color[3] > 0.0 && dot.color[3] <= 1.0);
+    }
+
+    /// The live dot's alpha must change with elapsed time (the pulse).
+    /// Sampling at two well-separated phases should yield different alphas.
+    #[test]
+    fn live_dot_alpha_pulses_with_elapsed_secs() {
+        let roles = ColorRoles::phosphor();
+        // Phase t=0   -> sin(0)         = 0    -> mid alpha
+        // Phase t=0.25 -> sin(pi/2)     = 1    -> peak alpha (= base)
+        // Phase t=0.75 -> sin(3pi/2)    = -1   -> floor alpha
+        let tokens_low = Tokens::new(
+            roles,
+            RenderCtx::with_elapsed((8.0, 16.0), 1.0, 0.75),
+        );
+        let tokens_high = Tokens::new(
+            roles,
+            RenderCtx::with_elapsed((8.0, 16.0), 1.0, 0.25),
+        );
+        let head_low = AppHead::new("agent", "")
+            .with_meta("live")
+            .with_dot(AppHeadDot::Live)
+            .with_tokens(tokens_low);
+        let head_high = AppHead::new("agent", "")
+            .with_meta("live")
+            .with_dot(AppHeadDot::Live)
+            .with_tokens(tokens_high);
+        let dot_low = head_low.render_quads(&rect()).last().copied().unwrap();
+        let dot_high = head_high.render_quads(&rect()).last().copied().unwrap();
+        assert!(
+            dot_high.color[3] > dot_low.color[3],
+            "high-phase alpha {} must exceed low-phase alpha {}",
+            dot_high.color[3],
+            dot_low.color[3]
+        );
+    }
+
+    /// Focused header must paint a top accent quad in `chrome_frame_active`.
+    #[test]
+    fn focused_emits_top_accent_quad() {
+        let tokens = Tokens::phosphor(RenderCtx::fallback());
+        let head = AppHead::new("agent", "").focused(true).with_tokens(tokens);
+        let quads = head.render_quads(&rect());
+        // Quads: bg, focus-accent, divider. The accent sits between.
+        assert!(quads.len() >= 3);
+        let accent = quads.iter().find(|q| q.color == tokens.colors.chrome_frame_active);
+        assert!(
+            accent.is_some(),
+            "focused head must emit a quad in chrome_frame_active color"
+        );
+    }
+
+    /// Unfocused header must NOT emit the focus accent quad.
+    #[test]
+    fn unfocused_skips_focus_accent_quad() {
+        let tokens = Tokens::phosphor(RenderCtx::fallback());
+        let head = AppHead::new("agent", "").focused(false).with_tokens(tokens);
+        let quads = head.render_quads(&rect());
+        // Without focus we get bg + divider only.
+        assert_eq!(quads.len(), 2);
     }
 }

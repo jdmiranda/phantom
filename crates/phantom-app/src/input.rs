@@ -308,6 +308,11 @@ impl App {
         }
         self.apply_config_reload(&settings);
 
+        // Sync the Tier-2 theme-strip widget so its active-ring tracks the
+        // newly applied theme even when the cycle was triggered via keybind
+        // rather than a strip click.
+        self.theme_strip.set_active(&self.theme.name);
+
         // Broadcast a fresh Tokens snapshot to every chrome adapter we
         // know about so the next render reflects the new palette.
         self.broadcast_theme_to_chrome_panes();

@@ -52,6 +52,10 @@ pub struct AppCoordinator {
     /// Starts empty — all panes are roots.  The process-detach subsystem
     /// (#367/#368/#369) populates this when a subprocess pane is created.
     lineage: PaneLineage,
+    /// Monotonic seconds-since-start, updated once per frame by the App.
+    /// Threaded into each adapter's `Rect.elapsed_secs` so chrome
+    /// animations (e.g. the AppHead live-dot pulse) advance.
+    elapsed_secs: f32,
 }
 
 impl AppCoordinator {
@@ -76,7 +80,23 @@ impl AppCoordinator {
             floating: HashSet::new(),
             float_rects: HashMap::new(),
             lineage: PaneLineage::new(),
+            elapsed_secs: 0.0,
         }
+    }
+
+    /// Update the elapsed-secs clock threaded into every adapter's `Rect`.
+    ///
+    /// Called once per frame by the App before `render_all`. The value is
+    /// the App's monotonic scene clock and drives chrome animations
+    /// (e.g. the `AppHead` live-dot pulse).
+    pub fn set_elapsed_secs(&mut self, t: f32) {
+        self.elapsed_secs = t;
+    }
+
+    /// Current elapsed-secs clock value (debug / test helper).
+    #[must_use]
+    pub fn elapsed_secs(&self) -> f32 {
+        self.elapsed_secs
     }
 
     /// Configure the arbiter with the actual window content area and cell
@@ -508,6 +528,8 @@ impl AppCoordinator {
                 width: adapter_rect_ui.width,
                 height: adapter_rect_ui.height,
                 cell_size,
+                focused: self.focused == Some(id),
+                elapsed_secs: self.elapsed_secs,
             };
 
             let Some(adapter) = self.registry.get_adapter(id) else {
@@ -590,6 +612,8 @@ impl AppCoordinator {
                 y: wt.y,
                 width: wt.width,
                 height: wt.height,
+                focused: self.focused == Some(id),
+                elapsed_secs: self.elapsed_secs,
                 ..Default::default()
             };
             let Some(adapter) = self.registry.get_adapter(id) else {
@@ -1202,6 +1226,12 @@ mod tests {
 
     impl Renderable for MockAdapter {
         fn render(&self, rect: &Rect) -> RenderOutput {
+            // Embed focused / elapsed_secs into the text segment so tests
+            // can assert the coordinator propagated them.
+            let label = format!(
+                "{} focused={} elapsed={:.3}",
+                self.name, rect.focused, rect.elapsed_secs
+            );
             RenderOutput {
                 quads: vec![QuadData {
                     x: rect.x,
@@ -1211,7 +1241,7 @@ mod tests {
                     color: [1.0; 4],
                 }],
                 text_segments: vec![TextData {
-                    text: String::from(self.name),
+                    text: label,
                     x: rect.x,
                     y: rect.y,
                     color: [1.0; 4],
@@ -1391,6 +1421,41 @@ mod tests {
 
         coord.set_focus(id2);
         assert_eq!(coord.focused(), Some(id2));
+    }
+
+    /// `render_all` must thread `coordinator.focused` and `elapsed_secs`
+    /// into each adapter's `Rect`. This is the contract that makes the
+    /// per-pane focus ring and the live-dot pulse work without modifying
+    /// every adapter body.
+    #[test]
+    fn render_all_propagates_focused_and_elapsed_into_rect() {
+        let mut coord = AppCoordinator::new_test(EventBus::new());
+        let mut layout = LayoutEngine::new().unwrap();
+        let mut scene = SceneTree::new();
+        let content = scene.add_node(scene.root(), NodeKind::ContentArea);
+
+        let id_a = register_mock(&mut coord, &mut layout, &mut scene, content, "alpha");
+        let _id_b = register_mock(&mut coord, &mut layout, &mut scene, content, "beta");
+        layout.resize(1024.0, 768.0).unwrap();
+
+        coord.set_focus(id_a);
+        coord.set_elapsed_secs(2.5);
+
+        let outputs = coord.render_all(&layout, (8.0, 16.0));
+        assert!(outputs.len() >= 2, "two adapters should render");
+
+        for (id, rect, output) in &outputs {
+            let label = &output.text_segments[0].text;
+            if *id == id_a {
+                assert!(rect.focused, "alpha should be focused");
+                assert!(label.contains("focused=true"));
+            } else {
+                assert!(!rect.focused, "beta should not be focused");
+                assert!(label.contains("focused=false"));
+            }
+            assert!((rect.elapsed_secs - 2.5).abs() < 0.001);
+            assert!(label.contains("elapsed=2.500"));
+        }
     }
 
     #[test]

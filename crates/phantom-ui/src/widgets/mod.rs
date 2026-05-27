@@ -39,6 +39,10 @@ pub use panel::{Panel, TITLE_BAR_HEIGHT};
 pub mod app_head;
 pub use app_head::{APP_HEAD_HEIGHT_CELLS, AppHead, AppHeadDot};
 
+// Top-of-window theme picker + CRT toggle bar (matches mockup `.controls`).
+pub mod theme_strip;
+pub use theme_strip::{THEME_STRIP_HEIGHT, ThemeStrip, ThemeStripAction};
+
 // Issue #16 — 8px vertical scrollbar with token-driven colors.
 pub mod scrollbar;
 pub use scrollbar::{SCROLLBAR_WIDTH, ScrollState, ScrollbarAction, Scrollbar, track_y_to_offset};

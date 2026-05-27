@@ -92,6 +92,99 @@ impl Default for Theme {
     }
 }
 
+impl Theme {
+    /// Project the theme's terminal / UI colors onto the [`ColorRoles`] palette
+    /// used by `phantom-ui` widgets (`AppHead`, `ThemeStrip`, …).
+    ///
+    /// Themes pre-date the role-based token system, so this is a best-effort
+    /// mapping: `text_*` flows from terminal `foreground` + ANSI bright slots;
+    /// `surface_*` from the terminal background; status/chrome colors fall
+    /// back to phosphor defaults so a partial theme cannot leave a widget
+    /// unrenderable. As built-in themes migrate to native [`ColorRoles`] this
+    /// helper becomes a thin pass-through.
+    #[must_use]
+    pub fn token_color_roles(&self) -> crate::tokens::ColorRoles {
+        use crate::tokens::ColorRoles;
+        let mut roles = ColorRoles::phosphor();
+
+        let bg = self.colors.background;
+        // Slightly raised / recessed variants — mix in a touch of foreground
+        // for the raised band so focused chrome reads as elevated.
+        let lighten = |c: [f32; 4], k: f32| -> [f32; 4] {
+            [
+                (c[0] + k).min(1.0),
+                (c[1] + k).min(1.0),
+                (c[2] + k).min(1.0),
+                c[3],
+            ]
+        };
+        let darken = |c: [f32; 4], k: f32| -> [f32; 4] {
+            [
+                (c[0] - k).max(0.0),
+                (c[1] - k).max(0.0),
+                (c[2] - k).max(0.0),
+                c[3],
+            ]
+        };
+        roles.surface_base = bg;
+        roles.surface_recessed = darken(bg, 0.02);
+        roles.surface_raised = lighten(bg, 0.05);
+
+        // Foreground → text family.
+        let fg = self.colors.foreground;
+        roles.text_primary = fg;
+        roles.text_accent = self
+            .colors
+            .ansi
+            .get(10)
+            .copied()
+            .unwrap_or(fg); // bright green / accent slot
+        roles.text_secondary = [
+            fg[0] * 0.7,
+            fg[1] * 0.7,
+            fg[2] * 0.7,
+            fg[3],
+        ];
+        roles.text_dim = [
+            fg[0] * 0.45,
+            fg[1] * 0.45,
+            fg[2] * 0.45,
+            fg[3],
+        ];
+
+        // Chrome / dividers — derive from ui_colors.border.
+        roles.chrome_frame = self.ui_colors.border;
+        roles.chrome_frame_dim = [
+            self.ui_colors.border[0] * 0.5,
+            self.ui_colors.border[1] * 0.5,
+            self.ui_colors.border[2] * 0.5,
+            self.ui_colors.border[3] * 0.7,
+        ];
+        // Active frame — bias toward the theme's accent (bright ansi 10).
+        roles.chrome_frame_active = roles.text_accent;
+        roles.chrome_divider = roles.chrome_frame_dim;
+
+        // Status colors — try to read from ANSI palette so they track theme.
+        if let Some(&red) = self.colors.ansi.get(9) {
+            roles.status_danger = red;
+        }
+        if let Some(&yellow) = self.colors.ansi.get(11) {
+            roles.status_warn = yellow;
+        }
+        if let Some(&blue) = self.colors.ansi.get(12) {
+            roles.status_info = blue;
+        }
+        if let Some(&green) = self.colors.ansi.get(10) {
+            roles.status_ok = green;
+        }
+
+        roles.selection_bg = self.colors.selection;
+        roles.accent_focus = roles.text_accent;
+
+        roles
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Built-in themes
 // ---------------------------------------------------------------------------

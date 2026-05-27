@@ -884,6 +884,7 @@ mod tests {
             width: 1200.0,
             height: 800.0,
             cell_size: (cell_w, cell_w * 2.0),
+            ..Default::default()
         }
     }
 
