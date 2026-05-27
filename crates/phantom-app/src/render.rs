@@ -447,11 +447,12 @@ impl App {
                 origin,
             );
 
-            // Per-character phosphor halo (item 1, path A). Emitted before the
-            // sharp glyphs so the halo instances render behind in instance
-            // order — gives every glyph a soft phosphor rim without modifying
-            // the text shader.
-            phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
+            // Per-character phosphor halo is now produced in the text
+            // fragment shader via gaussian neighbour sampling of the atlas
+            // (see `shaders/text.wgsl`).  The CPU-side stacked-quad
+            // approximation that used to live here has been removed —
+            // `GridRenderer::set_glow_params` configures the per-frame
+            // halo alpha and radius once at App construction.
             glyphs.extend(batch.mono);
             color_glyphs.extend(batch.color);
         }
@@ -505,7 +506,7 @@ impl App {
                         self.cell_size,
                     );
                     quads.append(&mut bg_quads);
-                    phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
+                    // Halo is shader-driven now — see `shaders/text.wgsl`.
                     glyphs.extend(batch.mono);
                     color_glyphs.extend(batch.color);
 
@@ -530,6 +531,7 @@ impl App {
                                     0.7,
                                 ],
                                 border_radius: 0.0,
+                            ..Default::default()
                             });
                         }
                     }
@@ -560,6 +562,7 @@ impl App {
                     size: [q.w, q.h],
                     color: q.color,
                     border_radius: 0.0,
+                ..Default::default()
                 });
             }
             // Render text segments.
@@ -597,113 +600,61 @@ impl App {
 
                 // -- Scene pass chrome (gets CRT effects) --
 
-                // Drop shadow — soft 24-px gaussian approximation. The mockup
-                // `.app { box-shadow: 0 8px 24px rgba(0,0,0,0.5) }` is offset
-                // 8 px down with a 24-px blur radius. We approximate the
-                // gaussian falloff by stacking concentric shadow quads,
-                // each LARGER than the pane and SHIFTED DOWN by the
-                // shadow's effective vertical centre (~8 px). At each ring
-                // we increase the spread and decrease the alpha — the
-                // cumulative alpha composite forms a soft halo.
-                //
-                //   spread  6 px → alpha 0.42 (innermost, densest)
-                //   spread 14 px → alpha 0.26
-                //   spread 22 px → alpha 0.14
-                //   spread 30 px → alpha 0.06 (outermost, faintest)
-                //
-                // The total reach is ~30 px ≈ the 24 px CSS blur + the 8 px
-                // offset — visually that lands as a 24-ish-px soft glow
-                // pooled below the pane. ALWAYS painted, every pane.
-                // Build the shadow from OUTSIDE-IN: the largest, faintest
-                // ring renders first (sits below the smaller rings) and we
-                // stack progressively smaller / darker rings on top. The
-                // CUMULATIVE alpha (1-(1-α₁)(1-α₂)...) at any distance D
-                // from the pane edge approximates a gaussian falloff.
-                //
-                //   spread 32 px → alpha 0.06 (faintest, outermost)
-                //   spread 22 px → alpha 0.10
-                //   spread 14 px → alpha 0.16
-                //   spread  8 px → alpha 0.24
-                //   spread  4 px → alpha 0.36 (densest, closest to pane)
-                //
-                // Each ring sits 8 px DOWN from the pane (the CSS
-                // `0 8px 24px` y-offset) so the shadow pools below.
-                let shadow_offset_y = 8.0_f32;
-                for (spread, alpha) in [
-                    (32.0_f32, 0.06_f32),
-                    (22.0_f32, 0.10_f32),
-                    (14.0_f32, 0.16_f32),
-                    (8.0_f32, 0.24_f32),
-                    (4.0_f32, 0.36_f32),
-                ] {
-                    quads.push(QI {
-                        pos: [
-                            pane_rect.x - spread,
-                            pane_rect.y - spread + shadow_offset_y,
-                        ],
-                        size: [
-                            pane_rect.width + spread * 2.0,
-                            pane_rect.height + spread * 2.0,
-                        ],
-                        color: [0.0, 0.0, 0.0, alpha],
-                        border_radius: PANE_RADIUS + spread,
-                    });
-                }
+                // Drop shadow — ALWAYS painted, every pane, every layout. The
+                // mockup `.app { box-shadow: 0 8px 24px rgba(0,0,0,0.5) }`
+                // is rendered as a single SDF-gaussian quad: one shader-mode
+                // SHADOW instance with the actual rect (pane_rect) as the
+                // shadow-caster, offset y=8, blur radius=24px. The shader
+                // computes a real exp(-d^2/(2*sigma^2)) falloff around the
+                // rounded-rect SDF, no stacked-quad banding.
+                quads.push(QI::shadow(
+                    [pane_rect.x, pane_rect.y],
+                    [pane_rect.width, pane_rect.height],
+                    PANE_RADIUS,
+                    [0.0, 8.0],
+                    24.0,
+                    [0.0, 0.0, 0.0, 0.5],
+                ));
 
-                // Container background — mockup `.app-body { background:
-                // linear-gradient(180deg, var(--surface-recessed), var(--bg)) }`
-                // is approximated by stacking the base bg + a multi-band
-                // top tint. Earlier this stacked TWO half-height quads with
-                // 55 % alpha, which produced a sharp horizontal seam at the
-                // exact 50 % mark instead of a smooth gradient — the seam
-                // read as a layout/rendering bug, not a polish gradient.
+                // Container background — mockup token mapping (phosphor):
+                //   --surface-recessed: #060a10  (60% of base, very dark)
+                //   --surface-base:     #0a0e14  (base — the screen clear)
+                //   --surface-raised:   #0d1219  (lighter than base)
+                //   --surface-floating: #11171f  (lightest chrome surface)
                 //
-                // Replacement: 6 stacked tinted bands at decreasing alpha so
-                // the cumulative composite forms a SMOOTH falloff from the
-                // raised tint at the top toward the recessed base near the
-                // bottom of the pane. No hard line, no apparent split.
-                let cont_bg = [
-                    (bg[0] + 0.03).min(1.0),
-                    (bg[1] + 0.05).min(1.0),
-                    (bg[2] + 0.03).min(1.0),
+                // The mockup `.app-body { background:
+                // linear-gradient(180deg, var(--surface-recessed),
+                // var(--surface-base)) }` produces a vertical wash from
+                // very dark at the top to the base colour at the bottom.
+                // Rendered here as a single GRADIENT-mode quad with the
+                // shader interpolating in fragment space — no stacked
+                // alpha banding, smooth across the full height.
+                //
+                // We use surface-recessed (0.6 * bg) at top and a slightly
+                // raised surface (1.3 * bg) at the bottom so the pane
+                // reads as a *card* sitting on the surface — the bottom
+                // half is brighter than the surrounding screen-bg clear,
+                // making the rounded-rect chrome legible against the bg.
+                let surface_recessed = [
+                    (bg[0] * 0.6).max(0.0),
+                    (bg[1] * 0.6).max(0.0),
+                    (bg[2] * 0.6).max(0.0),
                     1.0,
                 ];
-                quads.push(QI {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, pane_rect.height],
-                    color: cont_bg,
-                    border_radius: PANE_RADIUS,
-                });
-                // Multi-band gradient tint — each band covers a fraction of
-                // the pane from the top, at a decreasing alpha. The
-                // CUMULATIVE alpha at any y inside the topmost band is the
-                // sum of all overlapping bands, producing a perceived
-                // gradient with no hard cutoff anywhere.
-                //
-                // band_frac means the band reaches `band_frac × pane_height`
-                // measured from the top.  Bands are stacked outside-in
-                // (tallest first, shortest last) so the topmost area gets
-                // every band's tint.
-                let raised_tint = [
-                    (bg[0] * 1.4 + 0.18).min(1.0),
-                    (bg[1] * 1.4 + 0.18).min(1.0),
-                    (bg[2] * 1.4 + 0.18).min(1.0),
+                let surface_raised = [
+                    (bg[0] * 1.4 + 0.02).min(1.0),
+                    (bg[1] * 1.4 + 0.02).min(1.0),
+                    (bg[2] * 1.4 + 0.02).min(1.0),
+                    1.0,
                 ];
-                for (band_frac, alpha) in [
-                    (0.95_f32, 0.04_f32),
-                    (0.75_f32, 0.05_f32),
-                    (0.55_f32, 0.06_f32),
-                    (0.40_f32, 0.08_f32),
-                    (0.25_f32, 0.10_f32),
-                    (0.12_f32, 0.14_f32),
-                ] {
-                    quads.push(QI {
-                        pos: [pane_rect.x, pane_rect.y],
-                        size: [pane_rect.width, pane_rect.height * band_frac],
-                        color: [raised_tint[0], raised_tint[1], raised_tint[2], alpha],
-                        border_radius: PANE_RADIUS,
-                    });
-                }
+                quads.push(QI::gradient(
+                    [pane_rect.x, pane_rect.y],
+                    [pane_rect.width, pane_rect.height],
+                    surface_recessed,
+                    surface_raised,
+                    [0.0, 1.0], // 180deg = top→bottom
+                    PANE_RADIUS,
+                ));
 
                 // Title strip — only drawn in multi-pane mode. In single-pane
                 // mode adapters use their own AppHead.
@@ -729,6 +680,7 @@ impl App {
                         size: [pane_rect.width, title_h],
                         color: title_bg,
                         border_radius: PANE_RADIUS,
+                    ..Default::default()
                     });
 
                     // Title text.
@@ -774,6 +726,7 @@ impl App {
                     size: [pane_rect.width, t],
                     color: border_color,
                     border_radius: 0.0,
+                ..Default::default()
                 });
                 // bottom
                 chrome_quads.push(QI {
@@ -781,6 +734,7 @@ impl App {
                     size: [pane_rect.width, t],
                     color: border_color,
                     border_radius: 0.0,
+                ..Default::default()
                 });
                 // left
                 chrome_quads.push(QI {
@@ -788,6 +742,7 @@ impl App {
                     size: [t, pane_rect.height],
                     color: border_color,
                     border_radius: 0.0,
+                ..Default::default()
                 });
                 // right
                 chrome_quads.push(QI {
@@ -795,6 +750,7 @@ impl App {
                     size: [t, pane_rect.height],
                     color: border_color,
                     border_radius: 0.0,
+                ..Default::default()
                 });
 
                 // -- Scrollbar (overlay pass — crisp, post-CRT) --
@@ -808,6 +764,7 @@ impl App {
                         size: [track.width, track.height],
                         color: [0.2, 0.2, 0.2, 0.3],
                         border_radius: 3.0,
+                    ..Default::default()
                     });
                     // Thumb.
                     if let Some(thumb) = scrollbar_thumb_rect(
@@ -826,6 +783,7 @@ impl App {
                             size: [thumb.width, thumb.height],
                             color: thumb_color,
                             border_radius: 3.0,
+                        ..Default::default()
                         });
                     }
                 }
@@ -856,7 +814,7 @@ impl App {
                     self.cell_size,
                 );
                 quads.append(&mut bg_quads);
-                phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
+                // Halo is shader-driven now — see `shaders/text.wgsl`.
                 glyphs.extend(batch.mono);
                 color_glyphs.extend(batch.color);
 
@@ -885,6 +843,7 @@ impl App {
                             size: [cw, ch],
                             color: self.theme.colors.cursor,
                             border_radius: 0.0,
+                        ..Default::default()
                         });
                     }
                 }
@@ -1077,10 +1036,8 @@ impl App {
             );
 
             // Widget text segments are always monochrome; color batch is empty.
-            // Glow halos are emitted ahead of the sharp glyphs so the halo
-            // instances render behind the crisp text (item 1, path A — see
-            // `phantom_renderer::text::append_glow_halos`).
-            phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
+            // Halo is shader-driven now (see `shaders/text.wgsl` neighbour
+            // sampling); no CPU-side extra instances emitted here.
             glyphs.extend(batch.mono);
         }
     }

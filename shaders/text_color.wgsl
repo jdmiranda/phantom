@@ -26,8 +26,17 @@
 //   location(3) size     : vec2<f32>   — glyph quad size in pixels [w, h]
 
 // ---- Uniforms (group 0) ----
+//
+// Same struct layout as `shaders/text.wgsl`'s Uniforms so a single uniform
+// buffer can serve both pipelines. The color pipeline only reads
+// `screen_size` (the halo fields are mono-text concerns), but declares
+// the full layout for binding compatibility.
 struct Uniforms {
     screen_size: vec2<f32>,
+    atlas_size: vec2<f32>,
+    glow_alpha: f32,
+    glow_radius_px: f32,
+    _pad: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;

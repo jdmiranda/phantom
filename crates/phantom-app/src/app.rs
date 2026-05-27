@@ -797,7 +797,17 @@ impl App {
 
         // -- Renderers --
         let quad_renderer = QuadRenderer::new(&gpu.device, format);
-        let grid_renderer = GridRenderer::new(&gpu.device, format, atlas.bind_group_layout());
+        let mut grid_renderer = GridRenderer::new(&gpu.device, format, atlas.bind_group_layout());
+        // Wire the monochrome text pipeline's halo shader to the live
+        // atlas dimensions and a sensible default glow strength.  The CSS
+        // mockup uses `text-shadow: 0 0 8px currentColor` which maps to a
+        // mid-strength rim — `0.45` alpha at `1.5` atlas-pixel radius
+        // reads as a soft phosphor halo without smearing into adjacent
+        // cells in a monospace grid.  See the system overlay update path
+        // in `render.rs` for the per-theme override.
+        let (atlas_w, atlas_h) = atlas.size();
+        grid_renderer.set_atlas_size([atlas_w as f32, atlas_h as f32]);
+        grid_renderer.set_glow_params(0.45, 1.5);
         let color_grid_renderer =
             GridRenderer::new_color(&gpu.device, format, color_atlas.bind_group_layout());
         let postfx = PostFxPipeline::new(&gpu.device, format, width, height);

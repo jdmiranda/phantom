@@ -232,6 +232,7 @@ impl DagViewerState {
                 size: [qw.max(1.0), qh.max(1.0)],
                 color: [0.35, 0.45, 0.45, 0.7],
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 
@@ -265,6 +266,7 @@ impl DagViewerState {
                 size: [sw, sh],
                 color,
                 border_radius: 3.0 * self.zoom,
+            ..Default::default()
             });
         }
 

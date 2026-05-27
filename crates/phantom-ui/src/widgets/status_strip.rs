@@ -165,7 +165,8 @@ impl Widget for StatusStrip {
             size: [rect.width, rect.height],
             color: t.colors.surface_recessed,
             border_radius: 0.0,
-        }]
+        ..Default::default()
+            }]
     }
 
     /// Emits up to three text segments (one per slot), each truncated to fit.

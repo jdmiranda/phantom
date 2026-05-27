@@ -282,7 +282,8 @@ impl Widget for Scrollbar {
             size: [rect.width, rect.height],
             color: track_color,
             border_radius: rect.width * 0.5, // pill shape
-        });
+        ..Default::default()
+            });
 
         // Thumb — visible indicator of current position.
         if let Some(thumb) = self.state.thumb_rect(*rect) {
@@ -293,6 +294,7 @@ impl Widget for Scrollbar {
                 size: [thumb.width, thumb.height],
                 color: thumb_color,
                 border_radius: thumb.width * 0.5,
+            ..Default::default()
             });
         }
 

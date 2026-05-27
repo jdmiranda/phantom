@@ -102,9 +102,11 @@ fn quad_and_clip_buffer_lengths_stay_in_lockstep() {
     // `prepare_with_clips`; this test documents the CPU-side contract.
     let quads = vec![
         QuadInstance { pos: [0.0, 0.0], size: [10.0, 10.0],
-                       color: [1.0; 4], border_radius: 0.0 },
+                       color: [1.0; 4], border_radius: 0.0 ..Default::default()
+            },
         QuadInstance { pos: [20.0, 0.0], size: [10.0, 10.0],
-                       color: [1.0; 4], border_radius: 0.0 },
+                       color: [1.0; 4], border_radius: 0.0 ..Default::default()
+            },
     ];
     let clips = vec![ClipRect::NONE, ClipRect::new(0.0, 0.0, 100.0, 100.0)];
     assert_eq!(quads.len(), clips.len(),

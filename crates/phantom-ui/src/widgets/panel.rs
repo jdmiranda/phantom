@@ -193,7 +193,8 @@ impl Widget for Panel {
             size: [rect.width, rect.height],
             color: t.colors.surface_raised,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // 2. Four border edges (frame color).
         // Top
@@ -202,28 +203,32 @@ impl Widget for Panel {
             size: [rect.width, border],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         // Bottom
         quads.push(QuadInstance {
             pos: [rect.x, rect.y + rect.height - border],
             size: [rect.width, border],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         // Left
         quads.push(QuadInstance {
             pos: [rect.x, rect.y],
             size: [border, rect.height],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         // Right
         quads.push(QuadInstance {
             pos: [rect.x + rect.width - border, rect.y],
             size: [border, rect.height],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         if self.has_title() {
             // 3. Title bar background.
@@ -233,6 +238,7 @@ impl Widget for Panel {
                 size: [tb.width, tb.height],
                 color: t.colors.surface_recessed,
                 border_radius: 0.0,
+            ..Default::default()
             });
 
             // 4. Divider line.
@@ -242,6 +248,7 @@ impl Widget for Panel {
                 size: [dv.width, dv.height],
                 color: t.colors.chrome_divider,
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 

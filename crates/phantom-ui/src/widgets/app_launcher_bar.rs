@@ -339,7 +339,8 @@ impl Widget for AppLauncherBar {
             size: [rect.width, rect.height],
             color: t.colors.surface_base,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         let hair = t.hair().max(1.0);
 
@@ -352,6 +353,7 @@ impl Widget for AppLauncherBar {
                 size: [chip.width, chip.height],
                 color: t.colors.surface_recessed,
                 border_radius: 0.0,
+            ..Default::default()
             });
 
             // Hairline border around the chip, drawn as four 1px quads. The
@@ -364,6 +366,7 @@ impl Widget for AppLauncherBar {
                 size: [chip.width, hair],
                 color: border,
                 border_radius: 0.0,
+            ..Default::default()
             });
             // bottom
             quads.push(QuadInstance {
@@ -371,6 +374,7 @@ impl Widget for AppLauncherBar {
                 size: [chip.width, hair],
                 color: border,
                 border_radius: 0.0,
+            ..Default::default()
             });
             // left
             quads.push(QuadInstance {
@@ -378,6 +382,7 @@ impl Widget for AppLauncherBar {
                 size: [hair, chip.height],
                 color: border,
                 border_radius: 0.0,
+            ..Default::default()
             });
             // right
             quads.push(QuadInstance {
@@ -385,6 +390,7 @@ impl Widget for AppLauncherBar {
                 size: [hair, chip.height],
                 color: border,
                 border_radius: 0.0,
+            ..Default::default()
             });
 
             // Mockup-style .kbd sub-chip around the keybind glyph. The
@@ -401,6 +407,7 @@ impl Widget for AppLauncherBar {
                 size: [kbd.width, kbd.height],
                 color: t.colors.surface_raised,
                 border_radius: 4.0,
+                ..Default::default()
             });
             // kbd 1-px border (4 sides).
             // top
@@ -409,6 +416,7 @@ impl Widget for AppLauncherBar {
                 size: [kbd.width, hair],
                 color: border,
                 border_radius: 0.0,
+                ..Default::default()
             });
             // bottom
             quads.push(QuadInstance {
@@ -416,6 +424,7 @@ impl Widget for AppLauncherBar {
                 size: [kbd.width, hair],
                 color: border,
                 border_radius: 0.0,
+                ..Default::default()
             });
             // left
             quads.push(QuadInstance {
@@ -423,6 +432,7 @@ impl Widget for AppLauncherBar {
                 size: [hair, kbd.height],
                 color: border,
                 border_radius: 0.0,
+                ..Default::default()
             });
             // right
             quads.push(QuadInstance {
@@ -430,6 +440,7 @@ impl Widget for AppLauncherBar {
                 size: [hair, kbd.height],
                 color: border,
                 border_radius: 0.0,
+                ..Default::default()
             });
         }
 
@@ -439,6 +450,7 @@ impl Widget for AppLauncherBar {
             size: [rect.width, hair],
             color: t.colors.chrome_divider,
             border_radius: 0.0,
+            ..Default::default()
         });
 
         quads

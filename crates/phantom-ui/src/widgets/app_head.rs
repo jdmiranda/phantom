@@ -278,7 +278,8 @@ impl Widget for AppHead {
             size: [rect.width, h],
             color: bg,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Focus-ring accent — when focused, paint a 2px top border in
         // `chrome_frame_active` (the mockup's `--frame-active` glow). This
@@ -291,6 +292,7 @@ impl Widget for AppHead {
                 size: [rect.width, frame_h],
                 color: t.colors.chrome_frame_active,
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 
@@ -308,7 +310,8 @@ impl Widget for AppHead {
             size: [rect.width, hair_h],
             color: divider_color,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Status dot — small circle just before the meta text.
         // Both the dot and the meta text use `space_3()` as their right
@@ -325,6 +328,7 @@ impl Widget for AppHead {
                 size: [dot_size, dot_size],
                 color,
                 border_radius: dot_size * 0.5,
+            ..Default::default()
             });
         }
 
