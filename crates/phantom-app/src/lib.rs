@@ -32,6 +32,7 @@ mod render;
 mod render_overlay;
 mod search;
 mod spawn_chrome;
+mod gallery_spawn;
 mod files_watcher;
 pub mod resources;
 pub mod runtime;

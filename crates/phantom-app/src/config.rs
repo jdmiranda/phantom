@@ -97,6 +97,14 @@ pub struct PhantomConfig {
     ///
     /// Set via the `--screenshot <PATH>` CLI flag. Not persisted in TOML.
     pub screenshot_after_frame: Option<std::path::PathBuf>,
+    /// Auto-spawn the full app gallery on cold-launch (mockup mode).
+    ///
+    /// Set via `gallery_mode = true` in `~/.config/phantom/config.toml` or
+    /// the `--gallery` CLI flag. When enabled, the App constructor switches
+    /// the layout engine to grid mode (`set_grid_mode(Some((4, 3)))`) and
+    /// spawns 12 chrome adapters in place of the SetupAdapter so the user
+    /// lands on the multi-pane gallery from `docs/mockups/apps.html`.
+    pub gallery_mode: bool,
     /// Per-category notification sound paths.
     ///
     /// Keys correspond to [`crate::notifications::Severity`] names in lowercase:
@@ -157,6 +165,7 @@ impl Default for PhantomConfig {
             // 2026-05-20 — see `feedback_agent_is_primary` memory entry.
             fullscreen: true,
             screenshot_after_frame: None,
+            gallery_mode: false,
             notification_sounds: HashMap::new(),
             mcp_servers: Vec::new(),
         }

@@ -145,6 +145,21 @@ impl App {
             let _ = self.despawn_boot_pane();
         }
 
+        // Gallery mode: drain the pending flag exactly once on the first
+        // Terminal frame and tile the full 4×3 mockup grid. Runs BEFORE the
+        // post-boot agent spawn block below so the gallery owns the
+        // workspace; the agent-spawn block is skipped automatically because
+        // `post_boot_agent_spawned` is wired but the screen will already be
+        // full of gallery tiles (no SetupAdapter exists in gallery mode).
+        if self.state == AppState::Terminal && self.pending_gallery_spawn {
+            self.pending_gallery_spawn = false;
+            // Skip the default agent spawn so it doesn't clobber the grid.
+            self.post_boot_agent_spawned = true;
+            self.demo_post_boot_done = true;
+            let spawned = crate::gallery_spawn::spawn_full_gallery(self);
+            info!("Gallery: auto-spawn complete, {spawned} tiles live");
+        }
+
         // Session resume prompt: fire exactly once on the first Terminal tick
         // when previous-session sidecar files contained live agents or goals.
         // We drain `restored_session` via `.take()` so this block runs at most
