@@ -652,9 +652,16 @@ impl App {
 
                 // Container background — mockup `.app-body { background:
                 // linear-gradient(180deg, var(--surface-recessed), var(--bg)) }`
-                // is approximated by stacking two quads: a recessed-tinted
-                // top, fading to the base bg at the bottom. We render the
-                // base bg first, then a faded top half-quad on top.
+                // is approximated by stacking the base bg + a multi-band
+                // top tint. Earlier this stacked TWO half-height quads with
+                // 55 % alpha, which produced a sharp horizontal seam at the
+                // exact 50 % mark instead of a smooth gradient — the seam
+                // read as a layout/rendering bug, not a polish gradient.
+                //
+                // Replacement: 6 stacked tinted bands at decreasing alpha so
+                // the cumulative composite forms a SMOOTH falloff from the
+                // raised tint at the top toward the recessed base near the
+                // bottom of the pane. No hard line, no apparent split.
                 let cont_bg = [
                     (bg[0] + 0.03).min(1.0),
                     (bg[1] + 0.05).min(1.0),
@@ -667,25 +674,36 @@ impl App {
                     color: cont_bg,
                     border_radius: PANE_RADIUS,
                 });
-                // Gradient top half — multiplicative tint (~×1.4 brighter on
-                // each channel) so the wash actually reads on dark phosphor
-                // / cyber bases where the prior additive `+0.08/+0.12` delta
-                // was too subtle to perceive. Clamped to 1.0 so brighter
-                // base palettes (amber / ice / vapor) don't blow out.
-                // 55 % alpha gives a perceptible top gradient without
-                // looking washed out.
+                // Multi-band gradient tint — each band covers a fraction of
+                // the pane from the top, at a decreasing alpha. The
+                // CUMULATIVE alpha at any y inside the topmost band is the
+                // sum of all overlapping bands, producing a perceived
+                // gradient with no hard cutoff anywhere.
+                //
+                // band_frac means the band reaches `band_frac × pane_height`
+                // measured from the top.  Bands are stacked outside-in
+                // (tallest first, shortest last) so the topmost area gets
+                // every band's tint.
                 let raised_tint = [
                     (bg[0] * 1.4 + 0.18).min(1.0),
                     (bg[1] * 1.4 + 0.18).min(1.0),
                     (bg[2] * 1.4 + 0.18).min(1.0),
-                    0.55,
                 ];
-                quads.push(QI {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, pane_rect.height * 0.5],
-                    color: raised_tint,
-                    border_radius: PANE_RADIUS,
-                });
+                for (band_frac, alpha) in [
+                    (0.95_f32, 0.04_f32),
+                    (0.75_f32, 0.05_f32),
+                    (0.55_f32, 0.06_f32),
+                    (0.40_f32, 0.08_f32),
+                    (0.25_f32, 0.10_f32),
+                    (0.12_f32, 0.14_f32),
+                ] {
+                    quads.push(QI {
+                        pos: [pane_rect.x, pane_rect.y],
+                        size: [pane_rect.width, pane_rect.height * band_frac],
+                        color: [raised_tint[0], raised_tint[1], raised_tint[2], alpha],
+                        border_radius: PANE_RADIUS,
+                    });
+                }
 
                 // Title strip — only drawn in multi-pane mode. In single-pane
                 // mode adapters use their own AppHead.

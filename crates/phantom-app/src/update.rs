@@ -229,11 +229,14 @@ impl App {
                     .to_owned(),
             });
 
-            // Default mockup-row-1 layout: Agent + Terminal two-up split.
-            // The agent now owns the full window; split it horizontally
-            // and place a fresh TerminalAdapter on the right so the user
-            // lands on the canonical two-pane layout from `docs/mockups/apps.html`.
-            let _ = self.ensure_first_layout();
+            // Intentionally NO `ensure_first_layout()` here.  The
+            // `feedback_agent_is_primary` memory + the replace-focused path
+            // inside `spawn_agent_pane` already give the agent the FULL
+            // window.  Splitting horizontally to a Agent+Terminal two-up
+            // hands ~half the screen back to a fresh, empty terminal — the
+            // exact "small agent inset" the design memo says we must not
+            // ship as the default.  The user can `Cmd+D` to split when they
+            // want a terminal alongside; the cold-launch view is agent-only.
         }
 
         // Live SetupAdapter→Agent upgrade. When the user provisions an API
