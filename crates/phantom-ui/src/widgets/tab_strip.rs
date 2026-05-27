@@ -235,7 +235,8 @@ impl Widget for TabStrip {
             size: [rect.width, rect.height],
             color: t.colors.surface_recessed,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         if self.tabs.is_empty() {
             return quads;
@@ -250,7 +251,8 @@ impl Widget for TabStrip {
             size: [tab_w, rect.height],
             color: t.colors.surface_raised,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // 3. Active tab accent bar along the bottom edge.
         quads.push(QuadInstance {
@@ -258,7 +260,8 @@ impl Widget for TabStrip {
             size: [tab_w, ACCENT_BAR_H],
             color: t.colors.accent_focus,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         quads
     }

@@ -167,6 +167,7 @@ impl Widget for FocusRing {
                 size: [rect.width, RING_THICKNESS],
                 color,
                 border_radius: r,
+            ..Default::default()
             },
             // Bottom
             QuadInstance {
@@ -174,6 +175,7 @@ impl Widget for FocusRing {
                 size: [rect.width, RING_THICKNESS],
                 color,
                 border_radius: r,
+            ..Default::default()
             },
             // Left
             QuadInstance {
@@ -181,6 +183,7 @@ impl Widget for FocusRing {
                 size: [RING_THICKNESS, rect.height],
                 color,
                 border_radius: r,
+            ..Default::default()
             },
             // Right
             QuadInstance {
@@ -188,6 +191,7 @@ impl Widget for FocusRing {
                 size: [RING_THICKNESS, rect.height],
                 color,
                 border_radius: r,
+            ..Default::default()
             },
         ]
     }

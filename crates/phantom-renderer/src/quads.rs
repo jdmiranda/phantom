@@ -41,6 +41,20 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
 // ---- Per-instance data ----
+//
+// Shader modes (encoded as f32 to keep all instance attributes Float32x*):
+//   0.0 = SOLID    — uniform `color` fill, rounded-rect anti-aliased edge.
+//   1.0 = SHADOW   — gaussian blurred drop shadow. shader_params.x = sigma,
+//                    shader_params.yz = inner_rect_offset (vec2 from quad
+//                    top-left to the inner rect top-left in pixels),
+//                    shader_params.w = inner_rect_radius.
+//                    color.rgb = shadow tint, color.a = peak alpha.
+//                    The quad itself is the BLUR BOUND (inner rect plus
+//                    sigma-margin on every side, plus offset).
+//   2.0 = GRADIENT — linear interpolation between `color` (start) and
+//                    `color2` (end) along direction `shader_params.xy`
+//                    (normalized) measured against the quad center.
+//                    Rounded-rect mask still applied via border_radius.
 struct QuadInstance {
     @location(0) pos: vec2<f32>,
     @location(1) size: vec2<f32>,
@@ -49,6 +63,12 @@ struct QuadInstance {
     // Phase 0.D — per-instance scissor rect [x, y, w, h] in pixels.
     // w<=0 || h<=0 means "no clipping" (the ClipRect::NONE sentinel).
     @location(4) clip_rect: vec4<f32>,
+    // Shader mode selector. 0 = solid, 1 = shadow SDF, 2 = gradient.
+    @location(5) shader_mode: f32,
+    // Mode-specific parameters. See mode comments above for layout.
+    @location(6) shader_params: vec4<f32>,
+    // Second color (gradient end-stop). Ignored when shader_mode != 2.
+    @location(7) color2: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -59,6 +79,9 @@ struct VertexOutput {
     @location(3) border_radius: f32,
     @location(4) frag_pos: vec2<f32>,   // pixel position of this fragment
     @location(5) clip_rect: vec4<f32>,  // forwarded clip rect
+    @location(6) shader_mode: f32,
+    @location(7) shader_params: vec4<f32>,
+    @location(8) color2: vec4<f32>,
 };
 
 // Unit quad: two triangles covering (0,0) to (1,1).
@@ -98,6 +121,9 @@ fn vs_main(
     out.border_radius = instance.border_radius;
     out.frag_pos = pixel_pos;
     out.clip_rect = instance.clip_rect;
+    out.shader_mode = instance.shader_mode;
+    out.shader_params = instance.shader_params;
+    out.color2 = instance.color2;
     return out;
 }
 
@@ -122,6 +148,66 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+    // --- SHADOW MODE ---
+    // Gaussian-falloff drop shadow against an SDF rounded-rect.  The quad
+    // itself is the BLUR BOUND.  The inner rect (the actual UI rect that
+    // casts the shadow) lives at `shader_params.yz` (offset from quad
+    // top-left) with size = quad_size - 2*(offset).
+    if in.shader_mode > 0.5 && in.shader_mode < 1.5 {
+        let sigma = max(in.shader_params.x, 0.5);
+        let inner_offset = in.shader_params.yz;
+        let inner_radius = in.shader_params.w;
+
+        // Inner rect dimensions = quad - twice the margin on each side.
+        let inner_size = in.size_px - 2.0 * inner_offset;
+        let inner_half = inner_size * 0.5;
+        let inner_center_local = inner_offset + inner_half;
+        // Position within quad in pixels, centered on the inner rect.
+        let local_pos = in.local_uv * in.size_px - inner_center_local;
+
+        // Signed distance to the rounded rect.  Negative inside, positive
+        // outside.  We clamp inside to 0 so the entire interior is fully
+        // covered (no ramp eating into the rect we just outlined).
+        let dist = max(sdf_rounded_rect(local_pos, inner_half, inner_radius), 0.0);
+
+        // Gaussian falloff: exp(-(d / sigma)^2 * 0.5).  At d=0 we get 1.0
+        // (peak alpha); at d=sigma we get ~0.61; at d=2*sigma ~0.13; at
+        // d=3*sigma ~0.011.  The quad's blur margin should be >= 3*sigma
+        // so the tail isn't clipped.
+        let t = dist / sigma;
+        let falloff = exp(-t * t * 0.5);
+
+        return vec4<f32>(in.color.rgb, in.color.a * falloff);
+    }
+
+    // --- GRADIENT MODE ---
+    // Smooth linear interpolation between `color` (start, t=0) and `color2`
+    // (end, t=1) along a direction vector `shader_params.xy`.  The
+    // direction is in local UV space, with origin at the quad center, so
+    // (0, 1) = top-to-bottom gradient.  The interpolation parameter is
+    // mapped through smoothstep for an even smoother visual transition.
+    if in.shader_mode > 1.5 {
+        // Direction vector — pre-normalized on the CPU.
+        let dir = in.shader_params.xy;
+        // Map local_uv (0..1) to center-origin space (-0.5..0.5).
+        let centered = in.local_uv - vec2<f32>(0.5, 0.5);
+        // Projection onto direction, remapped from (-0.5..0.5) to (0..1).
+        let raw_t = dot(centered, dir) + 0.5;
+        let t = clamp(raw_t, 0.0, 1.0);
+        let g_color = mix(in.color, in.color2, t);
+
+        // Optional rounded-rect mask (same as solid mode).
+        if in.border_radius <= 0.0 {
+            return g_color;
+        }
+        let local_pos = (in.local_uv - vec2<f32>(0.5, 0.5)) * in.size_px;
+        let half_size = in.size_px * 0.5;
+        let d = sdf_rounded_rect(local_pos, half_size, in.border_radius);
+        let alpha = 1.0 - smoothstep(-0.5, 0.5, d);
+        return vec4<f32>(g_color.rgb, g_color.a * alpha);
+    }
+
+    // --- SOLID MODE (default) ---
     // Early out: no border radius means a plain rectangle — skip SDF math.
     if in.border_radius <= 0.0 {
         return in.color;
@@ -144,7 +230,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 // CPU-side instance data
 // ---------------------------------------------------------------------------
 
+/// Shader mode discriminator for `QuadInstance::shader_mode`.
+///
+/// Encoded as f32 so the WGSL attribute layout stays uniform (all
+/// `Float32x*`) — the shader compares with thresholds, not equality.
+pub mod shader_mode {
+    /// Solid color fill with rounded-rect anti-aliased edge (legacy default).
+    pub const SOLID: f32 = 0.0;
+    /// Gaussian-blur drop shadow against an SDF rounded-rect mask.
+    pub const SHADOW: f32 = 1.0;
+    /// Linear interpolation between two RGBA colors along a direction vec.
+    pub const GRADIENT: f32 = 2.0;
+}
+
 /// A single quad instance uploaded to the GPU.
+///
+/// The `shader_mode` field selects between three rendering paths in the
+/// fragment shader. See `shader_mode::{SOLID, SHADOW, GRADIENT}` and the
+/// inline shader comments in `SHADER_SRC` for the parameter layout per
+/// mode. The default value (`shader_mode = 0.0`) preserves legacy
+/// behaviour for the 50+ existing call sites that construct `QuadInstance`
+/// via the `QuadInstance { pos, size, color, border_radius }` pattern.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct QuadInstance {
@@ -156,10 +262,127 @@ pub struct QuadInstance {
     pub color: [f32; 4],
     /// Corner radius in pixels. 0 = sharp corners.
     pub border_radius: f32,
+    /// Shader mode discriminator. See `shader_mode` constants.
+    pub shader_mode: f32,
+    /// Mode-specific shader parameters (layout depends on `shader_mode`).
+    pub shader_params: [f32; 4],
+    /// Second color (gradient end-stop). Unused when `shader_mode != GRADIENT`.
+    pub color2: [f32; 4],
+}
+
+impl Default for QuadInstance {
+    fn default() -> Self {
+        Self {
+            pos: [0.0; 2],
+            size: [0.0; 2],
+            color: [0.0; 4],
+            border_radius: 0.0,
+            shader_mode: shader_mode::SOLID,
+            shader_params: [0.0; 4],
+            color2: [0.0; 4],
+        }
+    }
 }
 
 impl QuadInstance {
+    /// Construct a solid-color quad (legacy default). Identical to the old
+    /// struct-literal form; provided for callers that want explicit intent.
+    #[must_use]
+    pub fn solid(pos: [f32; 2], size: [f32; 2], color: [f32; 4], border_radius: f32) -> Self {
+        Self {
+            pos,
+            size,
+            color,
+            border_radius,
+            shader_mode: shader_mode::SOLID,
+            shader_params: [0.0; 4],
+            color2: [0.0; 4],
+        }
+    }
+
+    /// Construct a gaussian-blur drop-shadow quad.
+    ///
+    /// `inner_pos` / `inner_size` describe the rect that casts the shadow
+    /// (typically the UI rect itself). `offset` is the shadow offset in
+    /// pixels (e.g. `[0, 8]` for the mockup's `box-shadow: 0 8px ...`).
+    /// `blur_radius` is the CSS blur radius in pixels (the gaussian sigma
+    /// is derived as `blur_radius / 2.0`, matching CSS' standard mapping).
+    /// `inner_radius` is the corner radius of the inner (casting) rect.
+    /// `color` is the shadow tint with `color.a` as the peak alpha at the
+    /// rect edge.
+    ///
+    /// The returned quad is sized to enclose the full ~3-sigma blur tail.
+    #[must_use]
+    pub fn shadow(
+        inner_pos: [f32; 2],
+        inner_size: [f32; 2],
+        inner_radius: f32,
+        offset: [f32; 2],
+        blur_radius: f32,
+        color: [f32; 4],
+    ) -> Self {
+        // CSS blur radius maps to gaussian sigma as roughly blur/2.
+        // Reference: https://drafts.csswg.org/css-backgrounds/#shadow-blur
+        let sigma = (blur_radius * 0.5).max(0.5);
+        // Margin on each side of the casting rect — clamp the gaussian tail
+        // at ~3.5 sigma so the visible alpha at the quad edge is < 0.005.
+        let margin = (sigma * 3.5).ceil();
+
+        // The blur-bound quad surrounds the offset inner rect, expanded by
+        // `margin` on every side.
+        let quad_pos = [
+            inner_pos[0] + offset[0] - margin,
+            inner_pos[1] + offset[1] - margin,
+        ];
+        let quad_size = [
+            inner_size[0] + 2.0 * margin,
+            inner_size[1] + 2.0 * margin,
+        ];
+
+        Self {
+            pos: quad_pos,
+            size: quad_size,
+            color,
+            border_radius: 0.0,
+            shader_mode: shader_mode::SHADOW,
+            shader_params: [sigma, margin, margin, inner_radius],
+            color2: [0.0; 4],
+        }
+    }
+
+    /// Construct a linear-gradient quad.
+    ///
+    /// Interpolates between `start_color` (top/left edge) and `end_color`
+    /// (bottom/right edge) along `direction` in normalized local UV space.
+    /// For the mockup's `linear-gradient(180deg, A, B)` (vertical top→bot)
+    /// use `direction = [0.0, 1.0]`. Direction does not need to be unit
+    /// length; the shader clamps the interpolation parameter to [0, 1].
+    #[must_use]
+    pub fn gradient(
+        pos: [f32; 2],
+        size: [f32; 2],
+        start_color: [f32; 4],
+        end_color: [f32; 4],
+        direction: [f32; 2],
+        border_radius: f32,
+    ) -> Self {
+        Self {
+            pos,
+            size,
+            color: start_color,
+            border_radius,
+            shader_mode: shader_mode::GRADIENT,
+            shader_params: [direction[0], direction[1], 0.0, 0.0],
+            color2: end_color,
+        }
+    }
+
     /// Vertex buffer layout describing per-instance attributes.
+    ///
+    /// Locations 0..3 match the legacy layout (pos / size / color /
+    /// border_radius). Locations 5..7 are the shader-mode extension (the
+    /// per-instance ClipRect at location 4 lives in a parallel buffer; see
+    /// `clip.rs`).
     fn layout() -> VertexBufferLayout<'static> {
         const ATTRS: &[VertexAttribute] = &[
             // pos: [f32; 2]
@@ -185,6 +408,24 @@ impl QuadInstance {
                 format: VertexFormat::Float32,
                 offset: 32,
                 shader_location: 3,
+            },
+            // shader_mode: f32  (location 4 reserved for parallel ClipRect buffer)
+            VertexAttribute {
+                format: VertexFormat::Float32,
+                offset: 36,
+                shader_location: 5,
+            },
+            // shader_params: [f32; 4]
+            VertexAttribute {
+                format: VertexFormat::Float32x4,
+                offset: 40,
+                shader_location: 6,
+            },
+            // color2: [f32; 4]
+            VertexAttribute {
+                format: VertexFormat::Float32x4,
+                offset: 56,
+                shader_location: 7,
             },
         ];
 

@@ -243,13 +243,17 @@ impl SearchBar {
 
         let mut quads = Vec::with_capacity(6);
 
-        // Drop shadow for depth.
-        quads.push(QuadInstance {
-            pos: [bar_x + 2.0, bar_y + 2.0],
-            size: [bar_w, bar_h],
-            color: [0.0, 0.0, 0.0, 0.25],
-            border_radius: 4.0,
-        });
+        // Drop shadow for depth — single SDF-gaussian quad with the bar as
+        // the caster.  Replaces the legacy single-offset hard rect with a
+        // real exp(-d^2/(2*sigma^2)) gaussian falloff around the rounded-rect.
+        quads.push(QuadInstance::shadow(
+            [bar_x, bar_y],
+            [bar_w, bar_h],
+            4.0,
+            [0.0, 4.0],
+            12.0,
+            [0.0, 0.0, 0.0, 0.6],
+        ));
 
         // Background panel.
         quads.push(QuadInstance {
@@ -257,7 +261,8 @@ impl SearchBar {
             size: [bar_w, bar_h],
             color: BG,
             border_radius: 4.0,
-        });
+        ..Default::default()
+            });
 
         // Border lines (top, bottom, left, right).
         let t = 1.0;
@@ -272,6 +277,7 @@ impl SearchBar {
                 size,
                 color: BORDER,
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 

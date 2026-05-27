@@ -36,12 +36,44 @@ const COLOR_GLYPH_SHADER_SRC: &str = include_str!("../../../shaders/text_color.w
 // Uniform buffer
 // ---------------------------------------------------------------------------
 
+/// Uniforms for the glyph and color-glyph pipelines.
+///
+/// Includes per-frame halo parameters that drive the text-glow neighbour
+/// sampling kernel in `shaders/text.wgsl`. The color-glyph shader
+/// (`text_color.wgsl`) re-declares the same struct but only reads
+/// `screen_size` — the extra fields are present for layout compatibility
+/// so a single uniform buffer can serve both pipelines.
+///
+/// Total size: 32 bytes (vec2 + vec2 + f32 + f32 + vec2 pad), satisfying
+/// WebGPU's 16-byte alignment requirement.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     screen_size: [f32; 2],
-    // Pad to 16-byte alignment (WebGPU uniform buffer requirement).
+    /// Atlas texture size in pixels — used by the halo shader to convert
+    /// a pixel-space neighbour offset (`glow_radius_px`) into UV deltas.
+    atlas_size: [f32; 2],
+    /// Peak alpha multiplier for the halo neighbours.  0.0 disables the
+    /// halo path; the shader takes an early-out branch.  Tuned 0.3–0.6.
+    glow_alpha: f32,
+    /// Neighbour sample radius in atlas pixels.  1.0 = tight rim, 2.0 =
+    /// wider halo.  Larger values smooth into adjacent atlas slots and
+    /// should be paired with a sparse atlas.
+    glow_radius_px: f32,
+    /// Padding to 16-byte alignment.
     _pad: [f32; 2],
+}
+
+impl Uniforms {
+    fn new(screen_size: [f32; 2]) -> Self {
+        Self {
+            screen_size,
+            atlas_size: [1024.0, 1024.0],
+            glow_alpha: 0.0,
+            glow_radius_px: 1.0,
+            _pad: [0.0; 2],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +99,14 @@ pub struct GridRenderer {
     uniform_bind_group_layout: BindGroupLayout,
     instance_count: u32,
     instance_capacity: u32,
+    /// Atlas size in pixels — set via [`Self::set_atlas_size`] from the
+    /// owning App so the halo shader can convert pixel offsets to UV
+    /// space.  Defaults to 1024x1024 (the initial atlas size).
+    atlas_size: [f32; 2],
+    /// Peak halo alpha (0.0 disables the halo path).  Tuned per theme.
+    glow_alpha: f32,
+    /// Halo neighbour sample radius in atlas pixels.
+    glow_radius_px: f32,
 }
 
 impl GridRenderer {
@@ -95,7 +135,9 @@ impl GridRenderer {
                 label: Some("grid-uniform-layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::VERTEX,
+                    // Fragment stage needs access to atlas_size / glow_alpha
+                    // / glow_radius_px for the halo neighbour-sample kernel.
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -143,10 +185,7 @@ impl GridRenderer {
         });
 
         // -- Uniform buffer --
-        let uniforms = Uniforms {
-            screen_size: [1.0, 1.0],
-            _pad: [0.0; 2],
-        };
+        let uniforms = Uniforms::new([1.0, 1.0]);
         let uniform_buf = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("grid-uniform-buf"),
             contents: bytemuck::bytes_of(&uniforms),
@@ -179,6 +218,9 @@ impl GridRenderer {
             uniform_bind_group_layout,
             instance_count: 0,
             instance_capacity: INITIAL_GLYPH_CAPACITY,
+            atlas_size: [1024.0, 1024.0],
+            glow_alpha: 0.0,
+            glow_radius_px: 1.0,
         }
     }
 
@@ -203,7 +245,9 @@ impl GridRenderer {
                 label: Some("color-grid-uniform-layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::VERTEX,
+                    // Fragment stage needs access to atlas_size / glow_alpha
+                    // / glow_radius_px for the halo neighbour-sample kernel.
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -248,10 +292,7 @@ impl GridRenderer {
             cache: None,
         });
 
-        let uniforms = Uniforms {
-            screen_size: [1.0, 1.0],
-            _pad: [0.0; 2],
-        };
+        let uniforms = Uniforms::new([1.0, 1.0]);
         let uniform_buf = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("color-grid-uniform-buf"),
             contents: bytemuck::bytes_of(&uniforms),
@@ -284,7 +325,34 @@ impl GridRenderer {
             uniform_bind_group_layout,
             instance_count: 0,
             instance_capacity: COLOR_GLYPH_CAPACITY,
+            atlas_size: [512.0, 512.0],
+            // Color emoji never gets a halo — the color shader ignores the
+            // halo path anyway, but keep glow_alpha == 0 for clarity.
+            glow_alpha: 0.0,
+            glow_radius_px: 1.0,
         }
+    }
+
+    /// Set the atlas pixel dimensions used by the halo shader to convert
+    /// pixel-space neighbour offsets into UV deltas.
+    ///
+    /// The owning App calls this whenever the atlas is created or grows.
+    /// Affects the next `prepare()` call.
+    pub fn set_atlas_size(&mut self, atlas_size: [f32; 2]) {
+        self.atlas_size = atlas_size;
+    }
+
+    /// Configure the per-glyph halo (gaussian neighbour-sample) effect.
+    ///
+    /// `glow_alpha` is the peak halo alpha (0.0 disables the halo path
+    /// via the shader's early-out branch).  `glow_radius_px` is the
+    /// neighbour offset in atlas pixels.
+    ///
+    /// Typical values: 0.4–0.55 alpha at 1.0–2.0 px radius for bright
+    /// phosphor / amber themes; lower values for muted themes.
+    pub fn set_glow_params(&mut self, glow_alpha: f32, glow_radius_px: f32) {
+        self.glow_alpha = glow_alpha.clamp(0.0, 1.0);
+        self.glow_radius_px = glow_radius_px.max(0.0);
     }
 
     /// Upload glyph instances and screen-size uniform for the current frame.
@@ -301,6 +369,9 @@ impl GridRenderer {
         // -- Update uniforms --
         let uniforms = Uniforms {
             screen_size,
+            atlas_size: self.atlas_size,
+            glow_alpha: self.glow_alpha,
+            glow_radius_px: self.glow_radius_px,
             _pad: [0.0; 2],
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
@@ -514,7 +585,8 @@ impl GridRenderData {
                     size: [cell_size.0, cell_size.1],
                     color: cell.bg,
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
             }
         }
 
@@ -597,7 +669,8 @@ impl GridRenderData {
                     size: [cell_size.0 * (run_len as f32), cell_size.1],
                     color: run_bg,
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
             }
         }
 
@@ -666,6 +739,12 @@ mod tests {
 
     #[test]
     fn uniforms_are_16_byte_aligned() {
-        assert_eq!(std::mem::size_of::<Uniforms>(), 16);
+        // Uniforms is now 32 bytes (screen_size + atlas_size + glow_alpha +
+        // glow_radius_px + _pad) — still a multiple of 16 as WebGPU requires.
+        let size = std::mem::size_of::<Uniforms>();
+        assert!(
+            size > 0 && size % 16 == 0,
+            "Uniforms size {size} must be a positive multiple of 16 bytes"
+        );
     }
 }

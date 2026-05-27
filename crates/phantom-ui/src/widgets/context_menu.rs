@@ -301,6 +301,7 @@ impl Widget for ContextMenu {
                 size: [mw, mh],
                 color: t.colors.surface_raised,
                 border_radius: 0.0,
+            ..Default::default()
             },
             // Top border
             QuadInstance {
@@ -308,6 +309,7 @@ impl Widget for ContextMenu {
                 size: [mw, border],
                 color: t.colors.chrome_frame,
                 border_radius: 0.0,
+            ..Default::default()
             },
             // Bottom border
             QuadInstance {
@@ -315,6 +317,7 @@ impl Widget for ContextMenu {
                 size: [mw, border],
                 color: t.colors.chrome_frame,
                 border_radius: 0.0,
+            ..Default::default()
             },
             // Left border
             QuadInstance {
@@ -322,6 +325,7 @@ impl Widget for ContextMenu {
                 size: [border, mh],
                 color: t.colors.chrome_frame,
                 border_radius: 0.0,
+            ..Default::default()
             },
             // Right border
             QuadInstance {
@@ -329,6 +333,7 @@ impl Widget for ContextMenu {
                 size: [border, mh],
                 color: t.colors.chrome_frame,
                 border_radius: 0.0,
+            ..Default::default()
             },
         ];
 
@@ -342,7 +347,8 @@ impl Widget for ContextMenu {
                     size: [mw - border * 2.0, row_h],
                     color: t.colors.accent_focus,
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
             }
 
             cursor_y += row_h;
@@ -354,7 +360,8 @@ impl Widget for ContextMenu {
                     size: [mw - border * 2.0, SEPARATOR_HEIGHT],
                     color: t.colors.chrome_frame,
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
                 cursor_y += SEPARATOR_HEIGHT;
             }
         }

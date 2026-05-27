@@ -149,7 +149,8 @@ impl Widget for Divider {
             size: [rect.width, rect.height],
             color: self.divider_color(),
             border_radius: 0.0,
-        }]
+        ..Default::default()
+            }]
     }
 
     /// Dividers carry no text; always returns an empty [`Vec`].

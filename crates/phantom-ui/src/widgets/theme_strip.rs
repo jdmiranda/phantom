@@ -245,7 +245,8 @@ impl Widget for ThemeStrip {
             size: [rect.width, rect.height],
             color: t.colors.surface_raised,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         // Bottom hairline divider so the strip reads as chrome, not a pane.
         let hair = t.hair().max(1.0);
         quads.push(QuadInstance {
@@ -253,7 +254,8 @@ impl Widget for ThemeStrip {
             size: [rect.width, hair],
             color: t.colors.chrome_divider,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // -- Swatches --------------------------------------------------------
         let r = self.swatch_radius();
@@ -271,7 +273,8 @@ impl Widget for ThemeStrip {
                     size: [ring_r * 2.0, ring_r * 2.0],
                     color: t.colors.chrome_frame_active,
                     border_radius: ring_r,
-                });
+                ..Default::default()
+            });
             }
 
             // Filled swatch.
@@ -280,6 +283,7 @@ impl Widget for ThemeStrip {
                 size: [r * 2.0, r * 2.0],
                 color: sw.color,
                 border_radius: r,
+            ..Default::default()
             });
         }
 
@@ -296,25 +300,29 @@ impl Widget for ThemeStrip {
             size: [box_size, stroke],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [box_x, box_y + box_size - stroke],
             size: [box_size, stroke],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [box_x, box_y],
             size: [stroke, box_size],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [box_x + box_size - stroke, box_y],
             size: [stroke, box_size],
             color: t.colors.chrome_frame,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         // Inner fill (only when on) — slightly inset so the outline stays visible.
         if self.crt_on {
             let inset = stroke + 1.5;
@@ -323,6 +331,7 @@ impl Widget for ThemeStrip {
                 size: [box_size - inset * 2.0, box_size - inset * 2.0],
                 color: t.colors.chrome_frame_active,
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 

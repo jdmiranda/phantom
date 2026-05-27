@@ -310,7 +310,8 @@ impl Widget for InputBar {
             size: [rect.width, rect.height],
             color: t.colors.surface_recessed,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // 2. Cursor block.
         let prompt_w = self.prompt_char_width() as f32 * char_w;
@@ -324,7 +325,8 @@ impl Widget for InputBar {
             size: [char_w, char_h],
             color: cursor_color,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         quads
     }

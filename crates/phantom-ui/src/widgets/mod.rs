@@ -311,7 +311,8 @@ impl Widget for StatusBar {
             size: [rect.width, rect.height],
             color: STATUS_BAR_BG,
             border_radius: 0.0,
-        }]
+        ..Default::default()
+            }]
     }
 
     fn render_text(&self, rect: &Rect) -> Vec<TextSegment> {
@@ -556,7 +557,8 @@ impl Widget for TabBar {
             size: [rect.width, rect.height],
             color: self.bar_bg,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         if self.tabs.is_empty() {
             return quads;
@@ -574,7 +576,8 @@ impl Widget for TabBar {
                     size: [tab_w, rect.height],
                     color: self.active_tab_bg,
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
             }
         }
 

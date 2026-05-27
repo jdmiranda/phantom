@@ -37,7 +37,8 @@ impl App {
             size: [console_width, full_height],
             color: [0.01, 0.01, 0.03, 1.0],
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // -- Glowing bottom edge (cyan scanline, the Quake separator) --
         // Positioned at the visible bottom of the sliding console.
@@ -46,13 +47,15 @@ impl App {
             size: [console_width, 2.0],
             color: [0.0, 0.85, 0.95, 0.9],
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [0.0, y_offset + full_height],
             size: [console_width, 6.0],
             color: [0.0, 0.4, 0.5, 0.25],
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Don't render text content until slide is far enough to be readable.
         if slide < 0.15 {
@@ -66,7 +69,8 @@ impl App {
             size: [console_width, title_h],
             color: [0.02, 0.04, 0.06, 0.95],
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         let title = "PHANTOM CONSOLE";
         self.render_overlay_text(title, padding, y_offset + 2.0, [0.0, 0.8, 0.9, 0.8], glyphs);
@@ -85,13 +89,15 @@ impl App {
             size: [console_width, input_bar_h],
             color: [0.02, 0.03, 0.05, 0.95],
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [0.0, input_bar_y],
             size: [console_width, 1.0],
             color: [0.1, 0.3, 0.2, 0.5],
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         let input_display = format!("> {}_", self.console.input);
         self.render_overlay_text(
@@ -191,14 +197,16 @@ impl App {
             size: [box_width + 4.0, box_height + 4.0],
             color: [0.01, 0.02, 0.04, 1.0],
             border_radius: 6.0,
-        });
+        ..Default::default()
+            });
         // Background panel (fully opaque to prevent text bleed-through artifacts).
         quads.push(QuadInstance {
             pos: [box_x, box_y],
             size: [box_width, box_height],
             color: [0.02, 0.04, 0.08, 1.0],
             border_radius: 4.0,
-        });
+        ..Default::default()
+            });
 
         // Cyan border.
         for &(pos, size) in &[
@@ -212,6 +220,7 @@ impl App {
                 size,
                 color: [0.0, 0.8, 0.9, 0.7],
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 
@@ -295,7 +304,8 @@ impl App {
             size: [hud_width, hud_height],
             color: [0.02, 0.02, 0.04, 0.90],
             border_radius: 4.0,
-        });
+        ..Default::default()
+            });
 
         // Border.
         let border_color = [0.15, 0.4, 0.2, 0.8];
@@ -310,6 +320,7 @@ impl App {
                 size,
                 color: border_color,
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 
@@ -457,7 +468,8 @@ impl App {
                 1.0,
             ],
             border_radius: 6.0,
-        });
+        ..Default::default()
+            });
 
         // Border.
         let t = 1.0;
@@ -466,25 +478,29 @@ impl App {
             size: [panel_width, t],
             color: border_color,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [panel_x, panel_y + panel_height - t],
             size: [panel_width, t],
             color: border_color,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [panel_x, panel_y],
             size: [t, panel_height],
             color: border_color,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
         quads.push(QuadInstance {
             pos: [panel_x + panel_width - t, panel_y],
             size: [t, panel_height],
             color: border_color,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Title bar.
         quads.push(QuadInstance {
@@ -497,7 +513,8 @@ impl App {
                 1.0,
             ],
             border_radius: 6.0,
-        });
+        ..Default::default()
+            });
 
         // Title text.
         let title_display = format!("▮ {title}");
@@ -562,7 +579,8 @@ impl App {
             size: screen_size,
             color: [0.0, 0.0, 0.0, 0.55],
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Panel background.
         quads.push(QuadInstance {
@@ -570,7 +588,8 @@ impl App {
             size: [panel_width, panel_height],
             color: [0.03, 0.04, 0.06, 0.96],
             border_radius: 6.0,
-        });
+        ..Default::default()
+            });
 
         // Panel border.
         let accent = [0.2, 1.0, 0.5, 0.7];
@@ -586,6 +605,7 @@ impl App {
                 size,
                 color: accent,
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 
@@ -634,7 +654,8 @@ impl App {
                         size: [panel_width - 4.0, line_height],
                         color: [0.1, 0.3, 0.15, 0.5],
                         border_radius: 2.0,
-                    });
+                    ..Default::default()
+            });
                 }
 
                 let marker = if is_selected { "▶" } else { " " };
@@ -713,7 +734,8 @@ impl App {
             size: [menu_w, menu_h],
             color: [0.0, 0.0, 0.0, 0.3],
             border_radius: 4.0,
-        });
+        ..Default::default()
+            });
 
         // Background.
         quads.push(QuadInstance {
@@ -721,7 +743,8 @@ impl App {
             size: [menu_w, menu_h],
             color: [0.03, 0.04, 0.06, 0.96],
             border_radius: 4.0,
-        });
+        ..Default::default()
+            });
 
         // Cyan border.
         let border_color = [0.0, 0.8, 0.9, 0.7];
@@ -737,6 +760,7 @@ impl App {
                 size,
                 color: border_color,
                 border_radius: 0.0,
+            ..Default::default()
             });
         }
 
@@ -754,7 +778,8 @@ impl App {
                     size: [menu_w - 4.0, item_h],
                     color: [0.1, 0.3, 0.15, 0.5],
                     border_radius: 2.0,
-                });
+                ..Default::default()
+            });
             }
 
             let label = self.context_menu.items[i].label.clone();
@@ -801,6 +826,7 @@ impl App {
                 size: q.size,
                 color: q.color,
                 border_radius: q.border_radius,
+            ..Default::default()
             });
         }
 
@@ -837,7 +863,8 @@ impl App {
                 cols,
                 (x, y),
             );
-            phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
+            // Halo is shader-driven now (see `shaders/text.wgsl`); no
+            // CPU-side extra instances emitted here.
             glyphs.extend(batch.mono);
         }
     }
@@ -918,7 +945,8 @@ impl App {
                     size: [len, segment_thickness],
                     color,
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
 
                 prev_x = cx;
                 prev_y = cy;

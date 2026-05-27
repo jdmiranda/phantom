@@ -393,7 +393,8 @@ impl Widget for MessageBlock {
             size: [rect.width, total_height],
             color: t.colors.surface_recessed,
             border_radius: 0.0,
-        }];
+        ..Default::default()
+            }];
 
         // Code-line highlight quads: dark charcoal overlay on top of
         // surface_recessed to give code blocks a subtle inset appearance.
@@ -407,7 +408,8 @@ impl Widget for MessageBlock {
                     size: [body_width, cell_h],
                     color: code_bg,
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
             }
         }
 

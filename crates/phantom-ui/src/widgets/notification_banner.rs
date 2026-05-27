@@ -148,6 +148,7 @@ impl Widget for NotificationBanner {
                 size: [rect.width, rect.height],
                 color: t.colors.surface_recessed,
                 border_radius: 0.0,
+            ..Default::default()
             },
             // Severity accent stripe along the bottom edge.
             QuadInstance {
@@ -155,6 +156,7 @@ impl Widget for NotificationBanner {
                 size: [rect.width, stripe_h],
                 color: accent,
                 border_radius: 0.0,
+            ..Default::default()
             },
         ]
     }

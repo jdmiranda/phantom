@@ -181,7 +181,8 @@ impl Widget for KeybindHelp {
             size: [rect.width, panel_h],
             color: PANEL_BG,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Title bar.
         quads.push(QuadInstance {
@@ -189,7 +190,8 @@ impl Widget for KeybindHelp {
             size: [rect.width, TITLE_H],
             color: TITLE_BG,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Separator below title.
         quads.push(QuadInstance {
@@ -197,7 +199,8 @@ impl Widget for KeybindHelp {
             size: [rect.width, 1.0],
             color: SEP_COLOR,
             border_radius: 0.0,
-        });
+        ..Default::default()
+            });
 
         // Alternating row highlights (every odd row).
         let body_y = panel_y + TITLE_H + INNER_PAD;
@@ -208,7 +211,8 @@ impl Widget for KeybindHelp {
                     size: [rect.width, ROW_H],
                     color: [0.04, 0.07, 0.09, 0.5],
                     border_radius: 0.0,
-                });
+                ..Default::default()
+            });
             }
         }
 
