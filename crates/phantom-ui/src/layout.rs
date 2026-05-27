@@ -123,6 +123,11 @@ pub struct LayoutEngine {
     tab_bar: NodeId,
     content: NodeId,
     status_bar: NodeId,
+    /// When `Some((cols, rows))`, the content area is in **gallery mode** —
+    /// flex-wrap is enabled and every pane added via [`add_pane`](Self::add_pane)
+    /// gets a fixed `width = 100/cols%`, `height = 100/rows%` so panes tile
+    /// into an N×M grid instead of stretching across a single row.
+    grid_mode: Option<(u32, u32)>,
 }
 
 impl LayoutEngine {
@@ -231,7 +236,60 @@ impl LayoutEngine {
             tab_bar,
             content,
             status_bar,
+            grid_mode: None,
         })
+    }
+
+    /// Switch the content area into **gallery mode** with the given
+    /// `cols` × `rows` grid dimensions.
+    ///
+    /// The content node's flex direction stays Row but `flex_wrap: Wrap` is
+    /// enabled and `align_content: FlexStart` is set so wrapped rows pack to
+    /// the top of the content area. Pane nodes added after this call get a
+    /// fixed `width = 100/cols%`, `height = 100/rows%` so they tile into an
+    /// `cols × rows` grid; existing panes are NOT migrated.
+    ///
+    /// Pass `None` to revert to the default single-row stretchy layout.
+    pub fn set_grid_mode(&mut self, dims: Option<(u32, u32)>) -> Result<()> {
+        self.grid_mode = dims;
+
+        let style = if let Some((_cols, _rows)) = dims {
+            Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                align_content: Some(AlignContent::FlexStart),
+                align_items: Some(AlignItems::Stretch),
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Auto,
+                },
+                ..Style::default()
+            }
+        } else {
+            Style {
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Auto,
+                },
+                ..Style::default()
+            }
+        };
+
+        self.tree
+            .set_style(self.content, style)
+            .map_err(|e| anyhow::anyhow!("set_grid_mode: cannot set content style: {e}"))
+    }
+
+    /// Whether the content area is currently in gallery mode and the grid
+    /// dimensions if so.
+    #[must_use]
+    pub fn grid_mode(&self) -> Option<(u32, u32)> {
+        self.grid_mode
     }
 
     /// Update the root dimensions and recompute the entire layout.
@@ -250,13 +308,33 @@ impl LayoutEngine {
 
     /// Add a new terminal pane to the content area.
     ///
-    /// The pane is created with `flex_grow: 1.0` so that all panes in the
-    /// content area share space equally. Returns a `PaneId` handle that can
-    /// be used for splitting, removal, and rect queries.
+    /// When gallery mode is **disabled** (the default) the pane is created
+    /// with `flex_grow: 1.0` so all panes in the content area share space
+    /// equally along a single row.
+    ///
+    /// When gallery mode is **enabled** via [`set_grid_mode`](Self::set_grid_mode)
+    /// the pane is created with fixed `width = 100/cols%` and
+    /// `height = 100/rows%` so it occupies one cell of the `cols × rows`
+    /// gallery grid. Flex-wrap then tiles successive panes onto new rows.
+    ///
+    /// Returns a `PaneId` handle that can be used for splitting, removal,
+    /// and rect queries.
     pub fn add_pane(&mut self) -> Result<PaneId> {
-        let node = self
-            .tree
-            .new_leaf(Style {
+        let style = if let Some((cols, rows)) = self.grid_mode {
+            let cell_w_pct = 1.0 / cols.max(1) as f32;
+            let cell_h_pct = 1.0 / rows.max(1) as f32;
+            Style {
+                flex_grow: 0.0,
+                flex_shrink: 0.0,
+                flex_basis: Dimension::Percent(cell_w_pct),
+                size: Size {
+                    width: Dimension::Percent(cell_w_pct),
+                    height: Dimension::Percent(cell_h_pct),
+                },
+                ..Style::default()
+            }
+        } else {
+            Style {
                 flex_grow: 1.0,
                 flex_shrink: 1.0,
                 size: Size {
@@ -264,7 +342,12 @@ impl LayoutEngine {
                     height: Dimension::Percent(1.0),
                 },
                 ..Style::default()
-            })
+            }
+        };
+
+        let node = self
+            .tree
+            .new_leaf(style)
             .context("failed to create pane node")?;
 
         self.tree
@@ -369,6 +452,13 @@ impl LayoutEngine {
     /// `min_size` / `max_size` style fields. Pass `None` for either bound
     /// to clear that constraint (resets to `auto`).
     ///
+    /// **Gallery-mode override**: when [`set_grid_mode`](Self::set_grid_mode)
+    /// is active this method is a no-op. The arbiter's pixel-space allocations
+    /// were calibrated for the default single-row stack and clobber the grid
+    /// sizing if applied wholesale, collapsing every gallery pane into the
+    /// first column. Honouring per-pane preferences while wrapping into a
+    /// grid would require an arbiter-aware grid solver (Phase 3 work).
+    ///
     /// Returns an error if the `PaneId` is not found in the tree.
     pub fn set_pane_size_constraints(
         &mut self,
@@ -376,6 +466,9 @@ impl LayoutEngine {
         min_size: Option<(f32, f32)>,
         max_size: Option<(f32, f32)>,
     ) -> Result<()> {
+        if self.grid_mode.is_some() {
+            return Ok(());
+        }
         let mut style = self
             .tree
             .style(pane.0)
@@ -800,6 +893,123 @@ mod tests {
 
         assert!(r2.width > r1.width, "pane should be wider after resize");
         assert!(r2.height > r1.height, "pane should be taller after resize");
+    }
+
+    // ── Gallery / grid-mode tests ────────────────────────────────────────
+
+    /// Grid mode must tile 12 panes into a 4×3 layout: each pane should be
+    /// ≈ 25% width × 33% height of the content area.
+    #[test]
+    fn grid_mode_tiles_twelve_panes_into_4x3() {
+        let mut engine = LayoutEngine::new().unwrap();
+        engine.set_grid_mode(Some((4, 3))).unwrap();
+        let mut panes = Vec::new();
+        for _ in 0..12 {
+            panes.push(engine.add_pane().unwrap());
+        }
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+
+        // Content area excludes launcher bar, theme strip, tab bar,
+        // status bar, and bottom pad (all enabled by default).
+        let content_h = WINDOW_H
+            - APP_LAUNCHER_BAR_HEIGHT_LOGICAL
+            - THEME_STRIP_HEIGHT_LOGICAL
+            - TAB_BAR_HEIGHT_LOGICAL
+            - STATUS_BAR_HEIGHT_LOGICAL
+            - BOTTOM_PAD;
+        let expected_w = WINDOW_W / 4.0;
+        let expected_h = content_h / 3.0;
+        let tol = 4.0; // grid mode flex math leaves a tiny rounding margin
+
+        // Every pane should be ~480×~341 (1920/4, ~1024/3).
+        for (i, pid) in panes.iter().enumerate() {
+            let r = engine.get_pane_rect(*pid).unwrap();
+            assert!(
+                (r.width - expected_w).abs() < tol,
+                "pane {i}: width {} not near expected {}",
+                r.width,
+                expected_w
+            );
+            assert!(
+                (r.height - expected_h).abs() < tol,
+                "pane {i}: height {} not near expected {}",
+                r.height,
+                expected_h
+            );
+        }
+
+        // Row 0: panes 0..4 share the top row → all have the same y.
+        let row0_y = engine.get_pane_rect(panes[0]).unwrap().y;
+        for i in 1..4 {
+            let y = engine.get_pane_rect(panes[i]).unwrap().y;
+            assert!(
+                (y - row0_y).abs() < tol,
+                "pane {i} should be on row 0, but y={y} differs from row0_y={row0_y}"
+            );
+        }
+
+        // Row 1: panes 4..8 — y should be one cell-height below row 0.
+        let row1_y = engine.get_pane_rect(panes[4]).unwrap().y;
+        assert!(
+            (row1_y - row0_y - expected_h).abs() < tol,
+            "row1_y={row1_y} should be row0_y={row0_y} + cell_h={expected_h}"
+        );
+
+        // X positions across row 0 should advance by one cell width each.
+        let mut prev_x = engine.get_pane_rect(panes[0]).unwrap().x;
+        for i in 1..4 {
+            let x = engine.get_pane_rect(panes[i]).unwrap().x;
+            assert!(
+                (x - prev_x - expected_w).abs() < tol,
+                "pane {i} x={x} should follow x={prev_x} + cell_w={expected_w}"
+            );
+            prev_x = x;
+        }
+    }
+
+    /// Switching back to no-grid mode must restore stretchy single-row
+    /// behaviour for newly-added panes.
+    #[test]
+    fn grid_mode_can_be_disabled() {
+        let mut engine = LayoutEngine::new().unwrap();
+        engine.set_grid_mode(Some((3, 2))).unwrap();
+        assert_eq!(engine.grid_mode(), Some((3, 2)));
+        engine.set_grid_mode(None).unwrap();
+        assert_eq!(engine.grid_mode(), None);
+
+        let pane = engine.add_pane().unwrap();
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+        let rect = engine.get_pane_rect(pane).unwrap();
+        let expected_h = WINDOW_H
+            - APP_LAUNCHER_BAR_HEIGHT_LOGICAL
+            - THEME_STRIP_HEIGHT_LOGICAL
+            - TAB_BAR_HEIGHT_LOGICAL
+            - STATUS_BAR_HEIGHT_LOGICAL
+            - BOTTOM_PAD;
+        // Without grid mode the single pane fills the content area.
+        assert!((rect.width - WINDOW_W).abs() < 1.0);
+        assert!((rect.height - expected_h).abs() < 1.0);
+    }
+
+    /// In grid mode `set_pane_size_constraints` must be a no-op so the
+    /// arbiter cannot collapse gallery tiles back into a single column.
+    #[test]
+    fn grid_mode_ignores_size_constraints() {
+        let mut engine = LayoutEngine::new().unwrap();
+        engine.set_grid_mode(Some((4, 3))).unwrap();
+        let pane = engine.add_pane().unwrap();
+        // Apply a constraint that would otherwise pin width to 100px.
+        engine
+            .set_pane_size_constraints(pane, Some((100.0, 50.0)), Some((100.0, 50.0)))
+            .unwrap();
+        engine.resize(WINDOW_W, WINDOW_H).unwrap();
+        let r = engine.get_pane_rect(pane).unwrap();
+        // The pane should still occupy its full 25% × 33% cell, NOT 100×50.
+        assert!(
+            r.width > 200.0,
+            "grid pane width was clamped by constraint: {}",
+            r.width
+        );
     }
 
     // ── Layout memory-leak regression (Issue #15) ──────────────────────────

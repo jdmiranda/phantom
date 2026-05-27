@@ -364,6 +364,8 @@ GUI / RUN OPTIONS:
     --boot                   Show the boot cinematic (default: skip for fast iteration)
     --no-boot                (kept for back-compat; the cinematic is skipped by default)
     --fullscreen             Start in borderless fullscreen mode (toggle with F11 / Cmd+Enter)
+    --gallery                Auto-spawn the full app gallery (mockup tiled grid) on cold-launch
+    --screenshot <PATH>      Capture one screenshot to PATH after ~30 warmup frames, then quit
     --init-config            Write default config to ~/.config/phantom/config.toml
     --help                   Print this help message
 
@@ -929,13 +931,30 @@ fn main() -> Result<()> {
             "--fullscreen" => {
                 config.fullscreen = true;
             }
+            "--gallery" => {
+                // Auto-spawn the full mockup gallery (12 chrome apps tiled
+                // in a 4×3 grid) on cold-launch. Mirrors `docs/mockups/apps.html`.
+                config.gallery_mode = true;
+                // Gallery is incompatible with the boot cinematic — skip it.
+                config.skip_boot = true;
+            }
             "--screenshot" => {
+                // One-shot screenshot mode: render the App, snapshot to the
+                // given path, then quit cleanly. Sets BOTH the legacy
+                // `screenshot_after_frame` config field (consumed by the
+                // pre-existing fidelity capture path) AND the
+                // `PHANTOM_AUTO_SCREENSHOT_PATH` env-var hatch (consumed by
+                // `update.rs::maybe_auto_screenshot`) so either capture path
+                // can produce the screenshot. Path is the next positional arg.
                 i += 1;
                 if i < args.len() {
-                    config.screenshot_after_frame =
-                        Some(std::path::PathBuf::from(&args[i]));
-                    // Skip boot so the screenshot doesn't capture the
-                    // cinematic.
+                    let path = std::path::PathBuf::from(&args[i]);
+                    config.screenshot_after_frame = Some(path.clone());
+                    // SAFETY: writing an env var pre-fork in single-threaded main.
+                    unsafe {
+                        std::env::set_var("PHANTOM_AUTO_SCREENSHOT_PATH", &args[i]);
+                    }
+                    // Skip boot so the screenshot doesn't capture the cinematic.
                     config.skip_boot = true;
                 }
             }

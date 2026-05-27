@@ -715,6 +715,16 @@ pub struct App {
     //    `None` when `config.mcp_servers` is empty (no work to do).
     #[allow(dead_code)]
     pub(crate) _mcp_discovery_task: Option<tokio::task::JoinHandle<()>>,
+
+    /// Pending gallery-mode auto-spawn flag.
+    ///
+    /// When `true`, the App constructor recorded a `--gallery` request and
+    /// `update.rs` should consume it on the first tick by calling
+    /// `crate::gallery_spawn::spawn_full_gallery`. The flag is cleared after
+    /// the spawn runs so subsequent ticks don't re-create panes.
+    ///
+    /// Set by `with_config_scaled` when `PhantomConfig::gallery_mode` is true.
+    pub(crate) pending_gallery_spawn: bool,
 }
 
 /// An active suggestion from the AI brain.
@@ -1369,7 +1379,17 @@ impl App {
         let post_setup_upgrade = std::sync::Arc::new(
             std::sync::atomic::AtomicBool::new(false),
         );
-        {
+        if config.gallery_mode {
+            // Gallery mode skips the SetupAdapter — `gallery_spawn::spawn_full_gallery`
+            // will fill the screen with 12 chrome adapters on the first
+            // update tick. The orphaned pane created by `layout.add_pane()`
+            // above must be removed so it doesn't ghost behind the grid.
+            if let Err(e) = layout.remove_pane(pane_id) {
+                warn!("gallery: failed to remove placeholder pane: {e}");
+            }
+            scene.remove_node(first_pane_node);
+            info!("Gallery mode: SetupAdapter skipped, awaiting gallery spawn on first tick");
+        } else {
             use crate::adapters::setup::SetupAdapter;
             use phantom_scene::clock::Cadence;
 
@@ -1759,6 +1779,7 @@ impl App {
             _mcp_discovery_task: mcp_discovery_task,
             first_layout_done: false,
             monitor_refresh_last: now,
+            pending_gallery_spawn: config.gallery_mode,
         })
         .map(|mut app: Self| {
             // Post-construction wiring for chrome adapters that need the
@@ -1767,7 +1788,9 @@ impl App {
             // Boot cinematic: opt-in via `--boot` / `skip_boot=false`.
             // When set, auto-open a `BootAdapter` pane that is despawned
             // in `update.rs` on `AppState::Terminal` entry.
-            if app.state == AppState::Boot {
+            // Skipped in gallery mode — the boot cinematic would clobber
+            // the auto-spawned chrome grid before the first user frame.
+            if app.state == AppState::Boot && !app.pending_gallery_spawn {
                 let _ = app.auto_open_boot_pane();
             }
             app
