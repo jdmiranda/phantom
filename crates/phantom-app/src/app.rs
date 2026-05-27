@@ -1229,6 +1229,24 @@ impl App {
         // Issue #79 item 7: topic for post-dedup frame notifications.
         let topic_capture_frame = event_bus.create_topic(0, "capture.frame", DataType::Json);
 
+        // Chrome-pane notification topics — registered at boot so the
+        // NotificationsAdapter's `subscribes_to()` resolves to live topic
+        // IDs when the coordinator wires the subscription.  Without these
+        // the registration logs a warn and the adapter silently never
+        // receives anything.
+        //
+        // Publishers:
+        // - `agent.denied`  — the capability-denial drain in `update.rs`
+        //   forwards every `EventKind::CapabilityDenied` as a typed
+        //   `Event::Custom { kind: "agent.denied", .. }`.
+        // - `brain.suggestion` — reserved for the brain reconciler's
+        //   advice surface (publisher lands with #647).
+        // - `system.warn` — reserved for the global logger to forward
+        //   warn/error log records.
+        event_bus.create_topic(0, "agent.denied", DataType::Json);
+        event_bus.create_topic(0, "brain.suggestion", DataType::Json);
+        event_bus.create_topic(0, "system.warn", DataType::Json);
+
         // Subscribe a virtual "brain observer" so the AI brain receives bus events.
         const BRAIN_OBSERVER_ID: u32 = 0xFFFF_FFFE;
         event_bus.subscribe(BRAIN_OBSERVER_ID, topic_terminal_output);
