@@ -22,7 +22,8 @@ use phantom_renderer::quads::{QuadInstance, QuadRenderer};
 use phantom_renderer::text::TextRenderer;
 use phantom_renderer::video::VideoRenderer;
 
-use phantom_terminal::terminal::PhantomTerminal;
+// NOTE: PhantomTerminal is no longer constructed at init; Cmd+T builds one
+// lazily via `phantom_terminal::terminal::PhantomTerminal::new` in `pane.rs`.
 
 use phantom_ui::keybinds::KeybindRegistry;
 use phantom_ui::layout::LayoutEngine;
@@ -765,7 +766,15 @@ impl App {
 
         info!("Terminal: {cols}x{rows} (window {width}x{height})");
 
-        let terminal = PhantomTerminal::new(cols, rows)?;
+        // NOTE: The PTY-backed PhantomTerminal is intentionally NOT constructed
+        // at init. Cold-launch shows the SetupAdapter (agent-is-king); Cmd+T
+        // constructs a fresh terminal on demand via `PhantomTerminal::new` in
+        // `pane.rs`. Building one here and immediately `drop`ping it caused the
+        // alacritty `Pty::Drop` impl to block on `child.wait()` forever — the
+        // shell never exits on its own, so init hung and the window stayed
+        // black. See commit 74bcd7f for the original (broken) drop-after-init
+        // pattern.
+        let _ = (cols, rows); // suppress unused warnings — see TODO above
 
         // -- Layout --
         let mut layout = LayoutEngine::with_scale(scale_factor)?;
@@ -1290,12 +1299,9 @@ impl App {
         // the SAME pane slot — no split, no half-window agent.  If no key is
         // available SetupAdapter stays put with a "needs API key" message.
         //
-        // The early `terminal: PhantomTerminal` built above at line ~679 is
-        // now unused at init; we drop it.  Cmd+T constructs a fresh terminal
-        // via `PhantomTerminal::new` in `pane.rs` when the user actually wants
-        // one.  Letting `terminal` go out of scope releases the PTY cleanly
-        // via `Drop`.
-        drop(terminal);
+        // The PTY-backed terminal is no longer constructed at init -- see the
+        // comment near line ~768 for the rationale. Cmd+T constructs a fresh
+        // terminal on demand via `PhantomTerminal::new` in `pane.rs`.
 
         let post_setup_upgrade = std::sync::Arc::new(
             std::sync::atomic::AtomicBool::new(false),
