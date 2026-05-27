@@ -777,6 +777,8 @@ mod tests {
             width: 800.0,
             height: 600.0,
             cell_size: (8.0, 16.0),
+            focused: false,
+            elapsed_secs: 0.0,
         };
         let out = a.render(&rect);
         // The empty-state message must appear.
@@ -807,6 +809,8 @@ mod tests {
             width: 1200.0,
             height: 800.0,
             cell_size: (8.0, 16.0),
+            focused: false,
+            elapsed_secs: 0.0,
         };
         let out = a.render(&rect);
         // At least the head quads plus some node quads should render.

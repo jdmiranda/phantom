@@ -523,6 +523,8 @@ mod tests {
             width: 600.0,
             height: 400.0,
             cell_size: (8.0, 16.0),
+            focused: false,
+            elapsed_secs: 0.0,
         };
         let out = adapter.render(&rect);
         // Should produce at least the head + some body lines.
