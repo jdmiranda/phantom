@@ -451,7 +451,7 @@ impl App {
             // sharp glyphs so the halo instances render behind in instance
             // order — gives every glyph a soft phosphor rim without modifying
             // the text shader.
-            phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
+            phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
             glyphs.extend(batch.mono);
             color_glyphs.extend(batch.color);
         }
@@ -505,7 +505,7 @@ impl App {
                         self.cell_size,
                     );
                     quads.append(&mut bg_quads);
-                    phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
+                    phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
                     glyphs.extend(batch.mono);
                     color_glyphs.extend(batch.color);
 
@@ -597,24 +597,58 @@ impl App {
 
                 // -- Scene pass chrome (gets CRT effects) --
 
-                // Drop shadow — ALWAYS painted, every pane, every layout. The
-                // mockup `.app { box-shadow: 0 8px 24px rgba(0,0,0,0.5) }`
-                // is unconditional. Offset y=8, blur extends ~24px; we fake
-                // the blur by stacking two soft shadow quads at growing
-                // offsets / decreasing alphas — flat fill alone reads as a
-                // hard drop, multi-layer reads as a soft halo.
-                quads.push(QI {
-                    pos: [pane_rect.x + 6.0, pane_rect.y + 10.0],
-                    size: [pane_rect.width, pane_rect.height],
-                    color: [0.0, 0.0, 0.0, 0.35],
-                    border_radius: PANE_RADIUS + 4.0,
-                });
-                quads.push(QI {
-                    pos: [pane_rect.x + 3.0, pane_rect.y + 5.0],
-                    size: [pane_rect.width, pane_rect.height],
-                    color: [0.0, 0.0, 0.0, 0.25],
-                    border_radius: PANE_RADIUS + 2.0,
-                });
+                // Drop shadow — soft 24-px gaussian approximation. The mockup
+                // `.app { box-shadow: 0 8px 24px rgba(0,0,0,0.5) }` is offset
+                // 8 px down with a 24-px blur radius. We approximate the
+                // gaussian falloff by stacking concentric shadow quads,
+                // each LARGER than the pane and SHIFTED DOWN by the
+                // shadow's effective vertical centre (~8 px). At each ring
+                // we increase the spread and decrease the alpha — the
+                // cumulative alpha composite forms a soft halo.
+                //
+                //   spread  6 px → alpha 0.42 (innermost, densest)
+                //   spread 14 px → alpha 0.26
+                //   spread 22 px → alpha 0.14
+                //   spread 30 px → alpha 0.06 (outermost, faintest)
+                //
+                // The total reach is ~30 px ≈ the 24 px CSS blur + the 8 px
+                // offset — visually that lands as a 24-ish-px soft glow
+                // pooled below the pane. ALWAYS painted, every pane.
+                // Build the shadow from OUTSIDE-IN: the largest, faintest
+                // ring renders first (sits below the smaller rings) and we
+                // stack progressively smaller / darker rings on top. The
+                // CUMULATIVE alpha (1-(1-α₁)(1-α₂)...) at any distance D
+                // from the pane edge approximates a gaussian falloff.
+                //
+                //   spread 32 px → alpha 0.06 (faintest, outermost)
+                //   spread 22 px → alpha 0.10
+                //   spread 14 px → alpha 0.16
+                //   spread  8 px → alpha 0.24
+                //   spread  4 px → alpha 0.36 (densest, closest to pane)
+                //
+                // Each ring sits 8 px DOWN from the pane (the CSS
+                // `0 8px 24px` y-offset) so the shadow pools below.
+                let shadow_offset_y = 8.0_f32;
+                for (spread, alpha) in [
+                    (32.0_f32, 0.06_f32),
+                    (22.0_f32, 0.10_f32),
+                    (14.0_f32, 0.16_f32),
+                    (8.0_f32, 0.24_f32),
+                    (4.0_f32, 0.36_f32),
+                ] {
+                    quads.push(QI {
+                        pos: [
+                            pane_rect.x - spread,
+                            pane_rect.y - spread + shadow_offset_y,
+                        ],
+                        size: [
+                            pane_rect.width + spread * 2.0,
+                            pane_rect.height + spread * 2.0,
+                        ],
+                        color: [0.0, 0.0, 0.0, alpha],
+                        border_radius: PANE_RADIUS + spread,
+                    });
+                }
 
                 // Container background — mockup `.app-body { background:
                 // linear-gradient(180deg, var(--surface-recessed), var(--bg)) }`
@@ -633,15 +667,18 @@ impl App {
                     color: cont_bg,
                     border_radius: PANE_RADIUS,
                 });
-                // Gradient top half — slightly brighter (raised feel) at
-                // ~35 % alpha, fading visually as we render only the top
-                // half of the pane. This is the cheap stacked-quad gradient
-                // path; a proper linear interp would be a shader variant.
+                // Gradient top half — multiplicative tint (~×1.4 brighter on
+                // each channel) so the wash actually reads on dark phosphor
+                // / cyber bases where the prior additive `+0.08/+0.12` delta
+                // was too subtle to perceive. Clamped to 1.0 so brighter
+                // base palettes (amber / ice / vapor) don't blow out.
+                // 55 % alpha gives a perceptible top gradient without
+                // looking washed out.
                 let raised_tint = [
-                    (bg[0] + 0.08).min(1.0),
-                    (bg[1] + 0.12).min(1.0),
-                    (bg[2] + 0.08).min(1.0),
-                    0.35,
+                    (bg[0] * 1.4 + 0.18).min(1.0),
+                    (bg[1] * 1.4 + 0.18).min(1.0),
+                    (bg[2] * 1.4 + 0.18).min(1.0),
+                    0.55,
                 ];
                 quads.push(QI {
                     pos: [pane_rect.x, pane_rect.y],
@@ -801,7 +838,7 @@ impl App {
                     self.cell_size,
                 );
                 quads.append(&mut bg_quads);
-                phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
+                phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
                 glyphs.extend(batch.mono);
                 color_glyphs.extend(batch.color);
 
@@ -1025,7 +1062,7 @@ impl App {
             // Glow halos are emitted ahead of the sharp glyphs so the halo
             // instances render behind the crisp text (item 1, path A — see
             // `phantom_renderer::text::append_glow_halos`).
-            phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
+            phantom_renderer::text::append_glow_halos_stacked(&batch.mono, glyphs);
             glyphs.extend(batch.mono);
         }
     }

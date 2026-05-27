@@ -794,10 +794,12 @@ impl App {
         let video_renderer = VideoRenderer::new(&gpu.device, format);
 
         // -- Terminal dimensions from window size --
-        // Reserve space for the theme strip (28px), tab bar (30px), status
-        // bar (28px), and the app-container chrome (padding + title strip)
-        // inside the pane.
-        let chrome_height = (28.0 + 30.0 + 28.0) * scale_factor;
+        // Reserve space for the theme strip (28px), tab bar (30px), and
+        // (formerly) the global status bar. The global status bar is now
+        // collapsed to 0 px height — per-pane AppHead widgets own status
+        // info inline (matches the mockup, where `.app-head .meta` carries
+        // `203×58` / `live` rather than a global footer strip).
+        let chrome_height = (28.0 + 30.0 + 0.0) * scale_factor;
         let content_height = (height as f32 - chrome_height).max(cell_size.1);
         let initial_outer = phantom_ui::layout::Rect {
             x: 0.0,

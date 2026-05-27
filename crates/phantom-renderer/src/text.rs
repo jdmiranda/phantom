@@ -651,6 +651,62 @@ pub fn append_glow_halos(
     }
 }
 
+/// Append a multi-ring per-glyph phosphor halo stack to `out`.
+///
+/// Stronger / softer variant of [`append_glow_halos`]: each sharp glyph
+/// spawns THREE halo instances at growing scales / decaying alphas so the
+/// cumulative composite reads as a wider, gaussian-style bloom. This is
+/// the "path A++" middle-ground between the cheap single-halo (path A)
+/// and a true shader-side multi-sample blur (path B).
+///
+/// Ring spec (back-to-front, painted in this order):
+///
+///   ring 0: 1.35× scale at 0.10 alpha (widest, faintest)
+///   ring 1: 1.22× scale at 0.16 alpha
+///   ring 2: 1.10× scale at 0.24 alpha (closest to sharp glyph, densest)
+///
+/// The caller pushes their unmodified `sharp` instances into `out` AFTER
+/// this call so the sharp glyphs render on top of the bloom rings.
+///
+/// # Cost
+/// 3× extra instances per visible glyph. Atlas state is untouched.
+pub fn append_glow_halos_stacked(
+    sharp: &[GlyphInstance],
+    out: &mut Vec<GlyphInstance>,
+) {
+    const RINGS: &[(f32, f32)] = &[
+        (1.35, 0.10),
+        (1.22, 0.16),
+        (1.10, 0.24),
+    ];
+
+    out.reserve(sharp.len() * RINGS.len());
+    for &(scale, alpha) in RINGS {
+        for g in sharp {
+            if g.is_color != 0 {
+                continue;
+            }
+            let w = g.size[0];
+            let h = g.size[1];
+            let dw = w * (scale - 1.0);
+            let dh = h * (scale - 1.0);
+            out.push(GlyphInstance {
+                position: [g.position[0] - dw * 0.5, g.position[1] - dh * 0.5],
+                uv_rect: g.uv_rect,
+                color: [
+                    g.color[0],
+                    g.color[1],
+                    g.color[2],
+                    g.color[3] * alpha,
+                ],
+                size: [w * scale, h * scale],
+                is_color: g.is_color,
+                _pad: 0,
+            });
+        }
+    }
+}
+
 /// Extract glyph color: use the glyph's color override if present, otherwise the default.
 fn glyph_color(glyph: &LayoutGlyph, default: [f32; 4]) -> [f32; 4] {
     match glyph.color_opt {
@@ -1034,6 +1090,61 @@ mod tests {
         // Halo size must be ≥ sharp size (scale clamped to 1.0).
         assert!(out[0].size[0] >= sharp[0].size[0]);
         assert!(out[0].size[1] >= sharp[0].size[1]);
+    }
+
+    // -------------------------------------------------------------------------
+    // append_glow_halos_stacked — multi-ring halo for stronger bloom
+    // -------------------------------------------------------------------------
+
+    /// Stacked halo must emit 3× as many instances as input (one per ring),
+    /// each scaled by a different factor with decaying alpha.
+    #[test]
+    fn append_glow_halos_stacked_emits_three_rings_per_glyph() {
+        let sharp = vec![sharp_instance(0), sharp_instance(0)];
+        let mut out = Vec::new();
+        append_glow_halos_stacked(&sharp, &mut out);
+        assert_eq!(out.len(), 6, "3 rings × 2 sharp glyphs = 6 halo instances");
+    }
+
+    /// Color emoji must be skipped by the stacked variant too.
+    #[test]
+    fn append_glow_halos_stacked_skips_color_emoji() {
+        let sharp = vec![sharp_instance(1), sharp_instance(0), sharp_instance(1)];
+        let mut out = Vec::new();
+        append_glow_halos_stacked(&sharp, &mut out);
+        // 3 rings × 1 mono glyph = 3 halo instances; the 2 color emojis are
+        // dropped entirely.
+        assert_eq!(out.len(), 3);
+        for inst in &out {
+            assert_eq!(inst.is_color, 0);
+        }
+    }
+
+    /// The stacked halo's rings should have monotonically growing sizes
+    /// (back-to-front: widest first, narrowest last) and decaying alpha.
+    #[test]
+    fn append_glow_halos_stacked_ring_alpha_decays_outward() {
+        let sharp = vec![sharp_instance(0)];
+        let mut out = Vec::new();
+        append_glow_halos_stacked(&sharp, &mut out);
+        // 3 rings: widest/faintest first, smallest/densest last.
+        assert_eq!(out.len(), 3);
+        assert!(
+            out[0].size[0] > out[1].size[0],
+            "ring 0 (back) must be wider than ring 1"
+        );
+        assert!(
+            out[1].size[0] > out[2].size[0],
+            "ring 1 must be wider than ring 2 (front)"
+        );
+        assert!(
+            out[0].color[3] < out[1].color[3],
+            "back ring must have lowest alpha"
+        );
+        assert!(
+            out[1].color[3] < out[2].color[3],
+            "front ring must have highest alpha"
+        );
     }
 
     /// The cache key tuple must differ for (char, bold=false) vs (char, bold=true)

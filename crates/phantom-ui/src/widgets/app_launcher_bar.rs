@@ -296,11 +296,42 @@ impl Default for AppLauncherBar {
     }
 }
 
+impl AppLauncherBar {
+    /// Compute the inner kbd sub-chip rect for the keybind glyph row.
+    ///
+    /// Mockup `.kbd` style: `border: 1px solid var(--frame-dim);
+    /// border-radius: 4px; padding: 1px 6px; background:
+    /// var(--surface-raised)`. The pixel sizing is derived from the glyph
+    /// metric so each kbd box hugs its keybind text exactly — no fixed
+    /// width.
+    fn kbd_rect(&self, chip: &Rect, keybind: &str) -> Rect {
+        let cell_w = self.ctx.cell_w();
+        let cell_h = self.ctx.cell_h();
+        // Width hugs the glyph: `chars * cell_w` for the text plus 6 px
+        // padding on each side to match `.kbd { padding: 1px 6px }`.
+        let kb_w = keybind.chars().count() as f32 * cell_w + 12.0;
+        // Height = cell_h + 2 px vertical padding (top/bottom 1 px each).
+        let kb_h = cell_h + 2.0;
+        // Center horizontally inside the parent chip.
+        let kb_x = chip.x + (chip.width - kb_w) * 0.5;
+        // Pin the kbd box to the bottom half of the chip, leaving room for
+        // the label row above it.
+        let kb_y = chip.y + chip.height * 0.5 + 1.0;
+        Rect {
+            x: kb_x.max(chip.x + 2.0),
+            y: kb_y,
+            width: kb_w,
+            height: kb_h,
+        }
+    }
+}
+
 impl Widget for AppLauncherBar {
     fn render_quads(&self, rect: &Rect) -> Vec<QuadInstance> {
         let t = self.tokens;
-        // 1 background + (1 fill + 1 hairline border) per chip + bottom hairline.
-        let mut quads = Vec::with_capacity(2 + self.items.len() * 2);
+        // 1 bar bg + 1 bottom hairline + per chip: 1 fill + 4 borders +
+        // 1 kbd fill + 4 kbd borders = 10 per chip.
+        let mut quads = Vec::with_capacity(2 + self.items.len() * 10);
 
         // Full bar background — sits flush with the tab strip just beneath us.
         quads.push(QuadInstance {
@@ -312,7 +343,7 @@ impl Widget for AppLauncherBar {
 
         let hair = t.hair().max(1.0);
 
-        for (idx, _item) in self.items.iter().enumerate() {
+        for (idx, item) in self.items.iter().enumerate() {
             let chip = self.chip_rect(rect, idx);
 
             // Chip background — surface_recessed for the boxy retro look.
@@ -355,6 +386,51 @@ impl Widget for AppLauncherBar {
                 color: border,
                 border_radius: 0.0,
             });
+
+            // Mockup-style .kbd sub-chip around the keybind glyph. The
+            // mockup CSS is `border: 1px solid var(--frame-dim);
+            // border-radius: 4px; padding: 1px 6px; background:
+            // var(--surface-raised)`. Renders as a small rounded box that
+            // hugs the keybind text inside the larger label chip.
+            let kbd = self.kbd_rect(&chip, item.keybind);
+
+            // kbd background fill — surface_raised so it pops against the
+            // surface_recessed parent chip body.
+            quads.push(QuadInstance {
+                pos: [kbd.x, kbd.y],
+                size: [kbd.width, kbd.height],
+                color: t.colors.surface_raised,
+                border_radius: 4.0,
+            });
+            // kbd 1-px border (4 sides).
+            // top
+            quads.push(QuadInstance {
+                pos: [kbd.x, kbd.y],
+                size: [kbd.width, hair],
+                color: border,
+                border_radius: 0.0,
+            });
+            // bottom
+            quads.push(QuadInstance {
+                pos: [kbd.x, kbd.y + kbd.height - hair],
+                size: [kbd.width, hair],
+                color: border,
+                border_radius: 0.0,
+            });
+            // left
+            quads.push(QuadInstance {
+                pos: [kbd.x, kbd.y],
+                size: [hair, kbd.height],
+                color: border,
+                border_radius: 0.0,
+            });
+            // right
+            quads.push(QuadInstance {
+                pos: [kbd.x + kbd.width - hair, kbd.y],
+                size: [hair, kbd.height],
+                color: border,
+                border_radius: 0.0,
+            });
         }
 
         // Bottom hairline separating the launcher from the tab strip.
@@ -373,7 +449,8 @@ impl Widget for AppLauncherBar {
         let cell_w = self.ctx.cell_w();
         let cell_h = self.ctx.cell_h();
         // Two stacked rows inside each chip: label (top), keybind (bottom).
-        // The label uses `text_primary` (bright), keybind uses `text_dim`.
+        // The label uses `text_primary` (bright), keybind uses
+        // `text_secondary` (matches mockup `.kbd { color: var(--text-secondary) }`).
         let mut segs = Vec::with_capacity(self.items.len() * 2);
 
         for (idx, item) in self.items.iter().enumerate() {
@@ -383,14 +460,11 @@ impl Widget for AppLauncherBar {
 
             // Center each text run horizontally inside the chip.
             let label_x = chip.x + (chip.width - label_w) * 0.5;
-            let kb_x = chip.x + (chip.width - kb_w) * 0.5;
 
-            // Vertical layout: label hugs the top half, keybind the bottom.
-            // Both anchored relative to the chip's vertical midpoint with one
-            // cell of separation so they don't run together.
+            // Vertical layout: label hugs the top half. The keybind centres
+            // inside its dedicated .kbd sub-chip in the bottom half.
             let mid = chip.y + chip.height * 0.5;
             let label_y = mid - cell_h - 1.0;
-            let kb_y = mid + 1.0;
 
             segs.push(TextSegment {
                 text: item.label.to_owned(),
@@ -398,11 +472,18 @@ impl Widget for AppLauncherBar {
                 y: label_y.max(chip.y + CHIP_PAD_Y),
                 color: t.colors.text_primary,
             });
+
+            // Keybind text — centred inside the kbd sub-chip box drawn in
+            // `render_quads`. Use text_secondary to match mockup `.kbd`
+            // foreground color.
+            let kbd = self.kbd_rect(&chip, item.keybind);
+            let kb_x = kbd.x + (kbd.width - kb_w) * 0.5;
+            let kb_y = kbd.y + (kbd.height - cell_h) * 0.5;
             segs.push(TextSegment {
                 text: item.keybind.to_owned(),
-                x: kb_x.max(chip.x + CHIP_PAD_X),
+                x: kb_x.max(kbd.x + 2.0),
                 y: kb_y,
-                color: t.colors.text_dim,
+                color: t.colors.text_secondary,
             });
         }
 
@@ -485,8 +566,9 @@ mod tests {
     fn render_quads_emits_one_bg_per_chip() {
         let bar = AppLauncherBar::new();
         let quads = bar.render_quads(&bar_rect());
-        // Background + bottom hairline + (1 fill + 4 borders) per chip.
-        let expected = 2 + bar.items().len() * 5;
+        // Background + bottom hairline + (chip 1 fill + 4 borders) per chip +
+        // (kbd 1 fill + 4 borders) per chip = 2 + items * 10.
+        let expected = 2 + bar.items().len() * 10;
         assert_eq!(quads.len(), expected);
     }
 

@@ -21,7 +21,15 @@ const APP_LAUNCHER_BAR_HEIGHT_LOGICAL: f32 = 48.0;
 const TAB_BAR_HEIGHT_LOGICAL: f32 = 30.0;
 
 /// Logical height of the status bar in points (before DPI scaling).
-const STATUS_BAR_HEIGHT_LOGICAL: f32 = 28.0;
+///
+/// Set to `0.0` so the global status bar collapses out of the layout and
+/// every adapter's `AppHead.meta` becomes the only place status info
+/// lives — that mirrors the mockup, where `.status` info lives inside the
+/// per-app `.app-head` (terminal shows `203×58`, agent shows `live`) and
+/// there is no global footer strip. The status_bar node remains in the
+/// Taffy tree to keep tests / chrome counts stable, but it occupies no
+/// pixels.
+const STATUS_BAR_HEIGHT_LOGICAL: f32 = 0.0;
 
 /// Maximum allowed nesting depth for split panes.
 ///
