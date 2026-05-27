@@ -186,6 +186,12 @@ impl Renderable for MonitorAdapter {
         let mut quads: Vec<QuadData> = Vec::new();
         let mut text_segments: Vec<TextData> = Vec::new();
 
+        let ctx = if rect.cell_size.0 > 0.0 && rect.cell_size.1 > 0.0 {
+            phantom_ui::RenderCtx::new(rect.cell_size, 1.0)
+        } else {
+            phantom_ui::RenderCtx::fallback()
+        };
+
         let head = AppHead::new("MONITOR", "system metrics")
             .with_icon("◇")
             .with_meta(if self.metrics.has_data {
@@ -193,7 +199,9 @@ impl Renderable for MonitorAdapter {
             } else {
                 "waiting for samples".to_string()
             })
-            .with_tokens(t);
+            .with_ctx(ctx)
+            .with_tokens(t)
+            .focused(rect.focused);
         head.render_into_adapter(rect, &mut quads, &mut text_segments);
 
         let body = head.body_rect_adapter(rect);
@@ -201,46 +209,115 @@ impl Renderable for MonitorAdapter {
         let cell_h = if rect.cell_size.1 > 0.0 { rect.cell_size.1 } else { 16.0 };
 
         let m = &self.metrics;
-        let lines: Vec<String> = if !m.has_data {
-            vec!["awaiting first sample…".to_string()]
-        } else {
-            let battery_str = match m.battery_pct {
-                Some(pct) => format!("{:>3.0}%{}", pct, if m.battery_charging { " ⚡" } else { "" }),
-                None => "—".to_string(),
-            };
-            let cpu_temp_str = m.cpu_temp_c.map(|t| format!("{:>4.1}°C", t)).unwrap_or_else(|| "—".into());
-            let gpu_temp_str = m.gpu_temp_c.map(|t| format!("{:>4.1}°C", t)).unwrap_or_else(|| "—".into());
-            let gpu_str = m.gpu_usage.map(|u| format!("{:>3.0}%", u * 100.0)).unwrap_or_else(|| "—".into());
-            vec![
-                format!("CPU       {:>5.1}%   (load 1m {:>4.2})", m.cpu_usage * 100.0, m.load_avg_1m),
-                format!(
-                    "MEM       {:>5.1}%   ({} / {} MiB)",
-                    m.mem_usage * 100.0, m.mem_used_mb, m.mem_total_mb
-                ),
-                format!(
-                    "DISK      {:>5.1}%   ({:.1} / {:.1} GiB)",
-                    m.disk_usage * 100.0, m.disk_used_gb, m.disk_total_gb
-                ),
-                format!("DISK I/O  R {:>6.0} kB/s   W {:>6.0} kB/s", m.disk_read_kbs, m.disk_write_kbs),
-                format!("NET       ↓ {:>6.0} kB/s   ↑ {:>6.0} kB/s", m.net_rx_kbs, m.net_tx_kbs),
-                format!("NET conns {:>5}", m.net_connections),
-                format!("BATTERY   {}", battery_str),
-                format!("CPU temp  {}   GPU {}   GPU temp {}", cpu_temp_str, gpu_str, gpu_temp_str),
-            ]
-        };
 
-        let mut y = body.y + cell_h * 0.5;
-        for line in &lines {
-            if y + cell_h > body.y + body.height {
-                break;
-            }
+        if !m.has_data {
             text_segments.push(TextData {
-                text: line.clone(),
+                text: "awaiting first sample…".to_string(),
                 x: body.x + cell_w,
-                y,
+                y: body.y + cell_h,
+                color: t.colors.text_dim,
+            });
+            return RenderOutput {
+                quads,
+                text_segments,
+                grid: None,
+                scroll: None,
+                selection: None,
+            };
+        }
+
+        // 2×2 grid: CPU · MEM (top row), GPU · NET (bottom row).
+        // Mirrors `docs/mockups/apps.html` rows 425–454. Each cell shows a
+        // label, a primary value, and a token-coloured progress bar.
+        let pad = cell_w * 0.6;
+        let gap = cell_w * 0.5;
+        let cell_w_total = ((body.width - pad * 2.0 - gap) * 0.5).max(0.0);
+        let cell_h_total = ((body.height - pad * 2.0 - gap) * 0.5).max(0.0);
+        let col0_x = body.x + pad;
+        let col1_x = col0_x + cell_w_total + gap;
+        let row0_y = body.y + pad;
+        let row1_y = row0_y + cell_h_total + gap;
+
+        let gpu_label = m.gpu_usage.map(|u| (u, format!("{:>3.0}%", u * 100.0))).unwrap_or_else(|| (0.0, "—".to_string()));
+        // Approximate network "load" as a soft saturation curve so the bar
+        // never pegs at 100% on idle traffic.
+        let net_total_kbs = m.net_rx_kbs + m.net_tx_kbs;
+        let net_norm = (net_total_kbs / 10_000.0).clamp(0.0, 1.0);
+        let net_str = format!("↓{:>5.0}  ↑{:>5.0}", m.net_rx_kbs, m.net_tx_kbs);
+
+        let cells: [(&str, &str, String, f32); 4] = [
+            ("CPU", "%", format!("{:>5.1}%   load {:.2}", m.cpu_usage * 100.0, m.load_avg_1m), m.cpu_usage.clamp(0.0, 1.0)),
+            ("MEM", "MiB", format!("{:>5.1}%   {} / {} MiB", m.mem_usage * 100.0, m.mem_used_mb, m.mem_total_mb), m.mem_usage.clamp(0.0, 1.0)),
+            ("GPU", "%", gpu_label.1.clone(), gpu_label.0.clamp(0.0, 1.0)),
+            ("NET", "kB/s", net_str, net_norm),
+        ];
+
+        let positions = [
+            (col0_x, row0_y),
+            (col1_x, row0_y),
+            (col0_x, row1_y),
+            (col1_x, row1_y),
+        ];
+
+        for (i, (label, _unit, value, ratio)) in cells.iter().enumerate() {
+            let (cx, cy) = positions[i];
+
+            // Cell background — slightly raised surface.
+            quads.push(QuadData {
+                x: cx,
+                y: cy,
+                w: cell_w_total,
+                h: cell_h_total,
+                color: t.colors.surface_recessed,
+            });
+
+            // Label (top-left).
+            text_segments.push(TextData {
+                text: label.to_string(),
+                x: cx + cell_w * 0.6,
+                y: cy + cell_h * 0.4,
+                color: t.colors.text_accent,
+            });
+
+            // Value (next line).
+            text_segments.push(TextData {
+                text: value.clone(),
+                x: cx + cell_w * 0.6,
+                y: cy + cell_h * 1.8,
                 color: t.colors.text_primary,
             });
-            y += cell_h;
+
+            // Progress bar at the bottom of the cell.
+            let bar_pad = cell_w * 0.6;
+            let bar_h = (cell_h * 0.5).max(4.0);
+            let bar_x = cx + bar_pad;
+            let bar_y = cy + cell_h_total - bar_h - cell_h * 0.4;
+            let bar_w = (cell_w_total - bar_pad * 2.0).max(0.0);
+
+            quads.push(QuadData {
+                x: bar_x,
+                y: bar_y,
+                w: bar_w,
+                h: bar_h,
+                color: t.colors.surface_raised,
+            });
+            let fill_w = (bar_w * ratio).max(0.0);
+            // Colour the fill warm when usage climbs past 80% so the panel
+            // reads as a status indicator at a glance.
+            let fill_color = if *ratio > 0.85 {
+                t.colors.status_danger
+            } else if *ratio > 0.65 {
+                t.colors.status_warn
+            } else {
+                t.colors.chrome_frame_active
+            };
+            quads.push(QuadData {
+                x: bar_x,
+                y: bar_y,
+                w: fill_w,
+                h: bar_h,
+                color: fill_color,
+            });
         }
 
         RenderOutput {
@@ -529,10 +606,12 @@ mod tests {
         let out = adapter.render(&rect);
         // Should produce at least the head + some body lines.
         assert!(!out.text_segments.is_empty());
+        // The new 2×2 layout emits the label "CPU" as its own segment plus a
+        // separate value/load segment — either is acceptable.
         let found_cpu = out
             .text_segments
             .iter()
-            .any(|t| t.text.starts_with("CPU "));
+            .any(|t| t.text.starts_with("CPU"));
         assert!(found_cpu, "rendered text must include a CPU row");
     }
 

@@ -481,59 +481,23 @@ impl App {
             }
 
             // -- Container chrome for this adapter --
-            // Skip chrome when only 1 tiled pane (no need for borders/title).
+            // Border + drop shadow + focus tint paint on every pane now, not
+            // only when tiled — without it a single pane gets a flat slab and
+            // the user has no visual cue that "this is the focused app".
             let tiled_count = coordinator_outputs.len();
             let is_focused = focused_app == Some(*app_id);
             let pane_id = self.coordinator.pane_id_for(*app_id);
             let layout_rect = pane_id.and_then(|pid| self.layout.get_pane_rect(pid).ok());
 
-            if tiled_count <= 1 {
-                // Single pane — skip container chrome (border/title), but still
-                // render the scrollbar so history is never inaccessible.
-                if let Some(ref scroll) = ro.scroll
-                    && scroll.history_size > 0
-                        && let Some(layout_rect) = layout_rect {
-                            let track = scrollbar_track_rect(phantom_ui::layout::Rect {
-                                x: layout_rect.x,
-                                y: layout_rect.y,
-                                width: layout_rect.width,
-                                height: layout_rect.height,
-                            });
-                            // Track background.
-                            chrome_quads.push(QI {
-                                pos: [track.x, track.y],
-                                size: [track.width, track.height],
-                                color: [0.2, 0.2, 0.2, 0.3],
-                                border_radius: 3.0,
-                            });
-                            // Thumb.
-                            if let Some(thumb) = scrollbar_thumb_rect(
-                                track,
-                                scroll.display_offset,
-                                scroll.history_size,
-                                scroll.visible_rows,
-                            ) {
-                                let thumb_color = if is_focused {
-                                    [0.2, 1.0, 0.5, 0.4]
-                                } else {
-                                    [0.5, 0.5, 0.5, 0.5]
-                                };
-                                chrome_quads.push(QI {
-                                    pos: [thumb.x, thumb.y],
-                                    size: [thumb.width, thumb.height],
-                                    color: thumb_color,
-                                    border_radius: 3.0,
-                                });
-                            }
-                        }
-            } else if let Some(layout_rect) = layout_rect {
+            if let Some(layout_rect) = layout_rect {
                 let pane_rect = container_rect(layout_rect, self.cell_size);
                 let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
                 let bg = self.theme.colors.background;
 
                 // -- Scene pass chrome (gets CRT effects) --
 
-                // Drop shadow.
+                // Drop shadow — subtle elevation so the pane sits above the
+                // background void.
                 quads.push(QI {
                     pos: [pane_rect.x + 3.0, pane_rect.y + 3.0],
                     size: [pane_rect.width, pane_rect.height],
@@ -541,7 +505,8 @@ impl App {
                     border_radius: 6.0,
                 });
 
-                // Container background.
+                // Container background — slightly raised from the theme bg
+                // so the pane edge reads as a card.
                 let cont_bg = [
                     (bg[0] + 0.06).min(1.0),
                     (bg[1] + 0.10).min(1.0),
@@ -555,33 +520,11 @@ impl App {
                     border_radius: 6.0,
                 });
 
-                // Title strip.
-                let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
-                let title_bg = if is_focused {
-                    [
-                        bg[0] * 1.6 + 0.04,
-                        bg[1] * 2.0 + 0.06,
-                        bg[2] * 1.6 + 0.04,
-                        1.0,
-                    ]
-                } else {
-                    [
-                        bg[0] * 1.3 + 0.02,
-                        bg[1] * 1.5 + 0.03,
-                        bg[2] * 1.3 + 0.02,
-                        1.0,
-                    ]
-                };
-                quads.push(QI {
-                    pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, title_h],
-                    color: title_bg,
-                    border_radius: 6.0,
-                });
-
                 // -- Overlay pass chrome (crisp, post-CRT) --
 
-                // Focus-aware border (1px lines).
+                // Focus-aware border (1px lines). Painting in both single and
+                // multi-pane modes so the user always sees which adapter has
+                // keyboard focus.
                 let border_color = if is_focused {
                     [0.2, 1.0, 0.5, 0.85]
                 } else {
@@ -617,59 +560,89 @@ impl App {
                     border_radius: 0.0,
                 });
 
-                // Title text.
-                let dot_color = if is_focused {
-                    [0.2, 1.0, 0.5, 1.0]
-                } else {
-                    [0.4, 0.5, 0.4, 0.7]
-                };
-                let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
-                let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
-                let app_type = self
-                    .coordinator
-                    .registry()
-                    .get(*app_id)
-                    .map(|e| e.app_type.as_str())
-                    .unwrap_or("app");
-                let grid_dims = ro
-                    .grid
-                    .as_ref()
-                    .map(|g| format!("  {}x{}", g.cols, g.rows))
-                    .unwrap_or_default();
-                let title_text = format!("\u{25cf} {}{}", app_type, grid_dims);
-                coord_titles.push((title_text, title_x, title_y, dot_color));
+                // Legacy multi-pane title strip — the per-adapter `AppHead`
+                // already paints the title inline, so this stays only as a
+                // back-compat fallback for adapters that do not yet render
+                // an `AppHead`. The strip is intentionally subtle: bg tint
+                // + a `\u{25cf} <app_type>` label at the left edge.
+                if tiled_count > 1 {
+                    let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
+                    let title_bg = if is_focused {
+                        [
+                            bg[0] * 1.6 + 0.04,
+                            bg[1] * 2.0 + 0.06,
+                            bg[2] * 1.6 + 0.04,
+                            1.0,
+                        ]
+                    } else {
+                        [
+                            bg[0] * 1.3 + 0.02,
+                            bg[1] * 1.5 + 0.03,
+                            bg[2] * 1.3 + 0.02,
+                            1.0,
+                        ]
+                    };
+                    quads.push(QI {
+                        pos: [pane_rect.x, pane_rect.y],
+                        size: [pane_rect.width, title_h],
+                        color: title_bg,
+                        border_radius: 6.0,
+                    });
+
+                    let dot_color = if is_focused {
+                        [0.2, 1.0, 0.5, 1.0]
+                    } else {
+                        [0.4, 0.5, 0.4, 0.7]
+                    };
+                    let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
+                    let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
+                    let app_type = self
+                        .coordinator
+                        .registry()
+                        .get(*app_id)
+                        .map(|e| e.app_type.as_str())
+                        .unwrap_or("app");
+                    let grid_dims = ro
+                        .grid
+                        .as_ref()
+                        .map(|g| format!("  {}x{}", g.cols, g.rows))
+                        .unwrap_or_default();
+                    let title_text = format!("\u{25cf} {}{}", app_type, grid_dims);
+                    coord_titles.push((title_text, title_x, title_y, dot_color));
+                }
 
                 // -- Scrollbar (overlay pass — crisp, post-CRT) --
                 if let Some(ref scroll) = ro.scroll
-                    && scroll.history_size > 0 {
-                        let track = scrollbar_track_rect(inner_rect);
-                        // Track background.
+                    && scroll.history_size > 0
+                {
+                    let track = scrollbar_track_rect(inner_rect);
+                    // Track background.
+                    chrome_quads.push(QI {
+                        pos: [track.x, track.y],
+                        size: [track.width, track.height],
+                        color: [0.2, 0.2, 0.2, 0.3],
+                        border_radius: 3.0,
+                    });
+                    // Thumb.
+                    if let Some(thumb) = scrollbar_thumb_rect(
+                        track,
+                        scroll.display_offset,
+                        scroll.history_size,
+                        scroll.visible_rows,
+                    ) {
+                        let thumb_color = if is_focused {
+                            [0.2, 1.0, 0.5, 0.4]
+                        } else {
+                            [0.5, 0.5, 0.5, 0.5]
+                        };
                         chrome_quads.push(QI {
-                            pos: [track.x, track.y],
-                            size: [track.width, track.height],
-                            color: [0.2, 0.2, 0.2, 0.3],
+                            pos: [thumb.x, thumb.y],
+                            size: [thumb.width, thumb.height],
+                            color: thumb_color,
                             border_radius: 3.0,
                         });
-                        // Thumb.
-                        if let Some(thumb) = scrollbar_thumb_rect(
-                            track,
-                            scroll.display_offset,
-                            scroll.history_size,
-                            scroll.visible_rows,
-                        ) {
-                            let thumb_color = if is_focused {
-                                [0.2, 1.0, 0.5, 0.4]
-                            } else {
-                                [0.5, 0.5, 0.5, 0.5]
-                            };
-                            chrome_quads.push(QI {
-                                pos: [thumb.x, thumb.y],
-                                size: [thumb.width, thumb.height],
-                                color: thumb_color,
-                                border_radius: 3.0,
-                            });
-                        }
                     }
+                }
             }
 
             // Render terminal grid data (the critical path for terminal adapters).
@@ -736,6 +709,30 @@ impl App {
         // -- Coordinator adapter title text (overlay pass — crisp, readable) --
         for (label, x, y, color) in &coord_titles {
             self.render_overlay_text(label, *x, *y, *color, chrome_glyphs);
+        }
+
+        // -- Focus ring overlay --
+        // Sync the ring's animated state to the coordinator's focused app
+        // and emit an outlined accent ring around the focused pane's outer
+        // container rect. The ring renders in the overlay pass (post-CRT)
+        // so the focus accent stays crisp regardless of shader settings.
+        let focused = focused_app;
+        self.focus_ring.set_focused(focused);
+        // Advance the fade animation by a nominal 16 ms per frame — the
+        // ring widget linearly steps toward its target opacity, so this
+        // produces a clean ~6-frame fade-in / fade-out at 60 Hz.
+        self.focus_ring.tick(16.0);
+        if let Some(app_id) = focused
+            && let Some(pane_id) = self.coordinator.pane_id_for(app_id)
+            && let Ok(layout_rect) = self.layout.get_pane_rect(pane_id)
+        {
+            let ring_rect = phantom_ui::layout::Rect {
+                x: layout_rect.x,
+                y: layout_rect.y,
+                width: layout_rect.width,
+                height: layout_rect.height,
+            };
+            chrome_quads.extend(self.focus_ring.render_quads(&ring_rect));
         }
 
         // -- Monitor panels: hstack (sysmon left, appmon right) --

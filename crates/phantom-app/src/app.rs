@@ -131,6 +131,10 @@ pub struct App {
     /// `.controls` row). Rendered above the tab bar; clicks dispatch to
     /// `apply_theme` / a CRT toggle helper.
     pub(crate) theme_strip: phantom_ui::widgets::ThemeStrip,
+    /// Animated focus ring overlay around the focused pane. The ring fades in
+    /// when focus moves and uses `accent_focus` from the active theme — see
+    /// `phantom_ui::widgets::focus_ring::FocusRing`.
+    pub(crate) focus_ring: phantom_ui::widgets::focus_ring::FocusRing,
     /// Cached CRT-on snapshot of the theme's shader params, captured before
     /// the user toggles CRT off so we can restore it on toggle-on. `None`
     /// means CRT is currently on (or has never been toggled off).
@@ -1575,6 +1579,7 @@ impl App {
             theme_strip: phantom_ui::widgets::ThemeStrip::new()
                 .with_active(theme.name.to_ascii_lowercase())
                 .with_crt(theme.shader_params.scanline_intensity > 0.001),
+            focus_ring: phantom_ui::widgets::focus_ring::FocusRing::new(),
             crt_snapshot: None,
             theme,
             status_bar,

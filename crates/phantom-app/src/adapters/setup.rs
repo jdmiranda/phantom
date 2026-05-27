@@ -20,6 +20,9 @@ use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
     AppCore, BusParticipant, Commandable, InputHandler, Lifecycled, Permissioned, Renderable,
 };
+use phantom_ui::render_ctx::RenderCtx;
+use phantom_ui::tokens::Tokens;
+use phantom_ui::widgets::app_head::{AppHead, AppHeadDot};
 use serde_json::json;
 
 const TITLE: &str = "PHANTOM";
@@ -29,15 +32,6 @@ const HELP_LINES: &[&str] = &[
     "set ANTHROPIC_API_KEY  (or OPENAI_API_KEY) and restart phantom",
     "or run:  phantom auth login",
 ];
-
-const BG: [f32; 4] = [0.039, 0.055, 0.078, 1.0]; // #0a0e14
-const SURFACE: [f32; 4] = [0.067, 0.090, 0.121, 1.0]; // #11171f
-const FRAME_DIM: [f32; 4] = [0.102, 0.165, 0.094, 1.0]; // #1a2a18
-const TEXT_BRIGHT: [f32; 4] = [0.20, 1.0, 0.0, 1.0]; // #33ff00
-const TEXT_BODY: [f32; 4] = [0.722, 1.0, 0.722, 1.0]; // #b8ffb8
-const TEXT_DIM: [f32; 4] = [0.290, 0.502, 0.282, 1.0]; // #4a8048
-const STATUS_OK: [f32; 4] = [0.20, 1.0, 0.0, 1.0];
-const STATUS_WARN: [f32; 4] = [1.0, 0.690, 0.0, 1.0]; // #ffb000
 
 const LINE_HEIGHT: f32 = 16.0;
 const TITLE_LINE_HEIGHT: f32 = 36.0;
@@ -60,6 +54,9 @@ pub struct SetupAdapter {
     /// Polling every [`POLL_INTERVAL`] is plenty for what is effectively a
     /// human-in-the-loop "did the user set an env var yet" check.
     poll_accum_secs: f32,
+    /// Live design tokens. Defaults to phosphor; the host App refreshes via
+    /// [`set_tokens`] on theme switches.
+    tokens: Tokens,
 }
 
 /// Throttle env-var probing to once every two seconds. The env is a slow
@@ -82,7 +79,14 @@ impl SetupAdapter {
             // Initialize at the poll interval so the first `update` call
             // probes immediately, matching previous behaviour.
             poll_accum_secs: POLL_INTERVAL,
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
         }
+    }
+
+    /// Update the live design tokens. The host App calls this on theme switch.
+    #[allow(dead_code)]
+    pub(crate) fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
     }
 }
 
@@ -141,48 +145,71 @@ impl AppCore for SetupAdapter {
 
 impl Renderable for SetupAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
-        let mut quads = Vec::with_capacity(4);
+        let mut quads = Vec::with_capacity(8);
         let mut text_segments = Vec::with_capacity(8);
 
-        // Full-pane background (deep black-blue) so we paint the entire slot,
-        // not just a small box.
+        let t = self.tokens;
+        let ctx = if rect.cell_size.0 > 0.0 && rect.cell_size.1 > 0.0 {
+            RenderCtx::new(rect.cell_size, 1.0)
+        } else {
+            RenderCtx::fallback()
+        };
+
+        // AppHead — `⚙ SETUP · cold-launch    waiting | ready`.
+        let (dot, meta) = if self.last_key_present {
+            (AppHeadDot::Ok, "ready")
+        } else {
+            (AppHeadDot::Warn, "waiting")
+        };
+        let head = AppHead::new("SETUP", "cold-launch")
+            .with_icon("⚙")
+            .with_meta(meta)
+            .with_dot(dot)
+            .with_ctx(ctx)
+            .with_tokens(t)
+            .focused(rect.focused);
+        head.render_into_adapter(rect, &mut quads, &mut text_segments);
+        let body = head.body_rect_adapter(rect);
+
+        // Full-body background — `surface_base` so a theme switch repaints
+        // the whole pane, not just the chrome strip.
         quads.push(QuadData {
-            x: rect.x,
-            y: rect.y,
-            w: rect.width,
-            h: rect.height,
-            color: BG,
+            x: body.x,
+            y: body.y,
+            w: body.width,
+            h: body.height,
+            color: t.colors.surface_base,
         });
 
         // Centered card surface — generous insets so the layout reads as
         // "intentional empty space", not "broken / forgot to draw".
-        let card_w = (rect.width * 0.72).min(720.0).max(360.0);
-        let card_h = 220.0_f32.min(rect.height - 64.0).max(160.0);
-        let card_x = rect.x + (rect.width - card_w) * 0.5;
-        let card_y = rect.y + (rect.height - card_h) * 0.5;
+        let card_w = (body.width * 0.72).min(720.0).max(360.0);
+        let card_h = 220.0_f32.min(body.height - 64.0).max(160.0);
+        let card_x = body.x + (body.width - card_w) * 0.5;
+        let card_y = body.y + (body.height - card_h) * 0.5;
 
         quads.push(QuadData {
             x: card_x,
             y: card_y,
             w: card_w,
             h: card_h,
-            color: SURFACE,
+            color: t.colors.surface_raised,
         });
 
-        // 1px-ish top/bottom rules in dim frame green.
+        // 1px-ish top/bottom rules in dim frame.
         quads.push(QuadData {
             x: card_x,
             y: card_y,
             w: card_w,
             h: 1.0,
-            color: FRAME_DIM,
+            color: t.colors.chrome_frame_dim,
         });
         quads.push(QuadData {
             x: card_x,
             y: card_y + card_h - 1.0,
             w: card_w,
             h: 1.0,
-            color: FRAME_DIM,
+            color: t.colors.chrome_frame_dim,
         });
 
         // Title.
@@ -190,14 +217,14 @@ impl Renderable for SetupAdapter {
             text: TITLE.to_string(),
             x: card_x + 24.0,
             y: card_y + 28.0,
-            color: TEXT_BRIGHT,
+            color: t.colors.text_accent,
         });
 
         // Status dot + subtitle.
         let (dot_color, subtitle) = if self.last_key_present {
-            (STATUS_OK, SUBTITLE_READY)
+            (t.colors.status_ok, SUBTITLE_READY)
         } else {
-            (STATUS_WARN, SUBTITLE_WAITING)
+            (t.colors.status_warn, SUBTITLE_WAITING)
         };
         let subtitle_y = card_y + 28.0 + TITLE_LINE_HEIGHT;
 
@@ -212,7 +239,7 @@ impl Renderable for SetupAdapter {
             text: subtitle.to_string(),
             x: card_x + 40.0,
             y: subtitle_y,
-            color: TEXT_BODY,
+            color: t.colors.text_secondary,
         });
 
         // Help lines (only show "set env var" guidance while waiting).
@@ -222,7 +249,7 @@ impl Renderable for SetupAdapter {
                     text: (*line).to_string(),
                     x: card_x + 24.0,
                     y: subtitle_y + 24.0 + (i as f32) * LINE_HEIGHT,
-                    color: TEXT_DIM,
+                    color: t.colors.text_dim,
                 });
             }
         }
@@ -386,9 +413,11 @@ mod tests {
             ..Default::default()
         };
         let out = a.render(&rect);
-        // Full-pane background quad must be present and cover the rect.
-        let bg = out.quads.iter().find(|q| q.w == 1920.0 && q.h == 1080.0);
-        assert!(bg.is_some(), "expected full-pane background quad covering rect");
+        // After the AppHead chrome strip lands, the body background fills
+        // the rect width but only the height below the header. Confirm at
+        // least one quad spans the full pane width (header bg or body bg).
+        let full_width = out.quads.iter().any(|q| (q.w - 1920.0).abs() < 0.5);
+        assert!(full_width, "expected at least one full-width quad (head + body bg)");
         assert!(!out.text_segments.is_empty(), "expected title + subtitle text");
     }
 
