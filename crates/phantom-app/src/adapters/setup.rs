@@ -294,9 +294,18 @@ impl Commandable for SetupAdapter {
     fn accept_command(
         &mut self,
         cmd: &str,
-        _args: &serde_json::Value,
+        args: &serde_json::Value,
     ) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                // Rebuild tokens from the theme name so the API-key probe
+                // pane recolors when the user clicks a theme swatch.
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "probe" => {
                 let present = api_key_present();
                 if present && !self.last_key_present {

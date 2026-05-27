@@ -359,6 +359,15 @@ impl InputHandler for MonitorAdapter {
 impl Commandable for MonitorAdapter {
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                // Refresh tokens from the named theme so AppHead, sparkline,
+                // and gauge chrome recolor at runtime on swatch click.
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "activate" => {
                 self.active = true;
                 self.handle.set_active(true);

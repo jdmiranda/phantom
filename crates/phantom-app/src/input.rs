@@ -319,14 +319,26 @@ impl App {
         info!("Theme cycled: {} → {}", current, next);
     }
 
-    /// Push a fresh Tokens snapshot into every currently-spawned chrome
-    /// adapter via `accept_command "set_tokens"`. Concrete `set_tokens`
-    /// methods on each adapter take `Tokens` directly; since we can't pass
-    /// non-JSON values through the coordinator, we encode the active
-    /// theme name and let each adapter rebuild its snapshot inside its
-    /// command handler.
+    /// Push a fresh Tokens snapshot into every currently-spawned adapter via
+    /// `accept_command "set_theme_name"`. Concrete `set_tokens` methods on
+    /// each adapter take `Tokens` directly; since we can't pass non-JSON
+    /// values through the coordinator, we encode the active theme name and
+    /// let each adapter rebuild its snapshot inside its command handler.
+    ///
+    /// Broadcast targets the union of:
+    /// 1. The named chrome pane IDs (settings, notifications, etc).
+    /// 2. Every running adapter the coordinator knows about — covers the
+    ///    core panes (agent / terminal / monitor / setup / video /
+    ///    alt_screen_view) that aren't tracked via `*_pane_id` fields.
+    /// Errors from adapters that don't recognize the command are ignored.
     pub(crate) fn broadcast_theme_to_chrome_panes(&mut self) {
-        let panes = [
+        let theme_name = self.theme.name.to_lowercase();
+        // Union the named chrome pane IDs with all currently-running app IDs
+        // so the core adapters (agent / terminal / monitor / setup / video /
+        // alt_screen_view) receive the broadcast even though they aren't
+        // tracked via dedicated `*_pane_id` fields on `App`.
+        let mut targets: Vec<u32> = self.coordinator.all_app_ids();
+        for chrome in [
             self.settings_pane_id,
             self.notifications_pane_id,
             self.console_pane_id,
@@ -339,9 +351,15 @@ impl App {
             self.plugins_pane_id,
             self.database_pane_id,
             self.voice_stt_pane_id,
-        ];
-        let theme_name = self.theme.name.to_lowercase();
-        for pane in panes.into_iter().flatten() {
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !targets.contains(&chrome) {
+                targets.push(chrome);
+            }
+        }
+        for pane in targets {
             let _ = self.coordinator.send_command(
                 pane,
                 "set_theme_name",

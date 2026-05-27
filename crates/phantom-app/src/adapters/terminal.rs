@@ -550,6 +550,15 @@ impl InputHandler for TerminalAdapter {
 impl Commandable for TerminalAdapter {
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                // Rebuild tokens from the theme name so the AppHead, status
+                // dot, and any other token-driven chrome recolor on click.
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "write" => {
                 let text = args.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
                     anyhow::anyhow!("write command requires a \"text\" string field")

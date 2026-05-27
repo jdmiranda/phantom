@@ -174,14 +174,28 @@ impl InputHandler for AltScreenViewAdapter {
 }
 
 impl Commandable for AltScreenViewAdapter {
-    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
-        Err(anyhow::anyhow!(
-            "alt_screen_view adapter does not accept commands: {cmd}"
-        ))
+    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
+        match cmd {
+            "set_theme_name" => {
+                // Rebuild tokens from the theme name so the alt-screen
+                // snapshot's AppHead chrome recolors on swatch click.
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
+            other => Err(anyhow::anyhow!(
+                "alt_screen_view adapter does not accept commands: {other}"
+            )),
+        }
     }
 
+    // Returns true so the host App's `broadcast_theme_to_chrome_panes` can
+    // route `set_theme_name` here. Every other command path still errors so
+    // the adapter's read-only snapshot semantics are unchanged.
     fn accepts_commands(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -233,7 +247,9 @@ mod tests {
     fn alt_screen_view_adapter_does_not_accept_commands() {
         let snap = new_snapshot();
         let mut adapter = AltScreenViewAdapter::new(snap, "vim".into());
-        assert!(!adapter.accepts_commands());
+        // Adapter now accepts the `set_theme_name` broadcast so theme
+        // switches recolor it at runtime — every other command still errors.
+        assert!(adapter.accepts_commands());
         let result = adapter.accept_command("resize", &serde_json::json!({}));
         assert!(result.is_err());
     }

@@ -1030,6 +1030,13 @@ impl App {
             // Re-sync the theme strip's active swatch so a click immediately
             // moves the active ring.
             self.theme_strip.set_active(&self.theme.name);
+            // Push the new tokens into every spawned adapter so the central
+            // agent / terminal / monitor / setup / video / alt_screen_view
+            // panes recolor in step with the chrome strip — without this
+            // only the named chrome panes (settings, notifications, etc)
+            // get repainted, leaving the focused content pane stuck on
+            // its construction-time palette.
+            self.broadcast_theme_to_chrome_panes();
             self.force_redraw = true;
         } else {
             warn!("Unknown theme: {name}");

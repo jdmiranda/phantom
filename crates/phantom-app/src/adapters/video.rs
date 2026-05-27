@@ -173,8 +173,17 @@ impl InputHandler for VideoAdapter {
 }
 
 impl Commandable for VideoAdapter {
-    fn accept_command(&mut self, cmd: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+    fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                // Rebuild tokens from the theme name so the video frame head
+                // chrome recolors on swatch click.
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "stop" => {
                 self.playback.stop();
                 self.finished = true;

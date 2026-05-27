@@ -648,6 +648,15 @@ impl InputHandler for AgentAdapter {
 impl Commandable for AgentAdapter {
     fn accept_command(&mut self, cmd: &str, args: &serde_json::Value) -> anyhow::Result<String> {
         match cmd {
+            "set_theme_name" => {
+                // Rebuild tokens from the theme name so swatch clicks recolor
+                // the agent pane's AppHead chrome at runtime.
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                }
+                Ok(json!({ "status": "ok" }).to_string())
+            }
             "dismiss" => {
                 self.pane.set_status(AgentPaneStatus::Done);
                 self.dismissed = true;
