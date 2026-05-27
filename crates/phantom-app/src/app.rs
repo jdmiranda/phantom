@@ -200,6 +200,16 @@ pub struct App {
     // -- Whether a quit has been requested --
     pub(crate) quit_requested: bool,
 
+    // -- One-shot screenshot mode --
+    // When `Some(path)`, the App captures the surface texture to `path`
+    // after the first complete frame, then sets `quit_requested = true`.
+    // Set from `--screenshot <PATH>` CLI flag via `PhantomConfig`.
+    pub(crate) screenshot_after_frame: Option<std::path::PathBuf>,
+    // Number of frames rendered since startup — gates the screenshot trigger.
+    // The first 4 frames are skipped so adapter chrome, AppHeads, and
+    // gradients have time to settle before the screenshot fires.
+    pub(crate) frames_since_startup: u32,
+
     // -- Force-redraw latch set by external events (key/mouse/resize/focus).
     //    Cleared after every GPU submit. Ensures at least one repaint happens
     //    even when the scene graph is fully clean.
@@ -1594,6 +1604,8 @@ impl App {
             cursor_blink: phantom_ui::CursorBlink::default(),
             cell_size,
             quit_requested: false,
+            screenshot_after_frame: config.screenshot_after_frame.clone(),
+            frames_since_startup: 0,
             force_redraw: true,
             supervisor,
             console: crate::console::Console::new(),

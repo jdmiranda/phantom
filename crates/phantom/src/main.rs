@@ -929,6 +929,16 @@ fn main() -> Result<()> {
             "--fullscreen" => {
                 config.fullscreen = true;
             }
+            "--screenshot" => {
+                i += 1;
+                if i < args.len() {
+                    config.screenshot_after_frame =
+                        Some(std::path::PathBuf::from(&args[i]));
+                    // Skip boot so the screenshot doesn't capture the
+                    // cinematic.
+                    config.skip_boot = true;
+                }
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[i]);
                 print_help();

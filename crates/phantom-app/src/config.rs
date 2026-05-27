@@ -89,6 +89,14 @@ pub struct PhantomConfig {
     /// the `--fullscreen` CLI flag. Can be toggled at runtime with F11 /
     /// Cmd+Enter regardless of this initial value.
     pub fullscreen: bool,
+    /// One-shot screenshot mode. When `Some(path)`, the app waits a few
+    /// frames for the first complete render, captures the surface texture to
+    /// `path`, and then exits with status `0`. Used by the render-fidelity
+    /// pipeline to grab visual diffs against the `docs/mockups/apps.html`
+    /// reference without needing a human at the keyboard.
+    ///
+    /// Set via the `--screenshot <PATH>` CLI flag. Not persisted in TOML.
+    pub screenshot_after_frame: Option<std::path::PathBuf>,
     /// Per-category notification sound paths.
     ///
     /// Keys correspond to [`crate::notifications::Severity`] names in lowercase:
@@ -148,6 +156,7 @@ impl Default for PhantomConfig {
             // Phantom IS the AI; the AI deserves the whole screen. Changed
             // 2026-05-20 — see `feedback_agent_is_primary` memory entry.
             fullscreen: true,
+            screenshot_after_frame: None,
             notification_sounds: HashMap::new(),
             mcp_servers: Vec::new(),
         }

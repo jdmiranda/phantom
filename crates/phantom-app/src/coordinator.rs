@@ -1881,7 +1881,7 @@ mod tests {
     /// paint outside the chrome's body region.
     #[test]
     fn adapter_render_height_excludes_title_strip() {
-        use crate::pane::{CONTAINER_PAD_B_CELLS, CONTAINER_TITLE_H_CELLS, container_rect};
+        use crate::pane::{CONTAINER_PAD_B_PX, CONTAINER_TITLE_H_CELLS, container_rect};
 
         let cell_size = (8.0_f32, 16.0_f32);
         let mut coord = AppCoordinator::new_test(EventBus::new());
@@ -1901,7 +1901,7 @@ mod tests {
         let layout_rect = layout.get_pane_rect(pane_id).unwrap();
         let outer = container_rect(layout_rect, cell_size);
         let title_h = cell_size.1 * CONTAINER_TITLE_H_CELLS;
-        let pad_b = cell_size.1 * CONTAINER_PAD_B_CELLS;
+        let pad_b = CONTAINER_PAD_B_PX;
         let body_bottom = outer.y + outer.height - pad_b;
 
         // The adapter's rect bottom must fit within the chrome body.

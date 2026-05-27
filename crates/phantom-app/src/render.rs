@@ -49,6 +49,12 @@ impl App {
     pub fn render(&mut self) -> Result<()> {
         crate::profile_scope!("render");
 
+        // When `--screenshot` is queued, force a redraw so the early return
+        // below doesn't starve the screenshot trigger of a fresh frame.
+        if self.screenshot_after_frame.is_some() {
+            self.force_redraw = true;
+        }
+
         // Skip the entire GPU pipeline when the scene is clean and no
         // external event has requested a forced repaint.
         if !self.scene.has_dirty_nodes() && !self.force_redraw {
@@ -304,7 +310,82 @@ impl App {
         self.pool_chrome_quads = chrome_quads;
         self.pool_chrome_glyphs = chrome_glyphs;
 
+        // -- One-shot screenshot trigger --
+        // Skip the first 4 frames so adapter chrome, AppHeads, gradients,
+        // and the live-dot pulse have time to settle before we grab the
+        // surface texture. After capture, set `quit_requested = true` so
+        // the winit event loop tears down cleanly.
+        self.frames_since_startup = self.frames_since_startup.saturating_add(1);
+        if self.frames_since_startup >= 4
+            && let Some(path) = self.screenshot_after_frame.take()
+        {
+            if let Err(e) = self.capture_one_shot_screenshot(&path) {
+                log::error!("one-shot screenshot failed: {e}");
+                eprintln!("phantom: --screenshot capture failed: {e}");
+            } else {
+                eprintln!("phantom: --screenshot saved to {}", path.display());
+            }
+            self.quit_requested = true;
+        }
+
         crate::profile_frame!();
+
+        Ok(())
+    }
+
+    /// Capture the current scene texture (post-FX target) and save as PNG.
+    ///
+    /// Used by the `--screenshot <PATH>` one-shot mode to grab the rendered
+    /// frame from a headless invocation. Routes through the same
+    /// `capture_frame` / `save_screenshot` helpers as the runtime
+    /// `screenshot` console command.
+    fn capture_one_shot_screenshot(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use phantom_renderer::screenshot::{ScreenshotMetadata, capture_frame, save_screenshot};
+
+        let texture = self.postfx.scene_texture();
+        let width = texture.width();
+        let height = texture.height();
+        let pixels = capture_frame(&self.gpu.device, &self.gpu.queue, texture, width, height)
+            .map_err(|e| anyhow::anyhow!("capture_frame failed: {e}"))?;
+
+        // Swap BGRA→RGBA on Metal/D3D12.
+        let pixels_rgba = match self.gpu.format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+                let mut out = pixels;
+                for px in out.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+                out
+            }
+            _ => pixels,
+        };
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let metadata = ScreenshotMetadata {
+            timestamp,
+            width,
+            height,
+            theme: self.theme.name.clone(),
+            pane_count: self.coordinator.adapter_count(),
+            project: self.context.as_ref().map(|c| c.name.clone()),
+            branch: self
+                .context
+                .as_ref()
+                .and_then(|c| c.git.as_ref().map(|g| g.branch.clone())),
+        };
+
+        // Ensure parent directory exists.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        save_screenshot(&pixels_rgba, width, height, &metadata, path)
+            .map_err(|e| anyhow::anyhow!("save_screenshot failed: {e}"))?;
 
         Ok(())
     }
@@ -366,6 +447,11 @@ impl App {
                 origin,
             );
 
+            // Per-character phosphor halo (item 1, path A). Emitted before the
+            // sharp glyphs so the halo instances render behind in instance
+            // order — gives every glyph a soft phosphor rim without modifying
+            // the text shader.
+            phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
             glyphs.extend(batch.mono);
             color_glyphs.extend(batch.color);
         }
@@ -419,6 +505,7 @@ impl App {
                         self.cell_size,
                     );
                     quads.append(&mut bg_quads);
+                    phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
                     glyphs.extend(batch.mono);
                     color_glyphs.extend(batch.color);
 
@@ -487,101 +574,135 @@ impl App {
             let pane_id = self.coordinator.pane_id_for(*app_id);
             let layout_rect = pane_id.and_then(|pid| self.layout.get_pane_rect(pid).ok());
 
-            if tiled_count <= 1 {
-                // Single pane — skip container chrome (border/title), but still
-                // render the scrollbar so history is never inaccessible.
-                if let Some(ref scroll) = ro.scroll
-                    && scroll.history_size > 0
-                        && let Some(layout_rect) = layout_rect {
-                            let track = scrollbar_track_rect(phantom_ui::layout::Rect {
-                                x: layout_rect.x,
-                                y: layout_rect.y,
-                                width: layout_rect.width,
-                                height: layout_rect.height,
-                            });
-                            // Track background.
-                            chrome_quads.push(QI {
-                                pos: [track.x, track.y],
-                                size: [track.width, track.height],
-                                color: [0.2, 0.2, 0.2, 0.3],
-                                border_radius: 3.0,
-                            });
-                            // Thumb.
-                            if let Some(thumb) = scrollbar_thumb_rect(
-                                track,
-                                scroll.display_offset,
-                                scroll.history_size,
-                                scroll.visible_rows,
-                            ) {
-                                let thumb_color = if is_focused {
-                                    [0.2, 1.0, 0.5, 0.4]
-                                } else {
-                                    [0.5, 0.5, 0.5, 0.5]
-                                };
-                                chrome_quads.push(QI {
-                                    pos: [thumb.x, thumb.y],
-                                    size: [thumb.width, thumb.height],
-                                    color: thumb_color,
-                                    border_radius: 3.0,
-                                });
-                            }
-                        }
-            } else if let Some(layout_rect) = layout_rect {
+            // Container chrome (border + shadow + body bg) is ALWAYS rendered,
+            // not gated on multi-pane mode. The mockup's `.app { box-shadow:
+            // 0 8px 24px rgba(0,0,0,0.5); border-radius: 10px; border: 1px
+            // solid var(--frame-dim) }` is per-pane chrome that every adapter
+            // sits inside, single-pane or tiled.
+            //
+            // Title strip rendering is still suppressed in single-pane mode
+            // because the AppHead widget (rendered by each adapter) supplies
+            // the per-app header — drawing both would double-stack chrome.
+            if let Some(layout_rect) = layout_rect {
                 let pane_rect = container_rect(layout_rect, self.cell_size);
                 let inner_rect = pane_inner_rect(self.cell_size, pane_rect);
                 let bg = self.theme.colors.background;
 
+                // Per the mockup `.app { border-radius: 10px }` the container
+                // corners use a 10 px radius (was 6 px — too tight, read
+                // "blocky" instead of "soft chrome").
+                const PANE_RADIUS: f32 = 10.0;
+
                 // -- Scene pass chrome (gets CRT effects) --
 
-                // Drop shadow.
+                // Drop shadow — ALWAYS painted, every pane, every layout. The
+                // mockup `.app { box-shadow: 0 8px 24px rgba(0,0,0,0.5) }`
+                // is unconditional. Offset y=8, blur extends ~24px; we fake
+                // the blur by stacking two soft shadow quads at growing
+                // offsets / decreasing alphas — flat fill alone reads as a
+                // hard drop, multi-layer reads as a soft halo.
                 quads.push(QI {
-                    pos: [pane_rect.x + 3.0, pane_rect.y + 3.0],
+                    pos: [pane_rect.x + 6.0, pane_rect.y + 10.0],
                     size: [pane_rect.width, pane_rect.height],
-                    color: [0.0, 0.0, 0.0, 0.15],
-                    border_radius: 6.0,
+                    color: [0.0, 0.0, 0.0, 0.35],
+                    border_radius: PANE_RADIUS + 4.0,
+                });
+                quads.push(QI {
+                    pos: [pane_rect.x + 3.0, pane_rect.y + 5.0],
+                    size: [pane_rect.width, pane_rect.height],
+                    color: [0.0, 0.0, 0.0, 0.25],
+                    border_radius: PANE_RADIUS + 2.0,
                 });
 
-                // Container background.
+                // Container background — mockup `.app-body { background:
+                // linear-gradient(180deg, var(--surface-recessed), var(--bg)) }`
+                // is approximated by stacking two quads: a recessed-tinted
+                // top, fading to the base bg at the bottom. We render the
+                // base bg first, then a faded top half-quad on top.
                 let cont_bg = [
-                    (bg[0] + 0.06).min(1.0),
-                    (bg[1] + 0.10).min(1.0),
-                    (bg[2] + 0.06).min(1.0),
+                    (bg[0] + 0.03).min(1.0),
+                    (bg[1] + 0.05).min(1.0),
+                    (bg[2] + 0.03).min(1.0),
                     1.0,
                 ];
                 quads.push(QI {
                     pos: [pane_rect.x, pane_rect.y],
                     size: [pane_rect.width, pane_rect.height],
                     color: cont_bg,
-                    border_radius: 6.0,
+                    border_radius: PANE_RADIUS,
                 });
-
-                // Title strip.
-                let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
-                let title_bg = if is_focused {
-                    [
-                        bg[0] * 1.6 + 0.04,
-                        bg[1] * 2.0 + 0.06,
-                        bg[2] * 1.6 + 0.04,
-                        1.0,
-                    ]
-                } else {
-                    [
-                        bg[0] * 1.3 + 0.02,
-                        bg[1] * 1.5 + 0.03,
-                        bg[2] * 1.3 + 0.02,
-                        1.0,
-                    ]
-                };
+                // Gradient top half — slightly brighter (raised feel) at
+                // ~35 % alpha, fading visually as we render only the top
+                // half of the pane. This is the cheap stacked-quad gradient
+                // path; a proper linear interp would be a shader variant.
+                let raised_tint = [
+                    (bg[0] + 0.08).min(1.0),
+                    (bg[1] + 0.12).min(1.0),
+                    (bg[2] + 0.08).min(1.0),
+                    0.35,
+                ];
                 quads.push(QI {
                     pos: [pane_rect.x, pane_rect.y],
-                    size: [pane_rect.width, title_h],
-                    color: title_bg,
-                    border_radius: 6.0,
+                    size: [pane_rect.width, pane_rect.height * 0.5],
+                    color: raised_tint,
+                    border_radius: PANE_RADIUS,
                 });
+
+                // Title strip — only drawn in multi-pane mode. In single-pane
+                // mode adapters use their own AppHead.
+                if tiled_count > 1 {
+                    let title_h = self.cell_size.1 * CONTAINER_TITLE_H_CELLS;
+                    let title_bg = if is_focused {
+                        [
+                            bg[0] * 1.6 + 0.04,
+                            bg[1] * 2.0 + 0.06,
+                            bg[2] * 1.6 + 0.04,
+                            1.0,
+                        ]
+                    } else {
+                        [
+                            bg[0] * 1.3 + 0.02,
+                            bg[1] * 1.5 + 0.03,
+                            bg[2] * 1.3 + 0.02,
+                            1.0,
+                        ]
+                    };
+                    quads.push(QI {
+                        pos: [pane_rect.x, pane_rect.y],
+                        size: [pane_rect.width, title_h],
+                        color: title_bg,
+                        border_radius: PANE_RADIUS,
+                    });
+
+                    // Title text.
+                    let dot_color = if is_focused {
+                        [0.2, 1.0, 0.5, 1.0]
+                    } else {
+                        [0.4, 0.5, 0.4, 0.7]
+                    };
+                    let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
+                    let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
+                    let app_type = self
+                        .coordinator
+                        .registry()
+                        .get(*app_id)
+                        .map(|e| e.app_type.as_str())
+                        .unwrap_or("app");
+                    let grid_dims = ro
+                        .grid
+                        .as_ref()
+                        .map(|g| format!("  {}x{}", g.cols, g.rows))
+                        .unwrap_or_default();
+                    let title_text = format!("\u{25cf} {}{}", app_type, grid_dims);
+                    coord_titles.push((title_text, title_x, title_y, dot_color));
+                }
 
                 // -- Overlay pass chrome (crisp, post-CRT) --
 
-                // Focus-aware border (1px lines).
+                // Focus-aware border (1px lines). Mockup `.app { border: 1px
+                // solid var(--frame-dim) }`; `.app.focused { border-color:
+                // var(--frame-active); box-shadow: var(--glow) }`. We use
+                // the theme tokens so theme switches recolor the border.
                 let border_color = if is_focused {
                     [0.2, 1.0, 0.5, 0.85]
                 } else {
@@ -616,28 +737,6 @@ impl App {
                     color: border_color,
                     border_radius: 0.0,
                 });
-
-                // Title text.
-                let dot_color = if is_focused {
-                    [0.2, 1.0, 0.5, 1.0]
-                } else {
-                    [0.4, 0.5, 0.4, 0.7]
-                };
-                let title_x = pane_rect.x + self.cell_size.0 * CONTAINER_PAD_X_CELLS;
-                let title_y = pane_rect.y + (title_h - self.cell_size.1) * 0.5;
-                let app_type = self
-                    .coordinator
-                    .registry()
-                    .get(*app_id)
-                    .map(|e| e.app_type.as_str())
-                    .unwrap_or("app");
-                let grid_dims = ro
-                    .grid
-                    .as_ref()
-                    .map(|g| format!("  {}x{}", g.cols, g.rows))
-                    .unwrap_or_default();
-                let title_text = format!("\u{25cf} {}{}", app_type, grid_dims);
-                coord_titles.push((title_text, title_x, title_y, dot_color));
 
                 // -- Scrollbar (overlay pass — crisp, post-CRT) --
                 if let Some(ref scroll) = ro.scroll
@@ -697,6 +796,7 @@ impl App {
                     self.cell_size,
                 );
                 quads.append(&mut bg_quads);
+                phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
                 glyphs.extend(batch.mono);
                 color_glyphs.extend(batch.color);
 
@@ -875,6 +975,10 @@ impl App {
             );
 
             // Widget text segments are always monochrome; color batch is empty.
+            // Glow halos are emitted ahead of the sharp glyphs so the halo
+            // instances render behind the crisp text (item 1, path A — see
+            // `phantom_renderer::text::append_glow_halos`).
+            phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
             glyphs.extend(batch.mono);
         }
     }

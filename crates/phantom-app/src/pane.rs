@@ -15,16 +15,37 @@ use crate::app::App;
 // ---------------------------------------------------------------------------
 
 /// Horizontal padding inside the app container, in multiples of cell width.
+///
+/// Retained for the title-strip text origin (which still uses cell metrics);
+/// the body inset now uses literal-pixel padding ([`CONTAINER_PAD_X_PX`]) so
+/// the inner rect doesn't drift when the user changes font size — matching the
+/// mockup `.app-body { padding: 14px 16px }` in `docs/mockups/system.css`.
 pub(crate) const CONTAINER_PAD_X_CELLS: f32 = 0.6;
 
 /// Title-strip height, in multiples of cell height.
 pub(crate) const CONTAINER_TITLE_H_CELLS: f32 = 1.2;
 
 /// Bottom padding inside the app container, in multiples of cell height.
+///
+/// Retained alongside [`CONTAINER_PAD_B_PX`] for callers that still compute
+/// cell-aligned bottom padding; render paths use the pixel constant.
+#[allow(dead_code)]
 pub(crate) const CONTAINER_PAD_B_CELLS: f32 = 0.3;
 
 /// Outer margin around each container, in pixels.
 pub(crate) const CONTAINER_MARGIN: f32 = 12.0;
+
+/// Horizontal padding inside the app body, in literal pixels.
+///
+/// Matches mockup `.app-body { padding: 14px 16px }` (`docs/mockups/system.css`).
+/// Literal px instead of cell-derived so the inner rect doesn't warp when the
+/// font size changes.
+pub(crate) const CONTAINER_PAD_X_PX: f32 = 16.0;
+
+/// Vertical body bottom padding, in literal pixels.
+///
+/// Matches mockup `.app-body { padding: 14px 16px }` top/bottom side.
+pub(crate) const CONTAINER_PAD_B_PX: f32 = 14.0;
 
 // ---------------------------------------------------------------------------
 // Geometry helpers
@@ -73,13 +94,19 @@ pub(crate) fn pane_cols_rows(
 }
 
 /// Compute the terminal-grid area inside a container rect.
+///
+/// Body padding uses literal-pixel constants ([`CONTAINER_PAD_X_PX`],
+/// [`CONTAINER_PAD_B_PX`]) so the inset matches the mockup `.app-body {
+/// padding: 14px 16px }` (`docs/mockups/system.css`) and does not warp when
+/// font size changes. The title-strip height is still cell-derived because
+/// the title text itself uses cell metrics.
 pub(crate) fn pane_inner_rect(
     cell_size: (f32, f32),
     outer: phantom_ui::layout::Rect,
 ) -> phantom_ui::layout::Rect {
-    let pad_x = cell_size.0 * CONTAINER_PAD_X_CELLS;
+    let pad_x = CONTAINER_PAD_X_PX;
     let title_h = cell_size.1 * CONTAINER_TITLE_H_CELLS;
-    let pad_b = cell_size.1 * CONTAINER_PAD_B_CELLS;
+    let pad_b = CONTAINER_PAD_B_PX;
     let w = (outer.width - pad_x * 2.0).max(cell_size.0);
     let h = (outer.height - title_h - pad_b).max(cell_size.1);
     phantom_ui::layout::Rect {

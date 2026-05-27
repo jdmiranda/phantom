@@ -578,6 +578,79 @@ impl TextRenderer {
     }
 }
 
+/// Default per-glyph halo strength when [`append_glow_halos`] is called with
+/// `intensity = None`. Tuned to be visible without over-bombing the bloom
+/// pass: each sharp glyph spawns one ~1.18× halo at ~22 % alpha, which reads
+/// as a phosphor bloom rim around bright text. Mockup token reference:
+/// `--glow: 0 0 12px currentColor` in `docs/mockups/system.css`.
+pub const DEFAULT_GLOW_HALO_INTENSITY: f32 = 0.22;
+
+/// Default scale factor for the halo quad relative to the sharp glyph.
+///
+/// 1.18× gives a perceptible halo without smearing into adjacent cells in a
+/// monospace grid — the bloom pass widens it further so the visible glow
+/// extends ~3-4 pixels beyond the glyph outline.
+pub const DEFAULT_GLOW_HALO_SCALE: f32 = 1.18;
+
+/// Append per-glyph phosphor-halo instances to `out` ahead of `sharp`, so the
+/// halos render BEHIND the crisp text in instance order.
+///
+/// Path A of the per-character glow plan (see `docs/mockups/system.css`
+/// `--glow: 0 0 12px currentColor`). Each input instance produces ONE halo
+/// instance scaled by `scale` (default 1.06×) at reduced alpha (`intensity`,
+/// default 0.16) so the halos read as a soft phosphor rim without doubling
+/// glyph weight. The atlas alpha mask is preserved — only the per-instance
+/// tint alpha changes — so anti-aliasing of the halo follows the glyph shape.
+///
+/// `instances` are not modified; the caller pushes their unmodified `sharp`
+/// instances into `out` AFTER this call.
+///
+/// # Cost
+/// 1× extra instance per visible glyph. Atlas state is untouched; this is
+/// pure CPU-side transform of `GlyphInstance` values.
+pub fn append_glow_halos(
+    sharp: &[GlyphInstance],
+    out: &mut Vec<GlyphInstance>,
+    intensity: Option<f32>,
+    scale: Option<f32>,
+) {
+    let intensity = intensity.unwrap_or(DEFAULT_GLOW_HALO_INTENSITY).clamp(0.0, 1.0);
+    let scale = scale.unwrap_or(DEFAULT_GLOW_HALO_SCALE).max(1.0);
+
+    // Skip entirely when intensity collapses to zero — no visible effect, no
+    // wasted draw instances.
+    if intensity <= f32::EPSILON {
+        return;
+    }
+
+    out.reserve(sharp.len());
+    for g in sharp {
+        // Color emoji glyphs skip the halo: the color shader discards `color`
+        // so an alpha-modulated halo would just paint a second opaque emoji
+        // 6 % larger. Phosphor glow is a monochrome-text effect.
+        if g.is_color != 0 {
+            continue;
+        }
+        let w = g.size[0];
+        let h = g.size[1];
+        let dw = w * (scale - 1.0);
+        let dh = h * (scale - 1.0);
+        out.push(GlyphInstance {
+            position: [g.position[0] - dw * 0.5, g.position[1] - dh * 0.5],
+            uv_rect: g.uv_rect,
+            color: [
+                g.color[0],
+                g.color[1],
+                g.color[2],
+                g.color[3] * intensity,
+            ],
+            size: [w * scale, h * scale],
+            is_color: g.is_color,
+            _pad: 0,
+        });
+    }
+}
+
 /// Extract glyph color: use the glyph's color override if present, otherwise the default.
 fn glyph_color(glyph: &LayoutGlyph, default: [f32; 4]) -> [f32; 4] {
     match glyph.color_opt {
@@ -863,6 +936,104 @@ mod tests {
         let (regular_key, _, _) = regular.unwrap();
         let (italic_key, _, _) = italic.unwrap();
         let _ = (regular_key, italic_key);
+    }
+
+    // -------------------------------------------------------------------------
+    // append_glow_halos — per-character phosphor halo (item 1, path A)
+    // -------------------------------------------------------------------------
+
+    fn sharp_instance(is_color: u32) -> GlyphInstance {
+        GlyphInstance {
+            position: [10.0, 20.0],
+            uv_rect: [0.1, 0.2, 0.5, 0.6],
+            color: [0.2, 1.0, 0.4, 1.0],
+            size: [8.0, 16.0],
+            is_color,
+            _pad: 0,
+        }
+    }
+
+    /// Each sharp monochrome glyph must spawn exactly one halo instance, and
+    /// the halo must be larger than the sharp (so it renders as a ring around
+    /// the glyph), at reduced alpha, with the same uv_rect.
+    #[test]
+    fn append_glow_halos_emits_one_oversized_halo_per_mono_glyph() {
+        let sharp = vec![sharp_instance(0), sharp_instance(0), sharp_instance(0)];
+        let mut out = Vec::new();
+        append_glow_halos(&sharp, &mut out, None, None);
+        assert_eq!(out.len(), 3, "one halo instance per input glyph");
+        for (s, h) in sharp.iter().zip(out.iter()) {
+            assert!(h.size[0] > s.size[0], "halo wider than sharp");
+            assert!(h.size[1] > s.size[1], "halo taller than sharp");
+            // Alpha must drop to the intensity factor.
+            assert!(h.color[3] < s.color[3], "halo alpha must be reduced");
+            // RGB must match (only alpha modulated).
+            assert_eq!([h.color[0], h.color[1], h.color[2]], [s.color[0], s.color[1], s.color[2]]);
+            // UVs must match — halo samples the same glyph mask.
+            assert_eq!(h.uv_rect, s.uv_rect);
+        }
+    }
+
+    /// Halo positioning must centre the oversized quad on the sharp glyph,
+    /// otherwise the rim would appear off-axis.
+    #[test]
+    fn append_glow_halos_centres_halo_on_sharp_glyph() {
+        let sharp = vec![sharp_instance(0)];
+        let mut out = Vec::new();
+        append_glow_halos(&sharp, &mut out, None, None);
+        let s = &sharp[0];
+        let h = &out[0];
+        // Halo top-left = sharp top-left minus half the size delta.
+        let dx_expected = (h.size[0] - s.size[0]) * 0.5;
+        let dy_expected = (h.size[1] - s.size[1]) * 0.5;
+        assert!((s.position[0] - h.position[0] - dx_expected).abs() < 0.001);
+        assert!((s.position[1] - h.position[1] - dy_expected).abs() < 0.001);
+    }
+
+    /// Color emoji glyphs must NOT spawn halos — the color pipeline ignores
+    /// `color` so an alpha-modulated halo would just paint a duplicate, larger
+    /// opaque emoji behind the original.
+    #[test]
+    fn append_glow_halos_skips_color_emoji_glyphs() {
+        let sharp = vec![sharp_instance(1), sharp_instance(0), sharp_instance(1)];
+        let mut out = Vec::new();
+        append_glow_halos(&sharp, &mut out, None, None);
+        assert_eq!(out.len(), 1, "only the monochrome glyph spawns a halo");
+        assert_eq!(out[0].is_color, 0);
+    }
+
+    /// Zero intensity must short-circuit — no halos emitted.
+    #[test]
+    fn append_glow_halos_zero_intensity_emits_nothing() {
+        let sharp = vec![sharp_instance(0); 5];
+        let mut out = Vec::new();
+        append_glow_halos(&sharp, &mut out, Some(0.0), None);
+        assert!(out.is_empty(), "intensity=0 must short-circuit");
+    }
+
+    /// Caller-supplied intensity must scale the halo's alpha linearly.
+    #[test]
+    fn append_glow_halos_alpha_follows_intensity() {
+        let sharp = vec![sharp_instance(0)];
+        let mut out_low = Vec::new();
+        let mut out_high = Vec::new();
+        append_glow_halos(&sharp, &mut out_low, Some(0.05), None);
+        append_glow_halos(&sharp, &mut out_high, Some(0.40), None);
+        assert!(
+            out_high[0].color[3] > out_low[0].color[3],
+            "higher intensity must produce higher halo alpha"
+        );
+    }
+
+    /// Scale < 1.0 must be clamped to 1.0 — halos never shrink below the sharp glyph.
+    #[test]
+    fn append_glow_halos_scale_clamped_to_one_minimum() {
+        let sharp = vec![sharp_instance(0)];
+        let mut out = Vec::new();
+        append_glow_halos(&sharp, &mut out, None, Some(0.5));
+        // Halo size must be ≥ sharp size (scale clamped to 1.0).
+        assert!(out[0].size[0] >= sharp[0].size[0]);
+        assert!(out[0].size[1] >= sharp[0].size[1]);
     }
 
     /// The cache key tuple must differ for (char, bold=false) vs (char, bold=true)

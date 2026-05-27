@@ -192,26 +192,28 @@ impl Theme {
 /// **Phosphor** — Classic green CRT phosphor.
 ///
 /// Deep void background, bright green text, heavy scanlines, warm bloom.
-/// The definitive Phantom look.
-#[must_use] 
+/// The definitive Phantom look. Hex values match the mockup's `system.css`
+/// `[data-theme="phosphor"]` block — see `docs/mockups/system.css`.
+#[must_use]
 pub fn phosphor() -> Theme {
-    // Greens
+    // Mockup tokens (system.css): --frame-active #33ff00, --text-bright #33ff00.
     let green = hex(0x33, 0xFF, 0x00);
-    let dim_green = hex(0x1A, 0x99, 0x00);
+    let dim_green = hex(0x4A, 0x80, 0x48); // --text-dim
+    // Mockup --surface-base: #0a0e14.
     let bg = hex(0x0A, 0x0E, 0x14);
 
     Theme {
         name: "Phosphor".into(),
         colors: TerminalColors {
-            foreground: green,
+            foreground: hex(0xB8, 0xFF, 0xB8), // --text-primary
             background: bg,
-            cursor: hex(0x33, 0xFF, 0x00),
-            selection: hexa(0x33, 0xFF, 0x00, 0.25),
+            cursor: hex(0x33, 0xFF, 0x00), // --text-bright
+            selection: hexa(0x33, 0xFF, 0x00, 0.22), // --selection rgba(51,255,0,0.22)
             ansi: [
                 // Normal 0-7
-                hex(0x0A, 0x0E, 0x14), // 0  black
+                hex(0x0A, 0x0E, 0x14), // 0  black (surface-base)
                 hex(0xCC, 0x33, 0x33), // 1  red
-                hex(0x33, 0xFF, 0x00), // 2  green (phosphor)
+                hex(0x33, 0xFF, 0x00), // 2  green (phosphor / frame-active)
                 hex(0xCC, 0xCC, 0x33), // 3  yellow
                 hex(0x33, 0x99, 0xCC), // 4  blue
                 hex(0x99, 0x33, 0xCC), // 5  magenta
@@ -219,10 +221,10 @@ pub fn phosphor() -> Theme {
                 hex(0xB0, 0xCC, 0xA0), // 7  white (green-tinted)
                 // Bright 8-15
                 hex(0x1A, 0x24, 0x30), // 8  bright black
-                hex(0xFF, 0x55, 0x55), // 9  bright red
-                hex(0x66, 0xFF, 0x44), // 10 bright green
-                hex(0xFF, 0xFF, 0x66), // 11 bright yellow
-                hex(0x55, 0xBB, 0xFF), // 12 bright blue
+                hex(0xFF, 0x33, 0x44), // 9  bright red (--status-danger)
+                hex(0x33, 0xFF, 0x00), // 10 bright green (--status-ok)
+                hex(0xFF, 0xB0, 0x00), // 11 bright yellow (--status-warn)
+                hex(0x66, 0xDD, 0xFF), // 12 bright blue (--status-info)
                 hex(0xCC, 0x66, 0xFF), // 13 bright magenta
                 hex(0x55, 0xFF, 0xCC), // 14 bright cyan
                 hex(0xD0, 0xEE, 0xC0), // 15 bright white
@@ -238,13 +240,13 @@ pub fn phosphor() -> Theme {
             glow_color: rgb3(dim_green),
         },
         ui_colors: UiColors {
-            status_bar_bg: hex(0x06, 0x08, 0x0C),
-            status_bar_fg: dim_green,
-            tab_bar_bg: hex(0x06, 0x08, 0x0C),
-            tab_bar_fg: hex(0x22, 0x99, 0x00),
-            tab_active_bg: hex(0x12, 0x1A, 0x0E),
+            status_bar_bg: hex(0x06, 0x0A, 0x10), // --surface-recessed
+            status_bar_fg: hex(0x6F, 0x9F, 0x6A), // --text-secondary
+            tab_bar_bg: hex(0x11, 0x17, 0x1F), // --surface-floating
+            tab_bar_fg: hex(0x4A, 0x80, 0x48), // --text-dim
+            tab_active_bg: hex(0x0D, 0x12, 0x19), // --surface-raised
             tab_active_fg: green,
-            border: hex(0x1A, 0x33, 0x00),
+            border: hex(0x1A, 0x2A, 0x18), // --frame-dim
         },
     }
 }
@@ -253,35 +255,36 @@ pub fn phosphor() -> Theme {
 ///
 /// The look of a Zenith or Wyse terminal from the 1980s.
 /// Amber (#FFB000) on near-black, classic and warm.
-#[must_use] 
+/// Hex values match `[data-theme="amber"]` in `docs/mockups/system.css`.
+#[must_use]
 pub fn amber() -> Theme {
-    let amber = hex(0xFF, 0xB0, 0x00);
-    let dim_amber = hex(0xB3, 0x7A, 0x00);
-    let bg = hex(0x0C, 0x09, 0x04);
+    let amber = hex(0xFF, 0xB0, 0x00); // --text-bright
+    let dim_amber = hex(0x80, 0x64, 0x30); // --text-dim
+    let bg = hex(0x11, 0x08, 0x00); // --surface-base
 
     Theme {
         name: "Amber".into(),
         colors: TerminalColors {
-            foreground: amber,
+            foreground: hex(0xFF, 0xD9, 0xA3), // --text-primary
             background: bg,
-            cursor: hex(0xFF, 0xC8, 0x44),
-            selection: hexa(0xFF, 0xB0, 0x00, 0.25),
+            cursor: hex(0xFF, 0xB0, 0x00), // --text-bright
+            selection: hexa(0xFF, 0xB0, 0x00, 0.22), // --selection
             ansi: [
                 // Normal 0-7
-                hex(0x0C, 0x09, 0x04), // 0  black
-                hex(0xCC, 0x44, 0x22), // 1  red
-                hex(0xCC, 0x99, 0x00), // 2  green (amber-shifted)
-                hex(0xFF, 0xB0, 0x00), // 3  yellow (amber)
+                hex(0x11, 0x08, 0x00), // 0  black (surface-base)
+                hex(0xFF, 0x55, 0x44), // 1  red (--status-danger)
+                hex(0xC4, 0xFF, 0x66), // 2  green (--status-ok)
+                hex(0xFF, 0xB0, 0x00), // 3  yellow (amber / --text-bright)
                 hex(0x88, 0x77, 0x44), // 4  blue (muted gold)
                 hex(0xCC, 0x66, 0x33), // 5  magenta (burnt orange)
                 hex(0xDD, 0x99, 0x44), // 6  cyan (warm gold)
                 hex(0xDD, 0xBB, 0x88), // 7  white (cream)
                 // Bright 8-15
                 hex(0x22, 0x1A, 0x0C), // 8  bright black
-                hex(0xFF, 0x66, 0x44), // 9  bright red
-                hex(0xFF, 0xBB, 0x33), // 10 bright green
-                hex(0xFF, 0xDD, 0x55), // 11 bright yellow
-                hex(0xBB, 0xAA, 0x66), // 12 bright blue
+                hex(0xFF, 0x55, 0x44), // 9  bright red (--status-danger)
+                hex(0xC4, 0xFF, 0x66), // 10 bright green (--status-ok)
+                hex(0xFF, 0xC9, 0x4D), // 11 bright yellow (--text-accent)
+                hex(0xFF, 0xCE, 0x5F), // 12 bright blue (--status-info — amber variant)
                 hex(0xFF, 0x88, 0x55), // 13 bright magenta
                 hex(0xFF, 0xCC, 0x66), // 14 bright cyan
                 hex(0xFF, 0xDD, 0xAA), // 15 bright white
@@ -297,13 +300,13 @@ pub fn amber() -> Theme {
             glow_color: rgb3(dim_amber),
         },
         ui_colors: UiColors {
-            status_bar_bg: hex(0x08, 0x06, 0x02),
-            status_bar_fg: dim_amber,
-            tab_bar_bg: hex(0x08, 0x06, 0x02),
-            tab_bar_fg: hex(0x99, 0x6E, 0x00),
-            tab_active_bg: hex(0x1A, 0x14, 0x06),
+            status_bar_bg: hex(0x0A, 0x05, 0x00), // --surface-recessed
+            status_bar_fg: hex(0xB8, 0x8F, 0x4E), // --text-secondary
+            tab_bar_bg: hex(0x1E, 0x10, 0x04), // --surface-floating
+            tab_bar_fg: hex(0x80, 0x64, 0x30), // --text-dim
+            tab_active_bg: hex(0x17, 0x0C, 0x01), // --surface-raised
             tab_active_fg: amber,
-            border: hex(0x33, 0x24, 0x00),
+            border: hex(0x3A, 0x23, 0x04), // --frame-dim
         },
     }
 }
@@ -311,38 +314,38 @@ pub fn amber() -> Theme {
 /// **Ice** — Cool blue / TRON aesthetic.
 ///
 /// Deep dark background, bright cyan text, neon blue glow.
-/// Minimal scanlines, clean digital look with subtle bloom.
-#[must_use] 
+/// Hex values match `[data-theme="ice"]` in `docs/mockups/system.css`.
+#[must_use]
 pub fn ice() -> Theme {
-    let cyan = hex(0x00, 0xD4, 0xFF);
-    let dim_cyan = hex(0x00, 0x88, 0xAA);
-    let bg = hex(0x04, 0x08, 0x12);
+    let cyan = hex(0x66, 0xDD, 0xFF); // --text-bright
+    let dim_cyan = hex(0x4A, 0x7D, 0x99); // --text-dim
+    let bg = hex(0x06, 0x0C, 0x14); // --surface-base
 
     Theme {
         name: "Ice".into(),
         colors: TerminalColors {
-            foreground: cyan,
+            foreground: hex(0xB8, 0xE0, 0xFF), // --text-primary
             background: bg,
-            cursor: hex(0x44, 0xDD, 0xFF),
-            selection: hexa(0x00, 0xD4, 0xFF, 0.22),
+            cursor: hex(0x66, 0xDD, 0xFF), // --text-bright
+            selection: hexa(0x66, 0xDD, 0xFF, 0.22), // --selection
             ansi: [
                 // Normal 0-7
-                hex(0x04, 0x08, 0x12), // 0  black
-                hex(0xFF, 0x33, 0x66), // 1  red (neon pink-red)
-                hex(0x00, 0xCC, 0x88), // 2  green (teal)
-                hex(0xCC, 0xDD, 0x44), // 3  yellow (lime)
-                hex(0x00, 0x88, 0xFF), // 4  blue (neon blue)
+                hex(0x06, 0x0C, 0x14), // 0  black (surface-base)
+                hex(0xFF, 0x5F, 0xA3), // 1  red (--status-danger)
+                hex(0x5F, 0xFF, 0xB8), // 2  green (--status-ok)
+                hex(0xFF, 0xCE, 0x5F), // 3  yellow (--status-warn)
+                hex(0x00, 0x88, 0xFF), // 4  blue
                 hex(0xBB, 0x44, 0xFF), // 5  magenta (electric purple)
-                hex(0x00, 0xD4, 0xFF), // 6  cyan (ice)
+                hex(0x66, 0xDD, 0xFF), // 6  cyan (ice / --text-bright)
                 hex(0xBB, 0xCC, 0xDD), // 7  white (blue-tinted)
                 // Bright 8-15
                 hex(0x10, 0x1C, 0x2C), // 8  bright black
-                hex(0xFF, 0x66, 0x88), // 9  bright red
-                hex(0x44, 0xFF, 0xAA), // 10 bright green
-                hex(0xEE, 0xFF, 0x77), // 11 bright yellow
-                hex(0x44, 0xAA, 0xFF), // 12 bright blue
+                hex(0xFF, 0x5F, 0xA3), // 9  bright red
+                hex(0x5F, 0xFF, 0xB8), // 10 bright green
+                hex(0xFF, 0xCE, 0x5F), // 11 bright yellow
+                hex(0x66, 0xDD, 0xFF), // 12 bright blue (--status-info)
                 hex(0xDD, 0x77, 0xFF), // 13 bright magenta
-                hex(0x44, 0xEE, 0xFF), // 14 bright cyan
+                hex(0x5F, 0xC4, 0xFF), // 14 bright cyan (--text-accent)
                 hex(0xDD, 0xEE, 0xFF), // 15 bright white
             ],
         },
@@ -356,13 +359,13 @@ pub fn ice() -> Theme {
             glow_color: rgb3(dim_cyan),
         },
         ui_colors: UiColors {
-            status_bar_bg: hex(0x02, 0x05, 0x0C),
-            status_bar_fg: dim_cyan,
-            tab_bar_bg: hex(0x02, 0x05, 0x0C),
-            tab_bar_fg: hex(0x00, 0x77, 0x99),
-            tab_active_bg: hex(0x08, 0x14, 0x22),
+            status_bar_bg: hex(0x04, 0x08, 0x0D), // --surface-recessed
+            status_bar_fg: hex(0x6F, 0xA3, 0xC4), // --text-secondary
+            tab_bar_bg: hex(0x0C, 0x19, 0x24), // --surface-floating
+            tab_bar_fg: hex(0x4A, 0x7D, 0x99), // --text-dim
+            tab_active_bg: hex(0x08, 0x11, 0x1B), // --surface-raised
             tab_active_fg: cyan,
-            border: hex(0x00, 0x2A, 0x44),
+            border: hex(0x18, 0x32, 0x4A), // --frame-dim
         },
     }
 }
@@ -370,37 +373,37 @@ pub fn ice() -> Theme {
 /// **Blood** — Red / Cyberpunk.
 ///
 /// Very dark background, searing red text, high contrast.
-/// Maximum menace. Heavy vignette, moderate scanlines.
-#[must_use] 
+/// Hex values match `[data-theme="blood"]` in `docs/mockups/system.css`.
+#[must_use]
 pub fn blood() -> Theme {
-    let red = hex(0xFF, 0x00, 0x33);
-    let dim_red = hex(0xAA, 0x00, 0x22);
-    let bg = hex(0x0A, 0x04, 0x06);
+    let red = hex(0xFF, 0x33, 0x44); // --text-bright / --frame-active
+    let dim_red = hex(0x8A, 0x40, 0x48); // --text-dim
+    let bg = hex(0x11, 0x06, 0x08); // --surface-base
 
     Theme {
         name: "Blood".into(),
         colors: TerminalColors {
-            foreground: red,
+            foreground: hex(0xFF, 0xD0, 0xD4), // --text-primary
             background: bg,
-            cursor: hex(0xFF, 0x44, 0x55),
-            selection: hexa(0xFF, 0x00, 0x33, 0.25),
+            cursor: red,
+            selection: hexa(0xFF, 0x33, 0x44, 0.22), // --selection
             ansi: [
                 // Normal 0-7
-                hex(0x0A, 0x04, 0x06), // 0  black
-                hex(0xFF, 0x00, 0x33), // 1  red (blood)
-                hex(0x88, 0x44, 0x33), // 2  green (dried blood)
-                hex(0xDD, 0x66, 0x33), // 3  yellow (ember)
+                hex(0x11, 0x06, 0x08), // 0  black (surface-base)
+                hex(0xFF, 0x33, 0x44), // 1  red (blood / --status-danger)
+                hex(0x66, 0xFF, 0x80), // 2  green (--status-ok)
+                hex(0xFF, 0xAA, 0x44), // 3  yellow (--status-warn)
                 hex(0x66, 0x22, 0x44), // 4  blue (bruise)
                 hex(0xCC, 0x22, 0x66), // 5  magenta (crimson)
                 hex(0xBB, 0x44, 0x44), // 6  cyan (rust)
                 hex(0xCC, 0x99, 0x99), // 7  white (pale)
                 // Bright 8-15
                 hex(0x1A, 0x0C, 0x10), // 8  bright black
-                hex(0xFF, 0x44, 0x55), // 9  bright red
-                hex(0xBB, 0x66, 0x55), // 10 bright green
-                hex(0xFF, 0x88, 0x55), // 11 bright yellow
-                hex(0x99, 0x44, 0x66), // 12 bright blue
-                hex(0xFF, 0x44, 0x88), // 13 bright magenta
+                hex(0xFF, 0x33, 0x44), // 9  bright red
+                hex(0x66, 0xFF, 0x80), // 10 bright green
+                hex(0xFF, 0xAA, 0x44), // 11 bright yellow
+                hex(0xFF, 0x80, 0xC4), // 12 bright blue (--status-info)
+                hex(0xFF, 0x66, 0x80), // 13 bright magenta (--text-accent)
                 hex(0xDD, 0x66, 0x66), // 14 bright cyan
                 hex(0xEE, 0xBB, 0xBB), // 15 bright white
             ],
@@ -415,56 +418,53 @@ pub fn blood() -> Theme {
             glow_color: rgb3(dim_red),
         },
         ui_colors: UiColors {
-            status_bar_bg: hex(0x06, 0x02, 0x04),
-            status_bar_fg: dim_red,
-            tab_bar_bg: hex(0x06, 0x02, 0x04),
-            tab_bar_fg: hex(0x88, 0x00, 0x1A),
-            tab_active_bg: hex(0x18, 0x06, 0x0C),
+            status_bar_bg: hex(0x0C, 0x04, 0x05), // --surface-recessed
+            status_bar_fg: hex(0xB8, 0x66, 0x6D), // --text-secondary
+            tab_bar_bg: hex(0x1F, 0x0C, 0x10), // --surface-floating
+            tab_bar_fg: hex(0x8A, 0x40, 0x48), // --text-dim
+            tab_active_bg: hex(0x18, 0x09, 0x0C), // --surface-raised
             tab_active_fg: red,
-            border: hex(0x44, 0x00, 0x11),
+            border: hex(0x3C, 0x18, 0x20), // --frame-dim
         },
     }
 }
 
 /// **Vapor** — Vaporwave / Retrowave.
 ///
-/// Purple-pink palette, dual accent colors (#FF71CE pink, #01CDFE cyan).
-/// Moderate CRT effects, dreamy bloom. Maximum A E S T H E T I C.
-#[must_use] 
+/// Miami Vice neon — pink + cyan + purple.
+/// Hex values match `[data-theme="vapor"]` in `docs/mockups/system.css`.
+#[must_use]
 pub fn vapor() -> Theme {
-    let pink = hex(0xFF, 0x71, 0xCE);
-    let cyan = hex(0x01, 0xCD, 0xFE);
-    let dim_pink = hex(0xAA, 0x44, 0x88);
-    let bg = hex(0x0C, 0x04, 0x14);
-
-    let _ = cyan; // used in ansi palette below
+    let pink = hex(0xFF, 0x44, 0xDD); // --text-bright / --frame-active
+    let dim_pink = hex(0x8A, 0x4E, 0xC4); // --text-dim
+    let bg = hex(0x0E, 0x06, 0x26); // --surface-base
 
     Theme {
         name: "Vapor".into(),
         colors: TerminalColors {
-            foreground: pink,
+            foreground: hex(0xF0, 0xE2, 0xFF), // --text-primary
             background: bg,
-            cursor: hex(0x01, 0xCD, 0xFE),
-            selection: hexa(0xFF, 0x71, 0xCE, 0.22),
+            cursor: pink, // --text-bright
+            selection: hexa(0x5F, 0xC4, 0xFF, 0.24), // --selection
             ansi: [
                 // Normal 0-7
-                hex(0x0C, 0x04, 0x14), // 0  black
-                hex(0xFF, 0x33, 0x88), // 1  red (hot pink)
-                hex(0x01, 0xCD, 0xFE), // 2  green (miami cyan)
-                hex(0xFF, 0xF0, 0x68), // 3  yellow (sun)
-                hex(0x77, 0x44, 0xDD), // 4  blue (synthwave purple)
-                hex(0xFF, 0x71, 0xCE), // 5  magenta (vapor pink)
-                hex(0x05, 0xFC, 0xC1), // 6  cyan (neon mint)
+                hex(0x0E, 0x06, 0x26), // 0  black (surface-base)
+                hex(0xFF, 0x5F, 0xA3), // 1  red (--status-danger)
+                hex(0x5F, 0xFF, 0xD0), // 2  green (--status-ok)
+                hex(0xFF, 0xC9, 0x4D), // 3  yellow (--status-warn)
+                hex(0x5F, 0xC4, 0xFF), // 4  blue (--status-info / --text-accent)
+                hex(0xFF, 0x44, 0xDD), // 5  magenta (vapor pink / --text-bright)
+                hex(0x5F, 0xFF, 0xD0), // 6  cyan (neon mint)
                 hex(0xE0, 0xCC, 0xEE), // 7  white (lavender)
                 // Bright 8-15
-                hex(0x1C, 0x10, 0x2C), // 8  bright black
-                hex(0xFF, 0x66, 0xAA), // 9  bright red
-                hex(0x44, 0xDD, 0xFF), // 10 bright green
-                hex(0xFF, 0xFF, 0x99), // 11 bright yellow
-                hex(0x99, 0x66, 0xFF), // 12 bright blue
+                hex(0x1C, 0x10, 0x48), // 8  bright black (surface-floating)
+                hex(0xFF, 0x5F, 0xA3), // 9  bright red
+                hex(0x5F, 0xFF, 0xD0), // 10 bright green
+                hex(0xFF, 0xC9, 0x4D), // 11 bright yellow
+                hex(0x5F, 0xC4, 0xFF), // 12 bright blue
                 hex(0xFF, 0x99, 0xDD), // 13 bright magenta
                 hex(0x66, 0xFF, 0xDD), // 14 bright cyan
-                hex(0xF0, 0xE0, 0xFF), // 15 bright white
+                hex(0xF0, 0xE2, 0xFF), // 15 bright white (--text-primary)
             ],
         },
         shader_params: ShaderParams {
@@ -477,13 +477,13 @@ pub fn vapor() -> Theme {
             glow_color: rgb3(dim_pink),
         },
         ui_colors: UiColors {
-            status_bar_bg: hex(0x08, 0x02, 0x0E),
-            status_bar_fg: dim_pink,
-            tab_bar_bg: hex(0x08, 0x02, 0x0E),
-            tab_bar_fg: hex(0x88, 0x44, 0x99),
-            tab_active_bg: hex(0x18, 0x08, 0x28),
+            status_bar_bg: hex(0x0A, 0x04, 0x18), // --surface-recessed
+            status_bar_fg: hex(0xC0, 0x8E, 0xFF), // --text-secondary
+            tab_bar_bg: hex(0x1C, 0x10, 0x48), // --surface-floating
+            tab_bar_fg: hex(0x8A, 0x4E, 0xC4), // --text-dim
+            tab_active_bg: hex(0x15, 0x0A, 0x36), // --surface-raised
             tab_active_fg: pink,
-            border: hex(0x33, 0x11, 0x44),
+            border: hex(0x3A, 0x1C, 0x5E), // --frame-dim
         },
     }
 }
@@ -556,37 +556,37 @@ pub fn pipboy() -> Theme {
 /// the look from the mockup's cyber swatch.
 #[must_use]
 pub fn cyber() -> Theme {
-    let magenta = hex(0xFF, 0x00, 0x7A);
-    let cyan = hex(0x00, 0xFF, 0xD0);
-    let dim_magenta = hex(0xA0, 0x00, 0x50);
-    let bg = hex(0x05, 0x02, 0x0A);
+    let magenta = hex(0xFF, 0x00, 0x7A); // --text-bright / --frame-active
+    let cyan = hex(0x00, 0xFF, 0xD0); // --text-accent / --status-ok
+    let dim_magenta = hex(0x7A, 0x3C, 0x8A); // --text-dim
+    let bg = hex(0x0A, 0x04, 0x10); // --surface-base
 
     Theme {
         name: "Cyber".into(),
         colors: TerminalColors {
-            foreground: magenta,
+            foreground: hex(0xF0, 0xD4, 0xFF), // --text-primary
             background: bg,
-            cursor: hex(0xFF, 0x44, 0xAA),
-            selection: hexa(0xFF, 0x00, 0x7A, 0.25),
+            cursor: magenta, // --text-bright
+            selection: hexa(0x00, 0xFF, 0xD0, 0.24), // --selection (cyan accent)
             ansi: [
                 // Normal 0-7
-                hex(0x05, 0x02, 0x0A), // 0  black
-                hex(0xFF, 0x00, 0x7A), // 1  red (magenta-primary)
-                hex(0x00, 0xFF, 0xD0), // 2  green (cyan-accent)
-                hex(0xFF, 0xDD, 0x33), // 3  yellow (acid)
+                hex(0x0A, 0x04, 0x10), // 0  black (surface-base)
+                hex(0xFF, 0x44, 0x44), // 1  red (--status-danger)
+                hex(0x00, 0xFF, 0xD0), // 2  green (--status-ok / --text-accent)
+                hex(0xFF, 0xE4, 0x4D), // 3  yellow (--status-warn)
                 hex(0x66, 0x33, 0xFF), // 4  blue (electric violet)
-                hex(0xFF, 0x33, 0xCC), // 5  magenta (hot pink)
-                hex(0x33, 0xDD, 0xFF), // 6  cyan (ice blue)
+                hex(0xFF, 0x00, 0x7A), // 5  magenta (--text-bright / --frame-active)
+                hex(0x00, 0xB4, 0xFF), // 6  cyan (--status-info)
                 hex(0xDD, 0xCC, 0xEE), // 7  white (lilac)
                 // Bright 8-15
-                hex(0x14, 0x08, 0x22), // 8  bright black
-                hex(0xFF, 0x55, 0xAA), // 9  bright red
-                hex(0x55, 0xFF, 0xDD), // 10 bright green
-                hex(0xFF, 0xFF, 0x66), // 11 bright yellow
-                hex(0x99, 0x66, 0xFF), // 12 bright blue
-                hex(0xFF, 0x77, 0xEE), // 13 bright magenta
+                hex(0x1C, 0x0E, 0x30), // 8  bright black (surface-floating)
+                hex(0xFF, 0x44, 0x44), // 9  bright red
+                hex(0x00, 0xFF, 0xD0), // 10 bright green
+                hex(0xFF, 0xE4, 0x4D), // 11 bright yellow
+                hex(0x00, 0xB4, 0xFF), // 12 bright blue
+                hex(0xC4, 0x4E, 0xD8), // 13 bright magenta (--text-secondary)
                 hex(0x77, 0xEE, 0xFF), // 14 bright cyan
-                hex(0xEE, 0xDD, 0xFF), // 15 bright white
+                hex(0xF0, 0xD4, 0xFF), // 15 bright white (--text-primary)
             ],
         },
         shader_params: ShaderParams {
@@ -599,13 +599,13 @@ pub fn cyber() -> Theme {
             glow_color: rgb3(cyan),       // cyan-tinted bloom against magenta text
         },
         ui_colors: UiColors {
-            status_bar_bg: hex(0x02, 0x01, 0x06),
-            status_bar_fg: dim_magenta,
-            tab_bar_bg: hex(0x02, 0x01, 0x06),
-            tab_bar_fg: hex(0x66, 0x00, 0x33),
-            tab_active_bg: hex(0x14, 0x04, 0x1C),
+            status_bar_bg: hex(0x05, 0x02, 0x08), // --surface-recessed
+            status_bar_fg: hex(0xC4, 0x4E, 0xD8), // --text-secondary
+            tab_bar_bg: hex(0x1C, 0x0E, 0x30), // --surface-floating
+            tab_bar_fg: dim_magenta,
+            tab_active_bg: hex(0x13, 0x08, 0x20), // --surface-raised
             tab_active_fg: magenta,
-            border: hex(0x44, 0x00, 0x22),
+            border: hex(0x3A, 0x18, 0x50), // --frame-dim
         },
     }
 }

@@ -811,6 +811,10 @@ impl App {
     }
 
     /// Helper: render a text string directly into the overlay glyph buffer.
+    ///
+    /// Emits per-character phosphor halos before the sharp glyphs so the
+    /// halo instances render behind the crisp text (item 1, path A — see
+    /// `phantom_renderer::text::append_glow_halos`).
     pub(crate) fn render_overlay_text(
         &mut self,
         text: &str,
@@ -833,6 +837,7 @@ impl App {
                 cols,
                 (x, y),
             );
+            phantom_renderer::text::append_glow_halos(&batch.mono, glyphs, None, None);
             glyphs.extend(batch.mono);
         }
     }
