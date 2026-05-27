@@ -330,6 +330,31 @@ impl App {
 
         let (mx, my) = (self.cursor_position.0 as f32, self.cursor_position.1 as f32);
 
+        // Top theme strip — handle left clicks on swatches / CRT toggle before
+        // any other hit-test so the picker is always reachable above the
+        // pane chrome.
+        if button == MouseButton::Left
+            && let Ok(strip_rect) = self.layout.get_theme_strip_rect() {
+                let ui_rect = phantom_ui::layout::Rect {
+                    x: strip_rect.x,
+                    y: strip_rect.y,
+                    width: strip_rect.width,
+                    height: strip_rect.height,
+                };
+                use phantom_ui::widgets::ThemeStripAction;
+                match self.theme_strip.hit_test(&ui_rect, mx, my) {
+                    ThemeStripAction::SetTheme(name) => {
+                        self.apply_theme(&name);
+                        return;
+                    }
+                    ThemeStripAction::ToggleCrt => {
+                        self.toggle_crt();
+                        return;
+                    }
+                    ThemeStripAction::None => {}
+                }
+            }
+
         // Right-click opens context menu.
         if button == MouseButton::Right {
             let items = self.build_context_menu_items();

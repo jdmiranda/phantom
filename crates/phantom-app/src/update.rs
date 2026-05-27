@@ -45,6 +45,12 @@ impl App {
         // share a monotonic time base that cannot jump on pause/resume.
         self.scene_clock.tick(dt_duration);
 
+        // Push the scene clock into the coordinator so the per-adapter
+        // `Rect.elapsed_secs` (used by chrome animations like the `AppHead`
+        // live-dot pulse) advances each frame.
+        self.coordinator
+            .set_elapsed_secs(self.scene_clock.elapsed_secs_f32());
+
         // Coordinator: tick all registered adapters and deliver bus messages.
         self.coordinator.update_all(dt_duration);
 

@@ -1027,9 +1027,63 @@ impl App {
         if let Some(new_theme) = themes::builtin_by_name(name) {
             info!("Theme switched to: {name}");
             self.theme = new_theme;
+            // Re-sync the theme strip's active swatch so a click immediately
+            // moves the active ring.
+            self.theme_strip.set_active(&self.theme.name);
+            self.force_redraw = true;
         } else {
             warn!("Unknown theme: {name}");
         }
+    }
+
+    /// Cycle to the next built-in theme.
+    ///
+    /// Used by the `CycleTheme` keybind action (and any future shortcut). Wraps
+    /// at the end of `themes::BUILTIN_NAMES`.
+    pub(crate) fn cycle_theme(&mut self) {
+        let names = themes::BUILTIN_NAMES;
+        if names.is_empty() {
+            return;
+        }
+        let current = self.theme.name.to_ascii_lowercase();
+        let idx = names
+            .iter()
+            .position(|n| n.to_ascii_lowercase() == current)
+            .unwrap_or(0);
+        let next = names[(idx + 1) % names.len()];
+        self.apply_theme(next);
+    }
+
+    /// Toggle CRT post-fx on or off.
+    ///
+    /// "Off" zeroes out every shader knob (matching the `plain` console
+    /// command); "on" restores either the cached pre-toggle snapshot or the
+    /// theme's default shader params. The theme strip is re-synced so the
+    /// checkbox renders immediately.
+    pub(crate) fn toggle_crt(&mut self) {
+        let scan = self.theme.shader_params.scanline_intensity;
+        if scan > 0.001 {
+            // Currently ON → capture snapshot, then zero everything.
+            self.crt_snapshot = Some(self.theme.shader_params.clone());
+            self.theme.shader_params.scanline_intensity = 0.0;
+            self.theme.shader_params.bloom_intensity = 0.0;
+            self.theme.shader_params.chromatic_aberration = 0.0;
+            self.theme.shader_params.curvature = 0.0;
+            self.theme.shader_params.vignette_intensity = 0.0;
+            self.theme.shader_params.noise_intensity = 0.0;
+            self.theme_strip.set_crt(false);
+            info!("CRT post-fx OFF");
+        } else {
+            // Currently OFF → restore from snapshot or rebuild from theme.
+            if let Some(snap) = self.crt_snapshot.take() {
+                self.theme.shader_params = snap;
+            } else if let Some(restored) = themes::builtin_by_name(&self.theme.name) {
+                self.theme.shader_params = restored.shader_params;
+            }
+            self.theme_strip.set_crt(true);
+            info!("CRT post-fx ON");
+        }
+        self.force_redraw = true;
     }
 
     /// Re-read the config file from disk and apply it.

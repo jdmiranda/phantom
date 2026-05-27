@@ -126,6 +126,14 @@ pub struct App {
     pub(crate) theme: Theme,
     pub(crate) status_bar: StatusBar,
     pub(crate) tab_bar: TabBar,
+    /// Top-of-window theme picker + CRT toggle strip (matches mockup
+    /// `.controls` row). Rendered above the tab bar; clicks dispatch to
+    /// `apply_theme` / a CRT toggle helper.
+    pub(crate) theme_strip: phantom_ui::widgets::ThemeStrip,
+    /// Cached CRT-on snapshot of the theme's shader params, captured before
+    /// the user toggles CRT off so we can restore it on toggle-on. `None`
+    /// means CRT is currently on (or has never been toggled off).
+    pub(crate) crt_snapshot: Option<phantom_ui::themes::ShaderParams>,
     /// Full-screen keybind help overlay (F1 / ?).
     pub(crate) keybind_help: KeybindHelp,
 
@@ -713,9 +721,10 @@ impl App {
         let video_renderer = VideoRenderer::new(&gpu.device, format);
 
         // -- Terminal dimensions from window size --
-        // Reserve space for the tab bar (30px), status bar (28px), and the
-        // app-container chrome (padding + title strip) inside the pane.
-        let chrome_height = (30.0 + 28.0) * scale_factor;
+        // Reserve space for the theme strip (28px), tab bar (30px), status
+        // bar (28px), and the app-container chrome (padding + title strip)
+        // inside the pane.
+        let chrome_height = (28.0 + 30.0 + 28.0) * scale_factor;
         let content_height = (height as f32 - chrome_height).max(cell_size.1);
         let initial_outer = phantom_ui::layout::Rect {
             x: 0.0,
@@ -1491,6 +1500,10 @@ impl App {
             postfx,
             layout,
             keybinds,
+            theme_strip: phantom_ui::widgets::ThemeStrip::new()
+                .with_active(theme.name.to_ascii_lowercase())
+                .with_crt(theme.shader_params.scanline_intensity > 0.001),
+            crt_snapshot: None,
             theme,
             status_bar,
             tab_bar,
@@ -1985,12 +1998,18 @@ impl App {
         }
 
         // Re-negotiate arbiter allocations with updated content area.
-        // Chrome height = tab bar + status bar (same formula as constructor).
+        // Chrome height = theme strip + tab bar + status bar (same formula
+        // as the constructor).
         let chrome_h = self
             .layout
-            .get_tab_bar_rect()
+            .get_theme_strip_rect()
             .map(|r| r.height)
             .unwrap_or(0.0)
+            + self
+                .layout
+                .get_tab_bar_rect()
+                .map(|r| r.height)
+                .unwrap_or(0.0)
             + self
                 .layout
                 .get_status_bar_rect()

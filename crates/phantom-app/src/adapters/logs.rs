@@ -192,7 +192,8 @@ impl Renderable for LogsAdapter {
         let head = AppHead::new("LOGS", "phantom.log · tail")
             .with_icon("≡")
             .with_meta(format!("{} rows", self.rows.len()))
-            .with_tokens(t);
+            .with_tokens(t)
+            .focused(rect.focused);
         head.render_into_adapter(rect, &mut quads, &mut text_segments);
 
         let body = head.body_rect_adapter(rect);
@@ -346,6 +347,7 @@ mod tests {
             width: 1000.0,
             height: 500.0,
             cell_size: (8.0, 16.0),
+            ..Default::default()
         }
     }
 

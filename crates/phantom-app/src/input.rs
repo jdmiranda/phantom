@@ -278,6 +278,9 @@ impl App {
                 debug!("PrevTab redirected to FocusPrev (panes-first model)");
                 self.dispatch_action(Action::FocusPrev);
             }
+            Action::CycleTheme => {
+                self.cycle_theme();
+            }
             _ => {
                 debug!("Action: {action} (not yet implemented)");
             }

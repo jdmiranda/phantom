@@ -737,6 +737,27 @@ impl App {
         // -- Monitor panels: hstack (sysmon left, appmon right) --
         self.render_monitor_hstack(screen_size, quads, glyphs);
 
+        // -- Top theme strip (matches mockup `.controls` row) --
+        // Sits above the tab bar. Sync runtime state into the widget once per
+        // frame so theme switches / CRT toggles redraw without a rebuild.
+        self.theme_strip
+            .set_active(&self.theme.name);
+        self.theme_strip
+            .set_crt(self.theme.shader_params.scanline_intensity > 0.001);
+        if let Ok(theme_rect) = self.layout.get_theme_strip_rect() {
+            // Build a live tokens snapshot so the swatch ring and CRT chrome
+            // colors stay in step with the active theme.
+            let tokens = phantom_ui::tokens::Tokens::new(
+                self.theme.token_color_roles(),
+                phantom_ui::RenderCtx::new(self.cell_size, 1.0),
+            );
+            let strip = self.theme_strip.clone().with_tokens(tokens);
+            let strip_quads = strip.render_quads(&theme_rect);
+            quads.extend(strip_quads);
+            let strip_texts = strip.render_text(&theme_rect);
+            self.render_text_segments(&strip_texts, glyphs);
+        }
+
         // -- Tab bar --
         if let Ok(tab_rect) = self.layout.get_tab_bar_rect() {
             let tab_quads = self.tab_bar.render_quads(&tab_rect);

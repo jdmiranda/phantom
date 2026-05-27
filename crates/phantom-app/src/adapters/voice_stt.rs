@@ -135,7 +135,8 @@ impl Renderable for VoiceSttAdapter {
             .with_icon("◉")
             .with_meta(meta)
             .with_dot(dot)
-            .with_tokens(t);
+            .with_tokens(t)
+            .focused(rect.focused);
         head.render_into_adapter(rect, &mut quads, &mut text_segments);
 
         let body = head.body_rect_adapter(rect);
@@ -311,6 +312,7 @@ mod tests {
             width: 800.0,
             height: 400.0,
             cell_size: (8.0, 16.0),
+            ..Default::default()
         }
     }
 
@@ -373,7 +375,7 @@ mod tests {
     fn drawable_bars_does_not_panic_on_narrow_rect() {
         let mut a = VoiceSttAdapter::new();
         a.push_level(0.5);
-        let narrow = Rect { x: 0.0, y: 0.0, width: 30.0, height: 100.0, cell_size: (8.0, 16.0) };
+        let narrow = Rect { x: 0.0, y: 0.0, width: 30.0, height: 100.0, cell_size: (8.0, 16.0), ..Default::default() };
         // Should not panic regardless of how narrow the rect is.
         let _ = a.render(&narrow);
     }

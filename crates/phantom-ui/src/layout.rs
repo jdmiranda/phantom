@@ -4,6 +4,11 @@
 use anyhow::{Context, Result};
 use taffy::prelude::*;
 
+/// Logical height of the theme strip (top-of-window chrome) in points.
+///
+/// Matches the mockup's `.controls` row but with terminal-chrome density.
+const THEME_STRIP_HEIGHT_LOGICAL: f32 = 28.0;
+
 /// Logical height of the tab bar in points (before DPI scaling).
 const TAB_BAR_HEIGHT_LOGICAL: f32 = 30.0;
 
@@ -91,6 +96,9 @@ impl PaneId {
 pub struct LayoutEngine {
     tree: TaffyTree,
     root: NodeId,
+    /// Top-of-window theme picker + CRT toggle strip (matches the mockup
+    /// `.controls` row). Sits above the tab bar.
+    theme_strip: NodeId,
     tab_bar: NodeId,
     content: NodeId,
     status_bar: NodeId,
@@ -108,10 +116,22 @@ impl LayoutEngine {
 
     /// Create a new layout engine with DPI scale factor applied to chrome heights.
     pub fn with_scale(scale: f32) -> Result<Self> {
+        let theme_h = THEME_STRIP_HEIGHT_LOGICAL * scale;
         let tab_h = TAB_BAR_HEIGHT_LOGICAL * scale;
         let status_h = STATUS_BAR_HEIGHT_LOGICAL * scale;
 
         let mut tree = TaffyTree::new();
+
+        let theme_strip = tree
+            .new_leaf(Style {
+                size: Size {
+                    width: Dimension::Auto,
+                    height: Dimension::Length(theme_h),
+                },
+                flex_shrink: 0.0,
+                ..Style::default()
+            })
+            .context("failed to create theme_strip node")?;
 
         let tab_bar = tree
             .new_leaf(Style {
@@ -166,13 +186,14 @@ impl LayoutEngine {
                     },
                     ..Style::default()
                 },
-                &[tab_bar, content, status_bar],
+                &[theme_strip, tab_bar, content, status_bar],
             )
             .context("failed to create root node")?;
 
         Ok(Self {
             tree,
             root,
+            theme_strip,
             tab_bar,
             content,
             status_bar,
@@ -280,6 +301,11 @@ impl LayoutEngine {
     /// Get the computed pixel rectangle for a pane.
     pub fn get_pane_rect(&self, id: PaneId) -> Result<Rect> {
         self.absolute_rect(id.0)
+    }
+
+    /// Get the computed pixel rectangle for the top-of-window theme strip.
+    pub fn get_theme_strip_rect(&self) -> Result<Rect> {
+        self.absolute_rect(self.theme_strip)
     }
 
     /// Get the computed pixel rectangle for the tab bar.
@@ -482,7 +508,13 @@ impl LayoutEngine {
     /// Chrome nodes (root, tab_bar, content, status_bar) are never pruned —
     /// they must remain even when empty to preserve the chrome structure.
     fn prune_empty_containers(&mut self, start: Option<NodeId>) -> Result<()> {
-        let chrome = [self.root, self.tab_bar, self.content, self.status_bar];
+        let chrome = [
+            self.root,
+            self.theme_strip,
+            self.tab_bar,
+            self.content,
+            self.status_bar,
+        ];
         let mut cursor = start;
         while let Some(node) = cursor {
             // Never prune fixed chrome nodes.
@@ -553,12 +585,24 @@ mod tests {
         let mut engine = LayoutEngine::new().unwrap();
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
+        let theme = engine.get_theme_strip_rect().unwrap();
         let tab = engine.get_tab_bar_rect().unwrap();
         let status = engine.get_status_bar_rect().unwrap();
 
         assert!(
-            approx_eq(tab.y, 0.0),
-            "tab bar should start at top: got {}",
+            approx_eq(theme.y, 0.0),
+            "theme strip should start at top: got {}",
+            theme.y
+        );
+        assert!(
+            approx_eq(theme.height, THEME_STRIP_HEIGHT_LOGICAL),
+            "theme strip height: got {}",
+            theme.height
+        );
+
+        assert!(
+            approx_eq(tab.y, THEME_STRIP_HEIGHT_LOGICAL),
+            "tab bar should sit under theme strip: got {}",
             tab.y
         );
         assert!(
@@ -592,11 +636,14 @@ mod tests {
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
 
         let rect = engine.get_pane_rect(pane).unwrap();
-        let expected_height =
-            WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
+        let expected_height = WINDOW_H
+            - THEME_STRIP_HEIGHT_LOGICAL
+            - TAB_BAR_HEIGHT_LOGICAL
+            - STATUS_BAR_HEIGHT_LOGICAL
+            - BOTTOM_PAD;
 
         assert!(
-            approx_eq(rect.y, TAB_BAR_HEIGHT_LOGICAL),
+            approx_eq(rect.y, THEME_STRIP_HEIGHT_LOGICAL + TAB_BAR_HEIGHT_LOGICAL),
             "pane y: got {}",
             rect.y
         );
@@ -877,8 +924,11 @@ mod tests {
         // After clearing, the pane should fill the available space again.
         engine.resize(WINDOW_W, WINDOW_H).unwrap();
         let rect = engine.get_pane_rect(pane).unwrap();
-        let expected_height =
-            WINDOW_H - TAB_BAR_HEIGHT_LOGICAL - STATUS_BAR_HEIGHT_LOGICAL - BOTTOM_PAD;
+        let expected_height = WINDOW_H
+            - THEME_STRIP_HEIGHT_LOGICAL
+            - TAB_BAR_HEIGHT_LOGICAL
+            - STATUS_BAR_HEIGHT_LOGICAL
+            - BOTTOM_PAD;
 
         assert!(
             approx_eq(rect.width, WINDOW_W),

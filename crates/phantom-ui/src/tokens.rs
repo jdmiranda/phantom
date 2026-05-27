@@ -84,11 +84,28 @@ impl Tokens {
         Self { colors, ctx }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn phosphor(ctx: RenderCtx) -> Self {
         Self {
             colors: ColorRoles::phosphor(),
             ctx,
+        }
+    }
+
+    /// Return a copy with `ctx.elapsed_secs` replaced.
+    ///
+    /// Adapters that hold a long-lived `Tokens` snapshot use this each frame
+    /// to thread the App's monotonic clock into chrome animations (the
+    /// `AppHead` live-dot pulse, etc.) without rebuilding the whole palette.
+    #[must_use]
+    pub fn with_elapsed(self, elapsed_secs: f32) -> Self {
+        Self {
+            colors: self.colors,
+            ctx: RenderCtx {
+                cell_size: self.ctx.cell_size,
+                dpi_scale: self.ctx.dpi_scale,
+                elapsed_secs,
+            },
         }
     }
 
