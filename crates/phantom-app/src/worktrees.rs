@@ -14,6 +14,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Maximum accepted branch-name length. Names longer than this are rejected
+/// with [`WorktreeError::InvalidBranchName`] as a defense-in-depth bound on
+/// the path component placed under `.phantom/worktrees/`.
+pub const MAX_BRANCH_LEN: usize = 200;
+
 /// A handle to a worktree this API created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeHandle {
@@ -91,7 +96,16 @@ fn sanitize_branch(branch: &str) -> Result<String, WorktreeError> {
     if trimmed.is_empty() {
         return Err(WorktreeError::InvalidBranchName(branch.to_string()));
     }
+    if trimmed.len() > MAX_BRANCH_LEN {
+        return Err(WorktreeError::InvalidBranchName(branch.to_string()));
+    }
     if trimmed.starts_with('-') {
+        return Err(WorktreeError::InvalidBranchName(branch.to_string()));
+    }
+    // Reject leading/trailing slashes as defense-in-depth. Otherwise a name
+    // like "/absolute" would survive the char allowlist and only be caught
+    // after the sanitized form ("-absolute") was already being passed to git.
+    if trimmed.starts_with('/') || trimmed.ends_with('/') {
         return Err(WorktreeError::InvalidBranchName(branch.to_string()));
     }
     if trimmed.contains('\0') {
@@ -357,6 +371,41 @@ mod tests {
         // Allowed: slashes become dashes on the path component.
         assert_eq!(sanitize_branch("feat/x").unwrap(), "feat-x");
         assert_eq!(sanitize_branch("v1.2.3+meta").unwrap(), "v1.2.3+meta");
+    }
+
+    #[test]
+    fn branch_name_at_max_length_accepted() {
+        // 200 ASCII alphanumerics. Allowed by the allowlist and exactly at
+        // the MAX_BRANCH_LEN ceiling. Must pass sanitize_branch.
+        let name: String = std::iter::repeat('a').take(MAX_BRANCH_LEN).collect();
+        let sanitized = sanitize_branch(&name).expect("max-length name should be accepted");
+        assert_eq!(sanitized.len(), MAX_BRANCH_LEN);
+    }
+
+    #[test]
+    fn branch_name_over_max_length_rejected() {
+        // One character over the ceiling. Must be rejected.
+        let name: String = std::iter::repeat('a').take(MAX_BRANCH_LEN + 1).collect();
+        let r = sanitize_branch(&name);
+        assert!(
+            matches!(r, Err(WorktreeError::InvalidBranchName(_))),
+            "over-length name should be rejected, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn leading_slash_rejected() {
+        let r = sanitize_branch("/absolute");
+        assert!(
+            matches!(r, Err(WorktreeError::InvalidBranchName(_))),
+            "leading-slash name should be rejected, got {r:?}"
+        );
+        // Trailing slash too, for symmetry with the new guard.
+        let r2 = sanitize_branch("trailing/");
+        assert!(
+            matches!(r2, Err(WorktreeError::InvalidBranchName(_))),
+            "trailing-slash name should be rejected, got {r2:?}"
+        );
     }
 
     #[test]
