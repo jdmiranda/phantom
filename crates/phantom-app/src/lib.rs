@@ -45,3 +45,4 @@ mod sysmon;
 pub mod tts;
 mod update;
 mod video;
+pub mod worktrees;
