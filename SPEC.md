@@ -113,5 +113,40 @@ pub enum LedgerEvent {
   on append failure; callers see the I/O error and the in-memory
   state is consistent with what the next append would have recorded.
 - **`fs::OpenOptions` append-mode atomicity** holds for write sizes
-  under PIPE_BUF (4096 bytes on Linux/macOS). LedgerEvent JSON lines
-  are well under that threshold for typical plans.
+  under PIPE_BUF (4096 bytes on Linux/macOS). Most `LedgerEvent`
+  variants serialize to well under that threshold for typical plans.
+  The one exception is `PlanInitialized { steps: Vec<PlanStep> }`,
+  which carries the full plan topology and can exceed PIPE_BUF on
+  large plans. POSIX append semantics do NOT guarantee atomicity
+  above PIPE_BUF, so a concurrent writer (forbidden by the
+  single-writer invariant above) could interleave such a write.
+  Within the single-writer model this is not an interleaving risk,
+  but a crash mid-write of a large `PlanInitialized` line will leave
+  a truncated final line on disk. The corrupt-line skip-on-replay
+  path (`warn!("ledger replay: skipping corrupt line ...")`)
+  mitigates: the partial line is discarded and replay continues,
+  yielding a ledger missing only the plan topology, which the
+  reconciler will treat as an empty plan and re-bootstrap.
+- **`BufWriter::flush` is not `fsync`.** `TaskLedger::append_event`
+  flushes the user-space buffer to the kernel page cache; it does
+  NOT issue an `fsync(2)`. The log survives a user-space process
+  crash (panic, SIGSEGV, OOM kill) because the kernel still holds
+  the bytes and will write them out, but it does NOT survive a
+  kernel panic or sudden power loss — the most recent appends may
+  be lost. This is acceptable for v1 because the supervisor-driven
+  restart loop targets only user-space crashes; durability against
+  hardware loss is out of scope.
+
+## Future Work
+
+- **`fsync` upgrade**: add an opt-in `LedgerConfig::sync_on_append`
+  flag that calls `File::sync_data` after each flush, trading
+  throughput for kernel-panic / power-loss durability. Suitable
+  defaults will depend on measured append rates.
+- **Lockfile-based single-writer enforcement**: replace the
+  documented invariant with an OS file lock (`fcntl(F_SETLK)` /
+  `LockFileEx`) so a second process opening the same path errors
+  out instead of silently interleaving large appends.
+- **Log compaction**: snapshot the in-memory ledger to a sibling
+  file and truncate the JSONL once it exceeds a size threshold,
+  bounding replay time on long-running processes.
