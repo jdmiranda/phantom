@@ -1,0 +1,312 @@
+{
+  "root": "/Users/jeremymiranda/Documents/GitHub/phantom",
+  "total_files": 312,
+  "total_words": 506305,
+  "code_files": 283,
+  "nodes": 7477,
+  "edges": 23048,
+  "communities": 107,
+  "test_nodes": 3536,
+  "cross_crate_edges": 398,
+  "crate_dependencies": {
+    "phantom": [
+      "phantom-app",
+      "phantom-protocol",
+      "phantom-renderer",
+      "phantom-terminal",
+      "phantom-ui",
+      "phantom-brain",
+      "phantom-context",
+      "phantom-memory",
+      "phantom-history",
+      "phantom-agents",
+      "phantom-semantic",
+      "phantom-nlp"
+    ],
+    "phantom-ui": [
+      "phantom-renderer",
+      "phantom-adapter"
+    ],
+    "phantom-app": [
+      "phantom-renderer",
+      "phantom-terminal",
+      "phantom-ui",
+      "phantom-protocol",
+      "phantom-brain",
+      "phantom-semantic",
+      "phantom-context",
+      "phantom-memory",
+      "phantom-nlp",
+      "phantom-session",
+      "phantom-agents",
+      "phantom-history",
+      "phantom-scene",
+      "phantom-mcp",
+      "phantom-adapter",
+      "phantom-plugins",
+      "phantom-vision",
+      "phantom-bundles",
+      "phantom-bundle-store",
+      "phantom-embeddings",
+      "phantom-stt",
+      "phantom-dag",
+      "phantom-ui",
+      "phantom-bundle-store",
+      "phantom-stt",
+      "phantom-nlp",
+      "phantom-context"
+    ],
+    "phantom-supervisor": [
+      "phantom-protocol"
+    ],
+    "phantom-history": [
+      "phantom-semantic"
+    ],
+    "phantom-agents": [
+      "phantom-semantic",
+      "phantom-protocol",
+      "phantom-memory"
+    ],
+    "phantom-session": [
+      "phantom-agents",
+      "phantom-context"
+    ],
+    "phantom-nlp": [
+      "phantom-context"
+    ],
+    "phantom-brain": [
+      "phantom-semantic",
+      "phantom-agents",
+      "phantom-adapter",
+      "phantom-context",
+      "phantom-memory",
+      "phantom-history"
+    ],
+    "phantom-adapter": [
+      "phantom-protocol"
+    ],
+    "phantom-recall": [
+      "phantom-bundles"
+    ],
+    "phantom-bundle-store": [
+      "phantom-bundles",
+      "phantom-embeddings",
+      "phantom-bundle-store",
+      "phantom-vision"
+    ]
+  },
+  "scoped_duplicate_ids_fixed": {
+    "lib": [
+      "crates/phantom-semantic/src/lib.rs",
+      "crates/phantom-audio/src/lib.rs",
+      "crates/phantom-voice/src/lib.rs",
+      "crates/phantom-adapter/src/lib.rs",
+      "crates/phantom-vision/src/lib.rs",
+      "crates/phantom-app/src/lib.rs",
+      "crates/phantom-agents/src/lib.rs",
+      "crates/phantom-net/src/lib.rs",
+      "crates/phantom-brain/src/lib.rs",
+      "crates/phantom-plugins/src/lib.rs",
+      "crates/phantom-relay/src/lib.rs",
+      "crates/phantom-scene/src/lib.rs",
+      "crates/phantom-ui/src/lib.rs",
+      "crates/phantom-bundle-store/src/lib.rs",
+      "crates/phantom-mcp/src/lib.rs",
+      "crates/phantom-memory/src/lib.rs",
+      "crates/phantom-context/src/lib.rs",
+      "crates/phantom-dag/src/lib.rs",
+      "crates/phantom-bundles/src/lib.rs",
+      "crates/phantom-session/src/lib.rs",
+      "crates/phantom-nlp/src/lib.rs",
+      "crates/phantom-renderer/src/lib.rs",
+      "crates/phantom-protocol/src/lib.rs",
+      "crates/phantom-stt/src/lib.rs",
+      "crates/phantom-terminal/src/lib.rs",
+      "crates/phantom-history/src/lib.rs",
+      "crates/phantom-embeddings/src/lib.rs",
+      "crates/phantom-recall/src/lib.rs"
+    ],
+    "lib_stream": [
+      "crates/phantom-audio/src/lib.rs",
+      "crates/phantom-stt/src/lib.rs"
+    ],
+    "lib_mockstream": [
+      "crates/phantom-audio/src/lib.rs",
+      "crates/phantom-stt/src/lib.rs"
+    ],
+    "lib_assert_stream_is_send": [
+      "crates/phantom-audio/src/lib.rs",
+      "crates/phantom-voice/src/lib.rs",
+      "crates/phantom-stt/src/lib.rs"
+    ],
+    "lib_assert_backend_is_send_sync": [
+      "crates/phantom-audio/src/lib.rs",
+      "crates/phantom-stt/src/lib.rs"
+    ],
+    "openai": [
+      "crates/phantom-voice/src/openai.rs",
+      "crates/phantom-stt/src/openai.rs",
+      "crates/phantom-embeddings/src/openai.rs"
+    ],
+    "openai_from_env_returns_not_configured_when_missing": [
+      "crates/phantom-voice/src/openai.rs",
+      "crates/phantom-stt/src/openai.rs",
+      "crates/phantom-embeddings/src/openai.rs"
+    ],
+    "openai_from_env_succeeds_with_key": [
+      "crates/phantom-voice/src/openai.rs",
+      "crates/phantom-stt/src/openai.rs",
+      "crates/phantom-embeddings/src/openai.rs"
+    ],
+    "registry": [
+      "crates/phantom-adapter/src/registry.rs",
+      "crates/phantom-plugins/src/registry.rs",
+      "crates/phantom-mcp/src/registry.rs"
+    ],
+    "protocol": [
+      "crates/phantom-adapter/src/protocol.rs",
+      "crates/phantom-mcp/src/protocol.rs"
+    ],
+    "lifecycle": [
+      "crates/phantom-adapter/src/lifecycle.rs",
+      "crates/phantom-agents/src/lifecycle.rs"
+    ],
+    "main": [
+      "crates/phantom-supervisor/src/main.rs",
+      "crates/phantom-relay/src/main.rs",
+      "crates/phantom/src/main.rs"
+    ],
+    "main_install_signal_handlers": [
+      "crates/phantom-supervisor/src/main.rs",
+      "crates/phantom/src/main.rs"
+    ],
+    "main_main": [
+      "crates/phantom-supervisor/src/main.rs",
+      "crates/phantom-relay/src/main.rs",
+      "crates/phantom/src/main.rs"
+    ],
+    "inspector": [
+      "crates/phantom-app/src/inspector.rs",
+      "crates/phantom-app/src/adapters/inspector.rs",
+      "crates/phantom-agents/src/inspector.rs"
+    ],
+    "session": [
+      "crates/phantom-app/src/session.rs",
+      "crates/phantom-relay/src/session.rs",
+      "crates/phantom-bundles/src/session.rs",
+      "crates/phantom-session/src/session.rs"
+    ],
+    "render": [
+      "crates/phantom-app/src/render.rs",
+      "crates/phantom-agents/src/render.rs"
+    ],
+    "video": [
+      "crates/phantom-app/src/video.rs",
+      "crates/phantom-app/src/adapters/video.rs",
+      "crates/phantom-renderer/src/video.rs"
+    ],
+    "input": [
+      "crates/phantom-app/src/input.rs",
+      "crates/phantom-terminal/src/input.rs"
+    ],
+    "notifications": [
+      "crates/phantom-app/src/notifications.rs",
+      "crates/phantom-memory/src/notifications.rs"
+    ],
+    "capture": [
+      "crates/phantom-app/src/capture.rs",
+      "crates/phantom-app/src/agent_pane/capture.rs"
+    ],
+    "events": [
+      "crates/phantom-app/src/agent_pane/events.rs",
+      "crates/phantom-brain/src/events.rs",
+      "crates/phantom-bundles/src/events.rs",
+      "crates/phantom-protocol/src/events.rs"
+    ],
+    "journal": [
+      "crates/phantom-app/src/agent_pane/journal.rs",
+      "crates/phantom-memory/src/journal.rs"
+    ],
+    "mod": [
+      "crates/phantom-app/src/agent_pane/mod.rs",
+      "crates/phantom-app/src/adapters/mod.rs",
+      "crates/phantom-agents/src/dispatch/mod.rs",
+      "crates/phantom-ui/src/widgets/mod.rs"
+    ],
+    "tests": [
+      "crates/phantom-app/src/agent_pane/tests.rs",
+      "crates/phantom-agents/src/dispatch/tests.rs",
+      "crates/phantom-net/src/tests.rs"
+    ],
+    "inspector_agent_ref": [
+      "crates/phantom-app/src/adapters/inspector.rs",
+      "crates/phantom-agents/src/inspector.rs"
+    ],
+    "terminal": [
+      "crates/phantom-app/src/adapters/terminal.rs",
+      "crates/phantom-terminal/src/terminal.rs"
+    ],
+    "agent": [
+      "crates/phantom-app/src/adapters/agent.rs",
+      "crates/phantom-agents/src/agent.rs"
+    ],
+    "router": [
+      "crates/phantom-agents/src/router.rs",
+      "crates/phantom-brain/src/router.rs",
+      "crates/phantom-relay/src/router.rs"
+    ],
+    "context": [
+      "crates/phantom-agents/src/dispatch/context.rs",
+      "crates/phantom-context/src/context.rs"
+    ],
+    "client": [
+      "crates/phantom-net/src/client.rs",
+      "crates/phantom-mcp/src/client.rs"
+    ],
+    "envelope": [
+      "crates/phantom-net/src/envelope.rs",
+      "crates/phantom-relay/src/envelope.rs"
+    ],
+    "envelope_envelope": [
+      "crates/phantom-net/src/envelope.rs",
+      "crates/phantom-relay/src/envelope.rs"
+    ],
+    "server": [
+      "crates/phantom-relay/src/server.rs",
+      "crates/phantom-mcp/src/server.rs"
+    ],
+    "clock": [
+      "crates/phantom-scene/src/clock.rs",
+      "crates/phantom-memory/src/clock.rs"
+    ],
+    "node": [
+      "crates/phantom-scene/src/node.rs",
+      "crates/phantom-dag/src/node.rs"
+    ],
+    "node_nodekind": [
+      "crates/phantom-scene/src/node.rs",
+      "crates/phantom-dag/src/node.rs"
+    ],
+    "recovery": [
+      "crates/phantom-bundle-store/tests/recovery.rs",
+      "crates/phantom-bundle-store/src/recovery.rs"
+    ],
+    "recovery_embedding": [
+      "crates/phantom-bundle-store/tests/recovery.rs",
+      "crates/phantom-bundle-store/src/recovery.rs"
+    ],
+    "lib_embedding": [
+      "crates/phantom-bundle-store/src/lib.rs",
+      "crates/phantom-embeddings/src/lib.rs"
+    ],
+    "store": [
+      "crates/phantom-memory/src/store.rs",
+      "crates/phantom-history/src/store.rs",
+      "crates/phantom-embeddings/src/store.rs"
+    ],
+    "lib_modality": [
+      "crates/phantom-embeddings/src/lib.rs",
+      "crates/phantom-recall/src/lib.rs"
+    ]
+  }
+}
