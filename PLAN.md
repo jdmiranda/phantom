@@ -1,57 +1,78 @@
-# PLAN
+# PLAN: Implementation Sequence
 
-## Step 1 — Scaffold the module
+## Phase 1 — Type plumbing
 
-Create `crates/phantom-app/src/worktrees.rs` and declare it as `pub mod worktrees;` from `crates/phantom-app/src/lib.rs`. No other workspace edits.
+1. Add `Serialize` + `Deserialize` derives to `StepFailureCause`,
+   `QuarantinePolicy`, and `PlanStep` (and any transitive types they
+   compose, like `AgentTask`, which already derives both).
+2. Verify `StepStatus` already derives `Serialize` / `Deserialize`; if
+   not, add them. (Inspection: it currently derives only `Debug, Clone,
+   Copy, PartialEq, Eq` — add serde derives.)
 
-## Step 2 — Define types
+## Phase 2 — Module: ledger_log
 
-- `WorktreeHandle` (branch, path, base_ref).
-- `WorktreeInfo` (branch, path, head, is_bare, is_detached).
-- `WorktreeError` enum with `Display` + `std::error::Error` impls and a `From<io::Error>`.
+Add a new file `crates/phantom-brain/src/orchestrator/ledger_log.rs`
+(or, to keep the diff small, inline the new types at the bottom of
+`orchestrator.rs`). Inline keeps diff under 800 lines; pick inline.
 
-## Step 3 — Branch sanitization
+The module contains:
 
-Internal `fn sanitize_branch(branch: &str) -> Result<String, WorktreeError>`:
-1. Trim and validate emptiness.
-2. Reject `..` components, leading `-`, NUL, and out-of-charset characters.
-3. Replace `/` with `-` for the on-disk component.
+- `LedgerError` enum wrapping `io::Error` and `serde_json::Error`.
+- `LedgerConfig { path: PathBuf }` with a helper `LedgerConfig::default_for_repo(&Path) -> Self` that resolves `<repo>/.phantom/ledger.jsonl`.
+- `LedgerEvent` enum (variants per SPEC).
+- A private `LedgerWriter` struct holding an open `BufWriter<File>` for the JSONL stream. The writer flushes after every line.
 
-## Step 4 — Git wrappers
+## Phase 3 — Wire into TaskLedger
 
-Internal `fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, WorktreeError>`:
-- Spawn `git -C <repo_root> <args...>` via `std::process::Command`.
-- On non-zero exit, return `GitCommandFailed { command, status, stderr }`.
-- On success, return stdout as a `String`.
+1. Add an `Option<LedgerWriter>` field on `TaskLedger`.
+2. Add `bind_persistence(&mut self, cfg) -> Result<(), LedgerError>`
+   that opens the file in append+create mode, parent-dir-creates as
+   needed, and stores the writer.
+3. Add `append_event(&mut self, ev) -> Result<(), LedgerError>` that
+   serializes one line and flushes. No-op when no writer is bound.
+4. Hook into mutators:
+   - `set_plan` -> `PlanInitialized { steps }` event.
+   - `try_dispatch` success path -> `StepDispatched { idx }`.
+   - `record_quarantine_failure` -> `Quarantined { idx, agent_id, since_ms, policy }`.
+   - `approve_checkpoint` success path -> `Approved { idx }`.
+   - Add new `record_step_success(idx, summary)` and `record_step_failure(idx, summary)` methods that delegate to `PlanStep::record_*` and append `StepCompleted` / `StepFailed` events.
+5. Add `replay_from(path) -> Result<TaskLedger, LedgerError>` that:
+   - Reads the file line-by-line via `BufReader`.
+   - Parses each line as `LedgerEvent`; on error logs a warn and
+     continues.
+   - Dispatches each event to a private `apply_event(&mut self, ev)`
+     that mutates the ledger without re-appending.
+   - Returns the reconstructed ledger with `writer = None` so the
+     caller decides whether to rebind for continued writes.
 
-## Step 5 — Public functions
+## Phase 4 — Tests (inline in orchestrator.rs `mod tests`)
 
-- `create_worktree`: sanitize, ensure `.phantom/worktrees/` exists, run `git worktree add -b <branch> <path> <base_ref>`.
-- `list_worktrees`: run `git worktree list --porcelain`, parse blank-line-delimited records, map each to `WorktreeInfo`.
-- `remove_worktree`: run `git worktree remove [--force] <path>`.
+1. `ledger_persist_roundtrip` — write a plan, dispatch, complete; tear
+   down; replay; assert plan state equality.
+2. `ledger_persist_corrupt_line_tolerated` — write a valid event, then
+   garbage, then another valid event; replay; assert both valid
+   events were applied and no panic.
+3. `ledger_persist_empty_file` — replay from a path that does not
+   exist; assert an empty default ledger comes back.
+4. `ledger_persist_quarantine_cascade_replayed` — exercise the
+   `Quarantined { policy: FailAndCascade }` path and replay, asserting
+   downstream steps are skipped after replay.
 
-## Step 6 — Tests
+## Phase 5 — Build & verify
 
-`#[cfg(test)] mod tests` at the bottom of `worktrees.rs`. A `setup_repo()` helper creates a tempdir, runs `git init`, `git config user.email/name`, writes a file, and commits so HEAD exists. A `has_git()` guard returns false when `git --version` cannot run; every test starts with `if !has_git() { return; }`.
+- `cargo build -p phantom-brain`
+- `cargo test -p phantom-brain`
 
-Tests:
-- `creates_worktree_at_dot_phantom_path`
-- `lists_created_worktree`
-- `removes_worktree_cleans_up`
-- `sanitization_rejects_bad_names`
-- `bad_base_ref_returns_git_command_failed`
+## Phase 6 — PR
 
-## Step 7 — Verification
+- Commit on the preconfigured branch.
+- `gh pr create --draft --title "feat(phantom-brain): persist TaskLedger as JSONL event log for crash survivability"` with the HEREDOC body.
 
-- `cargo build -p phantom-app`
-- `cargo test -p phantom-app worktrees`
+## Non-goals checked off the list
 
-## Step 8 — PR
-
-Open a draft PR titled `feat(phantom-app): first-class worktree primitive API` with a 3-bullet Summary and a Test plan checklist.
-
-## Risks and mitigations
-
-- **Tests flake on machines without git**: each test guards on `has_git()` and returns early.
-- **macOS tempdir under `/var` vs `/private/var` symlink mismatch**: tests canonicalize paths before comparing.
-- **`git worktree list --porcelain` format drift**: parser handles unknown lines by ignoring them rather than failing.
+- No `tokio` async path — the existing ledger is sync-only and the
+  reconciler calls it from a sync context.
+- No `tracing` dep — `log` is already in the workspace and the rest
+  of `phantom-brain` uses it.
+- No new dep edges; `serde_json` + `serde` + `log` are already in the
+  crate's `Cargo.toml`.
