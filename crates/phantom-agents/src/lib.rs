@@ -44,6 +44,7 @@ pub mod semantic_context;
 pub mod skill_registry;
 pub mod spawn_rules;
 pub mod speech;
+pub mod subagent_emit;
 pub mod suggest;
 pub mod supervisor;
 pub mod system_prompt;
