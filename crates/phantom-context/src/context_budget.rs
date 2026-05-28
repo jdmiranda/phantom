@@ -82,6 +82,21 @@ pub trait BudgetedItem {
     fn identifier(&self) -> &str;
 }
 
+/// Blanket impl so callers can pass borrowed slices to [`ContextBudget::select`]
+/// without giving up ownership of their items.
+impl<T: BudgetedItem> BudgetedItem for &T {
+    type Recency = T::Recency;
+    fn recency_key(&self) -> Self::Recency {
+        (*self).recency_key()
+    }
+    fn payload(&self) -> &str {
+        (*self).payload()
+    }
+    fn identifier(&self) -> &str {
+        (*self).identifier()
+    }
+}
+
 /// The result of running [`ContextBudget::select`] over one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedItem {
@@ -131,10 +146,13 @@ impl ContextBudget {
             let raw = it.payload();
             let raw_cost = counter.count(raw);
 
+            // On the truncation path the stored cost MUST reflect the
+            // truncated payload, not the original. Re-count after truncation
+            // so SelectedItem::token_cost stays consistent with payload.
             let (payload, cost) = if raw_cost > self.per_item_token_cap {
                 let truncated = truncate_to_tokens(raw, self.per_item_token_cap);
-                let cost = counter.count(&truncated);
-                (truncated, cost)
+                let truncated_cost = counter.count(&truncated);
+                (truncated, truncated_cost)
             } else {
                 (raw.to_string(), raw_cost)
             };
@@ -286,6 +304,76 @@ mod tests {
         assert_eq!(out[2].identifier, "a");
         assert_eq!(out[2].payload, "one two three");
         assert_eq!(out[2].token_cost, 3);
+    }
+
+    #[test]
+    fn borrowed_items_via_blanket_impl() {
+        let budget = ContextBudget {
+            max_items: 5,
+            per_item_token_cap: 100,
+            total_token_cap: 1_000,
+        };
+        let items = vec![
+            TestItem::new("a", 1, "alpha"),
+            TestItem::new("b", 2, "beta gamma"),
+        ];
+        // Pass borrowed references through the &T blanket impl.
+        let borrowed: Vec<&TestItem> = items.iter().collect();
+        let out = budget.select(borrowed, &WordCounter);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].identifier, "b");
+        assert_eq!(out[1].identifier, "a");
+        // Original items remain owned by caller.
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn max_items_zero_returns_empty() {
+        let budget = ContextBudget {
+            max_items: 0,
+            per_item_token_cap: 100,
+            total_token_cap: 1_000,
+        };
+        let items = vec![
+            TestItem::new("a", 1, "one two"),
+            TestItem::new("b", 2, "three four"),
+        ];
+        let out = budget.select(items, &WordCounter);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn total_cap_zero_returns_empty() {
+        let budget = ContextBudget {
+            max_items: 10,
+            per_item_token_cap: 100,
+            total_token_cap: 0,
+        };
+        let items = vec![
+            TestItem::new("a", 1, "one two"),
+            TestItem::new("b", 2, "three"),
+        ];
+        let out = budget.select(items, &WordCounter);
+        // A single-token item would push running from 0 to 1, exceeding 0.
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn single_item_exceeds_per_item_cap_is_truncated_not_dropped() {
+        // One item with 20 tokens, per_item_cap = 5, total_cap = 100.
+        // It must appear in the output, truncated to 5 tokens, with the
+        // token_cost reflecting the truncated payload.
+        let budget = ContextBudget {
+            max_items: 5,
+            per_item_token_cap: 5,
+            total_token_cap: 100,
+        };
+        let item = TestItem::new("only", 1, &body_of(20));
+        let out = budget.select(vec![item], &WordCounter);
+        assert_eq!(out.len(), 1, "truncated item must survive, not be dropped");
+        assert_eq!(out[0].identifier, "only");
+        assert_eq!(out[0].token_cost, 5);
+        assert_eq!(out[0].payload, "w0 w1 w2 w3 w4");
     }
 
     #[test]
