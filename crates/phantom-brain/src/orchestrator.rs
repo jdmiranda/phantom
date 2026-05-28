@@ -17,8 +17,14 @@
 //! | Progress ledger        | `ProgressAssessment` (5-question eval) |
 
 use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
+use phantom_agents::AgentStatus;
 use phantom_agents::AgentTask;
 use phantom_agents::dispatch::Disposition;
 
@@ -59,7 +65,7 @@ pub struct Fact {
 // ---------------------------------------------------------------------------
 
 /// Status of a single step in a plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepStatus {
     /// Not yet started.
     Pending,
@@ -111,7 +117,7 @@ pub enum StepStatus {
 ///   `complete_task` even though the spawn opted into the explicit
 ///   termination contract. Not emitted by this crate today; downstream
 ///   consumers may pattern-match on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepFailureCause {
     /// The agent reported failure through the normal completion path.
     AgentFailed,
@@ -155,7 +161,7 @@ pub enum StepFailureCause {
 /// should cascade-fail downstream).
 ///
 /// The default policy is [`QuarantinePolicy::FailAndAllowRetry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum QuarantinePolicy {
     /// Mark the step `Failed`, set its `failure_cause` to
     /// [`StepFailureCause::AgentQuarantined`], and clear its `agent_id` so
@@ -201,7 +207,7 @@ pub enum QuarantinePolicy {
 /// When `preferred_provider` is `Some(id)`, the dispatch layer should look up
 /// `id` in the `ProviderCatalog` and route the `AgentTask` to that backend.
 /// If the ID is unknown the catalog falls back to `"claude-default"`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStep {
     /// Human-readable description of what this step accomplishes.
     pub description: String,
@@ -487,6 +493,24 @@ pub struct TaskLedger {
     pub last_replan_at: Option<Instant>,
     /// Recent agent outputs for loop detection (circular buffer).
     recent_outputs: VecDeque<String>,
+    /// Optional on-disk JSONL event log writer.
+    ///
+    /// Bound via [`TaskLedger::bind_persistence`]. When `Some`, every
+    /// state-changing mutator appends a [`LedgerEvent`] line before
+    /// returning. When `None` (the default), the ledger runs entirely
+    /// in-memory exactly as before.
+    writer: Option<LedgerWriter>,
+    /// The most recent persistence failure observed while appending to
+    /// the on-disk event log, if any.
+    ///
+    /// Mutators internally call [`TaskLedger::append_event`] and stash
+    /// any [`LedgerError`] here rather than mutating their existing
+    /// return types. Callers that care about durability drain this
+    /// field via [`TaskLedger::take_last_persistence_error`] on every
+    /// reconciler tick. Append failures are also logged at
+    /// `log::error!` level so they show up in operator logs even when
+    /// the caller forgets to poll.
+    last_persistence_error: Option<LedgerError>,
 }
 
 impl TaskLedger {
@@ -505,6 +529,8 @@ impl TaskLedger {
             created_at: Instant::now(),
             last_replan_at: None,
             recent_outputs: VecDeque::with_capacity(10),
+            writer: None,
+            last_persistence_error: None,
         }
     }
 
@@ -577,6 +603,9 @@ impl TaskLedger {
                 step.result_summary = Some("blocked: dependency cycle detected in plan".into());
             }
         }
+
+        let snapshot = self.plan.clone();
+        self.append_event_internal(LedgerEvent::PlanInitialized { steps: snapshot });
     }
 
     /// Returns `None` when the step at `idx` has every entry in its
@@ -665,7 +694,11 @@ impl TaskLedger {
             .get_mut(idx)
             .expect("plan idx validated above");
         step.status = StepStatus::Active;
-        Ok(&*step)
+        // Persist the transition before returning the borrow so a
+        // disk-full / EIO event surfaces on this tick (drained via
+        // `take_last_persistence_error`).
+        self.append_event_internal(LedgerEvent::StepDispatched { idx });
+        Ok(&self.plan[idx])
     }
 
     /// Returns all `Pending` steps whose dependency constraints are satisfied.
@@ -739,6 +772,7 @@ impl TaskLedger {
             )),
             Some(step) => {
                 step.status = StepStatus::Pending;
+                self.append_event_internal(LedgerEvent::Approved { step_idx });
                 Ok(())
             }
         }
@@ -819,6 +853,13 @@ impl TaskLedger {
         if matches!(policy, QuarantinePolicy::FailAndCascade) {
             self.cascade_skip_dependents(idx);
         }
+
+        self.append_event_internal(LedgerEvent::Quarantined {
+            idx,
+            agent_id,
+            since_ms,
+            policy,
+        });
 
         Ok(&self.plan[idx])
     }
@@ -1297,6 +1338,382 @@ impl TaskLedger {
 
         ctx
     }
+
+    // -- On-disk persistence (JSONL event log) -----------------------------
+
+    /// Bind this ledger to a JSONL event log on disk.
+    ///
+    /// After binding, every state-changing mutator appends a
+    /// [`LedgerEvent`] line to `cfg.path` before returning. The file is
+    /// opened in append+create mode; the parent directory is created if
+    /// missing. Binding is idempotent in the sense that calling it twice
+    /// replaces the previous writer with a fresh one against the same or
+    /// a different path.
+    ///
+    /// Concurrent writers against the same path are out of scope for
+    /// v1 — see `SPEC.md` for the documented single-writer invariant.
+    pub fn bind_persistence(&mut self, cfg: LedgerConfig) -> Result<(), LedgerError> {
+        if let Some(parent) = cfg.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cfg.path)?;
+        self.writer = Some(LedgerWriter {
+            path: cfg.path,
+            inner: BufWriter::new(file),
+        });
+        Ok(())
+    }
+
+    /// Append a single [`LedgerEvent`] to the bound on-disk log and
+    /// flush. No-op when no writer is bound.
+    ///
+    /// Returns `Ok(())` on success or when no writer is bound. Returns
+    /// [`LedgerError`] when serialization or the underlying write
+    /// fails. Callers that want to surface persistence failures from
+    /// the existing infallible mutators should drain
+    /// [`TaskLedger::take_last_persistence_error`] each tick.
+    pub fn append_event(&mut self, ev: LedgerEvent) -> Result<(), LedgerError> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        let line = serde_json::to_string(&ev)?;
+        writer.inner.write_all(line.as_bytes())?;
+        writer.inner.write_all(b"\n")?;
+        writer.inner.flush()?;
+        Ok(())
+    }
+
+    /// Drain and return the most recent persistence error stashed by
+    /// an internal mutator.
+    ///
+    /// Returns `None` when no error has occurred since the last drain.
+    /// Callers (the reconciler, today) drain this on every tick so a
+    /// disk-full or EIO event surfaces promptly even though the
+    /// existing mutator signatures stay source-compatible.
+    pub fn take_last_persistence_error(&mut self) -> Option<LedgerError> {
+        self.last_persistence_error.take()
+    }
+
+    /// Internal helper: try to append an event and stash any error in
+    /// `last_persistence_error` instead of bubbling it through the
+    /// mutator's existing return type. Always logs the error at
+    /// `error!` level so operators see it even when callers forget to
+    /// poll.
+    fn append_event_internal(&mut self, ev: LedgerEvent) {
+        if let Err(err) = self.append_event(ev) {
+            log::error!("TaskLedger: persistence append failed: {err}");
+            self.last_persistence_error = Some(err);
+        }
+    }
+
+    /// Reconstruct a [`TaskLedger`] by replaying a JSONL event log.
+    ///
+    /// The returned ledger has its `writer` field set to `None` so the
+    /// caller decides whether to re-bind for continued persistence via
+    /// [`TaskLedger::bind_persistence`].
+    ///
+    /// A missing file (or an empty file) yields a default ledger with
+    /// `goal = ""` and an empty plan. Corrupt lines are skipped with a
+    /// `log::warn!` entry; the replay never panics on a malformed
+    /// payload.
+    pub fn replay_from(path: &Path) -> Result<TaskLedger, LedgerError> {
+        let mut ledger = TaskLedger::new("");
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(ledger),
+            Err(err) => return Err(err.into()),
+        };
+        let reader = BufReader::new(file);
+        for (line_no, line) in reader.lines().enumerate() {
+            let line = match line {
+                Ok(l) => l,
+                Err(err) => {
+                    log::warn!(
+                        "TaskLedger::replay_from: line {n} read error: {err}",
+                        n = line_no + 1
+                    );
+                    continue;
+                }
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<LedgerEvent>(&line) {
+                Ok(ev) => ledger.apply_event(ev),
+                Err(err) => {
+                    log::warn!(
+                        "TaskLedger::replay_from: skipping corrupt line {n}: {err}",
+                        n = line_no + 1
+                    );
+                }
+            }
+        }
+        Ok(ledger)
+    }
+
+    /// Apply a single [`LedgerEvent`] to in-memory state during replay.
+    ///
+    /// Pure in-memory mutator: never appends to disk and never calls
+    /// `append_event_internal`. Out-of-bounds indices on
+    /// `StepDispatched` / `StepCompleted` / `StepFailed` /
+    /// `Quarantined` / `Approved` log a warning and skip, so a
+    /// corrupt log cannot panic the replay.
+    fn apply_event(&mut self, ev: LedgerEvent) {
+        match ev {
+            LedgerEvent::PlanInitialized { steps } => {
+                self.plan = steps;
+                self.stall_counter = 0;
+            }
+            LedgerEvent::StepDispatched { idx } => {
+                if let Some(step) = self.plan.get_mut(idx) {
+                    step.status = StepStatus::Active;
+                } else {
+                    log::warn!("ledger replay: StepDispatched idx {idx} out of bounds");
+                }
+            }
+            LedgerEvent::StepCompleted { idx, summary } => {
+                if let Some(step) = self.plan.get_mut(idx) {
+                    step.record_success(summary);
+                } else {
+                    log::warn!("ledger replay: StepCompleted idx {idx} out of bounds");
+                }
+            }
+            LedgerEvent::StepFailed {
+                idx,
+                summary,
+                cause,
+            } => {
+                if let Some(step) = self.plan.get_mut(idx) {
+                    step.record_failure(summary);
+                    step.failure_cause = Some(cause);
+                } else {
+                    log::warn!("ledger replay: StepFailed idx {idx} out of bounds");
+                }
+            }
+            LedgerEvent::Quarantined {
+                idx,
+                agent_id,
+                since_ms,
+                policy,
+            } => {
+                let len = self.plan.len();
+                if idx >= len {
+                    log::warn!("ledger replay: Quarantined idx {idx} out of bounds");
+                    return;
+                }
+                self.plan[idx].quarantine_policy = policy;
+                // Replay through the canonical mutator so cascade
+                // semantics match a fresh run exactly.
+                if let Err(err) = self.record_quarantine_failure(idx, agent_id, since_ms) {
+                    log::warn!("ledger replay: record_quarantine_failure failed: {err:?}");
+                }
+            }
+            LedgerEvent::Approved { step_idx } => {
+                if let Some(step) = self.plan.get_mut(step_idx) {
+                    if step.status == StepStatus::NeedsApproval {
+                        step.status = StepStatus::Pending;
+                    }
+                } else {
+                    log::warn!("ledger replay: Approved step_idx {step_idx} out of bounds");
+                }
+            }
+            LedgerEvent::AgentStatusChanged { .. } => {
+                // AgentStatus lives on AgentPane (phantom-app), not on
+                // the ledger; the variant exists so reconciler-side
+                // observers can mirror the FSM transitions into the
+                // log. Replay is a no-op against ledger state.
+            }
+        }
+    }
+
+    /// Record a successful completion of `idx` and persist the
+    /// transition.
+    ///
+    /// Delegates to [`PlanStep::record_success`] and appends a
+    /// [`LedgerEvent::StepCompleted`] entry. Persistence failures are
+    /// surfaced via [`TaskLedger::take_last_persistence_error`].
+    pub fn record_step_success(&mut self, idx: usize, summary: impl Into<String>) {
+        let summary = summary.into();
+        if let Some(step) = self.plan.get_mut(idx) {
+            step.record_success(summary.clone());
+            self.append_event_internal(LedgerEvent::StepCompleted { idx, summary });
+        } else {
+            log::warn!("TaskLedger::record_step_success: idx {idx} out of bounds");
+        }
+    }
+
+    /// Record a failure on `idx` and persist the transition.
+    ///
+    /// Delegates to [`PlanStep::record_failure`], which sets the cause
+    /// to [`StepFailureCause::AgentFailed`], and appends a
+    /// [`LedgerEvent::StepFailed`] entry. Persistence failures are
+    /// surfaced via [`TaskLedger::take_last_persistence_error`].
+    pub fn record_step_failure(&mut self, idx: usize, summary: impl Into<String>) {
+        let summary = summary.into();
+        if let Some(step) = self.plan.get_mut(idx) {
+            step.record_failure(summary.clone());
+            let cause = step
+                .failure_cause
+                .clone()
+                .unwrap_or(StepFailureCause::AgentFailed);
+            self.append_event_internal(LedgerEvent::StepFailed {
+                idx,
+                summary,
+                cause,
+            });
+        } else {
+            log::warn!("TaskLedger::record_step_failure: idx {idx} out of bounds");
+        }
+    }
+
+    /// Record a typed [`AgentStatus`] transition for an agent assigned
+    /// to one of this ledger's steps, persisting the change.
+    ///
+    /// This mutator does not touch ledger state (agent FSM lives on
+    /// [`phantom_agents::AgentPane`]); it exists so the reconciler can
+    /// log the transition into the same JSONL stream as the
+    /// dispatch / completion events.
+    pub fn record_agent_status_change(
+        &mut self,
+        agent_id: u64,
+        from: AgentStatus,
+        to: AgentStatus,
+    ) {
+        self.append_event_internal(LedgerEvent::AgentStatusChanged {
+            agent_id,
+            from,
+            to,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ledger persistence types
+// ---------------------------------------------------------------------------
+
+/// Configuration for the on-disk JSONL event log.
+#[derive(Debug, Clone)]
+pub struct LedgerConfig {
+    /// Absolute path to the JSONL event log file.
+    pub path: PathBuf,
+}
+
+impl LedgerConfig {
+    /// Construct a config pointing at `path`.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Convenience: `<repo>/.phantom/ledger.jsonl`.
+    #[must_use]
+    pub fn default_for_repo(repo: &Path) -> Self {
+        Self {
+            path: repo.join(".phantom").join("ledger.jsonl"),
+        }
+    }
+}
+
+/// Persistence failure raised by [`TaskLedger::append_event`] /
+/// [`TaskLedger::bind_persistence`] / [`TaskLedger::replay_from`].
+#[derive(Debug)]
+pub enum LedgerError {
+    /// Underlying filesystem I/O failure (disk full, EIO, permission denied, etc.).
+    Io(io::Error),
+    /// Serde JSON serialization or deserialization failure.
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for LedgerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LedgerError::Io(err) => write!(f, "ledger io error: {err}"),
+            LedgerError::Json(err) => write!(f, "ledger json error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for LedgerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LedgerError::Io(err) => Some(err),
+            LedgerError::Json(err) => Some(err),
+        }
+    }
+}
+
+impl From<io::Error> for LedgerError {
+    fn from(err: io::Error) -> Self {
+        LedgerError::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for LedgerError {
+    fn from(err: serde_json::Error) -> Self {
+        LedgerError::Json(err)
+    }
+}
+
+/// A single durable transition appended to the JSONL event log.
+///
+/// Each variant corresponds to one observable mutation on a
+/// [`TaskLedger`]. The schema is append-only — adding a new variant is
+/// a forward-compatible change because `replay_from` skips any line
+/// `serde_json` cannot parse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LedgerEvent {
+    /// A new plan was loaded via [`TaskLedger::set_plan`]. Carries the
+    /// full plan snapshot so a fresh replay can reconstruct the
+    /// `Vec<PlanStep>` topology before any subsequent step events are
+    /// applied.
+    PlanInitialized { steps: Vec<PlanStep> },
+    /// Step `idx` transitioned from `Pending` to `Active` via the
+    /// guarded mutator [`TaskLedger::try_dispatch`].
+    StepDispatched { idx: usize },
+    /// Step `idx` reached `Done` via [`TaskLedger::record_step_success`].
+    StepCompleted { idx: usize, summary: String },
+    /// Step `idx` reached `Failed` (or was re-queued and ultimately
+    /// failed) via [`TaskLedger::record_step_failure`]. The typed
+    /// cause is replayed alongside the summary.
+    StepFailed {
+        idx: usize,
+        summary: String,
+        cause: StepFailureCause,
+    },
+    /// Step `idx`'s assigned agent was found quarantined at
+    /// completion time; the recorded policy was applied via
+    /// [`TaskLedger::record_quarantine_failure`].
+    Quarantined {
+        idx: usize,
+        agent_id: u64,
+        since_ms: u64,
+        policy: QuarantinePolicy,
+    },
+    /// A `NeedsApproval` step at `step_idx` was approved via
+    /// [`TaskLedger::approve_checkpoint`].
+    Approved { step_idx: usize },
+    /// An [`AgentStatus`] transition observed by the reconciler.
+    /// Replay is a no-op against ledger state; the variant exists so
+    /// the on-disk log captures the agent FSM alongside the step FSM
+    /// for forensic replay.
+    AgentStatusChanged {
+        agent_id: u64,
+        from: AgentStatus,
+        to: AgentStatus,
+    },
+}
+
+/// Internal handle to the open JSONL file.
+#[derive(Debug)]
+struct LedgerWriter {
+    #[allow(dead_code)]
+    path: PathBuf,
+    inner: BufWriter<File>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2522,5 +2939,140 @@ mod tests {
         let eligible = ledger.eligible_next();
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].1.description, "compile sources");
+    }
+
+    // -- JSONL persistence (issue: crash survivability) ---------------------
+
+    /// Write a small plan, dispatch and complete a step, tear the ledger
+    /// down, replay from the same file, and assert plan state equality.
+    #[test]
+    fn ledger_roundtrip_state_equality() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+
+        {
+            let mut ledger = TaskLedger::new("roundtrip");
+            ledger
+                .bind_persistence(LedgerConfig::new(path.clone()))
+                .expect("bind_persistence");
+            ledger.set_plan(vec![
+                PlanStep::new("first", free_task("a")),
+                PlanStep::new("second", free_task("b")),
+            ]);
+            ledger.try_dispatch(0).expect("dispatch 0");
+            ledger.record_step_success(0, "ok");
+            assert!(
+                ledger.take_last_persistence_error().is_none(),
+                "no persistence error expected"
+            );
+        }
+
+        let replayed = TaskLedger::replay_from(&path).expect("replay");
+        assert_eq!(replayed.plan.len(), 2, "plan topology must replay");
+        assert_eq!(replayed.plan[0].status, StepStatus::Done);
+        assert_eq!(replayed.plan[0].result_summary.as_deref(), Some("ok"));
+        assert_eq!(replayed.plan[1].status, StepStatus::Pending);
+    }
+
+    /// Corrupt lines between valid events must be skipped, not panic.
+    #[test]
+    fn ledger_replay_skips_corrupt_lines() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+
+        // First write one valid PlanInitialized event via the writer so
+        // serde version skew cannot drift between fixture and code.
+        {
+            let mut ledger = TaskLedger::new("corrupt");
+            ledger
+                .bind_persistence(LedgerConfig::new(path.clone()))
+                .expect("bind");
+            ledger.set_plan(vec![PlanStep::new("only", free_task("x"))]);
+        }
+
+        // Append garbage then a second valid event (StepDispatched for idx 0).
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f, "{{ this is not json").unwrap();
+            writeln!(f, "{}", serde_json::to_string(&LedgerEvent::StepDispatched { idx: 0 }).unwrap()).unwrap();
+        }
+
+        let replayed = TaskLedger::replay_from(&path).expect("replay must not panic");
+        assert_eq!(replayed.plan.len(), 1);
+        assert_eq!(
+            replayed.plan[0].status,
+            StepStatus::Active,
+            "valid event after corrupt line must still be applied"
+        );
+    }
+
+    /// Replaying from a non-existent path yields an empty default ledger.
+    #[test]
+    fn ledger_replay_missing_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.jsonl");
+        let replayed = TaskLedger::replay_from(&path).expect("replay missing is ok");
+        assert!(replayed.plan.is_empty());
+        assert_eq!(replayed.goal, "");
+    }
+
+    /// Replaying an empty file (zero bytes) is treated the same as a
+    /// missing file — empty default ledger.
+    #[test]
+    fn ledger_replay_empty_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        std::fs::File::create(&path).unwrap();
+        let replayed = TaskLedger::replay_from(&path).expect("replay empty");
+        assert!(replayed.plan.is_empty());
+    }
+
+    /// A `FailAndCascade` quarantine event must replay with downstream
+    /// dependents marked `Skipped` exactly the way a live run would.
+    #[test]
+    fn ledger_replay_reconstructs_quarantine_cascade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade.jsonl");
+
+        {
+            let mut ledger = TaskLedger::new("cascade");
+            ledger
+                .bind_persistence(LedgerConfig::new(path.clone()))
+                .expect("bind");
+            let s0 = PlanStep::new("root", free_task("r"))
+                .with_quarantine_policy(QuarantinePolicy::FailAndCascade);
+            let s1 = PlanStep::with_deps("downstream", free_task("d"), vec![0]);
+            ledger.set_plan(vec![s0, s1]);
+            ledger.try_dispatch(0).expect("dispatch 0");
+            // Simulate the agent assigned to step 0 quarantining.
+            ledger.plan[0].agent_id = Some(42);
+            ledger
+                .record_quarantine_failure(0, 42, 1_700_000_000_000)
+                .expect("record quarantine");
+        }
+
+        let replayed = TaskLedger::replay_from(&path).expect("replay");
+        assert_eq!(replayed.plan[0].status, StepStatus::Failed);
+        assert_eq!(
+            replayed.plan[1].status,
+            StepStatus::Skipped,
+            "downstream step must cascade-skip after replay"
+        );
+    }
+
+    /// Persistence is opt-in: a ledger that never binds a writer
+    /// continues to behave exactly like an in-memory-only ledger.
+    #[test]
+    fn ledger_without_persistence_is_pure_memory() {
+        let mut ledger = TaskLedger::new("no-persist");
+        ledger.set_plan(vec![PlanStep::new("only", free_task("x"))]);
+        ledger.try_dispatch(0).expect("dispatch");
+        // No writer bound — append_event is a no-op and no error stashed.
+        assert!(ledger.take_last_persistence_error().is_none());
     }
 }
