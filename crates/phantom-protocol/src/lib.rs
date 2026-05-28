@@ -7,7 +7,7 @@
 
 pub mod events;
 
-pub use events::{AgentId, Event, EventTopic, JobId, SessionId};
+pub use events::{AgentId, Event, EventClass, EventTopic, JobId, SessionId};
 // Note: Don't re-export AppId from here -- phantom-adapter owns that type.
 
 use std::io::Read as _;

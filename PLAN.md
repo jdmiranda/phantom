@@ -1,47 +1,79 @@
-# PLAN: Token-Budgeted Context Injection
+# PLAN.md — Subagent reports-up-only isolation contract
 
-## Steps
+## Step 1: `phantom-protocol` — classify events
 
-1. Create `crates/phantom-context/src/context_budget.rs` containing:
-   - `ContextBudget` struct with three usize fields and a `Default` impl
-     matching Claude Code's 5/5K/25K reference values.
-   - `TokenCounter` trait with `count(&self, s: &str) -> usize`.
-   - `WordCounter` zero-sized type implementing `TokenCounter` via
-     `s.split_whitespace().count()`.
-   - `BudgetedItem` trait with associated type `Recency: Ord`, `recency_key`,
-     `payload`, and `identifier` methods.
-   - `SelectedItem` struct with `identifier`, `payload`, `token_cost`.
-   - `ContextBudget::select` implementing the algorithm in SPEC.md.
+File: `crates/phantom-protocol/src/events.rs`.
 
-2. Export the module from `crates/phantom-context/src/lib.rs` with a single
-   `pub mod context_budget;` line. Do not re-export via glob to avoid name
-   collisions with `context::*`.
+Add a new `EventClass` enum next to `EventTopic` with three variants:
 
-3. Add unit tests inside the new module under a `#[cfg(test)] mod tests`
-   block. Cover all six cases listed in TASKS.md.
+```rust
+pub enum EventClass {
+    UpwardReport,
+    Lateral,
+    Internal,
+}
+```
 
-4. Build and test only the `phantom-context` crate to stay within scope:
-   - `cargo build -p phantom-context`
-   - `cargo test -p phantom-context`
+Add `Event::class(&self) -> EventClass`. The mapping:
 
-5. Commit the change on the current worktree branch with a Conventional
-   Commits message: `feat(phantom-context): token-budgeted context injection
-   primitive`.
+- `AgentTaskComplete`, `AgentError`, `AgentProgress` → `UpwardReport`
+  (agent-to-orchestrator status updates).
+- `AgentSpawned`, `FastPathTaken` → `Internal` (lifecycle telemetry, not the
+  agent's report-out surface).
+- `CommandStarted`, `CommandComplete`, `TerminalOutput`,
+  `SubprocessTakeoverDetected`, `SubprocessTakeoverCleared`,
+  `BrainDecision`, `NlpInterpreted`, `SessionSwitched`, `FocusChanged`,
+  `VideoPlaybackStateChanged`, `FrameCaptured`, `GlitchFxTriggered`,
+  `Custom` → `Lateral` (peer-bus traffic).
+- `MemoryPressure`, `JobCompleted`, `Shutdown` → `Internal` (host-level).
 
-6. Push the branch and open a draft PR via `gh pr create --draft` with the
-   prescribed title and HEREDOC body.
+Re-export `EventClass` from `crates/phantom-protocol/src/lib.rs`.
 
-## Risks
+## Step 2: `phantom-agents` — `AgentSpawnOpts` field
 
-- Truncation by token (word) count rather than byte count means the payload
-  string must be reconstructed from the kept words. Use
-  `s.split_whitespace().take(cap).collect::<Vec<_>>().join(" ")`.
-- The `total_token_cap` mid-iteration drop rule means a small item further
-  down the list might still fit after a large one is dropped. The test
-  `total_cap_hit_mid_iteration` pins that behavior.
+File: `crates/phantom-agents/src/agent.rs`.
 
-## Out of scope
+Add `subagent: bool` to `AgentSpawnOpts`. Default `false` in `new`. Add the
+builder `with_subagent(self, v: bool) -> Self` and the getter
+`subagent(&self) -> bool`.
 
-- BPE tokenizer integration.
-- Real skill-file discovery or filesystem walks.
-- Wiring into `phantom-agents::spawn` or any caller in this PR.
+## Step 3: `phantom-agents` — subagent emit guard
+
+New file: `crates/phantom-agents/src/subagent_emit.rs`.
+
+Provides a small `SubagentEmitGuard` struct holding `subagent: bool` and
+`suppressed_lateral_emits: u64`. One method:
+`try_emit(&mut self, ev: &Event) -> bool`. When the agent is a subagent and
+the event class is not `UpwardReport`, log at `warn`, increment the counter,
+return `false`. Otherwise return `true`.
+
+The guard is constructed from an `AgentSpawnOpts` via `SubagentEmitGuard::from_opts(opts)`.
+
+## Step 4: Tests
+
+Unit tests inside `subagent_emit.rs`:
+
+1. Subagent emitting `AgentTaskComplete` is allowed and the counter stays 0.
+2. Subagent emitting `CommandStarted` (Lateral) is blocked and the counter
+   moves to 1.
+3. Non-subagent agent emits any class. Counter remains 0 because
+   non-subagents do not gate.
+
+Round-trip tests on `Event::class()` in `crates/phantom-protocol/src/events.rs`:
+- `AgentTaskComplete` and `AgentError` classify as `UpwardReport`.
+- `CommandStarted` classifies as `Lateral`.
+- `Shutdown` classifies as `Internal`.
+
+## Step 5: Build and test
+
+Run:
+```
+cargo build -p phantom-agents -p phantom-protocol
+cargo test -p phantom-agents -p phantom-protocol
+```
+
+## Step 6: Draft PR
+
+Title: `feat(phantom-agents): subagent reports-up-only isolation contract`.
+
+PR body has a 3-bullet Summary and a Test plan checklist.
