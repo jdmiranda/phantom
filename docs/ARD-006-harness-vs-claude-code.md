@@ -18,24 +18,28 @@ implementation decisions are tracked in concurrent PRs — see Follow-on Work.
 Phantom now has a closed-loop agent harness with four independently verifiable properties:
 
 1. **Capability gate** — `phantom-agents::dispatch` routes every tool-use through
-   `capability::check_capability(ctx.role, tool.class())` before the handler runs. Ten
-   `AgentRole` variants each carry an explicit tool-class whitelist. Denials return a
-   canonical `ToolResult` so the model self-corrects.
+   `phantom-agents::dispatch::capability::check_capability(ctx.role, class_for(tool))` before
+   the handler runs. Twelve `AgentRole` variants (defined at
+   `crates/phantom-agents/src/role.rs:48`) each carry an explicit tool-class whitelist.
+   Denials return a canonical `ToolResult` so the model self-corrects.
 
-2. **External state machine** — `phantom-brain::TaskLedger` owns an external 9-state
-   `AgentStatus` FSM (`Queued → Planning → AwaitingApproval → Working → WaitingForTool →
-   Paused → Done → Failed → Flatline`). The `try_dispatch` guarded mutator returns
-   `Result<&PlanStep, DispatchBlocked>`, preventing concurrent dispatch. `StepFailureCause`
-   and `QuarantinePolicy` encode typed cascade semantics.
+2. **External state machine** — `phantom-brain::TaskLedger` (defined at
+   `crates/phantom-brain/src/orchestrator.rs:462`) owns the external 9-state `AgentStatus`
+   FSM (defined at `crates/phantom-agents/src/agent.rs:139`): `Queued → Planning →
+   AwaitingApproval → Working → WaitingForTool → Paused → Done → Failed → Flatline`. The
+   `try_dispatch` guarded mutator returns `Result<&PlanStep, DispatchBlocked>`, preventing
+   concurrent dispatch. `StepFailureCause` and `QuarantinePolicy` encode typed cascade
+   semantics.
 
 3. **Structured exit** — Agents spawned with `AgentSpawnOpts::with_requires_complete_task(true)`
    must call the `complete_task` lifecycle tool. The `LoopRunner` validates the payload against
    the per-loop `ExitSchema`. Three consecutive schema-invalid calls flatline the pane (3-strike
    `validation_failure_count`). The legacy stringly-typed "PARTIAL" exit path is removed.
 
-4. **Typed inter-agent messaging** — `phantom-protocol::Event` bus carries 22 typed variants
-   with `EventTopic` routing. `phantom-loop::LoopMessage` provides typed inter-loop routing
-   through `LoopQueueRegistry`. The `Event::FastPathTaken` envelope makes every audit-traced
+4. **Typed inter-agent messaging** — `phantom-protocol::Event` bus (defined at
+   `crates/phantom-protocol/src/events.rs:39`) carries 21 typed variants with `EventTopic`
+   routing. `phantom-loop::LoopMessage` provides typed inter-loop routing through
+   `LoopQueueRegistry`. The `Event::FastPathTaken` envelope makes every audit-traced
    auto-approval visible on the bus.
 
 An architectural review of the Claude Code harness — an externally-built agentic system built
@@ -66,7 +70,7 @@ full alignment.
 | Claude Code Layer | Responsibility | Phantom Property | Phantom Crate(s) |
 |---|---|---|---|
 | **1. Interface surface** | Input routing, slash-command dispatch, keybindings | Capability gate (role routing) | `phantom-agents::dispatch`, `phantom-ui` |
-| **2. Permission and safety** | Dangerousness scoring, user-approval flow, taint propagation | Capability gate (tool-class whitelisting) + taint levels | `phantom-agents::capability`, `phantom-agents::permissions` |
+| **2. Permission and safety** | Dangerousness scoring, user-approval flow, taint propagation | Capability gate (tool-class whitelisting) + taint levels | `phantom-agents::dispatch::capability`, `phantom-agents::permissions` |
 | **3. Tool** | ReadFile, WriteFile, RunCommand, BashTool, GitHub MCP, etc. | Tool execution layer inside each role's whitelist | `phantom-agents::tools`, `phantom-mcp` |
 | **4. Memory and context** | Top-5 skill injection (5K tokens each, 25K budget), CLAUDE.md re-read after compaction | Context assembly for agent prompts — budget discipline **not yet enforced** | `phantom-context` |
 | **5. Subagent and orchestration** | Subagents report upward only; Agent Teams share a task list across independent sessions | `LoopRunner` FSM + `SubstrateAgentDispatcher`; upward-only contract **not yet enforced** | `phantom-loop`, `phantom-brain` |
@@ -147,7 +151,10 @@ timestamp, step index, `AgentStatus` before/after, and optional `StepFailureCaus
 
 - `crates/phantom-agents/src/dispatch/mod.rs` — capability gate implementation
 - `crates/phantom-agents/src/dispatch/capability.rs` — role-to-tool-class whitelist
-- `crates/phantom-brain/src/task_ledger.rs` — `TaskLedger`, `try_dispatch`, `DispatchBlocked`
+- `crates/phantom-brain/src/orchestrator.rs:462` — `TaskLedger`, `try_dispatch`, `DispatchBlocked`
+- `crates/phantom-agents/src/agent.rs:139` — `AgentStatus` 9-state FSM
+- `crates/phantom-agents/src/role.rs:48` — `AgentRole` 12-variant enum
+- `crates/phantom-protocol/src/events.rs:39` — `Event` 21-variant bus
 - `crates/phantom-brain/src/self_improvement.rs` — `AuditEntry` JSONL pattern (reference for gap d)
 - `crates/phantom-loop/src/runner/fsm.rs` — `LoopRunner` async FSM
 - `crates/phantom-loop/src/dispatcher/substrate.rs` — `SubstrateAgentDispatcher`
