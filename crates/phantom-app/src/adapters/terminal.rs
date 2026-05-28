@@ -901,6 +901,11 @@ fn render_chrome(
     quads: &mut Vec<QuadData>,
     text_segments: &mut Vec<TextData>,
 ) {
+    // Back-to-front emission order: card bg, then app-head band, then
+    // body bg, and finally the 1 px border ring LAST so it draws on top
+    // of the head band (otherwise the head band paints over the top
+    // hairline and breaks the ring).
+
     // -- 1. Outer card background ----------------------------------------
     quads.push(QuadData {
         x: rect.x,
@@ -910,11 +915,36 @@ fn render_chrome(
         color: surface_floating(tokens),
     });
 
-    // -- 2. 1 px border ring -- emit four hairlines around the card.
+    // -- 2. App-head row ------------------------------------------------
     //
-    // Until the sibling phantom-renderer PR adds `draw_rounded_rect`
-    // with a stroke pass, a 4-quad ring is the closest analogue. The
-    // ring color is `chrome_frame_dim`, matching `system.css` `.app`.
+    // The shared `AppHead` widget already paints the band, the bottom
+    // divider, and the icon / name / title / meta text using the same
+    // tokens every other pane uses. We feed it the mockup's strings:
+    // icon `▶`, name `TERMINAL`, title `<shell · cwd>`, meta `<cols>x<rows>`.
+    let head = AppHead::new("TERMINAL", title)
+        .with_icon("▶")
+        .with_meta(format!("{cols}x{rows}"))
+        .with_tokens(*tokens);
+    head.render_into_adapter(rect, quads, text_segments);
+
+    // -- 3. Body background --------------------------------------------
+    //
+    // Must match `body_rect`'s `(space_4, space_3)` padding exactly so
+    // there is no recessed strip below the last cell row.
+    let head_h = head.height();
+    let pad_x = tokens.space_4();
+    let pad_y = tokens.space_3();
+    quads.push(QuadData {
+        x: rect.x + pad_x,
+        y: rect.y + head_h + pad_y,
+        w: (rect.width - pad_x * 2.0).max(0.0),
+        h: (rect.height - head_h - pad_y * 2.0).max(0.0),
+        color: tokens.colors.surface_recessed,
+    });
+
+    // -- 4. 1 px border ring -- emit four hairlines around the card LAST
+    // so the ring sits on top of the head band. Color is
+    // `chrome_frame_dim`, matching `system.css` `.app`.
     let frame = tokens.colors.chrome_frame_dim;
     let hair = tokens.hair();
     // top
@@ -948,31 +978,6 @@ fn render_chrome(
         w: hair,
         h: rect.height,
         color: frame,
-    });
-
-    // -- 3. App-head row ------------------------------------------------
-    //
-    // The shared `AppHead` widget already paints the band, the bottom
-    // divider, and the icon / name / title / meta text using the same
-    // tokens every other pane uses. We feed it the mockup's strings:
-    // icon `▶`, name `TERMINAL`, title `<shell · cwd>`, meta `<cols>x<rows>`.
-    let head = AppHead::new("TERMINAL", title)
-        .with_icon("▶")
-        .with_meta(format!("{cols}x{rows}"))
-        .with_tokens(*tokens);
-    head.render_into_adapter(rect, quads, text_segments);
-
-    // -- 4. Body background --------------------------------------------
-    //
-    // The grid sits on a recessed surface so the cells contrast against
-    // the floating card. Spans the head's body rect.
-    let head_h = head.height();
-    quads.push(QuadData {
-        x: rect.x + hair,
-        y: rect.y + head_h,
-        w: (rect.width - hair * 2.0).max(0.0),
-        h: (rect.height - head_h - hair).max(0.0),
-        color: tokens.colors.surface_recessed,
     });
 }
 
@@ -1124,17 +1129,20 @@ mod tests {
         assert!((card.h - 400.0).abs() < f32::EPSILON);
 
         // Border ring contributes four hairline quads (top, bottom, left,
-        // right) of `tokens.hair()` thickness.
+        // right) of `tokens.hair()` thickness. The ring is emitted LAST
+        // so it draws on top of the head band — assert the trailing four
+        // quads match the hairline geometry.
         let hair = tokens.hair();
-        let ring: Vec<&QuadData> = quads[1..5].iter().collect();
+        let ring_start = quads.len() - 4;
+        let ring: Vec<&QuadData> = quads[ring_start..].iter().collect();
         assert_eq!(ring.len(), 4);
         assert!(ring.iter().any(|q| (q.h - hair).abs() < f32::EPSILON));
         assert!(ring.iter().any(|q| (q.w - hair).abs() < f32::EPSILON));
 
-        // App-head adds at least two more quads (band + divider).
+        // Card + head band/divider + body bg + 4 ring quads.
         assert!(
             quads.len() >= 7,
-            "expected card + 4 ring + at least head band/divider quads, got {}",
+            "expected card + head band/divider + body bg + 4 ring quads, got {}",
             quads.len()
         );
 
