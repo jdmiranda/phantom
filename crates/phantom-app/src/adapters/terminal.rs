@@ -8,11 +8,9 @@ use log::warn;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
-use phantom_adapter::adapter::QuadData;
 use phantom_adapter::adapter::{
-    CursorData, CursorShape as AdapterCursorShape, GridData, Rect, RenderOutput, ScrollState,
-    SelectionRange, TerminalCell as AdapterCell,
+    CursorData, CursorShape as AdapterCursorShape, GridData, QuadData, Rect, RenderOutput,
+    ScrollState, SelectionRange, TerminalCell as AdapterCell, TextData,
 };
 use phantom_adapter::spatial::{InternalLayout, SpatialPreference};
 use phantom_adapter::{
@@ -23,6 +21,9 @@ use phantom_terminal::output::{
 };
 use phantom_terminal::takeover::TakeoverDetector;
 use phantom_terminal::terminal::PhantomTerminal;
+use phantom_ui::RenderCtx;
+use phantom_ui::tokens::Tokens;
+use phantom_ui::widgets::app_head::AppHead;
 
 /// Maximum bytes retained in the output buffer before the front is drained.
 const OUTPUT_BUF_CAP: usize = 8192;
@@ -78,6 +79,12 @@ pub struct TerminalAdapter {
     /// Set during `update()` when the terminal emits `Event::Title`; consumed
     /// (and cleared) by `take_pending_title()`.
     pending_title: Option<String>,
+    /// Design tokens used to paint pane chrome (card, head, body bg).
+    /// Set by `set_tokens` / the `set_theme_name` command.
+    tokens: Tokens,
+    /// Header subtitle shown in the app-head `title` slot.
+    /// Defaults to `"zsh"`; updateable via `set_title` command.
+    head_title: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +116,23 @@ impl TerminalAdapter {
             alt_screen_snapshot: None,
             takeover_detector: TakeoverDetector::default(),
             pending_title: None,
+            tokens: Tokens::phosphor(RenderCtx::fallback()),
+            head_title: default_head_title(),
         }
+    }
+
+    /// Swap the design-token palette used to paint the pane chrome.
+    /// Callers that already build per-frame tokens (e.g. the App after a
+    /// theme change) push them in here. The grid body still uses the
+    /// `TerminalThemeColors` set via `set_theme_colors`.
+    pub fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = tokens;
+    }
+
+    /// Replace the title shown in the app-head subtitle slot.
+    /// Typical content is `"zsh · ~/path"`. Defaults to `"zsh"`.
+    pub fn set_head_title(&mut self, title: impl Into<String>) {
+        self.head_title = title.into();
     }
 
     /// Update the theme colors used for grid extraction.
@@ -425,11 +448,27 @@ impl AppCore for TerminalAdapter {
 
 impl Renderable for TerminalAdapter {
     fn render(&self, rect: &Rect) -> RenderOutput {
-        // Extract the terminal grid with theme-aware colors.
+        let mut quads: Vec<QuadData> = Vec::with_capacity(8);
+        let mut text_segments: Vec<TextData> = Vec::new();
+
+        // -- Chrome: card + 1px border ring + head + body bg --------------
+        render_chrome(
+            rect,
+            &self.tokens,
+            &self.head_title,
+            self.terminal.size().cols as usize,
+            self.terminal.size().rows as usize,
+            &mut quads,
+            &mut text_segments,
+        );
+
+        // -- Body inner rect (the grid's drawable area) -------------------
+        let body = body_rect(rect, &self.tokens);
+
+        // Pull the live grid from the underlying terminal.
         let (render_cells, cols, rows, cursor_state) =
             output::extract_grid_themed(self.terminal.term(), &self.theme_colors);
 
-        // Convert terminal RenderCells to adapter TerminalCells.
         let cells: Vec<AdapterCell> = render_cells
             .iter()
             .map(|rc| AdapterCell {
@@ -447,11 +486,29 @@ impl Renderable for TerminalAdapter {
             None
         };
 
+        // Cursor glow — a soft halo behind the cursor cell. The renderer's
+        // grid pipeline draws the cursor block itself; this quad is the
+        // glow under it. The sibling phantom-renderer PR replaces this
+        // with `draw_glow`; until then we emit a faint over-sized quad.
+        if let Some(c) = cursor.as_ref() {
+            let (cell_w, cell_h) = grid_cell_size(rect);
+            let cx = body.x + c.col as f32 * cell_w;
+            let cy = body.y + c.row as f32 * cell_h;
+            let halo = 6.0;
+            quads.push(QuadData {
+                x: cx - halo,
+                y: cy - halo,
+                w: cell_w + halo * 2.0,
+                h: cell_h + halo * 2.0,
+                color: glow_color_for(&self.tokens),
+            });
+        }
+
         let grid = GridData {
             cells,
             cols,
             rows,
-            origin: (rect.x, rect.y),
+            origin: (body.x, body.y),
             cursor,
         };
 
@@ -472,8 +529,8 @@ impl Renderable for TerminalAdapter {
             });
 
         RenderOutput {
-            quads: vec![],
-            text_segments: vec![],
+            quads,
+            text_segments,
             grid: Some(grid),
             scroll,
             selection,
@@ -692,6 +749,26 @@ impl Commandable for TerminalAdapter {
                 }
                 Ok("scrolled to match".into())
             }
+            "set_theme_name" => {
+                let name = args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("set_theme_name requires a \"name\" string"))?;
+                if let Some(tokens) = Tokens::for_theme_name(name, RenderCtx::fallback()) {
+                    self.set_tokens(tokens);
+                    Ok(format!("theme set: {name}"))
+                } else {
+                    Err(anyhow::anyhow!("unknown theme: {name}"))
+                }
+            }
+            "set_title" => {
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("set_title requires a \"title\" string"))?;
+                self.set_head_title(title);
+                Ok("title set".into())
+            }
             other => Err(anyhow::anyhow!("unknown command: {other}")),
         }
     }
@@ -732,6 +809,176 @@ fn key_name_to_bytes(key: &str) -> Vec<u8> {
         "Left" => b"\x1b[D".to_vec(),
         other => other.as_bytes().to_vec(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Chrome rendering — card / border / head / body bg
+// ---------------------------------------------------------------------------
+//
+// This block paints the pane chrome described in
+// `docs/mockups/apps.html` `#terminal`. The body grid itself is still
+// emitted via `GridData` by the renderer's grid pipeline; this code
+// only paints the surfaces the grid sits on.
+//
+// Sibling phantom-renderer PR introduces `draw_rounded_rect`,
+// `draw_glow`, `draw_gradient_rect`. Until that lands, the helpers
+// here approximate those with plain `QuadData` rectangles. The shape
+// of the output is identical; only the corners and the glow are flat.
+
+/// Default subtitle for new terminals.
+fn default_head_title() -> String {
+    "zsh".to_string()
+}
+
+/// `surface_floating` token with a graceful fallback to `surface_raised`.
+///
+/// `phantom-ui` adds a dedicated `surface_floating` color role in its
+/// sibling PR that syncs the Rust tokens with `system.css`. While main
+/// does not yet expose that role, the floating surface is visually
+/// indistinguishable from `surface_raised` for the terminal card, so
+/// we return that instead. Once the sibling PR lands, swap this body
+/// for `t.colors.surface_floating`.
+fn surface_floating(t: &Tokens) -> [f32; 4] {
+    t.colors.surface_raised
+}
+
+/// Glow color used behind the cursor cell.
+///
+/// `phantom-ui` adds a dedicated `glow_color` rgba slot. Until that
+/// lands, derive a faint halo from `text_accent` at 14% alpha — that
+/// matches the apparent intensity of the CSS `box-shadow: 0 0 12px
+/// rgba(51,255,0,0.32)` once the GPU compositor blends it.
+fn glow_color_for(t: &Tokens) -> [f32; 4] {
+    let a = t.colors.text_accent;
+    [a[0], a[1], a[2], 0.14]
+}
+
+/// Inner rect a grid renders into.
+///
+/// Carves the header height plus a `(top, side)` inset of
+/// `(space_3, space_4)` (= 12 / 16 px) off the outer rect, matching
+/// `.term-body { padding: 12px 16px; }` in `system.css`.
+fn body_rect(rect: &Rect, tokens: &Tokens) -> Rect {
+    let head_h = AppHead::new("TERMINAL", "")
+        .with_tokens(*tokens)
+        .height();
+    let pad_x = tokens.space_4();
+    let pad_y = tokens.space_3();
+    Rect {
+        x: rect.x + pad_x,
+        y: rect.y + head_h + pad_y,
+        width: (rect.width - pad_x * 2.0).max(0.0),
+        height: (rect.height - head_h - pad_y * 2.0).max(0.0),
+        cell_size: rect.cell_size,
+    }
+}
+
+/// Per-cell pixel size, with a sane fallback when the rect carries
+/// `(0.0, 0.0)` (test / pre-layout frames).
+fn grid_cell_size(rect: &Rect) -> (f32, f32) {
+    let w = if rect.cell_size.0 > 0.0 {
+        rect.cell_size.0
+    } else {
+        8.0
+    };
+    let h = if rect.cell_size.1 > 0.0 {
+        rect.cell_size.1
+    } else {
+        16.0
+    };
+    (w, h)
+}
+
+/// Paint the card, the 1 px border ring, the app-head, and the body
+/// background quad. Appends quads / text segments to the supplied
+/// vectors. The grid itself is emitted by the caller.
+fn render_chrome(
+    rect: &Rect,
+    tokens: &Tokens,
+    title: &str,
+    cols: usize,
+    rows: usize,
+    quads: &mut Vec<QuadData>,
+    text_segments: &mut Vec<TextData>,
+) {
+    // Back-to-front emission order: card bg, then app-head band, then
+    // body bg, and finally the 1 px border ring LAST so it draws on top
+    // of the head band (otherwise the head band paints over the top
+    // hairline and breaks the ring).
+
+    // -- 1. Outer card background ----------------------------------------
+    quads.push(QuadData {
+        x: rect.x,
+        y: rect.y,
+        w: rect.width,
+        h: rect.height,
+        color: surface_floating(tokens),
+    });
+
+    // -- 2. App-head row ------------------------------------------------
+    //
+    // The shared `AppHead` widget already paints the band, the bottom
+    // divider, and the icon / name / title / meta text using the same
+    // tokens every other pane uses. We feed it the mockup's strings:
+    // icon `▶`, name `TERMINAL`, title `<shell · cwd>`, meta `<cols>x<rows>`.
+    let head = AppHead::new("TERMINAL", title)
+        .with_icon("▶")
+        .with_meta(format!("{cols}x{rows}"))
+        .with_tokens(*tokens);
+    head.render_into_adapter(rect, quads, text_segments);
+
+    // -- 3. Body background --------------------------------------------
+    //
+    // Must match `body_rect`'s `(space_4, space_3)` padding exactly so
+    // there is no recessed strip below the last cell row.
+    let head_h = head.height();
+    let pad_x = tokens.space_4();
+    let pad_y = tokens.space_3();
+    quads.push(QuadData {
+        x: rect.x + pad_x,
+        y: rect.y + head_h + pad_y,
+        w: (rect.width - pad_x * 2.0).max(0.0),
+        h: (rect.height - head_h - pad_y * 2.0).max(0.0),
+        color: tokens.colors.surface_recessed,
+    });
+
+    // -- 4. 1 px border ring -- emit four hairlines around the card LAST
+    // so the ring sits on top of the head band. Color is
+    // `chrome_frame_dim`, matching `system.css` `.app`.
+    let frame = tokens.colors.chrome_frame_dim;
+    let hair = tokens.hair();
+    // top
+    quads.push(QuadData {
+        x: rect.x,
+        y: rect.y,
+        w: rect.width,
+        h: hair,
+        color: frame,
+    });
+    // bottom
+    quads.push(QuadData {
+        x: rect.x,
+        y: rect.y + rect.height - hair,
+        w: rect.width,
+        h: hair,
+        color: frame,
+    });
+    // left
+    quads.push(QuadData {
+        x: rect.x,
+        y: rect.y,
+        w: hair,
+        h: rect.height,
+        color: frame,
+    });
+    // right
+    quads.push(QuadData {
+        x: rect.x + rect.width - hair,
+        y: rect.y,
+        w: hair,
+        h: rect.height,
+        color: frame,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -852,5 +1099,90 @@ mod tests {
         // Compile-time check that TerminalAdapter: Send.
         fn _check<T: Send>() {}
         _check::<TerminalAdapter>();
+    }
+
+    #[test]
+    fn render_chrome_emits_card_head_and_body() {
+        // Verify the chrome emitter produces the four layers described
+        // in `docs/specs/terminal-rewrite/SPEC.md`:
+        //   1. outer card bg quad,
+        //   2. four 1-px border hairlines,
+        //   3. app-head (band + divider, plus TERMINAL / meta text),
+        //   4. body background quad.
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 400.0,
+            cell_size: (8.0, 16.0),
+        };
+        let tokens = Tokens::phosphor(RenderCtx::fallback());
+        let mut quads: Vec<QuadData> = Vec::new();
+        let mut text_segments: Vec<TextData> = Vec::new();
+        render_chrome(&rect, &tokens, "zsh", 80, 24, &mut quads, &mut text_segments);
+
+        // Card bg sits at the rect origin and spans the full rect.
+        let card = &quads[0];
+        assert_eq!(card.x, 0.0);
+        assert_eq!(card.y, 0.0);
+        assert!((card.w - 600.0).abs() < f32::EPSILON);
+        assert!((card.h - 400.0).abs() < f32::EPSILON);
+
+        // Border ring contributes four hairline quads (top, bottom, left,
+        // right) of `tokens.hair()` thickness. The ring is emitted LAST
+        // so it draws on top of the head band — assert the trailing four
+        // quads match the hairline geometry.
+        let hair = tokens.hair();
+        let ring_start = quads.len() - 4;
+        let ring: Vec<&QuadData> = quads[ring_start..].iter().collect();
+        assert_eq!(ring.len(), 4);
+        assert!(ring.iter().any(|q| (q.h - hair).abs() < f32::EPSILON));
+        assert!(ring.iter().any(|q| (q.w - hair).abs() < f32::EPSILON));
+
+        // Card + head band/divider + body bg + 4 ring quads.
+        assert!(
+            quads.len() >= 7,
+            "expected card + head band/divider + body bg + 4 ring quads, got {}",
+            quads.len()
+        );
+
+        // Text segments expose the mockup's TERMINAL label and the meta.
+        let labels: Vec<&str> = text_segments.iter().map(|t| t.text.as_str()).collect();
+        assert!(
+            labels.iter().any(|s| s.contains("TERMINAL")),
+            "expected a TERMINAL label segment, got {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|s| s.contains("80x24")),
+            "expected a meta segment with 80x24, got {labels:?}"
+        );
+    }
+
+    #[test]
+    fn body_rect_is_inset_below_head() {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 400.0,
+            cell_size: (8.0, 16.0),
+        };
+        let tokens = Tokens::phosphor(RenderCtx::fallback());
+        let body = body_rect(&rect, &tokens);
+        // The body must start below the rect's top edge (head was inset).
+        assert!(body.y > rect.y, "body must be below the head row");
+        // It must also be narrower than the outer rect (side padding).
+        assert!(body.width < rect.width);
+        // And its bottom must stay inside the outer rect.
+        assert!(body.y + body.height <= rect.y + rect.height + 0.001);
+    }
+
+    #[test]
+    fn glow_color_is_dimmed_accent() {
+        let tokens = Tokens::phosphor(RenderCtx::fallback());
+        let g = glow_color_for(&tokens);
+        // Glow alpha must be far below 1.0 so it reads as a halo, not
+        // a solid quad.
+        assert!(g[3] > 0.0 && g[3] < 0.30, "glow alpha out of range");
     }
 }
