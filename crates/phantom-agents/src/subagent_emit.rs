@@ -1,0 +1,304 @@
+//! Subagent reports-up-only isolation contract.
+//!
+//! A subagent (an [`crate::agent::Agent`] spawned with
+//! [`crate::agent::AgentSpawnOpts::with_subagent(true)`]) is allowed to emit
+//! only upward report events to its parent orchestrator. Lateral and internal
+//! events are dropped at the emit boundary, counted, and logged at `warn`.
+//!
+//! The gate is a thin wrapper. Non-subagents bypass the check entirely and
+//! their emit path is unchanged. The mirror of Claude Code's subagent
+//! contract: subagents report up only.
+//!
+//! See [`phantom_protocol::EventClass`] for the classification rules and
+//! `crates/phantom-protocol/src/events.rs::Event::class` for the per-variant
+//! mapping.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use phantom_agents::agent::{AgentSpawnOpts, AgentTask};
+//! use phantom_agents::subagent_emit::SubagentEmitGuard;
+//! use phantom_protocol::Event;
+//!
+//! let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "t".into() })
+//!     .with_subagent(true);
+//! let mut guard = SubagentEmitGuard::from_opts(&opts);
+//!
+//! let ev = Event::AgentTaskComplete {
+//!     agent_id: 1,
+//!     success: true,
+//!     summary: "ok".into(),
+//!     spawn_tag: None,
+//!     result: None,
+//! };
+//! assert!(guard.try_emit(&ev));
+//! assert_eq!(guard.suppressed_lateral_emits(), 0);
+//! ```
+
+use phantom_protocol::{Event, EventClass};
+
+use crate::agent::AgentSpawnOpts;
+
+/// Per-agent emit gate enforcing the subagent reports-up-only contract.
+///
+/// Construct one per agent via [`Self::from_opts`] and call
+/// [`Self::try_emit`] before pushing an event onto the bus. A `false` return
+/// means the event was dropped and the suppressed-emit counter ticked up;
+/// the caller MUST NOT publish the event.
+///
+/// For non-subagent agents the gate is a pass-through: `try_emit` always
+/// returns `true` and the counter stays at zero.
+#[derive(Debug, Clone)]
+pub struct SubagentEmitGuard {
+    /// Whether the owning agent is a subagent. Mirrors
+    /// [`AgentSpawnOpts::subagent`].
+    subagent: bool,
+    /// Count of lateral / internal events the gate dropped during the
+    /// agent's lifetime. Reset only when the guard is dropped.
+    ///
+    /// Named for the dominant case (lateral peer-bus emits). Internal-class
+    /// blocks are counted in the same bucket because the contract treats
+    /// both the same: a subagent must not emit them.
+    suppressed_lateral_emits: u64,
+}
+
+impl SubagentEmitGuard {
+    /// Build a guard whose mode mirrors [`AgentSpawnOpts::subagent`].
+    #[must_use]
+    pub fn from_opts(opts: &AgentSpawnOpts) -> Self {
+        Self {
+            subagent: opts.subagent(),
+            suppressed_lateral_emits: 0,
+        }
+    }
+
+    /// Build a guard with explicit subagent state. Useful for tests and for
+    /// callers that do not own an [`AgentSpawnOpts`].
+    #[must_use]
+    pub fn new(subagent: bool) -> Self {
+        Self {
+            subagent,
+            suppressed_lateral_emits: 0,
+        }
+    }
+
+    /// Returns whether the gate is in subagent mode.
+    #[must_use]
+    pub fn is_subagent(&self) -> bool {
+        self.subagent
+    }
+
+    /// Returns the count of events the gate has dropped during this agent's
+    /// lifetime.
+    #[must_use]
+    pub fn suppressed_lateral_emits(&self) -> u64 {
+        self.suppressed_lateral_emits
+    }
+
+    /// Decide whether `ev` may be emitted by the owning agent.
+    ///
+    /// Returns `true` when the caller should publish the event. Returns
+    /// `false` when the event was dropped, in which case the counter has
+    /// been incremented and a `warn`-level log line has been written.
+    ///
+    /// The path is panic-free. A blocked emit is observable through
+    /// [`Self::suppressed_lateral_emits`] and the `tracing` log only.
+    pub fn try_emit(&mut self, ev: &Event) -> bool {
+        if !self.subagent {
+            // Non-subagent path is unchanged.
+            return true;
+        }
+        match ev.class() {
+            EventClass::UpwardReport => true,
+            class @ (EventClass::Lateral | EventClass::Internal) => {
+                self.suppressed_lateral_emits =
+                    self.suppressed_lateral_emits.saturating_add(1);
+                // Rate-limit the warn! log so a runaway subagent emitting
+                // thousands of blocked events does not flood the trace stream.
+                // We log only when the count crosses a power-of-two boundary
+                // (1, 2, 4, 8, 16, ...). A 1000-blocked-emit run produces
+                // ceil(log2(1000)) + 1 = 11 lines instead of 1000.
+                if should_log_at(self.suppressed_lateral_emits) {
+                    tracing::warn!(
+                        target: "phantom_agents::subagent_emit",
+                        event_class = ?class,
+                        suppressed_total = self.suppressed_lateral_emits,
+                        "subagent emit blocked by reports-up-only contract"
+                    );
+                }
+                false
+            }
+        }
+    }
+}
+
+/// Return true when the warn! line should fire for the given cumulative
+/// suppressed-emit count. We emit only on power-of-two boundaries so a
+/// pathological subagent does not flood the log.
+fn should_log_at(count: u64) -> bool {
+    count > 0 && count.is_power_of_two()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{AgentSpawnOpts, AgentTask};
+
+    fn task_complete() -> Event {
+        Event::AgentTaskComplete {
+            agent_id: 7,
+            success: true,
+            summary: "done".into(),
+            spawn_tag: None,
+            result: None,
+        }
+    }
+
+    fn lateral_command_started() -> Event {
+        Event::CommandStarted { app_id: 1, command: "ls".into() }
+    }
+
+    fn internal_shutdown() -> Event {
+        Event::Shutdown
+    }
+
+    #[test]
+    fn subagent_allows_upward_report() {
+        let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "p".into() })
+            .with_subagent(true);
+        let mut guard = SubagentEmitGuard::from_opts(&opts);
+        assert!(guard.is_subagent());
+        assert!(guard.try_emit(&task_complete()));
+        assert_eq!(guard.suppressed_lateral_emits(), 0);
+    }
+
+    #[test]
+    fn subagent_blocks_lateral_and_counts() {
+        let mut guard = SubagentEmitGuard::new(true);
+        let ev = lateral_command_started();
+        assert!(!guard.try_emit(&ev));
+        assert_eq!(guard.suppressed_lateral_emits(), 1);
+        // A second attempt increments the counter again.
+        assert!(!guard.try_emit(&ev));
+        assert_eq!(guard.suppressed_lateral_emits(), 2);
+    }
+
+    #[test]
+    fn subagent_blocks_internal_and_counts() {
+        let mut guard = SubagentEmitGuard::new(true);
+        assert!(!guard.try_emit(&internal_shutdown()));
+        assert_eq!(guard.suppressed_lateral_emits(), 1);
+    }
+
+    #[test]
+    fn non_subagent_passes_every_class_freely() {
+        // Default spawn opts have `subagent = false`. The gate must be a
+        // total pass-through and the counter must stay at zero.
+        let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "p".into() });
+        let mut guard = SubagentEmitGuard::from_opts(&opts);
+        assert!(!guard.is_subagent());
+
+        assert!(guard.try_emit(&task_complete()));
+        assert!(guard.try_emit(&lateral_command_started()));
+        assert!(guard.try_emit(&internal_shutdown()));
+
+        assert_eq!(guard.suppressed_lateral_emits(), 0);
+    }
+
+    #[test]
+    fn default_opts_are_not_subagent() {
+        let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "p".into() });
+        assert!(!opts.subagent());
+    }
+
+    #[test]
+    fn should_log_at_fires_on_power_of_two_boundaries() {
+        // 0 never logs; 1, 2, 4, 8, 16, ... do.
+        assert!(!should_log_at(0));
+        for n in [1u64, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+            assert!(should_log_at(n), "expected log at n={n}");
+        }
+        // Non-powers-of-two do not log.
+        for n in [3u64, 5, 6, 7, 9, 100, 999, 1000] {
+            assert!(!should_log_at(n), "did not expect log at n={n}");
+        }
+    }
+
+    #[test]
+    fn thousand_blocked_emits_through_guard_emits_no_more_than_log2_warns() {
+        // Use a tracing Layer that counts warn-level events targeted at the
+        // gate. Stand up a dedicated subscriber and run the gate inside its
+        // scope so the counter is isolated from the global subscriber state.
+        use std::sync::{Arc, Mutex};
+        use tracing::Level;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::Registry;
+        use tracing_subscriber::Layer;
+
+        #[derive(Default)]
+        struct CountLayer {
+            warn_count: Arc<Mutex<u64>>,
+        }
+        impl<S> Layer<S> for CountLayer
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let meta = event.metadata();
+                if meta.level() == &Level::WARN
+                    && meta.target() == "phantom_agents::subagent_emit"
+                {
+                    let mut g = self.warn_count.lock().unwrap();
+                    *g = g.saturating_add(1);
+                }
+            }
+        }
+
+        let counter = Arc::new(Mutex::new(0u64));
+        let layer = CountLayer { warn_count: counter.clone() };
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut guard = SubagentEmitGuard::new(true);
+            let ev = lateral_command_started();
+            for _ in 0..1000 {
+                assert!(!guard.try_emit(&ev));
+            }
+            assert_eq!(guard.suppressed_lateral_emits(), 1000);
+        });
+
+        let observed = *counter.lock().unwrap();
+        // Powers of two from 1 through 512 inclusive while count <= 1000.
+        assert_eq!(
+            observed, 10,
+            "expected 10 warn lines for 1000 blocked emits, observed {observed}"
+        );
+        // The point of the rate limit: NOT 1000.
+        assert!(observed < 1000, "rate limit failed: produced {observed} warn lines");
+    }
+
+    #[test]
+    fn thousand_blocked_emits_produces_at_most_log2_warn_lines() {
+        // Counts only the warn lines that our gate would emit for a 1000-block
+        // run. Iterating should_log_at over 1..=1000 is the source of truth
+        // since the gate calls it once per blocked emit.
+        let warn_lines = (1u64..=1000).filter(|n| should_log_at(*n)).count();
+        // Powers of two <= 1000: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512 = 10.
+        assert_eq!(warn_lines, 10);
+        // Most importantly: nowhere near 1000.
+        assert!(warn_lines < 20, "expected far fewer warn lines than blocked emits");
+    }
+
+    #[test]
+    fn with_subagent_toggles_field() {
+        let opts = AgentSpawnOpts::new(AgentTask::FreeForm { prompt: "p".into() })
+            .with_subagent(true);
+        assert!(opts.subagent());
+        let opts2 = opts.with_subagent(false);
+        assert!(!opts2.subagent());
+    }
+}
