@@ -1,37 +1,62 @@
-# SPEC.md — Subagent reports-up-only isolation contract
+# SPEC: First-class worktree primitive API
 
-## Goal
+## Problem
 
-Implement Claude Code's subagent isolation contract inside Phantom. A subagent
-is an agent spawned with a parent orchestrator. The contract: a subagent may
-emit only upward report events. Lateral and internal classes are dropped at
-the emit boundary, counted, and logged.
+Phantom currently uses git worktrees ad-hoc via shell-outs in the forever script and orchestration tooling. There is no first-class Rust API. Claude Code exposes `.claude/worktrees/` as a primitive for parallel branches; Phantom should expose the same shape under `.phantom/worktrees/`.
 
-## Scope
+## Goals
 
-- `crates/phantom-agents` — owner of `AgentSpawnOpts` and the dispatch gate.
-- `crates/phantom-protocol` — owner of `Event` and `EventTopic`.
+- Introduce a typed, testable Rust API in `phantom-app` for managing git worktrees.
+- Standardize worktree placement at `<repo_root>/.phantom/worktrees/<branch-sanitized>`.
+- Cover the three operations Phantom orchestration actually needs today: create, list, remove.
+- Provide a structured error type (`WorktreeError`) so callers can pattern-match instead of parsing stderr.
+- Sanitize branch names so they cannot escape the worktrees directory.
 
-Out of scope for this slice:
-- The full GUI wiring of `subagent=true` on `AgentPane`.
-- Behaviour change for `subagent=false` agents.
-- The 10 `AgentRole` variants (this contract is orthogonal to role).
+## Non-goals (this slice)
 
-## Contract
+- Migrating the forever script to call the new API. That is follow-up work.
+- Adding any new crate. The module lives inside `phantom-app`.
+- Pulling in `git2`/`libgit2`. We shell out via `std::process::Command`.
+- Lock/concurrency primitives beyond what `git worktree` itself provides.
 
-1. Every `Event` variant has a class: `UpwardReport`, `Lateral`, or `Internal`.
-2. `AgentTaskComplete` and `AgentError` are `UpwardReport`. The brain and
-   inspector consume those, which is exactly the parent-orchestrator surface.
-3. When `AgentSpawnOpts::subagent == true`, the emit boundary blocks every
-   non-`UpwardReport` event. The block path is: log at `warn`, drop the
-   event, increment a counter on the emit guard.
-4. `subagent == false` keeps the existing behaviour. No counter, no drop.
-5. The block path never panics. A blocked emit is observable through the
-   counter and the warn-log only.
+## Surface
 
-## Non-goals
+Module: `crates/phantom-app/src/worktrees.rs`
 
-- Forward-compat for unclassified `Event::Custom` variants — they are
-  classified as `Lateral` until a future revision needs finer granularity.
-- Persistence of the suppressed-emit counter. It is in-memory only on the
-  per-agent guard for the duration of the agent's life.
+Types:
+- `pub struct WorktreeHandle { pub branch: String, pub path: PathBuf, pub base_ref: String }`
+- `pub struct WorktreeInfo { pub branch: Option<String>, pub path: PathBuf, pub head: Option<String>, pub is_bare: bool, pub is_detached: bool }`
+- `pub enum WorktreeError { InvalidBranchName(String), GitCommandFailed { command: String, status: Option<i32>, stderr: String }, IoError(io::Error), ParseError(String) }`
+
+Functions:
+- `pub fn create_worktree(repo_root: &Path, branch: &str, base_ref: &str) -> Result<WorktreeHandle, WorktreeError>`
+- `pub fn list_worktrees(repo_root: &Path) -> Result<Vec<WorktreeInfo>, WorktreeError>`
+- `pub fn remove_worktree(repo_root: &Path, handle: WorktreeHandle, force: bool) -> Result<(), WorktreeError>`
+
+## Branch-name sanitization
+
+A branch name is rejected (returns `InvalidBranchName`) when any of these hold:
+- empty after trimming
+- contains `..` as a path component
+- starts with `-` (would be parsed as a flag by `git`)
+- contains a NUL byte
+- contains characters outside `[A-Za-z0-9._/+@-]`
+
+When constructing the on-disk path, `/` is replaced with `-` so the worktree fits in a single directory under `.phantom/worktrees/`.
+
+## Behavior
+
+- `create_worktree` ensures `<repo_root>/.phantom/worktrees/` exists, then runs `git -C <repo_root> worktree add -b <branch> <path> <base_ref>`.
+- `list_worktrees` runs `git -C <repo_root> worktree list --porcelain` and parses the porcelain stream.
+- `remove_worktree` runs `git -C <repo_root> worktree remove [--force] <path>`.
+
+## Testing
+
+Unit tests use the `tempfile` dev-dep (already present) and shell out to the real `git` binary. Each test gracefully skips when `git` is unavailable on `PATH`, so the suite runs on workstations and in CI without special setup.
+
+Coverage:
+- create succeeds and returns a handle pointing at an existing directory.
+- list shows the newly created worktree.
+- remove cleans up the directory and removes the entry from `git worktree list`.
+- sanitization rejects empty, leading-dash, `..`, NUL, and out-of-charset names.
+- a bad base ref produces `GitCommandFailed` with a non-zero status and non-empty stderr.

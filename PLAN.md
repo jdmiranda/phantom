@@ -1,79 +1,57 @@
-# PLAN.md — Subagent reports-up-only isolation contract
+# PLAN
 
-## Step 1: `phantom-protocol` — classify events
+## Step 1 — Scaffold the module
 
-File: `crates/phantom-protocol/src/events.rs`.
+Create `crates/phantom-app/src/worktrees.rs` and declare it as `pub mod worktrees;` from `crates/phantom-app/src/lib.rs`. No other workspace edits.
 
-Add a new `EventClass` enum next to `EventTopic` with three variants:
+## Step 2 — Define types
 
-```rust
-pub enum EventClass {
-    UpwardReport,
-    Lateral,
-    Internal,
-}
-```
+- `WorktreeHandle` (branch, path, base_ref).
+- `WorktreeInfo` (branch, path, head, is_bare, is_detached).
+- `WorktreeError` enum with `Display` + `std::error::Error` impls and a `From<io::Error>`.
 
-Add `Event::class(&self) -> EventClass`. The mapping:
+## Step 3 — Branch sanitization
 
-- `AgentTaskComplete`, `AgentError`, `AgentProgress` → `UpwardReport`
-  (agent-to-orchestrator status updates).
-- `AgentSpawned`, `FastPathTaken` → `Internal` (lifecycle telemetry, not the
-  agent's report-out surface).
-- `CommandStarted`, `CommandComplete`, `TerminalOutput`,
-  `SubprocessTakeoverDetected`, `SubprocessTakeoverCleared`,
-  `BrainDecision`, `NlpInterpreted`, `SessionSwitched`, `FocusChanged`,
-  `VideoPlaybackStateChanged`, `FrameCaptured`, `GlitchFxTriggered`,
-  `Custom` → `Lateral` (peer-bus traffic).
-- `MemoryPressure`, `JobCompleted`, `Shutdown` → `Internal` (host-level).
+Internal `fn sanitize_branch(branch: &str) -> Result<String, WorktreeError>`:
+1. Trim and validate emptiness.
+2. Reject `..` components, leading `-`, NUL, and out-of-charset characters.
+3. Replace `/` with `-` for the on-disk component.
 
-Re-export `EventClass` from `crates/phantom-protocol/src/lib.rs`.
+## Step 4 — Git wrappers
 
-## Step 2: `phantom-agents` — `AgentSpawnOpts` field
+Internal `fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, WorktreeError>`:
+- Spawn `git -C <repo_root> <args...>` via `std::process::Command`.
+- On non-zero exit, return `GitCommandFailed { command, status, stderr }`.
+- On success, return stdout as a `String`.
 
-File: `crates/phantom-agents/src/agent.rs`.
+## Step 5 — Public functions
 
-Add `subagent: bool` to `AgentSpawnOpts`. Default `false` in `new`. Add the
-builder `with_subagent(self, v: bool) -> Self` and the getter
-`subagent(&self) -> bool`.
+- `create_worktree`: sanitize, ensure `.phantom/worktrees/` exists, run `git worktree add -b <branch> <path> <base_ref>`.
+- `list_worktrees`: run `git worktree list --porcelain`, parse blank-line-delimited records, map each to `WorktreeInfo`.
+- `remove_worktree`: run `git worktree remove [--force] <path>`.
 
-## Step 3: `phantom-agents` — subagent emit guard
+## Step 6 — Tests
 
-New file: `crates/phantom-agents/src/subagent_emit.rs`.
+`#[cfg(test)] mod tests` at the bottom of `worktrees.rs`. A `setup_repo()` helper creates a tempdir, runs `git init`, `git config user.email/name`, writes a file, and commits so HEAD exists. A `has_git()` guard returns false when `git --version` cannot run; every test starts with `if !has_git() { return; }`.
 
-Provides a small `SubagentEmitGuard` struct holding `subagent: bool` and
-`suppressed_lateral_emits: u64`. One method:
-`try_emit(&mut self, ev: &Event) -> bool`. When the agent is a subagent and
-the event class is not `UpwardReport`, log at `warn`, increment the counter,
-return `false`. Otherwise return `true`.
+Tests:
+- `creates_worktree_at_dot_phantom_path`
+- `lists_created_worktree`
+- `removes_worktree_cleans_up`
+- `sanitization_rejects_bad_names`
+- `bad_base_ref_returns_git_command_failed`
 
-The guard is constructed from an `AgentSpawnOpts` via `SubagentEmitGuard::from_opts(opts)`.
+## Step 7 — Verification
 
-## Step 4: Tests
+- `cargo build -p phantom-app`
+- `cargo test -p phantom-app worktrees`
 
-Unit tests inside `subagent_emit.rs`:
+## Step 8 — PR
 
-1. Subagent emitting `AgentTaskComplete` is allowed and the counter stays 0.
-2. Subagent emitting `CommandStarted` (Lateral) is blocked and the counter
-   moves to 1.
-3. Non-subagent agent emits any class. Counter remains 0 because
-   non-subagents do not gate.
+Open a draft PR titled `feat(phantom-app): first-class worktree primitive API` with a 3-bullet Summary and a Test plan checklist.
 
-Round-trip tests on `Event::class()` in `crates/phantom-protocol/src/events.rs`:
-- `AgentTaskComplete` and `AgentError` classify as `UpwardReport`.
-- `CommandStarted` classifies as `Lateral`.
-- `Shutdown` classifies as `Internal`.
+## Risks and mitigations
 
-## Step 5: Build and test
-
-Run:
-```
-cargo build -p phantom-agents -p phantom-protocol
-cargo test -p phantom-agents -p phantom-protocol
-```
-
-## Step 6: Draft PR
-
-Title: `feat(phantom-agents): subagent reports-up-only isolation contract`.
-
-PR body has a 3-bullet Summary and a Test plan checklist.
+- **Tests flake on machines without git**: each test guards on `has_git()` and returns early.
+- **macOS tempdir under `/var` vs `/private/var` symlink mismatch**: tests canonicalize paths before comparing.
+- **`git worktree list --porcelain` format drift**: parser handles unknown lines by ignoring them rather than failing.
