@@ -28,6 +28,12 @@
 .phantom/tmp/
 docs/html/
 
+# Local graphify staging output
+.graphify-tmp/
+graphify-out/cache/
+**/graphify-out/cache/
+__pycache__/
+
 # Reference material (copyrighted / bulky)
 docs/references/*.pdf
 

@@ -1105,6 +1105,14 @@ pub struct AgentSpawnOpts {
     /// `complete_task(result)` to terminate. Default `false` preserves the
     /// existing state-implicit termination behaviour.
     requires_complete_task: bool,
+    /// Subagent isolation contract: when `true`, the spawned agent may only
+    /// emit [`phantom_protocol::EventClass::UpwardReport`] events through
+    /// its [`crate::subagent_emit::SubagentEmitGuard`]. Lateral and internal
+    /// events are dropped at the emit boundary and counted on the guard.
+    ///
+    /// Default `false` preserves the existing emit behaviour. Orthogonal to
+    /// [`crate::role::AgentRole`].
+    subagent: bool,
 }
 
 impl AgentSpawnOpts {
@@ -1120,6 +1128,7 @@ impl AgentSpawnOpts {
             role: None,
             label: None,
             requires_complete_task: false,
+            subagent: false,
         }
     }
 
@@ -1188,6 +1197,27 @@ impl AgentSpawnOpts {
     #[must_use]
     pub fn requires_complete_task(&self) -> bool {
         self.requires_complete_task
+    }
+
+    /// Subagent isolation contract: mark the spawned agent as a subagent.
+    ///
+    /// When `true`, the agent's emit path through
+    /// [`crate::subagent_emit::SubagentEmitGuard`] drops every event that is
+    /// not [`phantom_protocol::EventClass::UpwardReport`], logs the drop at
+    /// `warn`, and increments a per-agent counter.
+    ///
+    /// Default `false`. Orthogonal to [`crate::role::AgentRole`].
+    #[must_use]
+    pub fn with_subagent(mut self, v: bool) -> Self {
+        self.subagent = v;
+        self
+    }
+
+    /// Returns whether the spawned agent is a subagent. See
+    /// [`Self::with_subagent`] for the contract.
+    #[must_use]
+    pub fn subagent(&self) -> bool {
+        self.subagent
     }
 
 

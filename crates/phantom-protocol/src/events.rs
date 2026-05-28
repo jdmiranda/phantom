@@ -162,6 +162,30 @@ pub enum EventTopic {
     Custom,
 }
 
+/// Classification of an event for the subagent isolation contract.
+///
+/// A subagent (spawned with `AgentSpawnOpts::with_subagent(true)`) reports
+/// **upward only** to the parent orchestrator. The emit boundary in
+/// `phantom_agents::subagent_emit` reads `Event::class()` and drops anything
+/// that is not [`EventClass::UpwardReport`], incrementing a per-agent
+/// suppressed-emit counter.
+///
+/// Non-subagents bypass the gate entirely; their emit path is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EventClass {
+    /// Agent-to-parent status: `AgentTaskComplete`, `AgentError`,
+    /// `AgentProgress`. The only class a subagent may emit.
+    UpwardReport,
+    /// Peer-bus traffic — terminal output, focus changes, brain telemetry,
+    /// video, custom plugin events. Subagents are blocked from emitting
+    /// these.
+    Lateral,
+    /// Host-level lifecycle and infrastructure: memory pressure, job
+    /// completion, shutdown, agent-spawn telemetry, fast-path audit.
+    /// Subagents are blocked from emitting these.
+    Internal,
+}
+
 impl Event {
     /// Returns the topic this event belongs to.
     #[must_use]
@@ -192,6 +216,48 @@ impl Event {
             }
 
             Self::Custom { .. } => EventTopic::Custom,
+        }
+    }
+
+    /// Returns the class of this event for the subagent isolation contract.
+    ///
+    /// See [`EventClass`] for the full contract. The summary:
+    ///
+    /// - `AgentTaskComplete`, `AgentError`, `AgentProgress` are upward
+    ///   reports — the parent orchestrator surface.
+    /// - `AgentSpawned`, `FastPathTaken`, host-level lifecycle events
+    ///   (`MemoryPressure`, `JobCompleted`, `Shutdown`) are internal.
+    /// - Everything else (terminal output, focus, brain telemetry, video,
+    ///   sessions, custom plugin events) is lateral peer-bus traffic.
+    #[must_use]
+    pub fn class(&self) -> EventClass {
+        match self {
+            // Upward reports — agent → parent orchestrator.
+            Self::AgentTaskComplete { .. }
+            | Self::AgentError { .. }
+            | Self::AgentProgress { .. } => EventClass::UpwardReport,
+
+            // Internal — host/infra lifecycle, not a peer-bus message.
+            Self::AgentSpawned { .. }
+            | Self::FastPathTaken { .. }
+            | Self::MemoryPressure { .. }
+            | Self::JobCompleted { .. }
+            | Self::Shutdown => EventClass::Internal,
+
+            // Lateral — everything else on the peer bus.
+            Self::TerminalOutput { .. }
+            | Self::CommandStarted { .. }
+            | Self::CommandComplete { .. }
+            | Self::SubprocessTakeoverDetected { .. }
+            | Self::SubprocessTakeoverCleared { .. }
+            | Self::SessionSwitched { .. }
+            | Self::FocusChanged { .. }
+            | Self::BrainDecision { .. }
+            | Self::NlpInterpreted { .. }
+            | Self::VideoPlaybackStateChanged { .. }
+            | Self::FrameCaptured { .. }
+            | Self::GlitchFxTriggered { .. }
+            | Self::Custom { .. } => EventClass::Lateral,
         }
     }
 }
@@ -331,6 +397,81 @@ mod tests {
     fn event_is_debug() {
         let event = Event::Shutdown;
         let _s = format!("{event:?}");
+    }
+
+    // -- EventClass mapping ----------------------------------------------
+
+    #[test]
+    fn agent_task_complete_classifies_as_upward_report() {
+        let event = Event::AgentTaskComplete {
+            agent_id: 1,
+            success: true,
+            summary: "done".into(),
+            spawn_tag: None,
+            result: None,
+        };
+        assert_eq!(event.class(), EventClass::UpwardReport);
+    }
+
+    #[test]
+    fn agent_error_classifies_as_upward_report() {
+        let event = Event::AgentError { agent_id: 1, error: "boom".into() };
+        assert_eq!(event.class(), EventClass::UpwardReport);
+    }
+
+    #[test]
+    fn agent_progress_classifies_as_upward_report() {
+        let event = Event::AgentProgress {
+            agent_id: 1,
+            fraction: 0.5,
+            message: "halfway".into(),
+        };
+        assert_eq!(event.class(), EventClass::UpwardReport);
+    }
+
+    #[test]
+    fn command_started_classifies_as_lateral() {
+        let event = Event::CommandStarted { app_id: 1, command: "ls".into() };
+        assert_eq!(event.class(), EventClass::Lateral);
+    }
+
+    #[test]
+    fn terminal_output_classifies_as_lateral() {
+        let event = Event::TerminalOutput { app_id: 1, bytes: 100 };
+        assert_eq!(event.class(), EventClass::Lateral);
+    }
+
+    #[test]
+    fn shutdown_classifies_as_internal() {
+        assert_eq!(Event::Shutdown.class(), EventClass::Internal);
+    }
+
+    #[test]
+    fn memory_pressure_classifies_as_internal() {
+        let event = Event::MemoryPressure { bytes_free: 1 };
+        assert_eq!(event.class(), EventClass::Internal);
+    }
+
+    #[test]
+    fn agent_spawned_classifies_as_internal() {
+        let event = Event::AgentSpawned { agent_id: 1, task: "x".into() };
+        assert_eq!(event.class(), EventClass::Internal);
+    }
+
+    #[test]
+    fn fast_path_taken_classifies_as_internal() {
+        let event = Event::FastPathTaken {
+            agent_id: 1,
+            kind: FastPathKind::AutoApprove,
+            reason: "fast".into(),
+        };
+        assert_eq!(event.class(), EventClass::Internal);
+    }
+
+    #[test]
+    fn custom_event_classifies_as_lateral() {
+        let event = Event::Custom { kind: "k".into(), data: "d".into() };
+        assert_eq!(event.class(), EventClass::Lateral);
     }
 
     #[test]
